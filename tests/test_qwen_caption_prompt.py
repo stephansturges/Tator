@@ -158,6 +158,35 @@ def test_caption_prompt_accepts_frontend_context_policy():
     assert truncated is False
 
 
+def test_caption_prompt_rejects_malformed_glossary_terms():
+    prompt, counts, used, truncated = _build_qwen_caption_prompt(
+        "Describe this image.",
+        [
+            QwenCaptionHint(label="Building", bbox=[0, 0, 40, 40], confidence=0.9),
+            QwenCaptionHint(label="Solarpanels", bbox=[50, 0, 90, 25], confidence=0.8),
+            QwenCaptionHint(label="UPole", bbox=[10, 50, 20, 95], confidence=0.7),
+        ],
+        image_width=100,
+        image_height=100,
+        include_counts=True,
+        include_coords=True,
+        max_boxes=0,
+        detailed_mode=True,
+        restrict_to_labels=True,
+        labelmap_glossary='Building: [\nSolarpanels: solar panels and rooftop arrays\nUPole: utility pole or antenna',
+    )
+
+    assert counts == {"Building": 1, "Solarpanels": 1, "UPole": 1}
+    assert used == 3
+    assert truncated is False
+    assert "broad term \"[\"" not in prompt
+    assert "COUNTS (state exactly in final caption): [" not in prompt
+    assert '"label":"["' not in prompt
+    assert "Building: 1" in prompt
+    assert "solar panels: 1" in prompt
+    assert "utility pole: 1" in prompt
+
+
 def test_resolve_caption_all_windows_defaults_to_labeled_windows_only():
     assert (
         _resolve_caption_all_windows(
@@ -361,7 +390,7 @@ def test_caption_overlap_guidance_never_exposes_bbox_ids():
     )
 
     assert "Overlap deduplication guidance" in guidance
-    assert "car or van" in guidance
+    assert "car" in guidance
     assert source_id not in guidance
     assert "object ID" not in guidance
     assert "bbox ID" not in guidance
@@ -377,10 +406,94 @@ def test_window_observation_lines_ground_local_spatial_language_globally():
 
     assert "Spatial grounding" in text
     assert "crop-relative" in text
-    assert "global region top-left" in text
+    assert "global upper-left section" in text
     assert "covers x 0-25% and y 0-25%" in text
     assert "do not copy local spatial wording" in text
     assert "bottom-right corner of the crop" in text
+
+
+def test_window_observation_lines_describe_overlapping_quadrants():
+    lines = _format_caption_window_observation_lines(
+        [
+            (0, 0, 672, "Window one."),
+            (328, 0, 672, "Window two."),
+            (0, 328, 672, "Window three."),
+            (328, 328, 672, "Window four."),
+        ],
+        image_width=1000,
+        image_height=1000,
+    )
+    text = "\n".join(lines)
+
+    assert "Window 1 (first-row, first-column global upper-left section" in text
+    assert "Window 2 (first-row, last-column global upper-right section" in text
+    assert "Window 3 (last-row, first-column global lower-left section" in text
+    assert "Window 4 (last-row, last-column global lower-right section" in text
+    assert "global region middle-center" not in text
+
+
+def test_window_observation_lines_reconcile_window_hints_to_full_frame_objects():
+    full_hints = [
+        QwenCaptionHint(
+            label="light_vehicle",
+            bbox=[20, 20, 90, 90],
+            confidence=0.9,
+            source_id="full-car-1",
+        ),
+        QwenCaptionHint(label="person", bbox=[240, 240, 280, 320], confidence=0.8, source_id="person-1"),
+    ]
+    window_hints = {
+        (0, 0): [
+            QwenCaptionHint(
+                label="light_vehicle",
+                bbox=[20, 20, 90, 90],
+                confidence=0.9,
+                source_id="full-car-1",
+            ),
+            QwenCaptionHint(label="bike", bbox=[120, 120, 150, 150], confidence=0.6),
+        ]
+    }
+
+    lines = _format_caption_window_observation_lines(
+        [(0, 0, 200, "A close view shows a small vehicle near pavement.")],
+        image_width=400,
+        image_height=400,
+        full_label_hints=full_hints,
+        window_hints_by_window=window_hints,
+        glossary_map={"light_vehicle": ["small vehicle"]},
+    )
+    text = "\n".join(lines)
+
+    assert "Object reconciliation" in text
+    assert "object_001 small vehicle" in text
+    assert "same source id" in text
+    assert "Window-only evidence not matched to the full-frame inventory" in text
+    assert "bike" in text
+    assert "never output them" in text
+
+
+def test_window_observation_lines_reconcile_without_source_ids_by_geometry():
+    full_hints = [
+        QwenCaptionHint(label="car", bbox=[40, 40, 120, 120], confidence=0.9),
+    ]
+    window_hints = {
+        (0, 0): [
+            QwenCaptionHint(label="car", bbox=[40, 40, 100, 100], confidence=0.9),
+        ]
+    }
+
+    lines = _format_caption_window_observation_lines(
+        [(0, 0, 100, "The crop shows part of the car.")],
+        image_width=200,
+        image_height=200,
+        full_label_hints=full_hints,
+        window_hints_by_window=window_hints,
+    )
+    text = "\n".join(lines)
+
+    assert "object_001 car" in text
+    assert "window coverage" in text
+    assert "Window-only evidence not matched" not in text
 
 
 def test_caption_prompt_never_includes_bbox_source_ids():
@@ -478,8 +591,8 @@ def test_short_caption_request_removes_conflicting_detail_instructions():
         max_sentences=10,
     )
 
-    assert "no more than 2 complete sentences" in prompt
-    assert "Write a detailed caption" not in prompt
+    assert "Write a short caption (1-2 sentences)" in prompt
+    assert "Use the image as truth" in prompt
     assert "longer captions are acceptable" not in prompt
     assert "Be maximally descriptive" not in prompt
 
@@ -902,7 +1015,8 @@ def test_qwen_caption_prompt_preview_uses_caption_stack_without_loading_model(mo
     assert "Window merge prompt template" in preview.full_text
     assert "Conditional cleanup / guard prompt template" in preview.full_text
     assert "Only mention these classes if they appear:" in preview.full_text
-    assert "watercraft and vessels" in preview.full_text
+    assert "watercraft" in preview.full_text
+    assert "vessels" in preview.full_text
     assert "visible humans" in preview.full_text
     assert "Edit the draft with minimal changes. Do not introduce new objects or actions." in preview.full_text
     assert "First-stage model output context:" in preview.full_text
@@ -910,6 +1024,55 @@ def test_qwen_caption_prompt_preview_uses_caption_stack_without_loading_model(mo
     assert "<generated draft caption>" in preview.full_text
     assert any(section.chat_messages for section in preview.sections)
     assert any(section.kind == "template" for section in preview.sections)
+
+
+def test_qwen_caption_prompt_preview_hardens_windowed_evidence_contract(monkeypatch):
+    monkeypatch.setattr(
+        api,
+        "_ensure_qwen_ready_for_caption",
+        lambda *_args, **_kwargs: pytest.fail("prompt preview must not load a Qwen runtime"),
+    )
+    payload = QwenCaptionRequest(
+        image_base64=_caption_test_image_data_url(width=100, height=100),
+        image_name="caption_contract.png",
+        image_width=100,
+        image_height=100,
+        user_prompt="Write a detailed caption describing the scene.",
+        label_hints=[
+            QwenCaptionHint(label="Building", bbox=[0, 0, 40, 40], confidence=0.9),
+            QwenCaptionHint(label="Solarpanels", bbox=[50, 0, 90, 25], confidence=0.8),
+            QwenCaptionHint(label="UPole", bbox=[10, 50, 20, 95], confidence=0.7),
+        ],
+        include_counts=True,
+        include_coords=True,
+        max_boxes=0,
+        caption_mode="windowed",
+        caption_all_windows=True,
+        window_size=64,
+        window_overlap=0.1,
+        caption_window_min_sentences=2,
+        caption_window_max_sentences=4,
+        labelmap_glossary='Building: [\nSolarpanels: solar panels and rooftop arrays\nUPole: utility pole or antenna',
+    )
+
+    preview = qwen_caption_prompt_preview(payload)
+
+    assert "Write 2-4 concrete sentences about this region only" in preview.full_text
+    assert "Object reconciliation" in preview.full_text
+    assert "Full-frame counts remain authoritative" in preview.full_text
+    assert "Matched full-frame objects in this window" in preview.full_text
+    assert "broad term \"[\"" not in preview.full_text
+    assert "COUNTS (state exactly in final caption): [" not in preview.full_text
+    assert '"label":"["' not in preview.full_text
+    assert "Allowed classes: [" not in preview.full_text
+    assert "if couts" not in preview.full_text
+    assert "solar panels" in preview.full_text
+    assert "utility pole" in preview.full_text
+    assert preview.full_text.count("Overlap deduplication guidance") <= 2
+    assert "global region middle-center" not in preview.full_text
+    assert "Use the class meaning glossary above" in preview.full_text
+    assert "Conditional cleanup / guard prompt template" in preview.full_text
+    assert "Authoritative object counts" in preview.full_text
 
 
 def test_qwen_caption_router_exposes_prompt_preview_endpoint():
@@ -1046,6 +1209,45 @@ def test_caption_request_normalizes_final_caption_max_sentences():
     assert zero_payload.final_caption_max_sentences == 10
 
 
+def test_caption_request_allows_high_cap_caption_tokens():
+    payload = QwenCaptionRequest(
+        image_base64="data:image/png;base64,AA==",
+        max_new_tokens=9000,
+    )
+
+    assert payload.max_new_tokens == 4096
+
+
+def test_caption_request_normalizes_window_sentence_range():
+    default_payload = QwenCaptionRequest(
+        image_base64="data:image/png;base64,AA==",
+    )
+    custom_payload = QwenCaptionRequest(
+        image_base64="data:image/png;base64,AA==",
+        caption_window_min_sentences=2,
+        caption_window_max_sentences=4,
+    )
+    inverted_payload = QwenCaptionRequest(
+        image_base64="data:image/png;base64,AA==",
+        caption_window_min_sentences=5,
+        caption_window_max_sentences=2,
+    )
+    long_payload = QwenCaptionRequest(
+        image_base64="data:image/png;base64,AA==",
+        caption_window_min_sentences=40,
+        caption_window_max_sentences=50,
+    )
+
+    assert default_payload.caption_window_min_sentences == 1
+    assert default_payload.caption_window_max_sentences == 3
+    assert custom_payload.caption_window_min_sentences == 2
+    assert custom_payload.caption_window_max_sentences == 4
+    assert inverted_payload.caption_window_min_sentences == 5
+    assert inverted_payload.caption_window_max_sentences == 5
+    assert long_payload.caption_window_min_sentences == 10
+    assert long_payload.caption_window_max_sentences == 10
+
+
 def test_resolve_qwen_caption_refinement_model_id_defaults_to_instruct_for_thinking_model():
     assert (
         _resolve_qwen_caption_refinement_model_id(
@@ -1169,7 +1371,7 @@ def test_caption_merge_uses_refinement_model_override():
     assert "repeated crop-edge descriptions of a car" in calls["prompt"]
     assert "Spatial grounding" in calls["prompt"]
     assert "crop-relative" in calls["prompt"]
-    assert "global region top-left" in calls["prompt"]
+    assert "global upper-left section" in calls["prompt"]
     assert "bottom-right of the crop" in calls["prompt"]
     assert "Smoke rises near scattered wreckage." in calls["prompt"]
     assert "small vehicle: 251" in calls["prompt"]

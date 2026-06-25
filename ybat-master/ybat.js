@@ -2382,6 +2382,8 @@ const AUTOMATION_LOCKED_TABS = new Set([
         captionMode: null,
         captionWindowSize: null,
         captionWindowOverlap: null,
+        captionWindowMinSentences: null,
+        captionWindowMaxSentences: null,
         captionModel: null,
         captionVariant: null,
         captionRefinementModel: null,
@@ -3041,54 +3043,70 @@ const AUTOMATION_LOCKED_TABS = new Set([
         "Use narrower subtypes only when the image clearly supports them.",
         "If the hints conflict with the image, mention the uncertainty briefly.",
         "Stop when the caption is complete; never repeat a sentence or keep writing to fill the token budget.",
+        "Respond in English only.",
+        "Return only the final caption. Do not include reasoning or preamble.",
     ].join(" ");
     const DEFAULT_CAPTION_DETECTION_CONTEXT_PROMPT = [
         "Treat the user caption request as required guidance. If it asks a question or asks for an inference such as likely location, scene type, event, or time, answer it when the image supports a grounded answer; otherwise state uncertainty briefly.",
         "Do not mention that a request or hint was provided.",
         "Follow the combined user request assembled from the editable caption style text and optional opening guidance; rephrase opening wording instead of copying exact phrases.",
-        "When authoritative counts are present, state those counts as ordinary image facts in the final caption using digits and without qualifiers such as visible, roughly, or approximately.",
+        "When authoritative counts of objects or people are present, state those counts as ordinary image facts in the final caption using digits and without qualifiers such as visible, roughly, or approximately.",
         "Use relative positions such as top-left, center, or lower-right when box layout matters, but never mention coordinates.",
         "Write a detailed caption. Use the image as truth and incorporate label hints; if hints conflict with the image, mention the uncertainty briefly.",
-        "Describe what the main objects are doing or how they are arranged when visible.",
+        "Describe what the main objects or people are doing or how they are arranged when visible.",
         "Mention important concrete details without adding unsupported objects or actions.",
+        "When authoritative counts are present, state them as ordinary image facts using digits.",
+        "When box layout matters, convert box positions into natural relative layout words; never mention coordinates.",
+        "Use glossary entries as semantic class meanings, not as forced words to copy.",
+        "Final caption length: The final caption may be long when the image contains many visible details; use up to 10 complete sentences when needed to preserve concrete detail.",
     ].join("\n");
-    const DEFAULT_CAPTION_WINDOW_PROMPT = [
+    function defaultCaptionWindowPrompt(minSentences = 1, maxSentences = 3) {
+        const minVal = Number.isFinite(minSentences) ? Math.max(1, Math.min(10, Math.floor(minSentences))) : 1;
+        const maxVal = Number.isFinite(maxSentences) ? Math.max(minVal, Math.min(10, Math.floor(maxSentences))) : 3;
+        const sentenceText = minVal === maxVal
+            ? `Write ${minVal} concrete sentence${minVal === 1 ? "" : "s"} about this region only.`
+            : `Write ${minVal}-${maxVal} concrete sentences about this region only.`;
+        return [
         "This crop is a subregion of the full image.",
         "Apply the crop caption context above to this crop only.",
         "Use the crop image as truth and treat the provided object context as priors, not as text to mention.",
         "Describe crop-local objects of interest with natural-language class meanings, visible attributes, counts, and spatial relations when available.",
         "Mention surrounding scene details only when they clarify those objects or the crop.",
         "Do not add unsupported object categories or treat background context as extra counted inventory.",
-        "Write 1-3 concrete sentences about this region only. No reasoning or preamble.",
-        "Do not mention labels, hints, bounding boxes, coordinates, glossary text, or that counts were provided.",
+        `${sentenceText} No reasoning or preamble.`,
+        "Do not mention labels, hints, bounding boxes, coordinates, glossary text, or that counts were provided, but if counts are provided then do make sure to keep those counts in your output.",
         "Do not output internal dataset class names or any token with underscores.",
         "Use narrower subtypes only when the crop clearly supports them.",
     ].join("\n");
+    }
     const DEFAULT_CAPTION_DRAFT_REFINE_PROMPT = [
-        "Draft pass: look at the image and form a draft caption that follows the full detection context.",
-        "Refine pass: edit the draft with minimal changes, do not introduce new objects or actions, and preserve image-grounded concrete detail.",
-        "Preserve broad category terms from the context; do not replace them with narrower subtypes unless that subtype is consistently supported by the image and source outputs.",
-        "Return only the final caption during the refine pass.",
+        "[Draft + refine runs only when enabled with a Thinking caption model.]",
+        "Final caption length: The final caption may be long when the image contains many visible details; use up to 10 complete sentences when needed to preserve concrete detail.",
+        "If counts of objects / detections / people / things are provided then do make sure to keep those counts in your output.",
     ].join("\n");
     const DEFAULT_CAPTION_MERGE_PROMPT = [
-        "Revise the draft caption so it includes all distinct object details from the window observations that are missing in the draft.",
-        "Translate crop-local spatial wording through each crop's global location before reusing it; do not copy phrases such as bottom-right or top-left from a crop unless they remain true in the full image.",
-        "Do not invent new objects, and do not turn background window descriptions into extra counted object categories.",
-        "Preserve broad category terms from the context; do not replace them with narrower subtypes unless that subtype is consistently supported.",
-        "Use multiple sentences if needed. Preserve specific counts, actions, and notable attributes from the windows; treat window text as supporting evidence, not a complete object inventory.",
-        "Do not mention labels, hints, or coordinates.",
+        "[Window merge runs only in Detailed/windowed mode.]",
+        "When authoritative counts are supplied to the merge pass, preserve them as natural scene facts using digits; do not say counts were provided.",
+        "Final caption length: The final caption may be long when the image contains many visible details; use up to 10 complete sentences when needed to preserve concrete detail.",
     ].join("\n");
     const DEFAULT_CAPTION_CLEANUP_PROMPT = [
         "Remove repetition, avoid coordinates, and remove any mention of labels, hints, or counts being provided.",
         "Never copy planning phrases such as we can mention, we need to, or the user wants.",
+        "Do however conserve the total counts of items or people as mentioned.",
         "Preserve broad category terms from the context; do not replace them with narrower subtypes unless that subtype is consistently supported.",
         "If the draft is mostly reasoning or planning text, ignore that draft and write a fresh image-grounded caption.",
         "When a guard lists missing classes or count corrections, apply those fixes while keeping the caption grounded in the image.",
         "Return only the final caption.",
+        "When authoritative counts are supplied to a guard pass, preserve them as natural scene facts using digits; do not say counts were provided.",
+        "When the guard supplies count corrections, apply them and remove contradictory plural, group, or quantity wording.",
     ].join("\n");
     const DEFAULT_CAPTION_WINDOW_SIZE = 672;
     const DEFAULT_CAPTION_WINDOW_OVERLAP = 0.1;
+    const DEFAULT_CAPTION_WINDOW_MIN_SENTENCES = 1;
+    const DEFAULT_CAPTION_WINDOW_MAX_SENTENCES = 3;
     const DEFAULT_CAPTION_MAX_TOKENS = 1000;
+    const CAPTION_MAX_TOKEN_CAP = 4096;
+    const DEFAULT_CAPTION_WINDOWED_MAX_TOKENS = 3000;
     const DEFAULT_CAPTION_AUTO_SENTENCES = 10;
     let sam3TextUiInitialized = false;
     let sam3PromptUiInitialized = false;
@@ -21578,6 +21596,8 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenElements.captionMode = document.getElementById("qwenCaptionMode");
         qwenElements.captionWindowSize = document.getElementById("qwenCaptionWindowSize");
         qwenElements.captionWindowOverlap = document.getElementById("qwenCaptionWindowOverlap");
+        qwenElements.captionWindowMinSentences = document.getElementById("qwenCaptionWindowMinSentences");
+        qwenElements.captionWindowMaxSentences = document.getElementById("qwenCaptionWindowMaxSentences");
         qwenElements.captionModel = document.getElementById("qwenCaptionModel");
         qwenElements.captionVariant = document.getElementById("qwenCaptionVariant");
         qwenElements.captionRefinementModel = document.getElementById("qwenCaptionRefinementModel");
@@ -21929,6 +21949,8 @@ async function cancelRfDetrTrainingJobRequest() {
             qwenElements.captionOpeningList,
             qwenElements.captionWindowSize,
             qwenElements.captionWindowOverlap,
+            qwenElements.captionWindowMinSentences,
+            qwenElements.captionWindowMaxSentences,
             qwenElements.captionMaxTokens,
             qwenElements.captionFinalSentences,
             qwenElements.captionMaxBoxes,
@@ -21969,6 +21991,12 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (qwenElements.captionWindowOverlap && !qwenElements.captionWindowOverlap.value.trim()) {
             qwenElements.captionWindowOverlap.value = DEFAULT_CAPTION_WINDOW_OVERLAP;
+        }
+        if (qwenElements.captionWindowMinSentences && !qwenElements.captionWindowMinSentences.value.trim()) {
+            qwenElements.captionWindowMinSentences.value = DEFAULT_CAPTION_WINDOW_MIN_SENTENCES;
+        }
+        if (qwenElements.captionWindowMaxSentences && !qwenElements.captionWindowMaxSentences.value.trim()) {
+            qwenElements.captionWindowMaxSentences.value = DEFAULT_CAPTION_WINDOW_MAX_SENTENCES;
         }
         if (qwenElements.captionMode) {
             qwenElements.captionMode.addEventListener("change", () => {
@@ -24591,24 +24619,23 @@ async function cancelRfDetrTrainingJobRequest() {
         const includeCoords = !!qwenElements.captionIncludeCoords?.checked;
         const maxBoxes = getCaptionMaxBoxesPreview();
         const finalSentences = getCaptionFinalSentencePreview();
+        const windowSentenceRange = readCaptionWindowSentenceRange();
         const glossaryText = String(qwenElements.captionGlossary?.value || "").trim();
         const lengthLine = `Final caption length: The final caption may be long when the image contains many visible details; use up to ${finalSentences} complete sentences when needed to preserve concrete detail.`;
         const countPolicyLine = includeCounts
-            ? "When authoritative counts are present, state them as ordinary image facts using digits."
+            ? ""
             : "Counts are disabled for this request; do not invent exact object totals unless the image makes them unambiguous.";
         const boxPolicyLine = includeCoords
-            ? "When box layout matters, convert box positions into natural relative layout words; never mention coordinates."
+            ? ""
             : "Box coordinates are disabled for this request; rely on the image and label list without coordinate language.";
         const maxBoxPolicyLine = maxBoxes > 0
             ? `If only ${maxBoxes} boxes are shown, treat class counts as the authoritative total and the shown boxes as examples for layout/appearance.`
             : "";
         const glossaryPolicyLine = glossaryText
-            ? "Use glossary entries as semantic class meanings, not as forced words to copy."
+            ? ""
             : "";
         const systemLines = [
             DEFAULT_CAPTION_SYSTEM_PROMPT,
-            "Respond in English only.",
-            qwenElements.captionFinalOnly?.checked ? "Return only the final caption. Do not include reasoning or preamble." : "",
             resolvedMode.isThinking && qwenElements.captionFinalOnly?.checked && !resolvedMode.twoStage
                 ? "Respond with exactly <final>...</final> and nothing else."
                 : "",
@@ -24622,34 +24649,25 @@ async function cancelRfDetrTrainingJobRequest() {
             lengthLine,
         ].filter(Boolean).join("\n");
         const windowPrompt = [
-            DEFAULT_CAPTION_WINDOW_PROMPT,
+            defaultCaptionWindowPrompt(windowSentenceRange.min, windowSentenceRange.max),
             resolvedMode.isWindowed
                 ? ""
                 : "[Only used in Detailed/windowed mode.]",
         ].filter(Boolean).join("\n");
         const draftRefinePrompt = [
-            resolvedMode.twoStage && resolvedMode.isThinking
-                ? DEFAULT_CAPTION_DRAFT_REFINE_PROMPT
-                : "[Draft + refine runs only when enabled with a Thinking caption model.]",
-            lengthLine,
+            DEFAULT_CAPTION_DRAFT_REFINE_PROMPT.replace(
+                "use up to 10 complete sentences",
+                `use up to ${finalSentences} complete sentences`,
+            ),
         ].filter(Boolean).join("\n");
         const mergePrompt = [
-            resolvedMode.isWindowed
-                ? DEFAULT_CAPTION_MERGE_PROMPT
-                : "[Window merge runs only in Detailed/windowed mode.]",
-            includeCounts
-                ? "When authoritative counts are supplied to the merge pass, preserve them as natural scene facts using digits; do not say counts were provided."
-                : "",
-            lengthLine,
+            DEFAULT_CAPTION_MERGE_PROMPT.replace(
+                "use up to 10 complete sentences",
+                `use up to ${finalSentences} complete sentences`,
+            ),
         ].filter(Boolean).join("\n");
         const cleanupPrompt = [
             DEFAULT_CAPTION_CLEANUP_PROMPT,
-            includeCounts
-                ? "When authoritative counts are supplied to a guard pass, preserve them as natural scene facts using digits; do not say counts were provided."
-                : "",
-            includeCounts
-                ? "When the guard supplies count corrections, apply them and remove contradictory plural, group, or quantity wording."
-                : "",
         ].filter(Boolean).join("\n");
         return {
             user: userPrompt,
@@ -24732,7 +24750,12 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         const isWindowed = qwenElements.captionMode.value === "windowed";
-        const controls = [qwenElements.captionWindowSize, qwenElements.captionWindowOverlap];
+        const controls = [
+            qwenElements.captionWindowSize,
+            qwenElements.captionWindowOverlap,
+            qwenElements.captionWindowMinSentences,
+            qwenElements.captionWindowMaxSentences,
+        ];
         controls.forEach((control) => {
             if (!control) {
                 return;
@@ -24741,6 +24764,20 @@ async function cancelRfDetrTrainingJobRequest() {
             control.closest("div")?.classList.toggle("is-disabled", !isWindowed);
         });
         updateQwenCaptionWorkflow();
+    }
+
+    function readCaptionWindowSentenceRange() {
+        let minSentences = parseInt(qwenElements.captionWindowMinSentences?.value || `${DEFAULT_CAPTION_WINDOW_MIN_SENTENCES}`, 10);
+        let maxSentences = parseInt(qwenElements.captionWindowMaxSentences?.value || `${DEFAULT_CAPTION_WINDOW_MAX_SENTENCES}`, 10);
+        if (!Number.isFinite(minSentences) || minSentences <= 0) {
+            minSentences = DEFAULT_CAPTION_WINDOW_MIN_SENTENCES;
+        }
+        if (!Number.isFinite(maxSentences) || maxSentences <= 0) {
+            maxSentences = DEFAULT_CAPTION_WINDOW_MAX_SENTENCES;
+        }
+        minSentences = Math.min(Math.max(minSentences, 1), 10);
+        maxSentences = Math.min(Math.max(maxSentences, minSentences), 10);
+        return { min: minSentences, max: maxSentences };
     }
 
     function getSelectDisplayText(selectEl, fallback = "") {
@@ -27404,20 +27441,23 @@ async function cancelRfDetrTrainingJobRequest() {
         if (Number.isNaN(maxTokens)) {
             maxTokens = DEFAULT_CAPTION_MAX_TOKENS;
         }
-        maxTokens = Math.min(Math.max(maxTokens, 32), 2000);
+        maxTokens = Math.min(Math.max(maxTokens, 32), CAPTION_MAX_TOKEN_CAP);
         let finalSentences = parseInt(qwenElements.captionFinalSentences?.value || "", 10);
         if (Number.isNaN(finalSentences) || finalSentences <= 0) {
             finalSentences = DEFAULT_CAPTION_AUTO_SENTENCES;
         } else {
             finalSentences = Math.min(Math.max(finalSentences, 1), 30);
         }
-        maxTokens = Math.max(maxTokens, Math.min(2000, Math.max(DEFAULT_CAPTION_MAX_TOKENS, finalSentences * 100)));
+        maxTokens = Math.max(maxTokens, Math.min(CAPTION_MAX_TOKEN_CAP, Math.max(DEFAULT_CAPTION_MAX_TOKENS, finalSentences * 100)));
         let maxBoxes = parseInt(qwenElements.captionMaxBoxes?.value || "0", 10);
         if (Number.isNaN(maxBoxes)) {
             maxBoxes = 0;
         }
         maxBoxes = Math.min(Math.max(maxBoxes, 0), 200);
         const captionMode = qwenElements.captionMode?.value || "full";
+        if (captionMode === "windowed") {
+            maxTokens = Math.max(maxTokens, Math.min(CAPTION_MAX_TOKEN_CAP, DEFAULT_CAPTION_WINDOWED_MAX_TOKENS));
+        }
         let windowSize = parseInt(qwenElements.captionWindowSize?.value || `${DEFAULT_CAPTION_WINDOW_SIZE}`, 10);
         if (Number.isNaN(windowSize)) {
             windowSize = DEFAULT_CAPTION_WINDOW_SIZE;
@@ -27426,6 +27466,7 @@ async function cancelRfDetrTrainingJobRequest() {
         if (Number.isNaN(windowOverlap)) {
             windowOverlap = DEFAULT_CAPTION_WINDOW_OVERLAP;
         }
+        const windowSentenceRange = readCaptionWindowSentenceRange();
         const includeCounts = !!qwenElements.captionIncludeCounts?.checked;
         const includeCoords = !!qwenElements.captionIncludeCoords?.checked;
         const variant = qwenElements.captionVariant?.value || "auto";
@@ -27492,6 +27533,8 @@ async function cancelRfDetrTrainingJobRequest() {
             caption_mode: captionMode,
             window_size: captionMode === "windowed" ? windowSize : null,
             window_overlap: captionMode === "windowed" ? windowOverlap : null,
+            caption_window_min_sentences: captionMode === "windowed" ? windowSentenceRange.min : null,
+            caption_window_max_sentences: captionMode === "windowed" ? windowSentenceRange.max : null,
         };
         return {
             requestFields,
@@ -27503,6 +27546,8 @@ async function cancelRfDetrTrainingJobRequest() {
                 captionMode,
                 windowSize,
                 windowOverlap,
+                windowMinSentences: windowSentenceRange.min,
+                windowMaxSentences: windowSentenceRange.max,
                 includeCounts,
                 includeCoords,
                 maxBoxes,
@@ -28513,6 +28558,8 @@ async function cancelRfDetrTrainingJobRequest() {
             caption_mode: meta?.captionMode || null,
             window_size: meta?.windowSize || null,
             window_overlap: meta?.windowOverlap || null,
+            window_min_sentences: meta?.windowMinSentences ?? null,
+            window_max_sentences: meta?.windowMaxSentences ?? null,
             include_counts: meta?.includeCounts ?? null,
             include_coords: meta?.includeCoords ?? null,
             max_boxes: meta?.maxBoxes ?? null,

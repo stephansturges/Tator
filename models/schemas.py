@@ -382,6 +382,8 @@ class QwenCaptionRequest(BaseModel):
     caption_mode: Optional[Literal["full", "windowed"]] = "full"
     window_size: Optional[int] = None
     window_overlap: Optional[float] = None
+    caption_window_min_sentences: Optional[int] = 1
+    caption_window_max_sentences: Optional[int] = 3
     restrict_to_labels: Optional[bool] = True
     caption_all_windows: Optional[bool] = None
     unload_others: Optional[bool] = False
@@ -428,6 +430,8 @@ class QwenCaptionRequest(BaseModel):
             "presence_penalty",
             "window_size",
             "window_overlap",
+            "caption_window_min_sentences",
+            "caption_window_max_sentences",
         ):
             if data.get(field) is None:
                 continue
@@ -472,7 +476,7 @@ class QwenCaptionRequest(BaseModel):
                 max_tokens_val = int(max_tokens)
             except (TypeError, ValueError, OverflowError):
                 max_tokens_val = 1000
-            values["max_new_tokens"] = max(32, min(max_tokens_val, 2000))
+            values["max_new_tokens"] = max(32, min(max_tokens_val, 4096))
         else:
             values["max_new_tokens"] = 1000
         max_sentences = values.get("final_caption_max_sentences")
@@ -486,6 +490,20 @@ class QwenCaptionRequest(BaseModel):
             )
         else:
             values["final_caption_max_sentences"] = 10
+        window_min = values.get("caption_window_min_sentences")
+        try:
+            window_min_val = int(window_min) if window_min is not None else 1
+        except (TypeError, ValueError, OverflowError):
+            window_min_val = 1
+        window_min_val = max(1, min(window_min_val, 10))
+        window_max = values.get("caption_window_max_sentences")
+        try:
+            window_max_val = int(window_max) if window_max is not None else 3
+        except (TypeError, ValueError, OverflowError):
+            window_max_val = 3
+        window_max_val = max(window_min_val, min(window_max_val, 10))
+        values["caption_window_min_sentences"] = window_min_val
+        values["caption_window_max_sentences"] = window_max_val
         temp = values.get("temperature")
         if temp is not None:
             try:

@@ -13,6 +13,63 @@ import torch
 from utils.glossary import _normalize_labelmap_glossary, _parse_glossary_mapping
 
 
+_CAPTION_BAD_DISPLAY_TERMS = {"[", "]", "{", "}", "[]", "{}"}
+
+
+def _caption_display_term(term: Any, *, max_len: int = 80) -> str:
+    cleaned = _collapse_whitespace(str(term or "").replace("_", " ").strip(" \t\r\n\"'`"))
+    cleaned = cleaned.strip(" .,:;")
+    if not cleaned:
+        return ""
+    if cleaned in _CAPTION_BAD_DISPLAY_TERMS:
+        return ""
+    if any(ch in cleaned for ch in "[]{}"):
+        return ""
+    if not re.search(r"[A-Za-z0-9]", cleaned):
+        return ""
+    if len(cleaned) > max_len:
+        return ""
+    return cleaned
+
+
+def _caption_natural_label(label: Any) -> str:
+    raw = str(label or "").strip()
+    if not raw:
+        return ""
+    spaced = raw.replace("_", " ")
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", spaced)
+    spaced = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", spaced)
+    return _caption_display_term(spaced) or raw
+
+
+def _caption_sanitize_glossary_map(
+    glossary_map: Optional[Mapping[str, Sequence[Any]]],
+) -> Dict[str, List[str]]:
+    cleaned: Dict[str, List[str]] = {}
+    for label, terms in (glossary_map or {}).items():
+        label_key = str(label or "").strip()
+        if not label_key:
+            continue
+        if isinstance(terms, str):
+            term_iter: Sequence[Any] = [terms]
+        else:
+            term_iter = list(terms or [])
+        display_terms: List[str] = []
+        seen: set[str] = set()
+        for term in term_iter:
+            display = _caption_display_term(term)
+            if not display:
+                continue
+            key = display.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            display_terms.append(display)
+        if display_terms:
+            cleaned[label_key] = display_terms
+    return cleaned
+
+
 def _extract_balanced_json(text: str, start_char: str, end_char: str) -> Optional[str]:
     start = text.find(start_char)
     if start < 0:
@@ -64,7 +121,8 @@ def _generate_qwen_text(
 def _caption_glossary_map(labelmap_glossary: Optional[str], labels: Sequence[str]) -> Dict[str, List[str]]:
     if not labelmap_glossary:
         return {}
-    return _parse_glossary_mapping(_normalize_labelmap_glossary(labelmap_glossary), list(labels))
+    parsed = _parse_glossary_mapping(_normalize_labelmap_glossary(labelmap_glossary), list(labels))
+    return _caption_sanitize_glossary_map(parsed)
 
 
 def _sanitize_prompts_impl(prompts: List[str]) -> List[str]:
@@ -93,13 +151,12 @@ def _caption_preferred_label(label: str, glossary_map: Optional[Dict[str, List[s
     label = str(label or "").strip()
     if not label:
         return ""
-    terms = (glossary_map or {}).get(label) or []
+    terms = _caption_sanitize_glossary_map(glossary_map).get(label) or []
     for term in terms:
-        if term and "_" not in term:
-            return str(term)
-    if "_" in label:
-        return label.replace("_", " ")
-    return label
+        display = _caption_display_term(term)
+        if display:
+            return display
+    return _caption_natural_label(label)
 
 
 def _caption_hint_value(hint: Any, key: str, default: Any = None) -> Any:
@@ -134,6 +191,7 @@ def _format_caption_glossary_instruction(
     glossary_map: Dict[str, List[str]],
     labels: Sequence[str],
 ) -> str:
+    glossary_map = _caption_sanitize_glossary_map(glossary_map)
     if not glossary_map:
         return ""
     pieces: List[str] = []
@@ -143,7 +201,11 @@ def _format_caption_glossary_instruction(
         if not label or label in seen:
             continue
         seen.add(label)
-        terms = [str(term).strip() for term in (glossary_map.get(label) or []) if str(term).strip()]
+        terms = [
+            _caption_display_term(term)
+            for term in (glossary_map.get(label) or [])
+            if _caption_display_term(term)
+        ]
         if not terms:
             continue
         natural_terms: List[str] = []
@@ -260,8 +322,6 @@ def _build_qwen_caption_prompt(
 ) -> Tuple[str, Dict[str, int], int, bool]:
     safe_width = max(1, int(image_width))
     safe_height = max(1, int(image_height))
-    short_requested = _caption_user_requested_short(user_prompt, max_sentences)
-    sentence_limit = _caption_requested_sentence_limit(user_prompt, max_sentences)
     counts: Dict[str, int] = dict(
         Counter(
             label
@@ -347,13 +407,6 @@ def _build_qwen_caption_prompt(
     lines: List[str] = []
     if user_prompt:
         lines.append(f"User caption request: {user_prompt}")
-        if not has_custom_context_prompt:
-            lines.append(
-                "Treat the user caption request as required guidance. If it asks a question "
-                "or asks for an inference such as likely location, scene type, event, or time, "
-                "answer it when the image supports a grounded answer; otherwise state uncertainty briefly. "
-                "Do not mention that a request or hint was provided."
-            )
         if not has_custom_context_prompt and "style inspirations" in user_prompt.lower():
             lines.append(
                 "Style guidance: use inspirations for tone/angle only. Rephrase, do not copy wording."
@@ -435,36 +488,22 @@ def _build_qwen_caption_prompt(
     if has_custom_context_prompt:
         lines.append("Caption policy:")
         lines.append(custom_context_prompt)
-    elif short_requested:
-        if sentence_limit == 1:
-            lines.append(
-                "Write a concise caption in exactly one complete sentence. Use the image as truth and mention the main visible scene and objects."
-            )
-        else:
-            limit = sentence_limit or 2
-            lines.append(
-                f"Write a concise caption in no more than {limit} complete sentences. "
-                "Use the image as truth and mention the main visible scene and objects."
-            )
-        lines.append(
-            "Do not enumerate every small detail; only include label hints that are central to the visible scene."
-        )
     else:
-        caption_kind = "detailed caption" if detailed_mode else "caption"
+        lines.append("Caption policy:")
         lines.append(
-            f"Write a {caption_kind}. Use the image as truth and incorporate the label hints; "
-            "if hints conflict with the image, mention the uncertainty briefly."
+            "Treat the user caption request as required guidance. If it asks a question or asks for an inference such as likely location, scene type, event, or time, answer it when the image supports a grounded answer; otherwise state uncertainty briefly.\n"
+            "Do not mention that a request or hint was provided.\n"
+            "Follow the combined user request assembled from the editable caption style text and optional opening guidance; rephrase opening wording instead of copying exact phrases.\n"
+            "When authoritative counts of objects or people are present, state those counts as ordinary image facts in the final caption using digits and without qualifiers such as visible, roughly, or approximately.\n"
+            "Use relative positions such as top-left, center, or lower-right when box layout matters, but never mention coordinates.\n"
+            "Write a detailed caption. Use the image as truth and incorporate label hints; if hints conflict with the image, mention the uncertainty briefly.\n"
+            "Describe what the main objects or people are doing or how they are arranged when visible.\n"
+            "Mention important concrete details without adding unsupported objects or actions.\n"
+            "When authoritative counts are present, state them as ordinary image facts using digits.\n"
+            "When box layout matters, convert box positions into natural relative layout words; never mention coordinates.\n"
+            "Use glossary entries as semantic class meanings, not as forced words to copy.\n"
+            "Final caption length: The final caption may be long when the image contains many visible details; use up to 10 complete sentences when needed to preserve concrete detail."
         )
-        lines.append("Describe what the main objects are doing or how they are arranged when it is visible.")
-        if detailed_mode:
-            lines.append(
-                "Be descriptive when there is a lot to see. The labeled boxes are especially important and should be mentioned explicitly unless counts are overwhelming "
-                "(e.g., summarize many cars as a parking lot)."
-            )
-        else:
-            lines.append(
-                "Mention the most important concrete details without adding unsupported objects or actions."
-            )
     return "\n".join(lines), counts, len(selected), truncated
 
 
@@ -672,8 +711,9 @@ def _caption_label_terms(
     terms = [str(label or "")]
     if "_" in str(label or ""):
         terms.append(str(label).replace("_", " "))
-    if glossary_map and glossary_map.get(label):
-        terms.extend(glossary_map[label])
+    clean_glossary = _caption_sanitize_glossary_map(glossary_map)
+    if clean_glossary and clean_glossary.get(label):
+        terms.extend(clean_glossary[label])
     preferred = _caption_preferred_label(label, glossary_map)
     if preferred:
         terms.append(preferred)
@@ -1368,6 +1408,11 @@ def _caption_window_global_region(
     size: int,
     image_width: Optional[int],
     image_height: Optional[int],
+    *,
+    row_index: Optional[int] = None,
+    col_index: Optional[int] = None,
+    row_count: Optional[int] = None,
+    col_count: Optional[int] = None,
 ) -> str:
     try:
         safe_width = max(1, int(image_width or 0))
@@ -1386,16 +1431,317 @@ def _caption_window_global_region(
     bottom = min(safe_height, top + crop_size)
     center_x = (left + right) / 2.0
     center_y = (top + bottom) / 2.0
-    horiz = "left" if center_x < safe_width / 3.0 else "right" if center_x > safe_width * 2 / 3.0 else "center"
-    vert = "top" if center_y < safe_height / 3.0 else "bottom" if center_y > safe_height * 2 / 3.0 else "middle"
+
+    def _axis_word(start: int, end: int, full: int, center: float, low: str, mid: str, high: str) -> str:
+        if start <= 0 and end >= full:
+            return f"full-{low}-{high}"
+        if start <= 0:
+            return low
+        if end >= full:
+            return high
+        if center < full / 3.0:
+            return low
+        if center > full * 2 / 3.0:
+            return high
+        return mid
+
+    horiz = _axis_word(left, right, safe_width, center_x, "left", "center", "right")
+    vert = _axis_word(top, bottom, safe_height, center_y, "upper", "middle", "lower")
     x0_pct = int(round((left / safe_width) * 100))
     x1_pct = int(round((right / safe_width) * 100))
     y0_pct = int(round((top / safe_height) * 100))
     y1_pct = int(round((bottom / safe_height) * 100))
+    grid_note = ""
+    if (
+        row_index is not None
+        and col_index is not None
+        and row_count is not None
+        and col_count is not None
+        and row_count > 1
+        and col_count > 1
+    ):
+        row_word = {
+            0: "first-row",
+            row_count - 1: "last-row",
+        }.get(row_index, f"row {row_index + 1}")
+        col_word = {
+            0: "first-column",
+            col_count - 1: "last-column",
+        }.get(col_index, f"column {col_index + 1}")
+        grid_note = f"{row_word}, {col_word} "
+    overlap_note = ""
+    if (right - left) > safe_width / 2.0 or (bottom - top) > safe_height / 2.0:
+        overlap_note = ", overlapping toward the image center"
     return (
-        f"global region {vert}-{horiz}; "
+        f"{grid_note}global {vert}-{horiz} section{overlap_note}; "
         f"covers x {x0_pct}-{x1_pct}% and y {y0_pct}-{y1_pct}% of the full image"
     )
+
+
+def _caption_bbox_tuple(bbox: Any) -> Optional[Tuple[float, float, float, float]]:
+    if not bbox or len(bbox) != 4:
+        return None
+    try:
+        x1, y1, x2, y2 = [float(value) for value in bbox[:4]]
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not all(math.isfinite(value) for value in (x1, y1, x2, y2)):
+        return None
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
+def _caption_bbox_area(box: Optional[Tuple[float, float, float, float]]) -> float:
+    if not box:
+        return 0.0
+    return max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
+
+
+def _caption_bbox_intersection_area(
+    a: Optional[Tuple[float, float, float, float]],
+    b: Optional[Tuple[float, float, float, float]],
+) -> float:
+    if not a or not b:
+        return 0.0
+    ix1 = max(a[0], b[0])
+    iy1 = max(a[1], b[1])
+    ix2 = min(a[2], b[2])
+    iy2 = min(a[3], b[3])
+    if ix2 <= ix1 or iy2 <= iy1:
+        return 0.0
+    return (ix2 - ix1) * (iy2 - iy1)
+
+
+def _caption_bbox_iou(
+    a: Optional[Tuple[float, float, float, float]],
+    b: Optional[Tuple[float, float, float, float]],
+) -> float:
+    inter = _caption_bbox_intersection_area(a, b)
+    if inter <= 0:
+        return 0.0
+    union = _caption_bbox_area(a) + _caption_bbox_area(b) - inter
+    if union <= 0:
+        return 0.0
+    return inter / union
+
+
+def _caption_bbox_center_inside(
+    inner_center_box: Optional[Tuple[float, float, float, float]],
+    outer_box: Optional[Tuple[float, float, float, float]],
+) -> bool:
+    if not inner_center_box or not outer_box:
+        return False
+    cx = (inner_center_box[0] + inner_center_box[2]) * 0.5
+    cy = (inner_center_box[1] + inner_center_box[3]) * 0.5
+    return outer_box[0] <= cx <= outer_box[2] and outer_box[1] <= cy <= outer_box[3]
+
+
+def _caption_position_phrase_for_bbox(
+    bbox: Sequence[float],
+    image_width: Optional[int],
+    image_height: Optional[int],
+) -> str:
+    box = _caption_bbox_tuple(bbox)
+    if not box:
+        return ""
+    safe_width = max(1.0, float(image_width or 1))
+    safe_height = max(1.0, float(image_height or 1))
+    cx = max(0.0, min(safe_width, (box[0] + box[2]) * 0.5))
+    cy = max(0.0, min(safe_height, (box[1] + box[3]) * 0.5))
+    horiz = "left" if cx < safe_width / 3.0 else "right" if cx > safe_width * 2.0 / 3.0 else "center"
+    vert = "upper" if cy < safe_height / 3.0 else "lower" if cy > safe_height * 2.0 / 3.0 else "middle"
+    if horiz == "center" and vert == "middle":
+        return "near the center"
+    if horiz == "center":
+        return f"in the {vert} center"
+    if vert == "middle":
+        return f"near the {horiz} side"
+    return f"in the {vert}-{horiz}"
+
+
+def _caption_full_object_refs(
+    full_label_hints: Optional[Sequence[Any]],
+    glossary_map: Optional[Mapping[str, Sequence[Any]]],
+    image_width: Optional[int],
+    image_height: Optional[int],
+) -> List[Dict[str, Any]]:
+    refs: List[Dict[str, Any]] = []
+    for index, hint in enumerate(full_label_hints or [], start=1):
+        raw_label = str(_caption_hint_value(hint, "label", "") or "").strip()
+        bbox = _caption_bbox_tuple(_caption_hint_value(hint, "bbox", None))
+        if not raw_label or not bbox:
+            continue
+        display = _caption_preferred_label(raw_label, glossary_map)
+        refs.append(
+            {
+                "id": f"object_{index:03d}",
+                "label": raw_label,
+                "display": display or _caption_natural_label(raw_label),
+                "bbox": bbox,
+                "source_id": str(_caption_hint_value(hint, "source_id", "") or "").strip(),
+                "position": _caption_position_phrase_for_bbox(bbox, image_width, image_height),
+            }
+        )
+    return refs
+
+
+def _caption_window_hint_full_bbox(
+    hint: Any,
+    x0: int,
+    y0: int,
+    image_width: Optional[int],
+    image_height: Optional[int],
+) -> Optional[Tuple[float, float, float, float]]:
+    local_box = _caption_bbox_tuple(_caption_hint_value(hint, "bbox", None))
+    if not local_box:
+        return None
+    safe_width = max(1.0, float(image_width or 1))
+    safe_height = max(1.0, float(image_height or 1))
+    left = max(0.0, min(safe_width, float(x0) + local_box[0]))
+    top = max(0.0, min(safe_height, float(y0) + local_box[1]))
+    right = max(0.0, min(safe_width, float(x0) + local_box[2]))
+    bottom = max(0.0, min(safe_height, float(y0) + local_box[3]))
+    if right <= left or bottom <= top:
+        return None
+    return left, top, right, bottom
+
+
+def _caption_labels_compatible(raw_label: str, ref: Mapping[str, Any], display: str) -> bool:
+    raw_key = str(raw_label or "").strip().lower()
+    if not raw_key:
+        return False
+    if raw_key == str(ref.get("label") or "").strip().lower():
+        return True
+    return bool(display and display.lower() == str(ref.get("display") or "").strip().lower())
+
+
+def _caption_match_window_hint_to_full_ref(
+    hint: Any,
+    full_box: Optional[Tuple[float, float, float, float]],
+    full_refs: Sequence[Mapping[str, Any]],
+    glossary_map: Optional[Mapping[str, Sequence[Any]]],
+) -> Tuple[str, Optional[Mapping[str, Any]], str]:
+    raw_label = str(_caption_hint_value(hint, "label", "") or "").strip()
+    display = _caption_preferred_label(raw_label, glossary_map)
+    source_id = str(_caption_hint_value(hint, "source_id", "") or "").strip()
+    if not raw_label or not full_box:
+        return "unmatched", None, "missing label or bbox"
+
+    candidates: List[Tuple[float, Mapping[str, Any], str]] = []
+    window_area = max(_caption_bbox_area(full_box), 1e-6)
+    for ref in full_refs:
+        if not _caption_labels_compatible(raw_label, ref, display):
+            continue
+        ref_box = ref.get("bbox")
+        ref_source_id = str(ref.get("source_id") or "").strip()
+        if source_id and ref_source_id and source_id == ref_source_id:
+            candidates.append((100.0, ref, "same source id"))
+            continue
+        inter = _caption_bbox_intersection_area(full_box, ref_box)
+        if inter <= 0:
+            continue
+        iou = _caption_bbox_iou(full_box, ref_box)
+        window_coverage = inter / window_area
+        ref_area = max(_caption_bbox_area(ref_box), 1e-6)
+        ref_coverage = inter / ref_area
+        center_inside = _caption_bbox_center_inside(full_box, ref_box)
+        if iou < 0.05 and window_coverage < 0.5 and not center_inside:
+            continue
+        score = iou * 3.0 + window_coverage * 2.0 + ref_coverage
+        if center_inside:
+            score += 0.75
+        reason = (
+            f"IoU {iou:.2f}, window coverage {window_coverage:.2f}, "
+            f"object coverage {ref_coverage:.2f}"
+        )
+        candidates.append((score, ref, reason))
+    if not candidates:
+        return "unmatched", None, "no compatible full-frame object"
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    if len(candidates) > 1 and candidates[0][0] < 100 and abs(candidates[0][0] - candidates[1][0]) < 0.05:
+        return "ambiguous", None, "multiple compatible full-frame objects"
+    return "matched", candidates[0][1], candidates[0][2]
+
+
+def _format_caption_reconciled_window_evidence(
+    x0: int,
+    y0: int,
+    window_hints: Sequence[Any],
+    full_refs: Sequence[Mapping[str, Any]],
+    glossary_map: Optional[Mapping[str, Sequence[Any]]],
+    image_width: Optional[int],
+    image_height: Optional[int],
+    *,
+    max_items: int = 60,
+) -> List[str]:
+    if not full_refs and not window_hints:
+        return []
+    matched: List[str] = []
+    unmatched: List[str] = []
+    ambiguous: List[str] = []
+    seen_refs: set[str] = set()
+    for hint in window_hints or []:
+        raw_label = str(_caption_hint_value(hint, "label", "") or "").strip()
+        display = _caption_preferred_label(raw_label, glossary_map)
+        full_box = _caption_window_hint_full_bbox(hint, x0, y0, image_width, image_height)
+        status, ref, reason = _caption_match_window_hint_to_full_ref(
+            hint,
+            full_box,
+            full_refs,
+            glossary_map,
+        )
+        position = _caption_position_phrase_for_bbox(full_box or [], image_width, image_height)
+        if status == "matched" and ref:
+            ref_id = str(ref.get("id") or "")
+            if ref_id and ref_id in seen_refs:
+                continue
+            seen_refs.add(ref_id)
+            label = str(ref.get("display") or display or raw_label)
+            ref_position = str(ref.get("position") or position or "").strip()
+            matched.append(
+                " ".join(
+                    part
+                    for part in (
+                        ref_id,
+                        label,
+                        ref_position,
+                        f"({reason})" if reason else "",
+                    )
+                    if part
+                )
+            )
+        elif status == "ambiguous":
+            ambiguous.append(" ".join(part for part in (display or raw_label, position, f"({reason})") if part))
+        else:
+            unmatched.append(" ".join(part for part in (display or raw_label, position, f"({reason})") if part))
+
+    lines: List[str] = []
+    if matched:
+        shown = matched[:max_items]
+        suffix = f"; {len(matched) - len(shown)} more matched objects not listed" if len(shown) < len(matched) else ""
+        lines.append("Matched full-frame objects in this window: " + "; ".join(shown) + suffix + ".")
+    if ambiguous:
+        shown = ambiguous[:max_items]
+        suffix = f"; {len(ambiguous) - len(shown)} more ambiguous items not listed" if len(shown) < len(ambiguous) else ""
+        lines.append(
+            "Ambiguous window evidence: "
+            + "; ".join(shown)
+            + suffix
+            + ". Use as visual detail only, not as a new count."
+        )
+    if unmatched:
+        shown = unmatched[:max_items]
+        suffix = f"; {len(unmatched) - len(shown)} more unmatched items not listed" if len(shown) < len(unmatched) else ""
+        lines.append(
+            "Window-only evidence not matched to the full-frame inventory: "
+            + "; ".join(shown)
+            + suffix
+            + ". Use as scene context only, not as extra object inventory."
+        )
+    if window_hints and not lines:
+        lines.append("Window detections could not be reconciled; use this observation as visual context only.")
+    return lines
 
 
 def _format_caption_window_observation_lines(
@@ -1403,9 +1749,17 @@ def _format_caption_window_observation_lines(
     *,
     image_width: Optional[int] = None,
     image_height: Optional[int] = None,
+    full_label_hints: Optional[Sequence[Any]] = None,
+    window_hints_by_window: Optional[Mapping[Tuple[int, int], Sequence[Any]]] = None,
+    glossary_map: Optional[Mapping[str, Sequence[Any]]] = None,
 ) -> List[str]:
     lines = [
-        "Window observations (supporting close-up evidence; do NOT invent objects):",
+        "Window observations (reconciled close-up evidence; do NOT invent objects):",
+        (
+            "Object reconciliation: window-local detection boxes are matched back to full-image annotation objects when possible. "
+            "Object reference IDs are internal merge aids; never output them. "
+            "Full-frame counts remain authoritative; matched window evidence only adds visual details."
+        ),
         (
             "Spatial grounding: each observation is only one crop of the full image. "
             "Absolute local words in a crop caption such as top, bottom, left, right, center, or corner are crop-relative. "
@@ -1413,12 +1767,39 @@ def _format_caption_window_observation_lines(
             "The percent bounds are prompt-only layout aids; do not mention crop coordinates or percentages in the final caption."
         ),
     ]
+    full_refs = _caption_full_object_refs(full_label_hints, glossary_map, image_width, image_height)
+    x_order = sorted({int(x0) for x0, _y0, _size, _caption in windowed_captions})
+    y_order = sorted({int(y0) for _x0, y0, _size, _caption in windowed_captions})
+    x_to_col = {value: idx for idx, value in enumerate(x_order)}
+    y_to_row = {value: idx for idx, value in enumerate(y_order)}
     for index, (x0, y0, size, caption) in enumerate(windowed_captions, start=1):
         text = _collapse_whitespace(str(caption or ""))
         if not text:
             continue
-        region = _caption_window_global_region(x0, y0, size, image_width, image_height)
+        region = _caption_window_global_region(
+            x0,
+            y0,
+            size,
+            image_width,
+            image_height,
+            row_index=y_to_row.get(int(y0)),
+            col_index=x_to_col.get(int(x0)),
+            row_count=len(y_order),
+            col_count=len(x_order),
+        )
+        evidence_lines = _format_caption_reconciled_window_evidence(
+            x0,
+            y0,
+            (window_hints_by_window or {}).get((x0, y0), []),
+            full_refs,
+            glossary_map,
+            image_width,
+            image_height,
+        )
+        evidence_text = (" " + " ".join(evidence_lines)) if evidence_lines else ""
         lines.append(f"- Window {index} ({region}): {text}")
+        if evidence_text:
+            lines[-1] = f"{lines[-1]}{evidence_text}"
     return lines
 
 
@@ -1439,6 +1820,7 @@ def _run_qwen_caption_cleanup(
     source_output: Optional[str] = None,
     source_outputs: Optional[Sequence[Tuple[str, str]]] = None,
     authoritative_counts_note: Optional[str] = None,
+    glossary_line: Optional[str] = None,
     cleanup_prompt_override: Optional[str] = None,
     cleanup_system_prompt_override: Optional[str] = None,
     chat_template_kwargs: Optional[Dict[str, Any]] = None,
@@ -1483,6 +1865,7 @@ def _run_qwen_caption_cleanup(
     cleanup_prompt = (
         f"{strict_note}{allowed_note}{minimal_note}"
         f"{user_request_note}"
+        f"{_collapse_whitespace(glossary_line or '') + ' ' if glossary_line else ''}"
         f"{_collapse_whitespace(authoritative_counts_note or '') + ' ' if authoritative_counts_note else ''}"
         f"{cleanup_policy}\n"
         f"Draft caption: {prompt}"
@@ -1535,6 +1918,9 @@ def _run_qwen_caption_merge(
     overlap_guidance: Optional[str] = None,
     source_outputs: Optional[Sequence[Tuple[str, str]]] = None,
     authoritative_counts_note: Optional[str] = None,
+    full_label_hints: Optional[Sequence[Any]] = None,
+    window_hints_by_window: Optional[Mapping[Tuple[int, int], Sequence[Any]]] = None,
+    glossary_map: Optional[Mapping[str, Sequence[Any]]] = None,
     merge_prompt_override: Optional[str] = None,
     merge_system_prompt_override: Optional[str] = None,
     chat_template_kwargs: Optional[Dict[str, Any]] = None,
@@ -1551,6 +1937,9 @@ def _run_qwen_caption_merge(
         windowed_captions,
         image_width=image_width,
         image_height=image_height,
+        full_label_hints=full_label_hints,
+        window_hints_by_window=window_hints_by_window,
+        glossary_map=glossary_map,
     )
     if len(window_lines) <= 2:
         return draft_caption
@@ -1581,6 +1970,7 @@ def _run_qwen_caption_merge(
     )
     merge_prompt = (
         f"{user_request_note}"
+        f"{_collapse_whitespace(glossary_line or '') + ' ' if glossary_line else ''}"
         f"{_collapse_whitespace(authoritative_counts_note or '') + ' ' if authoritative_counts_note else ''}"
         f"{merge_policy}\n"
         f"Draft caption: {draft_caption}\n"
@@ -1590,8 +1980,6 @@ def _run_qwen_caption_merge(
         merge_prompt = f"{merge_prompt}\n\n{overlap_guidance}"
     if source_context:
         merge_prompt = f"{merge_prompt}\n\n{source_context}"
-    if glossary_line:
-        merge_prompt = f"{merge_prompt}\n{glossary_line}"
     merge_system = (
         _collapse_whitespace(merge_system_prompt_override or "")
         or "You are a caption editor. Return only the revised caption in English."

@@ -37,7 +37,7 @@ def _normalize_labelmap_glossary(raw_glossary: Any) -> str:
 
 def _extract_glossary_synonyms(text: str) -> List[str]:
     cleaned = re.sub(r"[()]", " ", str(text))
-    parts = re.split(r"[;,/]|\\band\\b|\\bor\\b", cleaned, flags=re.IGNORECASE)
+    parts = re.split(r"[;,/]|\band\b|\bor\b", cleaned, flags=re.IGNORECASE)
     synonyms: List[str] = []
     for part in parts:
         term = part.strip()
@@ -143,7 +143,7 @@ def _parse_glossary_mapping(glossary: str, labelmap: Sequence[str]) -> Dict[str,
 def _split_synonym_terms(text: str) -> List[str]:
     if not text:
         return []
-    parts = re.split(r"[;,/]|\\band\\b|\\bor\\b", str(text), flags=re.IGNORECASE)
+    parts = re.split(r"[;,/]|\band\b|\bor\b", str(text), flags=re.IGNORECASE)
     return [part.strip() for part in parts if part.strip()]
 
 
@@ -153,13 +153,19 @@ def _clean_sam3_synonym(term: str) -> str:
     cleaned = str(term).strip()
     cleaned = re.sub(r"[\"']", "", cleaned).strip()
     cleaned = re.sub(
-        r"^(all kinds of|all kind of|all|including|include|including the|including those|such as|other|and|or)\\s+",
+        r"^(all kinds of|all kind of|all|including|include|including the|including those|such as|other|and|or)\s+",
         "",
         cleaned,
         flags=re.IGNORECASE,
     ).strip()
     cleaned = cleaned.strip(" .")
     if not cleaned:
+        return ""
+    if not re.search(r"[A-Za-z0-9]", cleaned):
+        return ""
+    if cleaned in {"[", "]", "{", "}", "[]", "{}"}:
+        return ""
+    if any(ch in cleaned for ch in "[]{}"):
         return ""
     if len(cleaned) > 40:
         return ""

@@ -731,7 +731,6 @@ from services.qwen import (
     _caption_length_instruction as _caption_length_instruction_impl,
     _caption_user_request_instruction as _caption_user_request_instruction_impl,
     _caption_user_requested_short as _caption_user_requested_short_impl,
-    _caption_requested_sentence_limit as _caption_requested_sentence_limit_impl,
     _clean_caption_source_context_text as _clean_caption_source_context_text_impl,
     _format_caption_source_output_context as _format_caption_source_output_context_impl,
     _format_caption_window_observation_lines as _format_caption_window_observation_lines_impl,
@@ -1179,6 +1178,7 @@ QWEN_MIN_TRANSFORMERS = "5.7.0"
 QWEN_MIN_PIXELS = _env_int("QWEN_MIN_PIXELS", 256 * 28 * 28)
 QWEN_MAX_PIXELS = _env_int("QWEN_MAX_PIXELS", 1280 * 28 * 28)
 QWEN_MAX_NEW_TOKENS = _env_int("QWEN_MAX_NEW_TOKENS", 2000)
+QWEN_CAPTION_MAX_NEW_TOKENS = _env_int("QWEN_CAPTION_MAX_NEW_TOKENS", 4096)
 QWEN_DO_SAMPLE = _env_bool("QWEN_DO_SAMPLE", False)
 QWEN_TEMPERATURE = _env_float("QWEN_TEMPERATURE", 0.2)
 QWEN_TOP_P = _env_float("QWEN_TOP_P", 0.9)
@@ -54420,6 +54420,23 @@ def _format_qwen_caption_prompt_preview_text(
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _format_caption_window_sentence_instruction(payload: QwenCaptionRequest) -> str:
+    try:
+        min_sentences = int(getattr(payload, "caption_window_min_sentences", 1) or 1)
+    except (TypeError, ValueError, OverflowError):
+        min_sentences = 1
+    try:
+        max_sentences = int(getattr(payload, "caption_window_max_sentences", 3) or 3)
+    except (TypeError, ValueError, OverflowError):
+        max_sentences = 3
+    min_sentences = max(1, min(min_sentences, 10))
+    max_sentences = max(min_sentences, min(max_sentences, 10))
+    if min_sentences == max_sentences:
+        suffix = "" if min_sentences == 1 else "s"
+        return f"Write {min_sentences} concrete sentence{suffix} about this region only. "
+    return f"Write {min_sentences}-{max_sentences} concrete sentences about this region only. "
+
+
 def qwen_caption_prompt_preview(payload: QwenCaptionRequest) -> QwenCaptionPromptPreviewResponse:
     pil_img, _, _ = resolve_image_payload(payload.image_base64, payload.image_token, None)
     request_image_name = str(getattr(payload, "image_name", "") or "").strip()
@@ -54505,40 +54522,27 @@ def qwen_caption_prompt_preview(payload: QwenCaptionRequest) -> QwenCaptionPromp
         user_prompt,
         final_caption_max_sentences,
     )
-    requested_sentence_limit = _caption_requested_sentence_limit_impl(
-        user_prompt,
-        final_caption_max_sentences,
-    )
     two_stage = bool(payload.two_stage_refine)
     is_thinking = "Thinking" in desired_model_id or variant == "Thinking"
     if is_thinking:
         prompt_text = _adjust_prompt_for_thinking_impl(prompt_text)
-    if final_caption_length_instruction:
+    if final_caption_length_instruction and "final caption length:" not in prompt_text.lower():
         prompt_text = f"{prompt_text}\nFinal caption length: {final_caption_length_instruction}"
     default_system_prompt = (
-        (
-            "You are a concise captioning assistant. Use the image as truth. "
-            "Prioritize the user's requested length over exhaustive detail. "
-        )
-        if short_caption_requested
-        else (
-            "You are a detailed captioning assistant. Use the image as truth. "
-            "Provide a rich, multi-sentence caption when there is a lot to see. "
-        )
-    ) + (
+        "You are a detailed captioning assistant. Use the image as truth. "
+        "Provide a rich, multi-sentence caption when there is a lot to see. "
         "Do not mention labels, hints, bounding boxes, coordinates, glossary text, or that counts were provided. "
         "Do not output internal dataset class names or any token with underscores. "
         "Use natural-language class terms from the provided context when available. "
         "Use narrower subtypes only when the image clearly supports them. "
         "If the hints conflict with the image, mention the uncertainty briefly. "
-        "Stop when the caption is complete; never repeat a sentence or keep writing to fill the token budget."
+        "Stop when the caption is complete; never repeat a sentence or keep writing to fill the token budget.\n"
+        "Respond in English only.\n"
+        "Return only the final caption. Do not include reasoning or preamble."
     )
     custom_system_prompt = bool((payload.caption_system_prompt or "").strip())
     system_prompt = (payload.caption_system_prompt or "").strip() or default_system_prompt
     if not custom_system_prompt:
-        system_prompt = f"{system_prompt} Respond in English only."
-        if final_only:
-            system_prompt = f"{system_prompt} Return only the final caption. Do not include reasoning or preamble."
         if final_only and is_thinking and not two_stage:
             system_prompt = f"{system_prompt} Respond with exactly <final>...</final> and nothing else."
     overlap: Optional[float] = None
@@ -54662,13 +54666,7 @@ def qwen_caption_prompt_preview(payload: QwenCaptionRequest) -> QwenCaptionPromp
                 if payload.caption_window_prompt:
                     window_task_prompt = payload.caption_window_prompt.strip()
                 else:
-                    if short_caption_requested:
-                        if requested_sentence_limit == 1:
-                            window_caption_instruction = "Write one concise sentence about this region only. "
-                        else:
-                            window_caption_instruction = "Write 1-2 concise sentences about this region only. "
-                    else:
-                        window_caption_instruction = "Write 1-3 concrete sentences about this region only. "
+                    window_caption_instruction = _format_caption_window_sentence_instruction(payload)
                     window_task_prompt = (
                         "This crop is a subregion of the full image.\n"
                         "Apply the crop caption context above to this crop only.\n"
@@ -54677,7 +54675,8 @@ def qwen_caption_prompt_preview(payload: QwenCaptionRequest) -> QwenCaptionPromp
                         "and spatial relations when available. Mention surrounding scene details only when they clarify those objects or the crop. "
                         "Do not add unsupported object categories or treat background context as extra counted inventory.\n"
                         f"{window_caption_instruction}No reasoning or preamble. "
-                        "Do not mention labels, hints, bounding boxes, coordinates, glossary text, or that counts were provided. "
+                        "Do not mention labels, hints, bounding boxes, coordinates, glossary text, or that counts were provided, "
+                        "but if counts are provided then do make sure to keep those counts in your output. "
                         "Do not output internal dataset class names or any token with underscores. "
                         "Use narrower subtypes only when the crop clearly supports them."
                     )
@@ -54732,6 +54731,9 @@ def qwen_caption_prompt_preview(payload: QwenCaptionRequest) -> QwenCaptionPromp
                 planned_windows,
                 image_width=image_width,
                 image_height=image_height,
+                full_label_hints=label_hints,
+                window_hints_by_window=grouped_hints,
+                glossary_map=glossary_map,
             )
             window_lines.append(
                 "Treat these observations as close-up source notes, not a separate object inventory."
@@ -54815,15 +54817,12 @@ def qwen_caption_prompt_preview(payload: QwenCaptionRequest) -> QwenCaptionPromp
             )
             merge_prompt = (
                 f"{caption_user_request_note}"
+                f"{_collapse_whitespace_impl(glossary_line or '') + ' ' if glossary_line else ''}"
                 f"{_collapse_whitespace_impl(authoritative_counts_note or '') + ' ' if authoritative_counts_note else ''}"
                 f"{merge_policy}\n"
                 "Draft caption: <generated full-image caption before window merge>\n"
                 + "\n".join(window_lines)
             )
-            if overlap_guidance:
-                merge_prompt = f"{merge_prompt}\n\n{overlap_guidance}"
-            if glossary_line:
-                merge_prompt = f"{merge_prompt}\n{glossary_line}"
             merge_system = (
                 _collapse_whitespace_impl(system_prompt or "")
                 or "You are a caption editor. Return only the revised caption in English."
@@ -54950,6 +54949,7 @@ def qwen_caption_prompt_preview(payload: QwenCaptionRequest) -> QwenCaptionPromp
         f"{cleanup_allowed_note}"
         f"{cleanup_minimal_note}"
         f"{caption_user_request_note}"
+        f"{_collapse_whitespace_impl(glossary_line or '') + ' ' if glossary_line else ''}"
         f"{_collapse_whitespace_impl(authoritative_counts_note or '') + ' ' if authoritative_counts_note else ''}"
         f"{cleanup_policy}\n"
         "Draft caption: <caption that triggered cleanup, coverage, count, repetition, or language guards>\n\n"
@@ -54985,6 +54985,8 @@ def qwen_caption_prompt_preview(payload: QwenCaptionRequest) -> QwenCaptionPromp
         "include_counts": include_counts,
         "include_coords": include_coords,
         "max_boxes": max_boxes,
+        "caption_window_min_sentences": payload.caption_window_min_sentences,
+        "caption_window_max_sentences": payload.caption_window_max_sentences,
     }
     full_text = _format_qwen_caption_prompt_preview_text(sections, warnings=warnings, meta=meta)
     return QwenCaptionPromptPreviewResponse(
@@ -55186,10 +55188,6 @@ def qwen_caption(payload: QwenCaptionRequest):
             user_prompt,
             final_caption_max_sentences,
         )
-        requested_sentence_limit = _caption_requested_sentence_limit_impl(
-            user_prompt,
-            final_caption_max_sentences,
-        )
         two_stage = bool(payload.two_stage_refine)
         is_thinking = "Thinking" in desired_model_id or variant == "Thinking"
         caption_chat_template_kwargs = (
@@ -55210,42 +55208,33 @@ def qwen_caption(payload: QwenCaptionRequest):
         )
         if is_thinking:
             prompt_text = _adjust_prompt_for_thinking_impl(prompt_text)
-        if final_caption_length_instruction:
+        if final_caption_length_instruction and "final caption length:" not in prompt_text.lower():
             prompt_text = f"{prompt_text}\nFinal caption length: {final_caption_length_instruction}"
             max_new_tokens = max(
                 max_new_tokens,
-                min(2000, max(1000, int(final_caption_max_sentences or 10) * 100)),
+                min(QWEN_CAPTION_MAX_NEW_TOKENS, max(1000, int(final_caption_max_sentences or 10) * 100)),
             )
-        # Keep caption max_new_tokens consistent across full/windowed/refine paths; cap at 2000.
+        # Keep caption max_new_tokens consistent across full/windowed/refine paths.
         # Avoid per-path caps here (we previously caused repeated CUDA asserts by diverging).
         if is_thinking:
             max_new_tokens = max(max_new_tokens, 1000)
-        max_new_tokens = min(max_new_tokens, 2000)
+        max_new_tokens = min(max_new_tokens, QWEN_CAPTION_MAX_NEW_TOKENS)
         refine_max_tokens = max_new_tokens
         default_system_prompt = (
-            (
-                "You are a concise captioning assistant. Use the image as truth. "
-                "Prioritize the user's requested length over exhaustive detail. "
-            )
-            if short_caption_requested
-            else (
-                "You are a detailed captioning assistant. Use the image as truth. "
-                "Provide a rich, multi-sentence caption when there is a lot to see. "
-            )
-        ) + (
+            "You are a detailed captioning assistant. Use the image as truth. "
+            "Provide a rich, multi-sentence caption when there is a lot to see. "
             "Do not mention labels, hints, bounding boxes, coordinates, glossary text, or that counts were provided. "
             "Do not output internal dataset class names or any token with underscores. "
             "Use natural-language class terms from the provided context when available. "
             "Use narrower subtypes only when the image clearly supports them. "
             "If the hints conflict with the image, mention the uncertainty briefly. "
-            "Stop when the caption is complete; never repeat a sentence or keep writing to fill the token budget."
+            "Stop when the caption is complete; never repeat a sentence or keep writing to fill the token budget.\n"
+            "Respond in English only.\n"
+            "Return only the final caption. Do not include reasoning or preamble."
         )
         custom_system_prompt = bool((payload.caption_system_prompt or "").strip())
         system_prompt = (payload.caption_system_prompt or "").strip() or default_system_prompt
         if not custom_system_prompt:
-            system_prompt = f"{system_prompt} Respond in English only."
-            if final_only:
-                system_prompt = f"{system_prompt} Return only the final caption. Do not include reasoning or preamble."
             if final_only and is_thinking and not two_stage:
                 system_prompt = (
                     f"{system_prompt} Respond with exactly <final>...</final> and nothing else."
@@ -55304,6 +55293,9 @@ def qwen_caption(payload: QwenCaptionRequest):
                 image_width,
                 image_height,
             )
+            if total_windows > 1 or len(label_hints) > 40:
+                max_new_tokens = min(QWEN_CAPTION_MAX_NEW_TOKENS, max(max_new_tokens, 3000))
+                refine_max_tokens = max_new_tokens
         caption_step_plan = _build_qwen_caption_step_plan(
             caption_mode=caption_mode,
             total_windows=total_windows,
@@ -55376,6 +55368,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 source_output=source_output,
                 source_outputs=source_outputs,
                 authoritative_counts_note=counts_note,
+                glossary_line=glossary_line or None,
                 cleanup_prompt_override=payload.caption_cleanup_prompt,
                 cleanup_system_prompt_override=system_prompt,
                 chat_template_kwargs=postprocess_chat_template_kwargs,
@@ -55398,6 +55391,9 @@ def qwen_caption(payload: QwenCaptionRequest):
             max_sentences: Optional[int] = None,
             overlap_guidance: Optional[str] = None,
             source_outputs: Optional[Sequence[Tuple[str, str]]] = None,
+            full_label_hints: Optional[Sequence[QwenCaptionHint]] = None,
+            window_hints_by_window: Optional[Mapping[Tuple[int, int], Sequence[QwenCaptionHint]]] = None,
+            glossary_map: Optional[Dict[str, List[str]]] = None,
         ) -> str:
             return _run_qwen_caption_merge_impl(
                 draft,
@@ -55413,6 +55409,9 @@ def qwen_caption(payload: QwenCaptionRequest):
                 overlap_guidance=overlap_guidance,
                 source_outputs=source_outputs,
                 authoritative_counts_note=authoritative_counts_note,
+                full_label_hints=full_label_hints,
+                window_hints_by_window=window_hints_by_window,
+                glossary_map=glossary_map,
                 merge_prompt_override=payload.caption_merge_prompt,
                 merge_system_prompt_override=system_prompt,
                 chat_template_kwargs=postprocess_chat_template_kwargs,
@@ -55639,19 +55638,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                     if payload.caption_window_prompt:
                         window_task_prompt = payload.caption_window_prompt.strip()
                     else:
-                        if short_caption_requested:
-                            if requested_sentence_limit == 1:
-                                window_caption_instruction = (
-                                    "Write one concise sentence about this region only. "
-                                )
-                            else:
-                                window_caption_instruction = (
-                                    "Write 1-2 concise sentences about this region only. "
-                                )
-                        else:
-                            window_caption_instruction = (
-                                "Write 1-3 concrete sentences about this region only. "
-                            )
+                        window_caption_instruction = _format_caption_window_sentence_instruction(payload)
                         window_task_prompt = (
                             "This crop is a subregion of the full image.\n"
                             "Apply the crop caption context above to this crop only.\n"
@@ -55660,7 +55647,8 @@ def qwen_caption(payload: QwenCaptionRequest):
                             "and spatial relations when available. Mention surrounding scene details only when they clarify those objects or the crop. "
                             "Do not add unsupported object categories or treat background context as extra counted inventory.\n"
                             f"{window_caption_instruction}No reasoning or preamble. "
-                            "Do not mention labels, hints, bounding boxes, coordinates, glossary text, or that counts were provided. "
+                            "Do not mention labels, hints, bounding boxes, coordinates, glossary text, or that counts were provided, "
+                            "but if counts are provided then do make sure to keep those counts in your output. "
                             "Do not output internal dataset class names or any token with underscores. "
                             "Use narrower subtypes only when the crop clearly supports them."
                         )
@@ -55940,6 +55928,9 @@ def qwen_caption(payload: QwenCaptionRequest):
                     windowed_captions,
                     image_width=image_width,
                     image_height=image_height,
+                    full_label_hints=label_hints,
+                    window_hints_by_window=grouped_hints,
+                    glossary_map=glossary_map,
                 )
                 window_lines.append(
                     "Treat these observations as close-up source notes, not a separate object inventory."
@@ -56171,10 +56162,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 )
                 cleanup_count += 1
         if caption_mode == "windowed" and windowed_captions and caption_text:
-            merge_tokens = min(
-                refine_max_tokens,
-                max(1000, int(final_caption_max_sentences or 10) * 100),
-            )
+            merge_tokens = min(QWEN_CAPTION_MAX_NEW_TOKENS, max(refine_max_tokens, 3000))
             _qwen_progress_update(
                 phase="merge",
                 phase_label="Merging",
@@ -56202,6 +56190,9 @@ def qwen_caption(payload: QwenCaptionRequest):
                 max_sentences=final_caption_max_sentences,
                 overlap_guidance=overlap_guidance or None,
                 source_outputs=first_stage_output_sections,
+                full_label_hints=label_hints,
+                window_hints_by_window=grouped_hints,
+                glossary_map=glossary_map,
             )
             _raise_if_qwen_cancelled()
             merge_count += 1
@@ -56483,7 +56474,7 @@ def qwen_caption(payload: QwenCaptionRequest):
             repaired_caption = _caption_cleanup(
                 caption_text,
                 pil_img,
-                min(refine_max_tokens, 2000),
+                min(refine_max_tokens, QWEN_CAPTION_MAX_NEW_TOKENS),
                 caption_base_model_id,
                 use_caption_cache,
                 model_id_override=repair_model,

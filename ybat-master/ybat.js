@@ -1079,6 +1079,17 @@
         qwenCaptionPromptDraftRefine: "Edit the prompt layer used to refine draft captions.",
         qwenCaptionPromptMerge: "Edit the prompt layer used to merge crop and full-image observations.",
         qwenCaptionPromptCleanup: "Edit the prompt layer used to clean up final caption wording.",
+        qwenCaptionPromptEditorSystem: "Edit the system prompt used by caption editor, merge, cleanup, coverage, and rewrite passes.",
+        qwenCaptionPromptCoverage: "Edit the policy used when coverage or count guards ask the editor to revise a caption.",
+        qwenCaptionPromptLanguageRewrite: "Edit the policy used when a generated caption must be rewritten in English.",
+        qwenCaptionRecipeSelect: "Choose a browser-local caption recipe to load, delete, or download.",
+        qwenCaptionRecipeName: "Name used when saving or downloading the current caption setup as a recipe.",
+        qwenCaptionRecipeSave: "Save the current reusable caption setup in this browser.",
+        qwenCaptionRecipeLoad: "Apply the selected caption recipe to the current caption controls.",
+        qwenCaptionRecipeDelete: "Delete the selected browser-local caption recipe.",
+        qwenCaptionRecipeDownload: "Download the selected recipe, or the current settings if no recipe is selected, as portable JSON.",
+        qwenCaptionRecipeUploadButton: "Upload a portable caption recipe JSON and apply it.",
+        qwenCaptionRecipeUpload: "Choose a caption recipe JSON file to upload.",
         sam3RunButton: "Run SAM3 text prompting for the current image.",
         sam3TextCascadeRun: "Run the configured SAM3 text-prompt cascade.",
         sam3TextCascadeStop: "Stop the active SAM3 cascade job.",
@@ -2367,6 +2378,18 @@ const AUTOMATION_LOCKED_TABS = new Set([
         captionPromptDraftRefine: null,
         captionPromptMerge: null,
         captionPromptCleanup: null,
+        captionPromptEditorSystem: null,
+        captionPromptCoverage: null,
+        captionPromptLanguageRewrite: null,
+        captionRecipeSelect: null,
+        captionRecipeName: null,
+        captionRecipeSave: null,
+        captionRecipeLoad: null,
+        captionRecipeDelete: null,
+        captionRecipeDownload: null,
+        captionRecipeUploadButton: null,
+        captionRecipeUpload: null,
+        captionRecipeStatus: null,
         captionPreset: null,
         captionPresetRandom: null,
         captionStyleText: null,
@@ -2988,6 +3011,9 @@ const AUTOMATION_LOCKED_TABS = new Set([
             draftRefine: false,
             merge: false,
             cleanup: false,
+            editorSystem: false,
+            coverage: false,
+            languageRewrite: false,
         },
         lastDefaults: {},
     };
@@ -3100,6 +3126,24 @@ const AUTOMATION_LOCKED_TABS = new Set([
         "When authoritative counts are supplied to a guard pass, preserve them as natural scene facts using digits; do not say counts were provided.",
         "When the guard supplies count corrections, apply them and remove contradictory plural, group, or quantity wording.",
     ].join("\n");
+    const DEFAULT_CAPTION_EDITOR_SYSTEM_PROMPT = [
+        "You are a caption editor.",
+        "Use the image, draft caption, generated observations, glossary meanings, and authoritative counts as truth.",
+        "Respond in English only.",
+        "Return only the final revised caption, with no reasoning or preamble.",
+    ].join(" ");
+    const DEFAULT_CAPTION_COVERAGE_PROMPT = [
+        "Apply the requested class coverage and count corrections while keeping the caption grounded in the image.",
+        "Mention missing required object categories only when they are supported by the image or authoritative detection context.",
+        "Preserve authoritative counts as natural scene facts using digits.",
+        "Edit minimally unless the draft is mostly unusable.",
+        "Do not mention labels, hints, boxes, coordinates, prompts, or that counts were supplied.",
+    ].join("\n");
+    const DEFAULT_CAPTION_LANGUAGE_REWRITE_PROMPT = [
+        "Rewrite the caption in English only, preserving meaning, concrete visual detail, broad class terms, and authoritative counts.",
+        "Do not add new objects or actions.",
+        "Do not mention labels, hints, boxes, coordinates, prompts, or that counts were supplied.",
+    ].join("\n");
     const DEFAULT_CAPTION_WINDOW_SIZE = 672;
     const DEFAULT_CAPTION_WINDOW_OVERLAP = 0.1;
     const DEFAULT_CAPTION_WINDOW_MIN_SENTENCES = 1;
@@ -3108,6 +3152,9 @@ const AUTOMATION_LOCKED_TABS = new Set([
     const CAPTION_MAX_TOKEN_CAP = 4096;
     const DEFAULT_CAPTION_WINDOWED_MAX_TOKENS = 3000;
     const DEFAULT_CAPTION_AUTO_SENTENCES = 10;
+    const CAPTION_RECIPE_KIND = "tator.caption_recipe";
+    const CAPTION_RECIPE_VERSION = 1;
+    const CAPTION_RECIPE_STORAGE_KEY = "tator.qwenCaptionRecipes.v1";
     let sam3TextUiInitialized = false;
     let sam3PromptUiInitialized = false;
     let textLabels = {};
@@ -21581,6 +21628,18 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenElements.captionPromptDraftRefine = document.getElementById("qwenCaptionPromptDraftRefine");
         qwenElements.captionPromptMerge = document.getElementById("qwenCaptionPromptMerge");
         qwenElements.captionPromptCleanup = document.getElementById("qwenCaptionPromptCleanup");
+        qwenElements.captionPromptEditorSystem = document.getElementById("qwenCaptionPromptEditorSystem");
+        qwenElements.captionPromptCoverage = document.getElementById("qwenCaptionPromptCoverage");
+        qwenElements.captionPromptLanguageRewrite = document.getElementById("qwenCaptionPromptLanguageRewrite");
+        qwenElements.captionRecipeSelect = document.getElementById("qwenCaptionRecipeSelect");
+        qwenElements.captionRecipeName = document.getElementById("qwenCaptionRecipeName");
+        qwenElements.captionRecipeSave = document.getElementById("qwenCaptionRecipeSave");
+        qwenElements.captionRecipeLoad = document.getElementById("qwenCaptionRecipeLoad");
+        qwenElements.captionRecipeDelete = document.getElementById("qwenCaptionRecipeDelete");
+        qwenElements.captionRecipeDownload = document.getElementById("qwenCaptionRecipeDownload");
+        qwenElements.captionRecipeUploadButton = document.getElementById("qwenCaptionRecipeUploadButton");
+        qwenElements.captionRecipeUpload = document.getElementById("qwenCaptionRecipeUpload");
+        qwenElements.captionRecipeStatus = document.getElementById("qwenCaptionRecipeStatus");
         qwenElements.captionPreset = document.getElementById("qwenCaptionPreset");
         qwenElements.captionPresetRandom = document.getElementById("qwenCaptionPresetRandom");
         qwenElements.captionStyleText = document.getElementById("qwenCaptionStyleText");
@@ -22010,6 +22069,48 @@ async function cancelRfDetrTrainingJobRequest() {
         if (qwenElements.captionPresetRandom) {
             qwenElements.captionPresetRandom.addEventListener("click", () => {
                 applyCaptionPreset({ randomize: true });
+            });
+        }
+        refreshCaptionRecipeSelect();
+        if (qwenElements.captionRecipeSelect) {
+            qwenElements.captionRecipeSelect.addEventListener("change", () => {
+                const item = selectedCaptionRecipeItem();
+                if (qwenElements.captionRecipeName) {
+                    qwenElements.captionRecipeName.value = item?.name || "";
+                }
+                setCaptionRecipeStatus(item ? `Selected caption recipe "${item.name}".` : "");
+            });
+        }
+        if (qwenElements.captionRecipeSave) {
+            qwenElements.captionRecipeSave.addEventListener("click", saveCurrentCaptionRecipe);
+        }
+        if (qwenElements.captionRecipeLoad) {
+            qwenElements.captionRecipeLoad.addEventListener("click", loadSelectedCaptionRecipe);
+        }
+        if (qwenElements.captionRecipeDelete) {
+            qwenElements.captionRecipeDelete.addEventListener("click", deleteSelectedCaptionRecipe);
+        }
+        if (qwenElements.captionRecipeDownload) {
+            qwenElements.captionRecipeDownload.addEventListener("click", downloadCaptionRecipe);
+        }
+        if (qwenElements.captionRecipeUploadButton && qwenElements.captionRecipeUpload) {
+            qwenElements.captionRecipeUploadButton.addEventListener("click", () => {
+                qwenElements.captionRecipeUpload.click();
+            });
+            qwenElements.captionRecipeUpload.addEventListener("change", (event) => {
+                const file = event?.target?.files?.[0];
+                uploadCaptionRecipeFromFile(file)
+                    .catch((error) => {
+                        const message = error?.message || error;
+                        setCaptionRecipeStatus(`Upload failed: ${message}`);
+                        setSamStatus(`Caption recipe upload failed: ${message}`, { variant: "error", duration: 4000 });
+                        console.warn("Caption recipe upload failed", error);
+                    })
+                    .finally(() => {
+                        if (qwenElements.captionRecipeUpload) {
+                            qwenElements.captionRecipeUpload.value = "";
+                        }
+                    });
             });
         }
         if (qwenElements.captionDatasetRefresh) {
@@ -24588,12 +24689,25 @@ async function cancelRfDetrTrainingJobRequest() {
             draftRefine: qwenElements.captionPromptDraftRefine,
             merge: qwenElements.captionPromptMerge,
             cleanup: qwenElements.captionPromptCleanup,
+            editorSystem: qwenElements.captionPromptEditorSystem,
+            coverage: qwenElements.captionPromptCoverage,
+            languageRewrite: qwenElements.captionPromptLanguageRewrite,
         };
     }
 
     function captionPromptEditorValue(key) {
         const el = getCaptionPromptStackEditors()[key];
         return String(el?.value || "").trim();
+    }
+
+    function setCaptionPromptEditorValue(key, value) {
+        const el = getCaptionPromptStackEditors()[key];
+        if (!el) {
+            return;
+        }
+        el.value = String(value || "");
+        const previousDefault = qwenCaptionPromptStackState.lastDefaults[key] || "";
+        qwenCaptionPromptStackState.dirty[key] = String(el.value || "").trim() !== previousDefault;
     }
 
     function setCaptionPromptEditorDefault(key, value, force = false) {
@@ -24669,6 +24783,15 @@ async function cancelRfDetrTrainingJobRequest() {
         const cleanupPrompt = [
             DEFAULT_CAPTION_CLEANUP_PROMPT,
         ].filter(Boolean).join("\n");
+        const editorSystemPrompt = DEFAULT_CAPTION_EDITOR_SYSTEM_PROMPT;
+        const coveragePrompt = [
+            DEFAULT_CAPTION_COVERAGE_PROMPT,
+            lengthLine,
+        ].filter(Boolean).join("\n");
+        const languageRewritePrompt = [
+            DEFAULT_CAPTION_LANGUAGE_REWRITE_PROMPT,
+            lengthLine,
+        ].filter(Boolean).join("\n");
         return {
             user: userPrompt,
             system: systemLines,
@@ -24677,6 +24800,9 @@ async function cancelRfDetrTrainingJobRequest() {
             draftRefine: draftRefinePrompt,
             merge: mergePrompt,
             cleanup: cleanupPrompt,
+            editorSystem: editorSystemPrompt,
+            coverage: coveragePrompt,
+            languageRewrite: languageRewritePrompt,
         };
     }
 
@@ -24690,6 +24816,388 @@ async function cancelRfDetrTrainingJobRequest() {
             setCaptionPromptEditorDefault(key, value);
         });
         qwenCaptionPromptStackState.initialized = true;
+    }
+
+    function setCaptionRecipeStatus(message) {
+        if (qwenElements.captionRecipeStatus) {
+            qwenElements.captionRecipeStatus.textContent = message || "";
+        }
+    }
+
+    function captionRecipeStorageId(name) {
+        const slug = sanitizeFilename(String(name || "").trim() || "caption_recipe", "caption_recipe")
+            .replace(/\.json$/i, "")
+            .replace(/[^a-zA-Z0-9._-]+/g, "_");
+        return slug || `caption_recipe_${Date.now().toString(36)}`;
+    }
+
+    function captionRecipeLooksUsable(recipe) {
+        return !!(
+            recipe
+            && typeof recipe === "object"
+            && (
+                recipe.style
+                || recipe.prompt_stack
+                || recipe.scope
+                || recipe.models
+                || recipe.generation
+                || Object.prototype.hasOwnProperty.call(recipe, "glossary_text")
+            )
+        );
+    }
+
+    function normalizeCaptionRecipeItem(raw, fallbackName = "") {
+        if (!raw || typeof raw !== "object") {
+            return null;
+        }
+        if (raw.kind && raw.kind !== CAPTION_RECIPE_KIND && !raw.recipe) {
+            return null;
+        }
+        const recipe = raw.recipe && typeof raw.recipe === "object" ? raw.recipe : raw;
+        if (!captionRecipeLooksUsable(recipe)) {
+            return null;
+        }
+        const name = String(raw.name || recipe.name || fallbackName || "caption_recipe").trim() || "caption_recipe";
+        const id = String(raw.id || captionRecipeStorageId(name)).trim() || captionRecipeStorageId(name);
+        return {
+            kind: CAPTION_RECIPE_KIND,
+            version: CAPTION_RECIPE_VERSION,
+            id,
+            name,
+            created_at: raw.created_at || new Date().toISOString(),
+            updated_at: raw.updated_at || new Date().toISOString(),
+            recipe,
+        };
+    }
+
+    function readCaptionRecipeStore() {
+        try {
+            const raw = window.localStorage?.getItem(CAPTION_RECIPE_STORAGE_KEY);
+            if (!raw) {
+                return [];
+            }
+            const parsed = JSON.parse(raw);
+            const entries = Array.isArray(parsed?.recipes)
+                ? parsed.recipes
+                : (Array.isArray(parsed) ? parsed : []);
+            const seen = new Set();
+            const normalized = [];
+            entries.forEach((entry) => {
+                const item = normalizeCaptionRecipeItem(entry);
+                if (!item || seen.has(item.id)) {
+                    return;
+                }
+                seen.add(item.id);
+                normalized.push(item);
+            });
+            return normalized;
+        } catch (error) {
+            console.warn("Failed to read caption recipes", error);
+            return [];
+        }
+    }
+
+    function writeCaptionRecipeStore(items) {
+        try {
+            const payload = {
+                kind: `${CAPTION_RECIPE_KIND}.library`,
+                version: CAPTION_RECIPE_VERSION,
+                recipes: Array.isArray(items) ? items : [],
+                updated_at: new Date().toISOString(),
+            };
+            window.localStorage?.setItem(CAPTION_RECIPE_STORAGE_KEY, JSON.stringify(payload));
+            return true;
+        } catch (error) {
+            console.warn("Failed to save caption recipes", error);
+            setCaptionRecipeStatus("Browser storage is unavailable; use Download JSON to keep this recipe.");
+            return false;
+        }
+    }
+
+    function refreshCaptionRecipeSelect(selectedId = null) {
+        const select = qwenElements.captionRecipeSelect;
+        if (!select) {
+            return [];
+        }
+        const recipes = readCaptionRecipeStore();
+        const previous = selectedId !== null ? String(selectedId || "") : select.value;
+        select.innerHTML = "";
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = recipes.length ? "Select saved recipe" : "No saved recipes";
+        select.appendChild(placeholder);
+        recipes.forEach((item) => {
+            const option = document.createElement("option");
+            option.value = item.id;
+            option.textContent = item.name || item.id;
+            select.appendChild(option);
+        });
+        if (previous && recipes.some((item) => item.id === previous)) {
+            select.value = previous;
+        }
+        return recipes;
+    }
+
+    function selectedCaptionRecipeItem() {
+        const id = String(qwenElements.captionRecipeSelect?.value || "").trim();
+        if (!id) {
+            return null;
+        }
+        return readCaptionRecipeStore().find((item) => item.id === id) || null;
+    }
+
+    function collectCaptionRecipeFromUi(name = "") {
+        updateQwenCaptionPromptStack(getQwenCaptionWorkflowMode());
+        const windowSentenceRange = readCaptionWindowSentenceRange();
+        return {
+            name: String(name || qwenElements.captionRecipeName?.value || qwenElements.captionRecipeSelect?.selectedOptions?.[0]?.textContent || "caption_recipe").trim() || "caption_recipe",
+            style: {
+                preset: qwenElements.captionPreset?.value || "custom",
+                text: String(qwenElements.captionStyleText?.value || ""),
+                opening_phrases_text: String(qwenElements.captionOpeningList?.value || ""),
+                include_opening_guidance: !!qwenElements.captionVaryOpening?.checked,
+            },
+            prompt_stack: {
+                user: captionPromptEditorValue("user"),
+                system: captionPromptEditorValue("system"),
+                detection_context: captionPromptEditorValue("context"),
+                window: captionPromptEditorValue("window"),
+                draft_refine: captionPromptEditorValue("draftRefine"),
+                merge: captionPromptEditorValue("merge"),
+                cleanup: captionPromptEditorValue("cleanup"),
+                editor_system: captionPromptEditorValue("editorSystem"),
+                coverage: captionPromptEditorValue("coverage"),
+                language_rewrite: captionPromptEditorValue("languageRewrite"),
+            },
+            scope: {
+                caption_mode: qwenElements.captionMode?.value || "full",
+                window_size: String(qwenElements.captionWindowSize?.value || ""),
+                window_overlap: String(qwenElements.captionWindowOverlap?.value || ""),
+                window_min_sentences: windowSentenceRange.min,
+                window_max_sentences: windowSentenceRange.max,
+                max_boxes: String(qwenElements.captionMaxBoxes?.value || "0"),
+                include_counts: !!qwenElements.captionIncludeCounts?.checked,
+                include_coords: !!qwenElements.captionIncludeCoords?.checked,
+            },
+            models: {
+                caption_model: qwenElements.captionModel?.value || "active",
+                variant: qwenElements.captionVariant?.value || "auto",
+                editor_model: qwenElements.captionRefinementModel?.value || "same",
+            },
+            generation: {
+                max_new_tokens: String(qwenElements.captionMaxTokens?.value || DEFAULT_CAPTION_MAX_TOKENS),
+                final_caption_max_sentences: String(qwenElements.captionFinalSentences?.value || ""),
+                sampling_preset: qwenElements.captionSamplingPreset?.value || "recommended",
+                temperature: String(qwenElements.captionTemperature?.value || ""),
+                top_p: String(qwenElements.captionTopP?.value || ""),
+                top_k: String(qwenElements.captionTopK?.value || ""),
+                presence_penalty: String(qwenElements.captionPresencePenalty?.value || ""),
+                final_answer_only: !!qwenElements.captionFinalOnly?.checked,
+                two_stage_refine: !!qwenElements.captionTwoStage?.checked,
+                fast_mode: !!qwenElements.captionHighVram?.checked,
+                auto_save_to_text_labels: !!qwenElements.captionSaveText?.checked,
+            },
+            glossary_text: String(qwenElements.captionGlossary?.value || ""),
+        };
+    }
+
+    function buildCaptionRecipeExportItem(name = "") {
+        const recipe = collectCaptionRecipeFromUi(name);
+        const selected = selectedCaptionRecipeItem();
+        const id = selected?.id || captionRecipeStorageId(recipe.name);
+        const now = new Date().toISOString();
+        return {
+            kind: CAPTION_RECIPE_KIND,
+            version: CAPTION_RECIPE_VERSION,
+            id,
+            name: recipe.name,
+            created_at: selected?.created_at || now,
+            updated_at: now,
+            recipe,
+        };
+    }
+
+    function applyCaptionRecipeToUi(item) {
+        const normalized = normalizeCaptionRecipeItem(item);
+        const recipe = normalized?.recipe;
+        if (!recipe) {
+            throw new Error("Invalid caption recipe.");
+        }
+        if (qwenElements.captionRecipeName) {
+            qwenElements.captionRecipeName.value = normalized.name || recipe.name || "";
+        }
+        const style = recipe.style || {};
+        setSelectValueIfPresent(qwenElements.captionPreset, style.preset || "custom");
+        if (qwenElements.captionStyleText && typeof style.text !== "undefined") {
+            qwenElements.captionStyleText.value = String(style.text || "");
+        }
+        if (qwenElements.captionOpeningList && typeof style.opening_phrases_text !== "undefined") {
+            qwenElements.captionOpeningList.value = String(style.opening_phrases_text || "");
+        }
+        if (qwenElements.captionVaryOpening && typeof style.include_opening_guidance !== "undefined") {
+            qwenElements.captionVaryOpening.checked = style.include_opening_guidance !== false;
+        }
+        const prompts = recipe.prompt_stack || {};
+        const hasPrompt = (field) => Object.prototype.hasOwnProperty.call(prompts, field);
+        if (hasPrompt("user")) setCaptionPromptEditorValue("user", prompts.user);
+        if (hasPrompt("system")) setCaptionPromptEditorValue("system", prompts.system);
+        if (hasPrompt("detection_context")) setCaptionPromptEditorValue("context", prompts.detection_context);
+        if (hasPrompt("window")) setCaptionPromptEditorValue("window", prompts.window);
+        if (hasPrompt("draft_refine")) setCaptionPromptEditorValue("draftRefine", prompts.draft_refine);
+        if (hasPrompt("merge")) setCaptionPromptEditorValue("merge", prompts.merge);
+        if (hasPrompt("cleanup")) setCaptionPromptEditorValue("cleanup", prompts.cleanup);
+        if (hasPrompt("editor_system")) setCaptionPromptEditorValue("editorSystem", prompts.editor_system);
+        if (hasPrompt("coverage")) setCaptionPromptEditorValue("coverage", prompts.coverage);
+        if (hasPrompt("language_rewrite")) setCaptionPromptEditorValue("languageRewrite", prompts.language_rewrite);
+        const scope = recipe.scope || {};
+        setSelectValueIfPresent(qwenElements.captionMode, scope.caption_mode || "full");
+        if (qwenElements.captionWindowSize && typeof scope.window_size !== "undefined") {
+            qwenElements.captionWindowSize.value = String(scope.window_size || "");
+        }
+        if (qwenElements.captionWindowOverlap && typeof scope.window_overlap !== "undefined") {
+            qwenElements.captionWindowOverlap.value = String(scope.window_overlap || "");
+        }
+        if (qwenElements.captionWindowMinSentences && typeof scope.window_min_sentences !== "undefined") {
+            qwenElements.captionWindowMinSentences.value = String(scope.window_min_sentences || DEFAULT_CAPTION_WINDOW_MIN_SENTENCES);
+        }
+        if (qwenElements.captionWindowMaxSentences && typeof scope.window_max_sentences !== "undefined") {
+            qwenElements.captionWindowMaxSentences.value = String(scope.window_max_sentences || DEFAULT_CAPTION_WINDOW_MAX_SENTENCES);
+        }
+        if (qwenElements.captionMaxBoxes && typeof scope.max_boxes !== "undefined") {
+            qwenElements.captionMaxBoxes.value = String(scope.max_boxes || "0");
+        }
+        if (qwenElements.captionIncludeCounts && typeof scope.include_counts !== "undefined") {
+            qwenElements.captionIncludeCounts.checked = scope.include_counts !== false;
+        }
+        if (qwenElements.captionIncludeCoords && typeof scope.include_coords !== "undefined") {
+            qwenElements.captionIncludeCoords.checked = scope.include_coords !== false;
+        }
+        const models = recipe.models || {};
+        setSelectValueIfPresent(qwenElements.captionModel, models.caption_model || "active");
+        setSelectValueIfPresent(qwenElements.captionVariant, models.variant || "auto");
+        setSelectValueIfPresent(qwenElements.captionRefinementModel, models.editor_model || "same");
+        const generation = recipe.generation || {};
+        if (qwenElements.captionMaxTokens && typeof generation.max_new_tokens !== "undefined") {
+            qwenElements.captionMaxTokens.value = String(generation.max_new_tokens || DEFAULT_CAPTION_MAX_TOKENS);
+        }
+        if (qwenElements.captionFinalSentences && typeof generation.final_caption_max_sentences !== "undefined") {
+            qwenElements.captionFinalSentences.value = String(generation.final_caption_max_sentences || "");
+        }
+        setSelectValueIfPresent(qwenElements.captionSamplingPreset, generation.sampling_preset || "recommended");
+        if (qwenElements.captionTemperature && typeof generation.temperature !== "undefined") {
+            qwenElements.captionTemperature.value = String(generation.temperature || "");
+        }
+        if (qwenElements.captionTopP && typeof generation.top_p !== "undefined") {
+            qwenElements.captionTopP.value = String(generation.top_p || "");
+        }
+        if (qwenElements.captionTopK && typeof generation.top_k !== "undefined") {
+            qwenElements.captionTopK.value = String(generation.top_k || "");
+        }
+        if (qwenElements.captionPresencePenalty && typeof generation.presence_penalty !== "undefined") {
+            qwenElements.captionPresencePenalty.value = String(generation.presence_penalty || "");
+        }
+        if (qwenElements.captionFinalOnly && typeof generation.final_answer_only !== "undefined") {
+            qwenElements.captionFinalOnly.checked = generation.final_answer_only !== false;
+        }
+        if (qwenElements.captionTwoStage && typeof generation.two_stage_refine !== "undefined") {
+            qwenElements.captionTwoStage.checked = !!generation.two_stage_refine;
+        }
+        if (qwenElements.captionHighVram && typeof generation.fast_mode !== "undefined") {
+            qwenElements.captionHighVram.checked = !!generation.fast_mode;
+        }
+        if (qwenElements.captionSaveText && typeof generation.auto_save_to_text_labels !== "undefined") {
+            qwenElements.captionSaveText.checked = generation.auto_save_to_text_labels !== false;
+        }
+        if (qwenElements.captionGlossary && typeof recipe.glossary_text !== "undefined") {
+            qwenElements.captionGlossary.value = String(recipe.glossary_text || "");
+            qwenCaptionGlossaryState.dirty = true;
+            setCaptionGlossaryStatus("Loaded glossary text from caption recipe. Save to dataset if this should become canonical.");
+            updateCaptionGlossaryControls();
+        }
+        applyCaptionDecodeDefaults();
+        updateCaptionWindowMode();
+        updateQwenCaptionWorkflow();
+    }
+
+    function saveCurrentCaptionRecipe() {
+        const name = String(qwenElements.captionRecipeName?.value || qwenElements.captionRecipeSelect?.selectedOptions?.[0]?.textContent || "").trim();
+        if (!name) {
+            setCaptionRecipeStatus("Enter a recipe name before saving.");
+            return;
+        }
+        const item = buildCaptionRecipeExportItem(name);
+        const recipes = readCaptionRecipeStore();
+        const next = recipes.filter((existing) => existing.id !== item.id);
+        next.push(item);
+        next.sort((a, b) => String(a.name || a.id).localeCompare(String(b.name || b.id)));
+        writeCaptionRecipeStore(next);
+        refreshCaptionRecipeSelect(item.id);
+        setCaptionRecipeStatus(`Saved caption recipe "${item.name}".`);
+        setSamStatus(`Saved caption recipe "${item.name}".`, { variant: "success", duration: 2500 });
+    }
+
+    function loadSelectedCaptionRecipe() {
+        const item = selectedCaptionRecipeItem();
+        if (!item) {
+            setCaptionRecipeStatus("Choose a saved caption recipe to load.");
+            return;
+        }
+        applyCaptionRecipeToUi(item);
+        setCaptionRecipeStatus(`Loaded caption recipe "${item.name}".`);
+        setSamStatus(`Loaded caption recipe "${item.name}".`, { variant: "success", duration: 2500 });
+    }
+
+    function deleteSelectedCaptionRecipe() {
+        const item = selectedCaptionRecipeItem();
+        if (!item) {
+            setCaptionRecipeStatus("Choose a saved caption recipe to delete.");
+            return;
+        }
+        if (typeof window !== "undefined" && !window.confirm(`Delete caption recipe "${item.name}"?`)) {
+            return;
+        }
+        const next = readCaptionRecipeStore().filter((existing) => existing.id !== item.id);
+        writeCaptionRecipeStore(next);
+        refreshCaptionRecipeSelect("");
+        setCaptionRecipeStatus(`Deleted caption recipe "${item.name}".`);
+    }
+
+    function downloadCaptionRecipe() {
+        const item = selectedCaptionRecipeItem() || buildCaptionRecipeExportItem(qwenElements.captionRecipeName?.value || "caption_recipe");
+        const payload = {
+            ...item,
+            exported_at: new Date().toISOString(),
+        };
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+        const filename = `${sanitizeFilename(item.name || item.id || "caption_recipe", "caption_recipe")}.caption-recipe.json`;
+        saveBlobToDisk(blob, filename);
+        setCaptionRecipeStatus(`Downloaded caption recipe "${item.name}".`);
+    }
+
+    async function uploadCaptionRecipeFromFile(file) {
+        if (!file) {
+            return;
+        }
+        const text = await readFileAsTextPromise(file);
+        let parsed = null;
+        try {
+            parsed = JSON.parse(String(text || ""));
+        } catch (error) {
+            throw new Error("Recipe JSON could not be parsed.");
+        }
+        const item = normalizeCaptionRecipeItem(parsed, file.name.replace(/\.json$/i, ""));
+        if (!item) {
+            throw new Error("Recipe JSON is not a caption recipe.");
+        }
+        applyCaptionRecipeToUi(item);
+        const recipes = readCaptionRecipeStore();
+        const next = recipes.filter((existing) => existing.id !== item.id);
+        next.push({ ...item, updated_at: new Date().toISOString() });
+        next.sort((a, b) => String(a.name || a.id).localeCompare(String(b.name || b.id)));
+        writeCaptionRecipeStore(next);
+        refreshCaptionRecipeSelect(item.id);
+        setCaptionRecipeStatus(`Uploaded and loaded caption recipe "${item.name}".`);
+        setSamStatus(`Uploaded caption recipe "${item.name}".`, { variant: "success", duration: 2500 });
     }
 
     function isQwenCaptionThinkingSelection() {
@@ -27501,6 +28009,9 @@ async function cancelRfDetrTrainingJobRequest() {
         const captionDraftRefinePrompt = captionPromptEditorValue("draftRefine");
         const captionMergePrompt = captionPromptEditorValue("merge");
         const captionCleanupPrompt = captionPromptEditorValue("cleanup");
+        const captionEditorSystemPrompt = captionPromptEditorValue("editorSystem");
+        const captionCoveragePrompt = captionPromptEditorValue("coverage");
+        const captionLanguageRewritePrompt = captionPromptEditorValue("languageRewrite");
         const labelmapGlossary = String(qwenElements.captionGlossary?.value || "").trim();
         const requestFields = {
             image_name: imageName,
@@ -27511,6 +28022,9 @@ async function cancelRfDetrTrainingJobRequest() {
             caption_draft_refine_prompt: captionDraftRefinePrompt || null,
             caption_merge_prompt: captionMergePrompt || null,
             caption_cleanup_prompt: captionCleanupPrompt || null,
+            caption_editor_system_prompt: captionEditorSystemPrompt || null,
+            caption_coverage_prompt: captionCoveragePrompt || null,
+            caption_language_rewrite_prompt: captionLanguageRewritePrompt || null,
             labelmap_glossary: labelmapGlossary || null,
             label_hints: hints,
             include_counts: includeCounts,
@@ -27560,6 +28074,9 @@ async function cancelRfDetrTrainingJobRequest() {
                     || captionDraftRefinePrompt
                     || captionMergePrompt
                     || captionCleanupPrompt
+                    || captionEditorSystemPrompt
+                    || captionCoveragePrompt
+                    || captionLanguageRewritePrompt
                 ),
                 labelmapGlossaryPresent: !!labelmapGlossary,
             },

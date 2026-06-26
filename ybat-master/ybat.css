@@ -1505,6 +1505,19 @@ body.annotation-focus-mode .class-scroll-indicator {
     font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 }
 
+.qwen-caption-recipe {
+    display: grid;
+    gap: 8px;
+}
+
+.qwen-caption-recipe__grid {
+    margin-top: 8px;
+}
+
+.qwen-caption-recipe__actions button {
+    min-height: 34px;
+}
+
 .qwen-caption-progress {
     border: 1px solid #bfdbfe;
     background: #f8fafc;

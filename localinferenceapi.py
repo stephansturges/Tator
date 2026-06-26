@@ -7494,6 +7494,85 @@ def _run_qwen_inference_mlx(
     return output_text, 1000, 1000
 
 
+def _run_qwen_text_inference(
+    prompt: str,
+    *,
+    max_new_tokens: Optional[int] = None,
+    system_prompt_override: Optional[str] = None,
+    model_id_override: Optional[str] = None,
+    runtime_override: Optional[Tuple[Any, Any]] = None,
+    decode_override: Optional[Dict[str, Any]] = None,
+    chat_template_kwargs: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, int, int]:
+    """Run a text-only caption editor pass with the selected Qwen runtime.
+
+    Window merge is a reconciliation stage over already generated visual
+    observations. Keeping it text-only avoids resubmitting a large full-image
+    tensor to MLX for a prompt whose job is editing, not image inspection.
+    """
+    _raise_if_qwen_cancelled()
+    if runtime_override is not None:
+        runtime = runtime_override
+    elif model_id_override:
+        runtime = _ensure_qwen_ready_for_caption(model_id_override)
+    else:
+        runtime = _ensure_qwen_ready()
+    _raise_if_qwen_cancelled()
+    runtime_platform = _qwen_runtime_platform_from_runtime(runtime)
+    resolved_model_id = (
+        model_id_override
+        or _qwen_runtime_model_id(runtime)
+        or (active_qwen_metadata or {}).get("model_id")
+        or QWEN_MODEL_NAME
+    )
+    sys_prompt = (
+        system_prompt_override
+        if system_prompt_override is not None
+        else (active_qwen_metadata or {}).get("system_prompt")
+    )
+    messages: List[Dict[str, Any]] = []
+    if sys_prompt:
+        messages.append({"role": "system", "content": [{"type": "text", "text": sys_prompt}]})
+    messages.append({"role": "user", "content": [{"type": "text", "text": prompt}]})
+    llm_call_id = uuid.uuid4().hex[:12]
+    token = qwen_llm_call_id_var.set(llm_call_id)
+    try:
+        _qwen_caption_io_input(
+            call_id=llm_call_id,
+            source="qwen_text_inference",
+            runtime_platform=runtime_platform,
+            model_id=resolved_model_id,
+            messages=messages,
+            prompt_text=prompt,
+            system_prompt=str(sys_prompt or ""),
+            user_prompt=prompt,
+            max_new_tokens=max_new_tokens,
+            decode_override=decode_override,
+            chat_template_kwargs=chat_template_kwargs,
+        )
+        output_text = _run_qwen_chat(
+            messages,
+            max_new_tokens=max_new_tokens,
+            model_id_override=resolved_model_id,
+            runtime_override=runtime,
+            decode_override=decode_override,
+            chat_template_kwargs=chat_template_kwargs,
+            add_generation_prompt=True,
+        )
+    finally:
+        qwen_llm_call_id_var.reset(token)
+    _qwen_caption_io_output(
+        call_id=llm_call_id,
+        source="qwen_text_inference",
+        runtime_platform=runtime_platform,
+        model_id=resolved_model_id,
+        output_text=output_text,
+        loop_detected=_caption_repetition_loop_detected_impl(output_text),
+        degenerate_reason=_caption_degenerate_reason_impl(output_text, allow_short_caption=True),
+    )
+    return output_text, 0, 0
+
+
 def _run_qwen_inference(
     prompt: str,
     pil_img: Image.Image,
@@ -54634,6 +54713,31 @@ def qwen_caption_prompt_preview(payload: QwenCaptionRequest) -> QwenCaptionPromp
     if not custom_system_prompt:
         if final_only and is_thinking and not two_stage:
             system_prompt = f"{system_prompt} Respond with exactly <final>...</final> and nothing else."
+    default_editor_system_prompt = (
+        "You are a caption editor. Use the image, draft caption, generated observations, "
+        "glossary meanings, and authoritative counts as truth. Respond in English only. "
+        "Return only the final revised caption, with no reasoning or preamble."
+    )
+    editor_system_prompt = (
+        _collapse_whitespace_impl(payload.caption_editor_system_prompt or "")
+        or default_editor_system_prompt
+    )
+    coverage_policy = (
+        _collapse_whitespace_impl(payload.caption_coverage_prompt or "")
+        or (
+            "Apply the requested class coverage and count corrections while keeping the caption grounded in the image. "
+            "Mention missing required object categories only when they are supported by the image or authoritative detection context. "
+            "Preserve authoritative counts as natural scene facts using digits. Edit minimally unless the draft is mostly unusable. "
+            "Do not mention labels, hints, boxes, coordinates, prompts, or that counts were supplied."
+        )
+    )
+    language_rewrite_policy = (
+        _collapse_whitespace_impl(payload.caption_language_rewrite_prompt or "")
+        or (
+            "Rewrite the caption in English only, preserving meaning, concrete visual detail, broad class terms, and authoritative counts. "
+            "Do not add new objects or actions. Do not mention labels, hints, boxes, coordinates, prompts, or that counts were supplied."
+        )
+    )
     overlap: Optional[float] = None
     window_size: Optional[int] = None
     x_positions: List[int] = []
@@ -54913,7 +55017,7 @@ def qwen_caption_prompt_preview(payload: QwenCaptionRequest) -> QwenCaptionPromp
                 + "\n".join(window_lines)
             )
             merge_system = (
-                _collapse_whitespace_impl(system_prompt or "")
+                _collapse_whitespace_impl(editor_system_prompt or "")
                 or "You are a caption editor. Return only the revised caption in English."
             )
             pending_window_merge_section = _qwen_caption_prompt_preview_section(
@@ -54979,10 +55083,7 @@ def qwen_caption_prompt_preview(payload: QwenCaptionRequest) -> QwenCaptionPromp
                 f"{final_caption_length_instruction}"
                 "Return only the final caption."
             )
-        refine_system = (
-            "You are a captioning assistant. Use the image as truth. "
-            "Return only the final caption. Respond in English only."
-        )
+        refine_system = editor_system_prompt
         sections.append(
             _qwen_caption_prompt_preview_section(
                 title="Two-stage refinement prompt template",
@@ -55050,9 +55151,46 @@ def qwen_caption_prompt_preview(payload: QwenCaptionRequest) -> QwenCaptionPromp
             title="Conditional cleanup / guard prompt template",
             kind="template",
             model_id=caption_refinement_model_id,
-            system_prompt=system_prompt,
+            system_prompt=editor_system_prompt,
             user_prompt=cleanup_prompt,
             note="Runs only if caption quality guards fire; generated caption text is represented by a placeholder.",
+            image_region=full_region,
+        )
+    )
+    coverage_prompt = (
+        f"{prompt_text}\n"
+        "Draft caption: <caption with missing classes or count conflicts>\n"
+        "Guard findings: <missing classes and/or count corrections inserted here>\n"
+        f"{coverage_policy}\n"
+        f"{cleanup_policy}\n"
+        f"{final_caption_length_instruction}"
+        "Return only the final caption with no coordinates."
+    )
+    sections.append(
+        _qwen_caption_prompt_preview_section(
+            title="Conditional coverage/count refinement prompt template",
+            kind="template",
+            model_id=caption_refinement_model_id,
+            system_prompt=editor_system_prompt,
+            user_prompt=coverage_prompt,
+            note="Runs only when class coverage or exact-count guards find missing or contradictory caption content.",
+            image_region=full_region,
+        )
+    )
+    rewrite_prompt = (
+        f"{language_rewrite_policy}\n"
+        f"{cleanup_policy}\n"
+        f"{final_caption_length_instruction}\n"
+        "Caption: <caption that triggered the English-language guard>"
+    )
+    sections.append(
+        _qwen_caption_prompt_preview_section(
+            title="Conditional English rewrite prompt template",
+            kind="template",
+            model_id=caption_refinement_model_id,
+            system_prompt=editor_system_prompt,
+            user_prompt=rewrite_prompt,
+            note="Runs only when the language guard detects a non-English or mixed-language caption.",
             image_region=full_region,
         )
     )
@@ -55328,6 +55466,31 @@ def qwen_caption(payload: QwenCaptionRequest):
                 system_prompt = (
                     f"{system_prompt} Respond with exactly <final>...</final> and nothing else."
                 )
+        default_editor_system_prompt = (
+            "You are a caption editor. Use the image, draft caption, generated observations, "
+            "glossary meanings, and authoritative counts as truth. Respond in English only. "
+            "Return only the final revised caption, with no reasoning or preamble."
+        )
+        editor_system_prompt = (
+            _collapse_whitespace_impl(payload.caption_editor_system_prompt or "")
+            or default_editor_system_prompt
+        )
+        coverage_policy = (
+            _collapse_whitespace_impl(payload.caption_coverage_prompt or "")
+            or (
+                "Apply the requested class coverage and count corrections while keeping the caption grounded in the image. "
+                "Mention missing required object categories only when they are supported by the image or authoritative detection context. "
+                "Preserve authoritative counts as natural scene facts using digits. Edit minimally unless the draft is mostly unusable. "
+                "Do not mention labels, hints, boxes, coordinates, prompts, or that counts were supplied."
+            )
+        )
+        language_rewrite_policy = (
+            _collapse_whitespace_impl(payload.caption_language_rewrite_prompt or "")
+            or (
+                "Rewrite the caption in English only, preserving meaning, concrete visual detail, broad class terms, and authoritative counts. "
+                "Do not add new objects or actions. Do not mention labels, hints, boxes, coordinates, prompts, or that counts were supplied."
+            )
+        )
         use_caption_cache = True
         if (
             active_qwen_model_path
@@ -55459,7 +55622,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 authoritative_counts_note=counts_note,
                 glossary_line=glossary_line or None,
                 cleanup_prompt_override=payload.caption_cleanup_prompt,
-                cleanup_system_prompt_override=system_prompt,
+                cleanup_system_prompt_override=editor_system_prompt,
                 chat_template_kwargs=postprocess_chat_template_kwargs,
                 run_qwen_inference_fn=_run_qwen_inference,
                 resolve_variant_fn=_resolve_qwen_variant_model_id_impl,
@@ -55502,9 +55665,10 @@ def qwen_caption(payload: QwenCaptionRequest):
                 window_hints_by_window=window_hints_by_window,
                 glossary_map=glossary_map,
                 merge_prompt_override=payload.caption_merge_prompt,
-                merge_system_prompt_override=system_prompt,
+                merge_system_prompt_override=editor_system_prompt,
                 chat_template_kwargs=postprocess_chat_template_kwargs,
                 run_qwen_inference_fn=_run_qwen_inference,
+                run_qwen_text_inference_fn=_run_qwen_text_inference,
                 resolve_variant_fn=_resolve_qwen_variant_model_id_impl,
                 extract_caption_fn=_extract_caption_from_text_impl,
                 sanitize_caption_fn=_sanitize_qwen_caption_impl,
@@ -55972,6 +56136,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                                 refine_prompt = f"{refine_prompt}\n\n{first_stage_context}"
                         if allowed_note:
                             refine_prompt = f"{refine_prompt}\n{allowed_note}"
+                        refine_prompt = f"{refine_prompt}\n{coverage_policy}"
                         if payload.caption_cleanup_prompt:
                             refine_prompt = (
                                 f"{refine_prompt}\n"
@@ -55985,7 +56150,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                                 f"{broad_term_editor_note} "
                                 "Return only a concise, complete caption (1-3 sentences) with no coordinates."
                             )
-                        refine_system = "You are a concise captioning assistant. Return only the final caption in English."
+                        refine_system = editor_system_prompt
                         _qwen_progress_begin_output_section(f"Window {window_index}/{total_windows} refine output")
                         refine_text, _, _ = _run_qwen_inference(
                             refine_prompt,
@@ -56147,10 +56312,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                     f"{final_caption_length_instruction}"
                     "Return only the final caption."
                 )
-            refine_system = (
-                "You are a captioning assistant. Use the image as truth. "
-                "Return only the final caption. Respond in English only."
-            )
+            refine_system = editor_system_prompt
             refine_model = caption_refinement_model_id
             _qwen_progress_update(
                 phase="refine",
@@ -56263,7 +56425,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 step_detail=(
                     f"Windowed-only merge pass folding {len(windowed_captions)} window caption"
                     f"{'s' if len(windowed_captions) != 1 else ''} into the full-image caption; "
-                    "separate from Draft + refine"
+                    "text-only editor pass, separate from Draft + refine"
                 ),
             )
             _qwen_progress_begin_output_section("Window merge output")
@@ -56464,6 +56626,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                     refine_prompt = f"{refine_prompt}\n\n{first_stage_context}"
             if allowed_note:
                 refine_prompt = f"{refine_prompt}\n{allowed_note}"
+            refine_prompt = f"{refine_prompt}\n{coverage_policy}"
             if payload.caption_cleanup_prompt:
                 refine_prompt = (
                     f"{refine_prompt}\n"
@@ -56479,9 +56642,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                     f"{final_caption_length_instruction}"
                     "Return only the final caption with no coordinates."
                 )
-            refine_system = (
-                "You are a captioning assistant. Return only the final caption in English."
-            )
+            refine_system = editor_system_prompt
             _qwen_progress_begin_output_section("Coverage refinement output")
             refine_text, _, _ = _run_qwen_inference(
                 refine_prompt,
@@ -56514,7 +56675,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 step_detail="Rewriting non-English output in English",
             )
             rewrite_prompt = (
-                "Rewrite the caption in English only, preserving meaning and concrete detail. "
+                f"{language_rewrite_policy} "
                 f"{(payload.caption_cleanup_prompt.strip() + ' ') if payload.caption_cleanup_prompt else broad_term_editor_note + ' '}"
                 f"{final_caption_length_instruction}\n"
                 f"Caption: {caption_text}"
@@ -56525,7 +56686,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 )
                 if first_stage_context:
                     rewrite_prompt = f"{rewrite_prompt}\n\n{first_stage_context}"
-            rewrite_system = "Return only the rewritten caption in English."
+            rewrite_system = editor_system_prompt
             _qwen_progress_begin_output_section("English rewrite output")
             rewrite_text, _, _ = _run_qwen_inference(
                 rewrite_prompt,

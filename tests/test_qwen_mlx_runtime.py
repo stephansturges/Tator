@@ -1443,6 +1443,48 @@ def test_qwen_inference_mlx_cleans_transient_buffers(monkeypatch):
     assert cleanup_calls == [True]
 
 
+def test_qwen_text_inference_sends_no_image_to_caption_editor(monkeypatch):
+    calls = {}
+    runtime = api.QwenRuntime(
+        model=object(),
+        processor=object(),
+        platform=api.QWEN_PLATFORM_MLX,
+        model_id="mlx-community/Qwen3-VL-4B-Instruct-4bit",
+        config={"model_type": "qwen2_5_vl"},
+    )
+
+    def fake_chat(messages, **kwargs):
+        calls["messages"] = messages
+        calls["kwargs"] = kwargs
+        return "Merged caption."
+
+    monkeypatch.setattr(api, "_run_qwen_chat", fake_chat)
+    text, width, height = api._run_qwen_text_inference(
+        "Merge window observations.",
+        max_new_tokens=64,
+        system_prompt_override="You are a caption editor.",
+        model_id_override=runtime.model_id,
+        runtime_override=runtime,
+        decode_override={"do_sample": False},
+        chat_template_kwargs={"enable_thinking": False},
+    )
+
+    assert text == "Merged caption."
+    assert (width, height) == (0, 0)
+    assert calls["kwargs"]["runtime_override"] is runtime
+    assert calls["kwargs"]["model_id_override"] == runtime.model_id
+    assert calls["kwargs"]["decode_override"] == {"do_sample": False}
+    assert calls["kwargs"]["chat_template_kwargs"] == {"enable_thinking": False}
+    message_parts = [
+        part
+        for message in calls["messages"]
+        for part in message.get("content", [])
+        if isinstance(part, dict)
+    ]
+    assert {part.get("type") for part in message_parts} == {"text"}
+    assert "Merge window observations." in message_parts[-1]["text"]
+
+
 def test_qwen_caption_active_mlx_default_uses_stable_caption_model(monkeypatch):
     monkeypatch.setattr(api, "QWEN_MLX_CAPTION_MODEL_NAME", "mlx-community/Qwen3-VL-4B-Instruct-4bit")
     monkeypatch.setattr(api, "active_qwen_metadata", {"model_id": AEON_MLX_ID, "runtime_platform": api.QWEN_PLATFORM_MLX})

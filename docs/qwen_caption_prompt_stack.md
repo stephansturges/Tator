@@ -6,6 +6,15 @@ failure modes from returning during future prompt edits.
 ## Contract
 
 - Prompt preview and live caption generation must use the same evidence builder.
+- All reusable caption prompt layers must be visible in the Caption prompt stack
+  and portable through caption recipes. The editable layers are: combined user
+  request, main system prompt, detection context prompt, window/crop prompt,
+  draft/refine prompt, window merge prompt, cleanup prompt, editor system
+  prompt, coverage/count refinement prompt, and English rewrite prompt.
+- Image-specific context is generated, not recipe-authored: image pixels,
+  image tokens, boxes, counts, window bounds, matched full-frame object IDs,
+  raw model outputs, and generated captions are visible in the complete prompt
+  preview but must not be saved into portable recipes.
 - Raw label names are backend identifiers. Model-facing prompt prose must use
   validated natural terms from the glossary or a safe naturalized fallback.
 - Malformed glossary fragments such as `[`, `]`, `{`, `}`, empty text, or
@@ -26,6 +35,26 @@ failure modes from returning during future prompt edits.
 - Caption generation is high-cap rather than uncapped. Detailed/windowed calls
   may auto-lift output budgets, but loop detection and cleanup guardrails remain
   active.
+
+## Caption Recipes
+
+Caption recipes are browser-local until downloaded as JSON. A portable recipe is
+allowed to contain reusable setup only:
+
+- caption style text and opening phrase guidance
+- every editable prompt-stack layer
+- caption scope, windowing, model, and generation controls
+- optional editable glossary text
+
+Recipes must not contain image payloads, per-image boxes, label hints, used
+counts, generated captions, prompt-preview placeholders, or backend image tokens.
+Uploaded recipe JSON is applied to the current controls and saved locally only
+after it passes this reusable-setup shape check.
+
+The complete prompt-flow preview remains the source of truth for a specific
+image. It combines recipe-controlled prompt layers with generated per-image
+evidence and shows conditional templates for cleanup, coverage/count refinement,
+and English rewrite guards.
 
 ## Regression Mechanisms To Avoid
 

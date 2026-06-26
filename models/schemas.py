@@ -401,6 +401,9 @@ class QwenCaptionRequest(BaseModel):
     caption_draft_refine_prompt: Optional[str] = None
     caption_merge_prompt: Optional[str] = None
     caption_cleanup_prompt: Optional[str] = None
+    caption_editor_system_prompt: Optional[str] = None
+    caption_coverage_prompt: Optional[str] = None
+    caption_language_rewrite_prompt: Optional[str] = None
     labelmap_glossary: Optional[str] = None
 
     @root_validator_compat(pre=True)
@@ -459,6 +462,9 @@ class QwenCaptionRequest(BaseModel):
             "caption_draft_refine_prompt",
             "caption_merge_prompt",
             "caption_cleanup_prompt",
+            "caption_editor_system_prompt",
+            "caption_coverage_prompt",
+            "caption_language_rewrite_prompt",
         ):
             values[prompt_field] = (values.get(prompt_field) or "").strip()
         max_boxes = values.get("max_boxes")

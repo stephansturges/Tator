@@ -953,6 +953,9 @@ def test_caption_request_accepts_custom_system_prompt():
         caption_draft_refine_prompt="  Draft policy.  ",
         caption_merge_prompt="  Merge policy.  ",
         caption_cleanup_prompt="  Cleanup policy.  ",
+        caption_editor_system_prompt="  Editor system.  ",
+        caption_coverage_prompt="  Coverage policy.  ",
+        caption_language_rewrite_prompt="  Rewrite policy.  ",
     )
 
     assert payload.caption_system_prompt == "Stop after a single paragraph."
@@ -961,6 +964,9 @@ def test_caption_request_accepts_custom_system_prompt():
     assert payload.caption_draft_refine_prompt == "Draft policy."
     assert payload.caption_merge_prompt == "Merge policy."
     assert payload.caption_cleanup_prompt == "Cleanup policy."
+    assert payload.caption_editor_system_prompt == "Editor system."
+    assert payload.caption_coverage_prompt == "Coverage policy."
+    assert payload.caption_language_rewrite_prompt == "Rewrite policy."
 
 
 def test_qwen_caption_prompt_preview_uses_caption_stack_without_loading_model(monkeypatch):
@@ -995,6 +1001,9 @@ def test_qwen_caption_prompt_preview_uses_caption_stack_without_loading_model(mo
         caption_draft_refine_prompt="CUSTOM DRAFT REFINE PROMPT",
         caption_merge_prompt="CUSTOM MERGE PROMPT",
         caption_cleanup_prompt="CUSTOM CLEANUP PROMPT",
+        caption_editor_system_prompt="CUSTOM EDITOR SYSTEM PROMPT",
+        caption_coverage_prompt="CUSTOM COVERAGE PROMPT",
+        caption_language_rewrite_prompt="CUSTOM LANGUAGE REWRITE PROMPT",
         labelmap_glossary="Boat: watercraft and vessels\nPerson: visible humans",
     )
 
@@ -1010,10 +1019,15 @@ def test_qwen_caption_prompt_preview_uses_caption_stack_without_loading_model(mo
     assert "CUSTOM DRAFT REFINE PROMPT" in preview.full_text
     assert "CUSTOM MERGE PROMPT" in preview.full_text
     assert "CUSTOM CLEANUP PROMPT" in preview.full_text
+    assert "CUSTOM EDITOR SYSTEM PROMPT" in preview.full_text
+    assert "CUSTOM COVERAGE PROMPT" in preview.full_text
+    assert "CUSTOM LANGUAGE REWRITE PROMPT" in preview.full_text
     assert "Two-stage draft prompt" in preview.full_text
     assert "Two-stage refinement prompt template" in preview.full_text
     assert "Window merge prompt template" in preview.full_text
     assert "Conditional cleanup / guard prompt template" in preview.full_text
+    assert "Conditional coverage/count refinement prompt template" in preview.full_text
+    assert "Conditional English rewrite prompt template" in preview.full_text
     assert "Only mention these classes if they appear:" in preview.full_text
     assert "watercraft" in preview.full_text
     assert "vessels" in preview.full_text
@@ -1326,10 +1340,14 @@ def test_caption_merge_uses_refinement_model_override():
         calls["model_id"] = model_id
         return ("runtime", None)
 
-    def run_qwen_inference_fn(*_args, **kwargs):
+    def run_qwen_inference_fn(*_args, **_kwargs):
+        raise AssertionError("window merge should use the text-only editor runner")
+
+    def run_qwen_text_inference_fn(*_args, **kwargs):
         calls["runtime_override"] = kwargs.get("runtime_override")
         calls["chat_template_kwargs"] = kwargs.get("chat_template_kwargs")
         calls["prompt"] = _args[0]
+        calls["arg_count"] = len(_args)
         return "Merged caption.", None, None
 
     merged = _run_qwen_caption_merge(
@@ -1357,6 +1375,7 @@ def test_caption_merge_uses_refinement_model_override():
         ),
         chat_template_kwargs={"enable_thinking": False},
         run_qwen_inference_fn=run_qwen_inference_fn,
+        run_qwen_text_inference_fn=run_qwen_text_inference_fn,
         resolve_variant_fn=lambda _base, _variant: "Qwen/Qwen3-VL-30B-A3B-Instruct",
         extract_caption_fn=lambda text, marker=None: (text, False),
         sanitize_caption_fn=lambda text: text.strip(),
@@ -1366,6 +1385,7 @@ def test_caption_merge_uses_refinement_model_override():
     assert calls["model_id"] == "mlx-community/Qwen3-VL-4B-Instruct-4bit"
     assert calls["runtime_override"] == ("runtime", None)
     assert calls["chat_template_kwargs"] == {"enable_thinking": False}
+    assert calls["arg_count"] == 1
     assert "up to 10 complete sentences" in calls["prompt"]
     assert "User caption request: Can we infer the likely location of this scene?" in calls["prompt"]
     assert "repeated crop-edge descriptions of a car" in calls["prompt"]

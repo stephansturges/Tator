@@ -1925,6 +1925,7 @@ def _run_qwen_caption_merge(
     merge_system_prompt_override: Optional[str] = None,
     chat_template_kwargs: Optional[Dict[str, Any]] = None,
     run_qwen_inference_fn: Callable[..., Tuple[str, Any, Any]],
+    run_qwen_text_inference_fn: Optional[Callable[..., Tuple[str, Any, Any]]] = None,
     resolve_variant_fn: Callable[[str, str], str],
     extract_caption_fn: Callable[[str, Optional[str]], Tuple[str, bool]],
     sanitize_caption_fn: Callable[[str], str],
@@ -1998,15 +1999,28 @@ def _run_qwen_caption_merge(
         if "thinking" in str(merge_model or "").lower()
         else {"do_sample": False}
     )
-    qwen_text, _, _ = run_qwen_inference_fn(
-        merge_prompt,
-        pil_img,
-        max_new_tokens=max_new_tokens,
-        system_prompt_override=merge_system,
-        runtime_override=runtime_resolver(merge_model),
-        decode_override=merge_decode,
-        chat_template_kwargs=chat_template_kwargs,
-    )
+    run_editor_inference = run_qwen_text_inference_fn or run_qwen_inference_fn
+    if run_qwen_text_inference_fn is not None:
+        qwen_text, _, _ = run_editor_inference(
+            merge_prompt,
+            max_new_tokens=max_new_tokens,
+            system_prompt_override=merge_system,
+            model_id_override=merge_model,
+            runtime_override=runtime_resolver(merge_model),
+            decode_override=merge_decode,
+            chat_template_kwargs=chat_template_kwargs,
+        )
+    else:
+        qwen_text, _, _ = run_editor_inference(
+            merge_prompt,
+            pil_img,
+            max_new_tokens=max_new_tokens,
+            system_prompt_override=merge_system,
+            model_id_override=merge_model,
+            runtime_override=runtime_resolver(merge_model),
+            decode_override=merge_decode,
+            chat_template_kwargs=chat_template_kwargs,
+        )
     merged, _ = extract_caption_fn(qwen_text, marker=None)
     merged = sanitize_caption_fn(merged)
     if _caption_degenerate_reason(merged, allow_short_caption=True):

@@ -427,6 +427,77 @@ def test_caption_prompt_controls_have_tooltips_and_roomy_textareas():
     assert "max-height: 520px;" in css
 
 
+def test_qwen_caption_recipes_are_portable_and_cover_prompt_stack():
+    html = _html()
+    js = _js()
+    css = _css()
+
+    for control_id in [
+        "qwenCaptionPromptEditorSystem",
+        "qwenCaptionPromptCoverage",
+        "qwenCaptionPromptLanguageRewrite",
+        "qwenCaptionRecipeSelect",
+        "qwenCaptionRecipeName",
+        "qwenCaptionRecipeSave",
+        "qwenCaptionRecipeLoad",
+        "qwenCaptionRecipeDelete",
+        "qwenCaptionRecipeDownload",
+        "qwenCaptionRecipeUploadButton",
+        "qwenCaptionRecipeUpload",
+        "qwenCaptionRecipeStatus",
+    ]:
+        assert f'id="{control_id}"' in html
+        assert control_id in js
+
+    assert "Caption recipes" in html
+    assert "Advanced guard/editor prompts" in html
+    assert "never image pixels, per-image boxes, image tokens, or generated captions" in html
+    assert "complete prompt-flow preview" in html
+    assert "CAPTION_RECIPE_KIND" in js
+    assert "tator.caption_recipe" in js
+    assert "CAPTION_RECIPE_STORAGE_KEY" in js
+    assert "collectCaptionRecipeFromUi" in js
+    assert "applyCaptionRecipeToUi" in js
+    assert "uploadCaptionRecipeFromFile" in js
+    assert "downloadCaptionRecipe" in js
+    assert "readFileAsTextPromise(file)" in js
+    assert "saveBlobToDisk(blob, filename)" in js
+    assert "caption_editor_system_prompt" in js
+    assert "caption_coverage_prompt" in js
+    assert "caption_language_rewrite_prompt" in js
+
+    collect_start = js.index("function collectCaptionRecipeFromUi")
+    collect_end = js.index("function buildCaptionRecipeExportItem", collect_start)
+    collect_block = js[collect_start:collect_end]
+    for reusable_key in [
+        "style",
+        "prompt_stack",
+        "detection_context",
+        "draft_refine",
+        "merge",
+        "cleanup",
+        "editor_system",
+        "coverage",
+        "language_rewrite",
+        "scope",
+        "models",
+        "generation",
+        "glossary_text",
+    ]:
+        assert reusable_key in collect_block
+    for per_image_key in [
+        "image_base64",
+        "image_token",
+        "label_hints",
+        "used_boxes",
+        "used_counts",
+    ]:
+        assert per_image_key not in collect_block
+
+    assert ".qwen-caption-recipe" in css
+    assert ".qwen-caption-recipe__actions button" in css
+
+
 def test_help_tooltips_are_keyboard_accessible_app_wide():
     js = _js()
     css = _css()

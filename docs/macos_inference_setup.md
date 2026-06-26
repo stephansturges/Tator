@@ -63,7 +63,7 @@ SAM_MLX_ROOT=                 # mlx-examples/segment_anything checkout
 DINOV3_BACKEND=auto           # auto|torch|mlx
 QWEN_DEVICE=auto
 QWEN_INFERENCE_PLATFORM=auto # auto|mlx_vlm|transformers
-QWEN_MLX_MODEL_NAME=mlx-community/Qwen3-VL-4B-Instruct-4bit
+QWEN_MLX_MODEL_NAME=AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-MLX-FP4
 QWEN_MLX_CAPTION_MODEL_NAME=mlx-community/Qwen3-VL-4B-Instruct-4bit
 QWEN_MODEL_NAME=AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-NVFP4-MTP-XS
 QWEN_TRAINING_DEFAULT_MODEL=Qwen/Qwen3-VL-4B-Instruct
@@ -234,18 +234,19 @@ Useful environment settings:
 
 ```bash
 QWEN_INFERENCE_PLATFORM=auto
-QWEN_MLX_MODEL_NAME=mlx-community/Qwen3-VL-4B-Instruct-4bit
+QWEN_MLX_MODEL_NAME=AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-MLX-FP4
 QWEN_MLX_CAPTION_MODEL_NAME=mlx-community/Qwen3-VL-4B-Instruct-4bit
 QWEN_MODEL_NAME=AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-NVFP4-MTP-XS
 QWEN_TRAINING_DEFAULT_MODEL=Qwen/Qwen3-VL-4B-Instruct
 QWEN_MLX_DEFAULT_QUANTIZATION=4bit
 ```
 
-`QWEN_MODEL_NAME` and `QWEN_MLX_MODEL_NAME` are general inference defaults.
+`QWEN_MODEL_NAME` and `QWEN_MLX_MODEL_NAME` are general inference defaults. On
+Apple Silicon the general MLX default is AEON Qwen3.6 27B FP4.
 `QWEN_MLX_CAPTION_MODEL_NAME` is separate because a single captioning action can
 run many window, cleanup, and merge generations; implicit "Use active model"
 caption requests use the smaller caption default on MLX unless the UI/API
-request explicitly selects a different model. Qwen adapter-training defaults are
+request explicitly selects a different model such as AEON. Qwen adapter-training defaults are
 intentionally separate through
 `QWEN_TRAINING_DEFAULT_MODEL`, because the AEON Qwen3.6 checkpoints are exposed
 as inference-only until their training path is wired and tested.
@@ -302,11 +303,14 @@ in the Qwen training picker. The active agent catalog is deliberately narrow:
 - Qwen3-VL MLX 2B/4B/8B Instruct and 4B/8B Thinking entries from the stable
   MLX runtime catalog.
 - Previously working Huihui/abliterated MLX Qwen3-VL variants.
-- `mlx-community/Qwen3-VL-4B-Instruct-4bit` is the Apple Silicon default
-  inference checkpoint because it is the validated stable MLX-VLM path.
-- AEON Qwen3.6 27B Ultimate Uncensored MLX FP4 remains cataloged but blocked
-  for local vision inference because mlx-vlm currently rejects its
-  `qwen3_5_vision` tower.
+- `AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-MLX-FP4` is the
+  Apple Silicon default for general Qwen inference.
+- AEON Qwen3.6 27B Ultimate Uncensored MLX FP4 is enabled for local vision
+  inference through the same MLX-VLM runtime. Its repository includes
+  `vision_tower` weights and processor files, but stores the vision config as
+  `qwen3_5_vision`; the backend normalizes that alias to mlx-vlm's supported
+  `qwen3_5` vision implementation before load. It remains inference-only until
+  a full vignette/caption benchmark is run.
 - Qwen3.6 MLX review candidates that completed local vignette smoke.
 - `empero-ai/Qwable-9B-Claude-Fable-5` on the Transformers 5 path. Metadata
   smoke confirms it resolves as `qwen3_5` and exposes `Qwen3VLProcessor` with
@@ -336,7 +340,9 @@ The UI lists the quantized Qwen3-VL options from the `mlx-community/qwen3-vl`
 collection, including 2B, 4B, 8B, 30B-A3B, 32B, and available 235B-A22B
 variants. It also includes compatible abliterated MLX builds from EZCon,
 alexgusevski, nightmedia, introvoyz041, veeceey, and Goekdeniz-Guelmez where
-those repos expose MLX-format safetensors. The experimental
+those repos expose MLX-format safetensors. The AEON Qwen3.6 27B MLX FP4 model
+is selectable for captioning and Class Split review on Apple Silicon through
+the local `qwen3_5_vision` config-alias shim. The experimental
 `vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit` candidate is selectable
 for inference/review after local vignette-review smoke tests passed; training is
 disabled until tested. The Youssofal Heretic 35B-A3B 4-bit MLX MoE build is

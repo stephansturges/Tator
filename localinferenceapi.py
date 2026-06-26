@@ -5936,6 +5936,53 @@ def _qwen_mlx_catalog_incompatibility_detail(model_id: str) -> Optional[str]:
 
 _QWEN_MLX_QWEN35_MOE_SPLIT_SANITIZER_PATCHED = False
 _QWEN_MLX_PT_PROCESSOR_FALLBACK_PATCHED = False
+_QWEN_MLX_QWEN35_VISION_ALIAS_PATCHED = False
+
+
+def _normalize_qwen35_vision_config_alias(config: Any) -> Any:
+    """Normalize AEON-style qwen3_5_vision configs for mlx-vlm's qwen3_5 model."""
+
+    if not isinstance(config, dict):
+        return config
+    model_type = str(config.get("model_type") or "").lower()
+    if model_type != "qwen3_5":
+        return config
+    vision_config = config.get("vision_config")
+    if not isinstance(vision_config, dict):
+        return config
+    if str(vision_config.get("model_type") or "").lower() != "qwen3_5_vision":
+        return config
+    normalized = copy.deepcopy(config)
+    normalized["vision_config"]["model_type"] = "qwen3_5"
+    return normalized
+
+
+def _patch_qwen35_vision_config_alias() -> None:
+    """Allow mlx-vlm 0.6.x to load Qwen3.5/Qwen3.6 vision configs named qwen3_5_vision."""
+
+    global _QWEN_MLX_QWEN35_VISION_ALIAS_PATCHED, MLX_LOAD_CONFIG
+    if _QWEN_MLX_QWEN35_VISION_ALIAS_PATCHED:
+        return
+    try:
+        import mlx_vlm.utils as mlx_vlm_utils
+    except Exception:
+        return
+    current = getattr(mlx_vlm_utils, "load_config", None)
+    if current is None:
+        return
+    if getattr(current, "_tator_qwen35_vision_alias", False):
+        MLX_LOAD_CONFIG = current
+        _QWEN_MLX_QWEN35_VISION_ALIAS_PATCHED = True
+        return
+
+    def load_config_with_qwen35_vision_alias(model_path: Any, **kwargs: Any) -> Any:
+        config = current(model_path, **kwargs)
+        return _normalize_qwen35_vision_config_alias(config)
+
+    load_config_with_qwen35_vision_alias._tator_qwen35_vision_alias = True  # type: ignore[attr-defined]
+    mlx_vlm_utils.load_config = load_config_with_qwen35_vision_alias
+    MLX_LOAD_CONFIG = load_config_with_qwen35_vision_alias
+    _QWEN_MLX_QWEN35_VISION_ALIAS_PATCHED = True
 
 
 def _patch_qwen35_moe_mlx_split_weight_sanitizer() -> None:
@@ -6102,9 +6149,23 @@ def _qwen_mlx_entry_with_runtime_state(entry: Mapping[str, Any]) -> Dict[str, An
     return item
 
 
+def _dedupe_qwen_model_option_entries(entries: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    deduped: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    for entry in entries:
+        model_id = str(entry.get("id") or entry.get("model_id") or "").strip()
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        deduped.append(dict(entry))
+    return deduped
+
+
 def _qwen_mlx_runtime_model_options() -> List[Dict[str, Any]]:
     entries: List[Dict[str, Any]] = []
-    for entry in [*QWEN_MLX_MODEL_OPTIONS, *AGENT_MLX_MODEL_OPTIONS]:
+    for entry in _dedupe_qwen_model_option_entries(
+        [*QWEN_MLX_MODEL_OPTIONS, *AGENT_MLX_MODEL_OPTIONS]
+    ):
         enriched = _qwen_mlx_entry_with_runtime_state(entry)
         if (
             enriched.get("vision_inference_supported") is False
@@ -6198,6 +6259,7 @@ def _load_qwen_mlx_runtime(model_id: str, adapter_path: Optional[Path] = None) -
             max_progress=0.34 if availability.get("needs_download") else 0.36,
         )
         try:
+            _patch_qwen35_vision_config_alias()
             _patch_qwen35_moe_mlx_split_weight_sanitizer()
             _patch_mlx_vlm_pt_processor_fallback()
             model_local, processor_local = MLX_VLM_LOAD(str(resolved_model_id), **load_kwargs)
@@ -6234,7 +6296,7 @@ def _load_qwen_mlx_runtime(model_id: str, adapter_path: Optional[Path] = None) -
     config = None
     if MLX_LOAD_CONFIG is not None:
         try:
-            config = MLX_LOAD_CONFIG(str(resolved_model_id))
+            config = _normalize_qwen35_vision_config_alias(MLX_LOAD_CONFIG(str(resolved_model_id)))
         except Exception:
             config = getattr(model_local, "config", None)
     else:
@@ -54028,14 +54090,16 @@ def qwen_status():
         "vram": memory,
         "progress": qwen_progress(),
         "transformers_models": [*QWEN_TRANSFORMERS_MODEL_OPTIONS, *AGENT_MODEL_OPTIONS],
-        "mlx_models": [
-            *QWEN_MLX_VISION_MODEL_OPTIONS,
-            *[
-                entry
-                for entry in AGENT_MLX_MODEL_OPTIONS
-                if entry.get("vision_inference_supported", True) is not False
-            ],
-        ],
+        "mlx_models": _dedupe_qwen_model_option_entries(
+            [
+                *QWEN_MLX_VISION_MODEL_OPTIONS,
+                *[
+                    entry
+                    for entry in AGENT_MLX_MODEL_OPTIONS
+                    if entry.get("vision_inference_supported", True) is not False
+                ],
+            ]
+        ),
     }
 
 

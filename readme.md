@@ -256,10 +256,11 @@ Optional macOS overrides can go in `.env.macos`:
 ```bash
 QWEN_DEVICE=auto
 QWEN_INFERENCE_PLATFORM=auto
-# Optional override; by default Apple Silicon uses the validated MLX Qwen3-VL 4B path.
-QWEN_MLX_MODEL_NAME=mlx-community/Qwen3-VL-4B-Instruct-4bit
-# Captioning may run many model calls; implicit caption runs use the same safe MLX default.
+# Optional override; by default Apple Silicon general Qwen inference uses AEON Qwen3.6 27B FP4.
+QWEN_MLX_MODEL_NAME=AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-MLX-FP4
+# Captioning may run many model calls; implicit caption runs keep the compact MLX default.
 QWEN_MLX_CAPTION_MODEL_NAME=mlx-community/Qwen3-VL-4B-Instruct-4bit
+# AEON and other larger MLX models remain selectable in the UI for explicit captioning runs.
 # Optional CUDA/Transformers override; default is the matching AEON NVFP4 sibling.
 QWEN_MODEL_NAME=AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-NVFP4-MTP-XS
 # Training remains separate; default stays on a trainable Qwen3-VL checkpoint.

@@ -21,13 +21,16 @@ QWEN_PLATFORM_ALIASES = {
 QWEN_AEON_QWEN36_27B_MLX_MODEL = (
     "AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-MLX-FP4"
 )
-QWEN_MLX_DEFAULT_MODEL = "mlx-community/Qwen3-VL-4B-Instruct-4bit"
+# General Apple Silicon Qwen inference should use the largest validated local
+# vision-capable path by default. Captioning keeps a separate compact default
+# below because one caption action can trigger many model calls.
+QWEN_MLX_DEFAULT_MODEL = QWEN_AEON_QWEN36_27B_MLX_MODEL
 QWEN_MLX_CAPTION_DEFAULT_MODEL = "mlx-community/Qwen3-VL-4B-Instruct-4bit"
 QWEN_AEON_QWEN36_27B_MLX_NOTE = (
     "Inference-only AEON Qwen3.6 27B multimodal MLX FP4 checkpoint. "
-    "Local caption smoke failed with mlx-vlm rejecting qwen3_5_vision, so this "
-    "checkpoint is blocked on the current Apple Silicon runtime until mlx-vlm "
-    "supports that vision tower."
+    "mlx-vlm 0.6.x exposes the matching Qwen3.5 vision tower as qwen3_5, while "
+    "this checkpoint stores it as qwen3_5_vision; the backend normalizes that "
+    "config alias before load. Adapter training is not wired."
 )
 QWEN_VANCH007_QWEN36_35B_MLX_MODEL = "vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit"
 QWEN_VANCH007_QWEN36_35B_MLX_NOTE = (
@@ -307,7 +310,7 @@ def qwen_mlx_model_options() -> List[Dict[str, Any]]:
                 quantization=quantization,
                 source=source,
                 abliterated=True,
-                vision_inference_supported=not is_aeon_qwen36,
+                vision_inference_supported=True,
                 training_supported=not (is_aeon_qwen36 or is_vanch007_qwen36),
                 compatibility_note=(
                     QWEN_AEON_QWEN36_27B_MLX_NOTE

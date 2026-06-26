@@ -137,14 +137,14 @@ def _build_agent_model_options() -> List[Dict[str, Any]]:
             variant="AEON Ultimate Uncensored",
             quantization="FP4",
             abliterated=True,
-            vision_inference_supported=False,
+            vision_inference_supported=True,
             compatibility_note=(
                 "Inference-only AEON Qwen3.6 27B multimodal MLX FP4 model. "
-                "Local caption smoke failed with mlx-vlm rejecting qwen3_5_vision, "
-                "so this checkpoint is blocked on the current Apple Silicon runtime."
+                "The checkpoint includes vision_tower weights and processor files; "
+                "the backend normalizes its qwen3_5_vision config alias for mlx-vlm."
             ),
-            backend_status="blocked",
-            smoke_status="mlx_vlm_unsupported_vision_tower",
+            backend_status="validated_runtime",
+            smoke_status="mlx_vlm_qwen35_vision_alias_supported",
         ),
         _entry(
             QWEN_CUDA_DEFAULT_MODEL,

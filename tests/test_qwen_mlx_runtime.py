@@ -80,6 +80,11 @@ def _make_qwen_train_only_dataset(tmp_path, monkeypatch):
     return dataset_root
 
 
+def test_qwen_mlx_general_default_is_aeon_but_caption_default_is_compact():
+    assert api.QWEN_MLX_DEFAULT_MODEL == AEON_MLX_ID
+    assert api.QWEN_MLX_CAPTION_DEFAULT_MODEL == "mlx-community/Qwen3-VL-4B-Instruct-4bit"
+
+
 def test_qwen_model_registry_exposes_mlx_quantized_models():
     models = api.list_qwen_models()["models"]
     ids = {entry["id"] for entry in models}
@@ -95,10 +100,11 @@ def test_qwen_model_registry_exposes_mlx_quantized_models():
     assert aeon_entry["type"] == "builtin_mlx"
     assert aeon_entry["metadata"]["runtime_platform"] == "mlx_vlm"
     assert aeon_entry["metadata"]["agent_model"] is True
-    assert aeon_entry["metadata"]["vision_inference_supported"] is False
-    assert aeon_entry["metadata"]["inference_supported"] is False
+    assert aeon_entry["metadata"]["vision_inference_supported"] is True
+    assert aeon_entry["metadata"]["inference_supported"] is True
     assert aeon_entry["metadata"]["training_supported"] is False
     assert "qwen3_5_vision" in aeon_entry["metadata"]["compatibility_note"]
+    assert "normalizes" in aeon_entry["metadata"]["compatibility_note"]
 
 
 def test_qwen_model_registry_exposes_cuda_quantized_and_abliterated_models():
@@ -258,8 +264,8 @@ def test_qwen_model_registry_exposes_inference_only_agent_models():
             assert entry["metadata"]["training_supported"] is True
             assert entry["metadata"]["training_modes"] == ["official_lora", "trl_qlora"]
     assert not (removed_unusable & set(by_id))
-    assert by_id[AEON_MLX_ID]["metadata"]["vision_inference_supported"] is False
-    assert by_id[AEON_MLX_ID]["metadata"]["inference_supported"] is False
+    assert by_id[AEON_MLX_ID]["metadata"]["vision_inference_supported"] is True
+    assert by_id[AEON_MLX_ID]["metadata"]["inference_supported"] is True
 
 
 def test_qwen_training_config_accepts_moe_transformers_model(tmp_path, monkeypatch):
@@ -1044,6 +1050,42 @@ def test_qwen_mlx_runtime_loads_adapter_path(monkeypatch, tmp_path):
     assert calls["kwargs"]["adapter_path"] == str(adapter_dir)
 
 
+def test_qwen_mlx_normalizes_aeon_qwen35_vision_config_alias():
+    config = {
+        "model_type": "qwen3_5",
+        "vision_config": {"model_type": "qwen3_5_vision", "hidden_size": 1152},
+        "text_config": {"model_type": "qwen3_5_text"},
+    }
+
+    normalized = api._normalize_qwen35_vision_config_alias(config)
+
+    assert normalized is not config
+    assert normalized["vision_config"]["model_type"] == "qwen3_5"
+    assert config["vision_config"]["model_type"] == "qwen3_5_vision"
+
+
+def test_qwen_mlx_runtime_loads_aeon_with_qwen35_vision_alias(monkeypatch):
+    calls = {}
+
+    def fake_load(model_id, **kwargs):
+        calls["model_id"] = model_id
+        calls["kwargs"] = kwargs
+        return object(), object()
+
+    monkeypatch.setattr(api, "MLX_VLM_LOAD", fake_load)
+    monkeypatch.setattr(api, "MLX_VLM_GENERATE", object())
+    monkeypatch.setattr(api, "MLX_VLM_IMPORT_ERROR", None)
+    monkeypatch.setattr(
+        api, "_qwen_mlx_remote_checkpoint_incompatibility_detail", lambda _model_id: None
+    )
+
+    runtime = api._load_qwen_mlx_runtime(AEON_MLX_ID)
+
+    assert runtime.platform == api.QWEN_PLATFORM_MLX
+    assert runtime.model_id == AEON_MLX_ID
+    assert calls["model_id"] == AEON_MLX_ID
+
+
 def test_qwen_mlx_runtime_rejects_language_only_repack(monkeypatch):
     bad_model_id = (
         "introvoyz041/Huihui-Qwen3-VL-30B-A3B-Thinking-abliterated-qx86-hi-mlx-mlx-4Bit"
@@ -1091,6 +1133,23 @@ def test_qwen_settings_includes_working_qwen36_candidate():
     assert model_id in by_id
     assert by_id[model_id]["vision_inference_supported"] is True
     assert by_id[model_id]["training_supported"] is False
+
+
+def test_qwen_settings_includes_aeon_mlx_candidate():
+    settings = api.qwen_settings()
+    by_id = {entry["id"]: entry for entry in settings.mlx_models}
+
+    assert AEON_MLX_ID in by_id
+    assert by_id[AEON_MLX_ID]["vision_inference_supported"] is True
+    assert by_id[AEON_MLX_ID]["training_supported"] is False
+    assert "qwen3_5_vision" in by_id[AEON_MLX_ID]["compatibility_note"]
+
+
+def test_qwen_settings_mlx_options_are_deduped():
+    settings = api.qwen_settings()
+    ids = [entry["id"] for entry in settings.mlx_models]
+
+    assert len(ids) == len(set(ids))
 
 
 def test_qwen_settings_mlx_options_include_cache_availability():

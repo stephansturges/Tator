@@ -2286,11 +2286,13 @@ The 2026-06-18 model matrix benchmark used the fixed reviewable source set
   decisions.
 - `mlx-community/Qwen3.6-35B-A3B-4bit` also completed the 10-vignette baseline
   run with 10/10 completed reviews and 3/10 non-skip decisions.
-- `mlx-community/Qwen3-VL-4B-Instruct-4bit` remains the MLX inference default
-  because it is the validated stable Apple Silicon vision path.
-- `AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-MLX-FP4` remains
-  cataloged but blocked for local MLX vision inference: local caption smoke
-  failed with mlx-vlm rejecting its `qwen3_5_vision` tower.
+- `AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-MLX-FP4` is the
+  Apple Silicon default for general Qwen inference and is enabled for local MLX
+  vision inference through the normal macOS backend environment.
+  Its HF repo includes `vision_tower` weights and Qwen3VL processor files; the
+  backend applies a narrow `qwen3_5_vision -> qwen3_5` vision-config alias for
+  mlx-vlm 0.6.x before loading. Treat it as inference-only until a fresh
+  vignette/caption benchmark has run.
 - `AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-NVFP4-MTP-XS` is the
   CUDA/Transformers inference default. It is metadata-verified and exposed for
   agent-assisted flows, but should get a fresh vignette benchmark before being

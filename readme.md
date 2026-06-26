@@ -258,6 +258,8 @@ QWEN_DEVICE=auto
 QWEN_INFERENCE_PLATFORM=auto
 # Optional override; by default Apple Silicon general Qwen inference uses AEON Qwen3.6 27B FP4.
 QWEN_MLX_MODEL_NAME=AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-MLX-FP4
+# auto lazy-loads large MLX VLMs such as AEON; set false to force eager load.
+QWEN_MLX_LAZY_LOAD=auto
 # Captioning may run many model calls; implicit caption runs keep the compact MLX default.
 QWEN_MLX_CAPTION_MODEL_NAME=mlx-community/Qwen3-VL-4B-Instruct-4bit
 # AEON and other larger MLX models remain selectable in the UI for explicit captioning runs.

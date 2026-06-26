@@ -2291,8 +2291,9 @@ The 2026-06-18 model matrix benchmark used the fixed reviewable source set
   vision inference through the normal macOS backend environment.
   Its HF repo includes `vision_tower` weights and Qwen3VL processor files; the
   backend applies a narrow `qwen3_5_vision -> qwen3_5` vision-config alias for
-  mlx-vlm 0.6.x before loading. Treat it as inference-only until a fresh
-  vignette/caption benchmark has run.
+  mlx-vlm 0.6.x before loading. Large MLX VLMs are lazy-loaded by default via
+  `QWEN_MLX_LAZY_LOAD=auto`; keep benchmark-winner claims separate from this
+  runtime-support status.
 - `AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-NVFP4-MTP-XS` is the
   CUDA/Transformers inference default. It is metadata-verified and exposed for
   agent-assisted flows, but should get a fresh vignette benchmark before being

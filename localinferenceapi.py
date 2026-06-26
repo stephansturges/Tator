@@ -1191,6 +1191,7 @@ QWEN_MLX_CAPTION_MODEL_NAME = os.environ.get(
     QWEN_MLX_CAPTION_DEFAULT_MODEL,
 ).strip() or QWEN_MLX_CAPTION_DEFAULT_MODEL
 QWEN_MLX_DEFAULT_QUANTIZATION = os.environ.get("QWEN_MLX_DEFAULT_QUANTIZATION", "4bit").strip() or "4bit"
+QWEN_MLX_LAZY_LOAD = os.environ.get("QWEN_MLX_LAZY_LOAD", "auto").strip().lower() or "auto"
 QWEN_CAPTION_CACHE_LIMIT = _env_int("QWEN_CAPTION_CACHE_LIMIT", 0)
 QWEN_WINDOW_DEFAULT_SIZE = _env_int("QWEN_WINDOW_SIZE", 672)
 QWEN_WINDOW_DEFAULT_OVERLAP = _env_float("QWEN_WINDOW_OVERLAP", 0.2)
@@ -6130,6 +6131,26 @@ def _effective_qwen_mlx_settings_model_id() -> str:
     return QWEN_MLX_MODEL_NAME
 
 
+def _qwen_mlx_model_size_billions(model_id: str) -> Optional[float]:
+    metadata = qwen_mlx_metadata_for_model(str(model_id or ""))
+    candidates = [str(metadata.get("size") or ""), str(model_id or "")]
+    for candidate in candidates:
+        matches = re.findall(r"(\d+(?:\.\d+)?)\s*B", candidate, flags=re.IGNORECASE)
+        if matches:
+            return max(float(match) for match in matches)
+    return None
+
+
+def _qwen_mlx_lazy_load_for_model(model_id: str) -> bool:
+    raw = str(QWEN_MLX_LAZY_LOAD or "auto").strip().lower()
+    if raw in {"1", "true", "yes", "on", "lazy"}:
+        return True
+    if raw in {"0", "false", "no", "off", "eager"}:
+        return False
+    size_b = _qwen_mlx_model_size_billions(model_id)
+    return bool(size_b is not None and size_b >= 20.0)
+
+
 def _qwen_mlx_entry_with_runtime_state(entry: Mapping[str, Any]) -> Dict[str, Any]:
     item = dict(entry)
     model_id = str(item.get("id") or item.get("model_id") or "").strip()
@@ -6242,9 +6263,13 @@ def _load_qwen_mlx_runtime(model_id: str, adapter_path: Optional[Path] = None) -
     )
     _raise_if_qwen_cancelled()
     try:
-        load_kwargs = {}
+        lazy_load = _qwen_mlx_lazy_load_for_model(str(resolved_model_id))
+        load_kwargs = {"lazy": lazy_load}
         if adapter_path:
             load_kwargs["adapter_path"] = str(adapter_path)
+        _qwen_progress_log(
+            f"MLX Qwen load mode: {'lazy' if lazy_load else 'eager'}"
+        )
         monitor_paths = [
             availability.get("cache_path") and Path(str(availability.get("cache_path"))),
             _qwen_cache_repo_path(str(resolved_model_id)),

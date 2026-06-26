@@ -64,6 +64,7 @@ DINOV3_BACKEND=auto           # auto|torch|mlx
 QWEN_DEVICE=auto
 QWEN_INFERENCE_PLATFORM=auto # auto|mlx_vlm|transformers
 QWEN_MLX_MODEL_NAME=AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-MLX-FP4
+QWEN_MLX_LAZY_LOAD=auto      # auto|true|false; auto lazy-loads large MLX VLMs
 QWEN_MLX_CAPTION_MODEL_NAME=mlx-community/Qwen3-VL-4B-Instruct-4bit
 QWEN_MODEL_NAME=AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-NVFP4-MTP-XS
 QWEN_TRAINING_DEFAULT_MODEL=Qwen/Qwen3-VL-4B-Instruct
@@ -235,6 +236,7 @@ Useful environment settings:
 ```bash
 QWEN_INFERENCE_PLATFORM=auto
 QWEN_MLX_MODEL_NAME=AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-MLX-FP4
+QWEN_MLX_LAZY_LOAD=auto
 QWEN_MLX_CAPTION_MODEL_NAME=mlx-community/Qwen3-VL-4B-Instruct-4bit
 QWEN_MODEL_NAME=AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-NVFP4-MTP-XS
 QWEN_TRAINING_DEFAULT_MODEL=Qwen/Qwen3-VL-4B-Instruct
@@ -243,6 +245,9 @@ QWEN_MLX_DEFAULT_QUANTIZATION=4bit
 
 `QWEN_MODEL_NAME` and `QWEN_MLX_MODEL_NAME` are general inference defaults. On
 Apple Silicon the general MLX default is AEON Qwen3.6 27B FP4.
+`QWEN_MLX_LAZY_LOAD` defaults to `auto`, which passes `lazy=True` to
+`mlx_vlm.load()` for large MLX VLMs (20B parameters and up) and keeps compact
+models eager. Set it to `true` or `false` to force a mode.
 `QWEN_MLX_CAPTION_MODEL_NAME` is separate because a single captioning action can
 run many window, cleanup, and merge generations; implicit "Use active model"
 caption requests use the smaller caption default on MLX unless the UI/API

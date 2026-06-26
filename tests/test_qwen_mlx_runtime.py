@@ -85,6 +85,21 @@ def test_qwen_mlx_general_default_is_aeon_but_caption_default_is_compact():
     assert api.QWEN_MLX_CAPTION_DEFAULT_MODEL == "mlx-community/Qwen3-VL-4B-Instruct-4bit"
 
 
+def test_qwen_mlx_auto_lazy_load_uses_model_size(monkeypatch):
+    monkeypatch.setattr(api, "QWEN_MLX_LAZY_LOAD", "auto")
+
+    assert api._qwen_mlx_lazy_load_for_model(AEON_MLX_ID) is True
+    assert api._qwen_mlx_lazy_load_for_model("mlx-community/Qwen3-VL-4B-Instruct-4bit") is False
+
+
+def test_qwen_mlx_lazy_load_env_override(monkeypatch):
+    monkeypatch.setattr(api, "QWEN_MLX_LAZY_LOAD", "false")
+    assert api._qwen_mlx_lazy_load_for_model(AEON_MLX_ID) is False
+
+    monkeypatch.setattr(api, "QWEN_MLX_LAZY_LOAD", "true")
+    assert api._qwen_mlx_lazy_load_for_model("mlx-community/Qwen3-VL-4B-Instruct-4bit") is True
+
+
 def test_qwen_model_registry_exposes_mlx_quantized_models():
     models = api.list_qwen_models()["models"]
     ids = {entry["id"] for entry in models}
@@ -1048,6 +1063,7 @@ def test_qwen_mlx_runtime_loads_adapter_path(monkeypatch, tmp_path):
     assert runtime.platform == api.QWEN_PLATFORM_MLX
     assert calls["model_id"] == "mlx-community/Qwen3-VL-4B-Instruct-4bit"
     assert calls["kwargs"]["adapter_path"] == str(adapter_dir)
+    assert calls["kwargs"]["lazy"] is False
 
 
 def test_qwen_mlx_normalizes_aeon_qwen35_vision_config_alias():
@@ -1084,6 +1100,7 @@ def test_qwen_mlx_runtime_loads_aeon_with_qwen35_vision_alias(monkeypatch):
     assert runtime.platform == api.QWEN_PLATFORM_MLX
     assert runtime.model_id == AEON_MLX_ID
     assert calls["model_id"] == AEON_MLX_ID
+    assert calls["kwargs"]["lazy"] is True
 
 
 def test_qwen_mlx_runtime_rejects_language_only_repack(monkeypatch):
@@ -1537,7 +1554,7 @@ def test_qwen_mlx_message_normalization_keeps_falsey_image_objects():
 
 
 def test_qwen_mlx_cached_runtime_preserves_config(monkeypatch):
-    monkeypatch.setattr(api, "MLX_VLM_LOAD", lambda model_id: ("model", "processor"))
+    monkeypatch.setattr(api, "MLX_VLM_LOAD", lambda model_id, **_kwargs: ("model", "processor"))
     monkeypatch.setattr(api, "MLX_VLM_GENERATE", lambda *args, **kwargs: "")
     monkeypatch.setattr(api, "MLX_LOAD_CONFIG", lambda model_id: {"model_id": model_id})
     monkeypatch.setattr(api, "active_qwen_metadata", {"model_id": "mlx-community/Qwen3-VL-4B-Instruct-4bit"})

@@ -263,6 +263,20 @@ and import it back into the application.
 This report is the first artifact to inspect before deciding whether a corpus is
 ready for review or training.
 
+### Artifact Consistency
+
+The browser validates each downloadable artifact as part of the same run-level
+export set. It blocks trainer JSONL when the row count disagrees with the
+report's selected flattened-row count. It blocks archive JSONL when the row
+count disagrees with the report image count or archive image count, and it
+rejects duplicate archive `image_path` rows. It blocks review JSONL when total
+review rows, selected review rows, or manual-review rows disagree with the
+instruction report.
+
+This guard exists to catch stale, partial, mixed, or hand-edited artifacts
+before a reviewer or trainer consumes them. Row validation still checks content;
+artifact consistency checks whether the files agree with the run report.
+
 ## Source Annotation Contract
 
 Source annotations are built from real label evidence only. They are stored in
@@ -529,7 +543,22 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-159 passed
+160 passed
+```
+
+Focused artifact-consistency contract:
+
+```bash
+./.venv-macos/bin/python -m pytest \
+  tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports \
+  tests/test_labeling_panel_layout_contract.py::test_qwen_caption_export_preserves_saved_alternates_and_primary_rows \
+  -q
+```
+
+Latest recorded result:
+
+```text
+2 passed
 ```
 
 Focused review-import fail-closed suite:
@@ -592,7 +621,7 @@ Focused instruction-dataset and UI contract suite:
 Latest recorded result:
 
 ```text
-134 passed
+135 passed
 ```
 
 Runtime and unattended hardening suites have also been run in prior hardening

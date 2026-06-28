@@ -46,6 +46,24 @@ real-data pilot, manual generated-QA review, review import, re-export, and a
 small trainer-import or fine-tuning dry run remain required before using a
 corpus for model training.
 
+## How To Use This Packet
+
+Use this document as the reviewer entrypoint. It is intentionally broader than
+a changelog:
+
+- The early sections explain the product behavior and the design rationale.
+- The middle sections describe the artifact contract and validation boundaries.
+- The runtime hardening section explains why the long-running caption path was
+  changed before treating instruction-data creation as a usable workflow.
+- The validation evidence section records the current tests that prove the
+  wiring, guardrails, export/import boundaries, and UI contracts.
+- The final checklist and remaining-work sections separate implemented
+  functionality from the real-data pilot work still needed before training.
+
+The most important review question is not only whether files are produced. It is
+whether a generated training row can be traced back to source evidence,
+generated language, review state, and the report metrics that certify the run.
+
 ## Why This Work Was Needed
 
 A caption-only export is useful, but it is thin for VLM fine-tuning. Training
@@ -218,6 +236,30 @@ review decision fields.
 `instruction_report` records run-level metrics, quality warnings, blocking
 reasons, source-field provenance, row counts, split counts, generated-QA metrics,
 and training-readiness state.
+
+### Artifact Consistency Gates
+
+The browser now treats the instruction training JSONL, archive JSONL, review
+JSONL, and instruction report as one coherent export set. A download can pass
+row-level validation and still be blocked if its counts no longer match the
+report.
+
+The additional consistency checks are:
+
+- Trainer JSONL row count must match the report's selected flattened-row count.
+- Archive JSONL row count must match the report image count and the archive
+  image count.
+- Archive JSONL must not contain duplicate `image_path` rows.
+- Review JSONL row count must match the report review-row count.
+- Selected review-row count must match the report selected flattened-row count.
+- Manual-review row count must match the report manual-review count.
+- The instruction report itself must contain valid export validation,
+  review-row, manual-review, readiness, and corpus-quality fields.
+
+This matters because reviewers should not need to infer whether a hand-edited,
+stale, partial, or mixed artifact belongs to the current run. The UI now fails
+closed before writing a mismatched download, while the backend and trainer keep
+their own validation boundaries for scripted or hand-edited paths.
 
 ### Review Import
 
@@ -455,7 +497,22 @@ Result:
 Result:
 
 ```text
-159 passed
+160 passed
+```
+
+Focused artifact-consistency contract:
+
+```bash
+./.venv-macos/bin/python -m pytest \
+  tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports \
+  tests/test_labeling_panel_layout_contract.py::test_qwen_caption_export_preserves_saved_alternates_and_primary_rows \
+  -q
+```
+
+Result:
+
+```text
+2 passed
 ```
 
 Additional validation recorded in the hardening report includes trainer import
@@ -485,13 +542,15 @@ Use this checklist to review the implementation.
    do not enter flattened trainer rows.
 10. Confirm that browser, server, and trainer validation all block stale,
     incomplete, unknown-status, or non-trainable instruction rows.
-11. Confirm that dense prompt box lists are representative while counts remain
+11. Confirm that browser downloads block mismatched training/archive/review
+    artifacts when their counts disagree with the instruction report.
+12. Confirm that dense prompt box lists are representative while counts remain
     authoritative.
-12. Confirm that loop detection, safe retry, fallback, and deterministic
+13. Confirm that loop detection, safe retry, fallback, and deterministic
     recovery are visible in audit artifacts.
-13. Confirm that missing models are visually obvious and fail preflight unless
+14. Confirm that missing models are visually obvious and fail preflight unless
     downloads are explicitly allowed.
-14. Run a small real-data pilot before treating any generated corpus as
+15. Run a small real-data pilot before treating any generated corpus as
     training-ready.
 
 ## Remaining Work Before Training Use

@@ -137,7 +137,9 @@ selected row that a reviewer marks rejected or needs-revision moves readiness to
 **Download instruction archive** exports one per-image construction archive
 record per JSONL line, keeping caption0, generated QA, optional deterministic
 metadata QA, source annotation provenance, and per-image export metadata separate
-from trainer rows.
+from trainer rows. The archive download is blocked if row-level validation
+passes but the archive row count no longer matches the report image count or
+archive image count, or if the archive contains duplicate image paths.
 **Download review JSONL** exports one candidate-level row for each caption0,
 generated QA, and deterministic metadata QA item. Review rows preserve candidate
 answers, selected training answers, source summaries, rejection reasons,
@@ -152,7 +154,9 @@ browser import preflight also catches unsupported actionable row origins and
 duplicate or conflicting actionable review targets before sending the packet. It
 does not edit source labels, generated answers, or deterministic metadata rows.
 Rejected or needs-revision language candidates stay auditable in the archive and
-review JSONL but are excluded from flattened trainer rows.
+review JSONL but are excluded from flattened trainer rows. Review downloads are
+also blocked when the review-row count, selected review-row count, or
+manual-review row count disagrees with the instruction report.
 **Download instruction report** exports run-level counts, rejection reasons,
 source-field provenance, split image counts, split row counts, QA count per
 image, selected flattened-row counts, duplicate-question/diversity metrics,

@@ -602,6 +602,14 @@ invalid JSON answers, missing or unknown validation/review state, rejected
 validation status, and non-trainable review status. Any validation error blocks
 training readiness with `instruction_training_rows_invalid`.
 
+The browser also cross-checks downloadable artifacts against the report before
+writing files. Trainer JSONL must match the report's selected flattened-row
+count. Archive JSONL must match the report image count and archive image count
+and cannot contain duplicate image paths. Review JSONL must match the report's
+total review-row count, selected review-row count, and manual-review count. This
+prevents stale, partial, mixed, or hand-edited artifacts from being mistaken for
+the current reviewed export set.
+
 ## Review Rows
 
 The export payload also includes `instruction_review_rows`, a candidate-level
@@ -868,7 +876,22 @@ Current combined caption/instruction/trainer/UI contract suite:
 Result:
 
 ```text
-159 passed
+160 passed
+```
+
+Focused artifact-consistency contract:
+
+```bash
+./.venv-macos/bin/python -m pytest \
+  tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports \
+  tests/test_labeling_panel_layout_contract.py::test_qwen_caption_export_preserves_saved_alternates_and_primary_rows \
+  -q
+```
+
+Result:
+
+```text
+2 passed
 ```
 
 Focused review-import fail-closed tests:
@@ -933,7 +956,7 @@ Caption/instruction/UI contract suite outside the trainer file:
 Result:
 
 ```text
-134 passed
+135 passed
 ```
 
 Syntax and formatting checks:

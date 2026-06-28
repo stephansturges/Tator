@@ -347,9 +347,12 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     assert "async function importCaptionInstructionReviewFile" in js
     assert "normalizeCaptionInstructionReviewDecision" in js
     assert "function validateCaptionInstructionReport" in js
+    assert "function validateCaptionInstructionArtifactConsistency" in js
     assert "corpus_quality_metrics" in js
     assert "training_readiness" in js
     assert "instruction_export_validation" in js
+    assert "artifact consistency failed" in js
+    assert "does not match report selected row count" in js
     assert "function downloadCaptionInstructionJsonl" in js
     assert "function downloadCaptionInstructionArchive" in js
     assert "function downloadCaptionInstructionReview" in js
@@ -436,9 +439,13 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "training_readiness.thresholds is missing" in report_validator
     assert "report missing instruction_export_validation" in report_validator
     assert "instruction_export_validation contains training-row errors" in report_validator
+    assert "instruction_export_validation.row_count does not match selected_flattened_row_count" in report_validator
+    assert "report instruction_review_row_count is missing or invalid" in report_validator
+    assert "report manual_review_required_count is missing or invalid" in report_validator
     assert "Training readiness blocked" in js
     assert "Training readiness needs review" in js
-    assert "Instruction JSONL export blocked: invalid readiness report" in js
+    assert "Instruction JSONL export blocked: " in js
+    assert "artifact consistency failed" in js
     assert "Disable Require ready report only for deliberate review-pending diagnostics" in js
     review_validator_start = js.index("function validateCaptionInstructionReviewRows")
     review_validator_end = js.index("function describeCaptionInstructionReviewValidation", review_validator_start)
@@ -614,6 +621,95 @@ def test_qwen_caption_instruction_launch_settings_block_empty_training_family():
             "  subcaptions_per_image: 0,",
             "});",
             "assert(existingOnly.includes('existing generated QA rows only'));",
+        ]
+    )
+    subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
+
+
+def test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            _extract_js_function(js, "normalizeCaptionInstructionReviewDecision"),
+            _extract_js_function(js, "validateCaptionInstructionArchiveRows"),
+            _extract_js_function(js, "validateCaptionInstructionReviewRows"),
+            _extract_js_function(js, "validateCaptionInstructionReport"),
+            _extract_js_function(js, "validateCaptionInstructionArtifactConsistency"),
+            "const report = {",
+            "  format: 'tator_caption_instruction_report_v1',",
+            "  image_count: 1,",
+            "  selected_flattened_row_count: 1,",
+            "  instruction_review_row_count: 1,",
+            "  manual_review_required_count: 1,",
+            "  corpus_quality_metrics: {",
+            "    image_count: 1,",
+            "    selected_flattened_row_count: 1,",
+            "    rejected_training_row_count: 0,",
+            "    generated_qa_candidate_count: 1,",
+            "    accepted_generated_qa_count: 1,",
+            "    rejected_generated_qa_count: 0,",
+            "    generated_qa_question_diversity_ratio: 1,",
+            "    generated_qa_acceptance_rate: 1,",
+            "    generated_qa_rejection_rate: 0,",
+            "    structured_rewrite_rate: 0,",
+            "    source_validated_training_row_rate: 1,",
+            "    source_class_coverage_rate: 1,",
+            "    source_classes: ['Building'],",
+            "    source_classes_covered_by_training_rows: ['Building'],",
+            "    training_answer_format_distribution: { natural: 1 },",
+            "  },",
+            "  training_readiness: {",
+            "    status: 'ready',",
+            "    ready_for_training: true,",
+            "    blocking_reasons: [],",
+            "    required_actions: [],",
+            "    quality_warnings: [],",
+            "    thresholds: {},",
+            "  },",
+            "  instruction_export_validation: { ok: true, error_count: 0, errors: [], row_count: 1 },",
+            "};",
+            "const archiveRow = {",
+            "  image_path: 'frame.jpg',",
+            "  source_annotations: {},",
+            "  language_annotations: {},",
+            "  deterministic_metadata_qa_pairs: [],",
+            "  export_metadata: {},",
+            "};",
+            "const reviewRow = {",
+            "  format: 'tator_caption_instruction_review_rows_v1',",
+            "  image_path: 'frame.jpg',",
+            "  qa_id: 'qa-1',",
+            "  row_origin: 'generated_qa',",
+            "  question: 'What is shown?',",
+            "  candidate_answer: 'A building.',",
+            "  training_answer: 'A building.',",
+            "  validation_status: 'accepted',",
+            "  selected_for_training: true,",
+            "  requires_manual_review: true,",
+            "  source_summary: {},",
+            "  rejection_reasons: [],",
+            "  review_decision: '',",
+            "  review_notes: '',",
+            "};",
+            "const archiveValidation = validateCaptionInstructionArchiveRows([archiveRow]);",
+            "assert.strictEqual(archiveValidation.ok, true);",
+            "assert.strictEqual(validateCaptionInstructionArtifactConsistency({ instruction_report: report, instruction_archive: { image_count: 1 } }, 'archive', archiveValidation).ok, true);",
+            "const duplicateArchive = validateCaptionInstructionArchiveRows([archiveRow, archiveRow]);",
+            "assert.strictEqual(duplicateArchive.ok, false);",
+            "assert(duplicateArchive.errors.some((error) => error.includes('duplicate archive image_path')));",
+            "const archiveMismatch = validateCaptionInstructionArtifactConsistency({ instruction_report: { ...report, image_count: 2, corpus_quality_metrics: { ...report.corpus_quality_metrics, image_count: 2 } }, instruction_archive: { image_count: 2 } }, 'archive', archiveValidation);",
+            "assert.strictEqual(archiveMismatch.ok, false);",
+            "assert(archiveMismatch.errors.some((error) => error.includes('archive row count 1 does not match report image count 2')));",
+            "const reviewValidation = validateCaptionInstructionReviewRows([reviewRow]);",
+            "assert.strictEqual(reviewValidation.ok, true);",
+            "assert.strictEqual(validateCaptionInstructionArtifactConsistency({ instruction_report: report }, 'review', reviewValidation).ok, true);",
+            "const reviewMismatch = validateCaptionInstructionArtifactConsistency({ instruction_report: { ...report, instruction_review_row_count: 2 } }, 'review', reviewValidation);",
+            "assert.strictEqual(reviewMismatch.ok, false);",
+            "assert(reviewMismatch.errors.some((error) => error.includes('review row count 1 does not match report review row count 2')));",
+            "const trainingMismatch = validateCaptionInstructionArtifactConsistency({ instruction_report: { ...report, corpus_quality_metrics: { ...report.corpus_quality_metrics, selected_flattened_row_count: 2 }, instruction_export_validation: { ok: true, error_count: 0, errors: [], row_count: 2 } } }, 'training', { rowCount: 1 });",
+            "assert.strictEqual(trainingMismatch.ok, false);",
+            "assert(trainingMismatch.errors.some((error) => error.includes('training row count 1 does not match report selected row count 2')));",
         ]
     )
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)

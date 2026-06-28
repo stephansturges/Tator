@@ -34823,6 +34823,9 @@ async function cancelRfDetrTrainingJobRequest() {
             if (!imagePath) {
                 errors.push(`archive row ${rowNumber} missing image_path`);
             } else {
+                if (imagePaths.has(imagePath)) {
+                    errors.push(`duplicate archive image_path at row ${rowNumber}`);
+                }
                 imagePaths.add(imagePath);
             }
             if (!row?.source_annotations || typeof row.source_annotations !== "object") {
@@ -35076,6 +35079,78 @@ async function cancelRfDetrTrainingJobRequest() {
             if (exportValidation.ok === false || errorCount > 0) {
                 errors.push("instruction_export_validation contains training-row errors");
             }
+            const exportRowCount = Number(exportValidation.row_count);
+            const selectedRowCount = Number(metrics?.selected_flattened_row_count);
+            if (
+                Number.isFinite(exportRowCount)
+                && Number.isFinite(selectedRowCount)
+                && exportRowCount !== selectedRowCount
+            ) {
+                errors.push("instruction_export_validation.row_count does not match selected_flattened_row_count");
+            }
+        }
+        const reviewRowCount = Number(report.instruction_review_row_count);
+        if (!Number.isFinite(reviewRowCount) || reviewRowCount < 0) {
+            errors.push("report instruction_review_row_count is missing or invalid");
+        }
+        const manualReviewCount = Number(report.manual_review_required_count);
+        if (!Number.isFinite(manualReviewCount) || manualReviewCount < 0) {
+            errors.push("report manual_review_required_count is missing or invalid");
+        }
+        return {
+            ok: errors.length === 0,
+            errors,
+            warnings,
+        };
+    }
+
+    function validateCaptionInstructionArtifactConsistency(payload, artifactKind, rowValidation) {
+        const errors = [];
+        const warnings = [];
+        const reportValidation = validateCaptionInstructionReport(payload?.instruction_report);
+        if (!reportValidation.ok) {
+            const firstErrors = (reportValidation.errors || []).slice(0, 3).join("; ");
+            const suffix = (reportValidation.errors || []).length > 3 ? `; +${reportValidation.errors.length - 3} more` : "";
+            errors.push(`invalid instruction report (${firstErrors || "invalid report"}${suffix})`);
+            return { ok: false, errors, warnings };
+        }
+        const report = payload.instruction_report;
+        const metrics = report?.corpus_quality_metrics || {};
+        const rowCount = Number(rowValidation?.rowCount);
+        const selectedCount = Number(metrics.selected_flattened_row_count);
+        if (artifactKind === "training" && Number.isFinite(rowCount) && Number.isFinite(selectedCount) && rowCount !== selectedCount) {
+            errors.push(`training row count ${rowCount} does not match report selected row count ${selectedCount}`);
+        }
+        if (artifactKind === "archive" && Number.isFinite(rowCount)) {
+            const imageCount = Number(report.image_count);
+            if (Number.isFinite(imageCount) && rowCount !== imageCount) {
+                errors.push(`archive row count ${rowCount} does not match report image count ${imageCount}`);
+            }
+            const archiveImageCount = Number(payload?.instruction_archive?.image_count);
+            if (Number.isFinite(archiveImageCount) && rowCount !== archiveImageCount) {
+                errors.push(`archive row count ${rowCount} does not match archive image count ${archiveImageCount}`);
+            }
+        }
+        if (artifactKind === "review" && Number.isFinite(rowCount)) {
+            const reportReviewCount = Number(report.instruction_review_row_count);
+            if (Number.isFinite(reportReviewCount) && rowCount !== reportReviewCount) {
+                errors.push(`review row count ${rowCount} does not match report review row count ${reportReviewCount}`);
+            }
+            if (
+                Number.isFinite(Number(rowValidation?.selectedTrainingCount))
+                && Number.isFinite(selectedCount)
+                && Number(rowValidation.selectedTrainingCount) !== selectedCount
+            ) {
+                errors.push(`selected review row count ${rowValidation.selectedTrainingCount} does not match report selected row count ${selectedCount}`);
+            }
+            const manualReviewCount = Number(report.manual_review_required_count);
+            if (
+                Number.isFinite(Number(rowValidation?.manualReviewCount))
+                && Number.isFinite(manualReviewCount)
+                && Number(rowValidation.manualReviewCount) !== manualReviewCount
+            ) {
+                errors.push(`manual review row count ${rowValidation.manualReviewCount} does not match report manual review count ${manualReviewCount}`);
+            }
         }
         return {
             ok: errors.length === 0,
@@ -35277,11 +35352,11 @@ async function cancelRfDetrTrainingJobRequest() {
             setSamStatus(message, { variant: "error", duration: 5000 });
             return;
         }
-        const reportValidation = validateCaptionInstructionReport(payload?.instruction_report);
-        if (!reportValidation.ok) {
-            const firstErrors = (reportValidation.errors || []).slice(0, 3).join("; ");
-            const suffix = (reportValidation.errors || []).length > 3 ? `; +${reportValidation.errors.length - 3} more` : "";
-            const message = `Instruction JSONL export blocked: invalid readiness report (${firstErrors || "invalid report"}${suffix}).`;
+        const consistency = validateCaptionInstructionArtifactConsistency(payload, "training", validation);
+        if (!consistency.ok) {
+            const firstErrors = (consistency.errors || []).slice(0, 3).join("; ");
+            const suffix = (consistency.errors || []).length > 3 ? `; +${consistency.errors.length - 3} more` : "";
+            const message = `Instruction JSONL export blocked: ${firstErrors || "artifact consistency failed"}${suffix}.`;
             setCaptionExportHealth(message, "fail");
             setSamStatus(message, { variant: "error", duration: 5000 });
             return;
@@ -35327,6 +35402,15 @@ async function cancelRfDetrTrainingJobRequest() {
             setSamStatus(message, { variant: "error", duration: 5000 });
             return;
         }
+        const consistency = validateCaptionInstructionArtifactConsistency(payload, "archive", validation);
+        if (!consistency.ok) {
+            const firstErrors = (consistency.errors || []).slice(0, 3).join("; ");
+            const suffix = (consistency.errors || []).length > 3 ? `; +${consistency.errors.length - 3} more` : "";
+            const message = `Instruction archive export blocked: ${firstErrors || "artifact consistency failed"}${suffix}.`;
+            setCaptionExportHealth(message, "fail");
+            setSamStatus(message, { variant: "error", duration: 5000 });
+            return;
+        }
         const lines = rows.map((row) => JSON.stringify(row));
         const blob = new Blob([lines.join("\n")], { type: "application/jsonl" });
         saveBlobToDisk(blob, "caption_instruction_archive.jsonl");
@@ -35348,6 +35432,15 @@ async function cancelRfDetrTrainingJobRequest() {
         const validation = validateCaptionInstructionReviewRows(rows);
         if (!validation.ok) {
             const message = describeCaptionInstructionReviewValidation(validation);
+            setCaptionExportHealth(message, "fail");
+            setSamStatus(message, { variant: "error", duration: 5000 });
+            return;
+        }
+        const consistency = validateCaptionInstructionArtifactConsistency(payload, "review", validation);
+        if (!consistency.ok) {
+            const firstErrors = (consistency.errors || []).slice(0, 3).join("; ");
+            const suffix = (consistency.errors || []).length > 3 ? `; +${consistency.errors.length - 3} more` : "";
+            const message = `Instruction review export blocked: ${firstErrors || "artifact consistency failed"}${suffix}.`;
             setCaptionExportHealth(message, "fail");
             setSamStatus(message, { variant: "error", duration: 5000 });
             return;

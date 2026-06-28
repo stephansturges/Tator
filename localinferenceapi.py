@@ -17593,21 +17593,40 @@ def _annotation_write_text_within_root(path: Path, root: Path, text: str) -> Non
             tmp_path.unlink(missing_ok=True)
 
 
-def _annotation_effective_label_lines(
+def _annotation_effective_label_payload(
     entry: Dict[str, Any], split: str, image_relpath: Path
-) -> List[str]:
+) -> Dict[str, Any]:
     overlay_root = _dataset_overlay_root_from_entry(entry, ensure=False)
     overlay_path = _annotation_overlay_label_path(entry, split, image_relpath, ensure=False)
     overlay_text = _annotation_read_text_within_root(overlay_path, overlay_root)
     if overlay_text is not None:
-        return [ln.strip() for ln in overlay_text.splitlines() if ln.strip()]
+        return {
+            "label_lines": [ln.strip() for ln in overlay_text.splitlines() if ln.strip()],
+            "label_source_present": True,
+            "label_source": "overlay_label_file",
+        }
     dataset_root = _dataset_effective_root_from_entry(entry)
     layout = str(entry.get("yolo_layout") or "flat")
     source_path = _annotation_source_label_path(dataset_root, layout, split, image_relpath)
     source_text = _annotation_read_text_within_root(source_path, dataset_root)
     if source_text is None:
-        return []
-    return [ln.strip() for ln in source_text.splitlines() if ln.strip()]
+        return {
+            "label_lines": [],
+            "label_source_present": False,
+            "label_source": "missing_label_file",
+        }
+    return {
+        "label_lines": [ln.strip() for ln in source_text.splitlines() if ln.strip()],
+        "label_source_present": True,
+        "label_source": "dataset_label_file",
+    }
+
+
+def _annotation_effective_label_lines(
+    entry: Dict[str, Any], split: str, image_relpath: Path
+) -> List[str]:
+    payload = _annotation_effective_label_payload(entry, split, image_relpath)
+    return list(payload.get("label_lines") or [])
 
 
 def _annotation_effective_text_label(
@@ -17961,14 +17980,29 @@ def _annotation_manifest_for_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
     for row in rows:
         split = _annotation_normalise_split(row.get("split"))
         image_relpath = _annotation_normalise_image_relpath(row.get("image_relpath"))
-        label_lines = _annotation_effective_label_lines(entry, split, image_relpath)
+        label_payload = _annotation_effective_label_payload(entry, split, image_relpath)
+        label_lines = list(label_payload.get("label_lines") or [])
         text_label = _annotation_effective_text_label(entry, image_relpath, split)
+        image_width: Optional[int] = None
+        image_height: Optional[int] = None
+        image_path = row.get("image_path")
+        if image_path:
+            try:
+                with Image.open(Path(image_path)) as img:
+                    image_width, image_height = img.size
+            except Exception:
+                image_width = None
+                image_height = None
         manifest_rows.append(
             {
                 "split": split,
                 "image_relpath": str(image_relpath.as_posix()),
                 "image_name": row.get("image_name") or image_relpath.name,
                 "label_lines": label_lines,
+                "label_source_present": bool(label_payload.get("label_source_present")),
+                "label_source": str(label_payload.get("label_source") or "").strip(),
+                "image_width": image_width,
+                "image_height": image_height,
                 "text_label": text_label,
             }
         )
@@ -20348,12 +20382,165 @@ def _caption_instruction_label_name(class_idx: int, labelmap: Sequence[str]) -> 
     }.get(raw, raw)
 
 
+def _caption_instruction_json_answer(payload: Mapping[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _caption_instruction_question_class_name(label: str) -> str:
+    return re.sub(r"\s+", " ", str(label or "").replace("_", " ")).strip()
+
+
+def _caption_instruction_bbox_quadrant(x_center: float, y_center: float) -> str:
+    vertical = "upper" if y_center < 0.5 else "lower"
+    horizontal = "left" if x_center < 0.5 else "right"
+    return f"{vertical}_{horizontal}"
+
+
+def _caption_instruction_bbox_area_bucket(width: float, height: float) -> str:
+    area = max(0.0, float(width)) * max(0.0, float(height))
+    if area < 0.01:
+        return "small"
+    if area < 0.08:
+        return "medium"
+    return "large"
+
+
+def _caption_instruction_dominant_region(annotations: Sequence[Mapping[str, Any]]) -> str:
+    if not annotations:
+        return "unknown"
+    upper = 0
+    lower = 0
+    left = 0
+    right = 0
+    for annotation in annotations:
+        bbox = annotation.get("bbox_xywhn") if isinstance(annotation, Mapping) else None
+        if not isinstance(bbox, Sequence) or len(bbox) < 2:
+            continue
+        try:
+            x_center = float(bbox[0])
+            y_center = float(bbox[1])
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if y_center < 0.5:
+            upper += 1
+        else:
+            lower += 1
+        if x_center < 0.5:
+            left += 1
+        else:
+            right += 1
+    total = max(upper + lower, left + right)
+    if total <= 0:
+        return "unknown"
+    candidates = [
+        ("upper_half", upper),
+        ("lower_half", lower),
+        ("left_half", left),
+        ("right_half", right),
+    ]
+    region, count = max(candidates, key=lambda item: item[1])
+    if count <= total / 2:
+        return "mixed"
+    return region
+
+
+def _caption_instruction_bbox_geometry(
+    annotations: Sequence[Mapping[str, Any]],
+    *,
+    image_width: Optional[int],
+    image_height: Optional[int],
+) -> Dict[str, Any]:
+    by_class: Dict[str, List[Mapping[str, Any]]] = defaultdict(list)
+    for annotation in annotations:
+        class_name = str(annotation.get("class_name") or "").strip()
+        if class_name:
+            by_class[class_name].append(annotation)
+    class_geometry: Dict[str, Any] = {}
+    for class_name in sorted(by_class, key=lambda item: item.lower()):
+        class_annotations = by_class[class_name]
+        quadrants: Set[str] = set()
+        area_buckets: Set[str] = set()
+        for annotation in class_annotations:
+            bbox = annotation.get("bbox_xywhn") if isinstance(annotation, Mapping) else None
+            if not isinstance(bbox, Sequence) or len(bbox) < 4:
+                continue
+            try:
+                x_center = float(bbox[0])
+                y_center = float(bbox[1])
+                width = float(bbox[2])
+                height = float(bbox[3])
+            except (TypeError, ValueError, OverflowError):
+                continue
+            quadrants.add(_caption_instruction_bbox_quadrant(x_center, y_center))
+            area_buckets.add(_caption_instruction_bbox_area_bucket(width, height))
+        class_geometry[class_name] = {
+            "count": len(class_annotations),
+            "quadrants": sorted(quadrants),
+            "dominant_region": _caption_instruction_dominant_region(class_annotations),
+            "area_buckets": sorted(area_buckets),
+        }
+    return {
+        "image_width": image_width,
+        "image_height": image_height,
+        "classes": class_geometry,
+        "provenance": {
+            "source": "source_annotations.bbox_instances",
+            "derived_by": "coarse_bbox_geometry",
+        },
+    }
+
+
+def _caption_instruction_spatial_facts(bbox_geometry: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    classes = bbox_geometry.get("classes") if isinstance(bbox_geometry, Mapping) else {}
+    if not isinstance(classes, Mapping):
+        return []
+    region_text = {
+        "upper_half": "upper half",
+        "lower_half": "lower half",
+        "left_half": "left half",
+        "right_half": "right half",
+        "mixed": "multiple regions",
+        "unknown": "an unknown region",
+    }
+    facts: List[Dict[str, Any]] = []
+    for class_name in sorted(classes, key=lambda item: str(item).lower()):
+        class_data = classes.get(class_name)
+        if not isinstance(class_data, Mapping):
+            continue
+        try:
+            count = int(class_data.get("count") or 0)
+        except (TypeError, ValueError, OverflowError):
+            count = 0
+        dominant = str(class_data.get("dominant_region") or "").strip()
+        if count <= 0 or dominant in {"", "mixed", "unknown"}:
+            continue
+        display = _caption_instruction_question_class_name(str(class_name))
+        phrase = "Most" if count > 1 else "The"
+        verb = "boxes are" if count > 1 else "box is"
+        facts.append(
+            {
+                "fact": f"{phrase} {display} {verb} in the {region_text.get(dominant, dominant)} of the image.",
+                "class_name": str(class_name),
+                "source": "bbox_geometry",
+                "method": "dominant_region_from_bbox_centers",
+                "confidence": "deterministic",
+                "source_fields": [f"source_annotations.bbox_geometry.classes.{class_name}.dominant_region"],
+            }
+        )
+    return facts
+
+
 def _caption_instruction_source_annotations_from_row(
     row: Mapping[str, Any],
     labelmap: Sequence[str],
 ) -> Dict[str, Any]:
+    has_label_source = bool(row.get("label_source_present"))
+    if "label_source_present" not in row and "label_lines" in row:
+        # Older tests and manifests only carried the already-loaded label lines.
+        # Treat that as explicit label evidence rather than a missing label file.
+        has_label_source = True
     raw_lines = [str(line or "").strip() for line in (row.get("label_lines") or []) if str(line or "").strip()]
-    annotations: List[Dict[str, Any]] = []
+    bbox_instances: List[Dict[str, Any]] = []
     for index, line in enumerate(raw_lines, start=1):
         parts = line.split()
         if len(parts) < 5:
@@ -20363,7 +20550,7 @@ def _caption_instruction_source_annotations_from_row(
             bbox = [float(value) for value in parts[1:5]]
         except (TypeError, ValueError, OverflowError):
             continue
-        annotations.append(
+        bbox_instances.append(
             {
                 "annotation_id": f"label_{index:04d}",
                 "class_index": class_idx,
@@ -20373,13 +20560,80 @@ def _caption_instruction_source_annotations_from_row(
             }
         )
     counts = _qwen_caption_label_counts_from_lines(raw_lines, labelmap)
+    visible_classes = sorted((str(label) for label, count in counts.items() if int(count or 0) > 0), key=str.lower)
+    image_width_raw = row.get("image_width")
+    image_height_raw = row.get("image_height")
+    try:
+        image_width = int(image_width_raw) if image_width_raw is not None else None
+    except (TypeError, ValueError, OverflowError):
+        image_width = None
+    try:
+        image_height = int(image_height_raw) if image_height_raw is not None else None
+    except (TypeError, ValueError, OverflowError):
+        image_height = None
+    bbox_geometry = _caption_instruction_bbox_geometry(
+        bbox_instances,
+        image_width=image_width,
+        image_height=image_height,
+    )
+    spatial_facts = _caption_instruction_spatial_facts(bbox_geometry)
+    label_source = str(row.get("label_source") or ("label_file" if has_label_source else "missing_label_file")).strip()
+    if not has_label_source:
+        status = "missing_label_file"
+    elif bbox_instances:
+        status = "label_file_present"
+    else:
+        status = "empty_label_file"
+    uncertainty = []
+    if not has_label_source:
+        uncertainty.append(
+            {
+                "type": "missing_source_annotations",
+                "source": "annotation_workflow",
+                "message": "No source label file was available for this image.",
+            }
+        )
     return {
         "format": CAPTION_INSTRUCTION_SOURCE_ANNOTATIONS_FORMAT,
-        "status": "labeled_with_boxes" if annotations else "no_labeled_boxes",
+        "status": status,
+        "label_source_present": has_label_source,
         "object_counts": counts,
-        "annotations": annotations,
+        "visible_classes": visible_classes,
+        "bbox_instances": bbox_instances,
+        "annotations": bbox_instances,
+        "bbox_geometry": bbox_geometry,
+        "spatial_facts": spatial_facts,
+        "uncertainty": uncertainty,
+        "field_provenance": {
+            "object_counts": {
+                "source": label_source if has_label_source else "missing_label_file",
+                "derived_by": "count_boxes_by_class",
+            },
+            "visible_classes": {
+                "source": "derived",
+                "source_fields": ["source_annotations.object_counts"],
+                "derived_by": "positive_count_classes",
+            },
+            "bbox_instances": {
+                "source": label_source if has_label_source else "missing_label_file",
+            },
+            "bbox_geometry": {
+                "source": "derived",
+                "source_fields": ["source_annotations.bbox_instances"],
+                "derived_by": "coarse_bbox_geometry",
+            },
+            "spatial_facts": {
+                "source": "derived",
+                "source_fields": ["source_annotations.bbox_geometry"],
+                "derived_by": "deterministic_geometry_rules",
+            },
+            "uncertainty": {
+                "source": "annotation_workflow",
+                "empty_means": "no explicit uncertainty signal was provided",
+            },
+        },
         "provenance": {
-            "source": "dataset_manifest_label_lines",
+            "source": label_source,
             "note": "Generated language rows are not source annotations.",
         },
     }
@@ -20388,12 +20642,15 @@ def _caption_instruction_source_annotations_from_row(
 def _caption_instruction_deterministic_qa_pairs(
     image_name: str,
     source_annotations: Mapping[str, Any],
+    labelmap: Sequence[str],
 ) -> List[Dict[str, Any]]:
     counts = source_annotations.get("object_counts") if isinstance(source_annotations, Mapping) else {}
     if not isinstance(counts, Mapping):
         return []
+    if str(source_annotations.get("status") or "").strip() == "missing_label_file":
+        return []
     rows: List[Dict[str, Any]] = []
-    positive_counts = []
+    positive_counts: List[Tuple[str, int]] = []
     for label, count in counts.items():
         label_name = str(label or "").strip()
         if not label_name:
@@ -20402,32 +20659,113 @@ def _caption_instruction_deterministic_qa_pairs(
             count_value = int(count or 0)
         except (TypeError, ValueError, OverflowError):
             continue
-        positive_counts.append((label_name, count_value))
-    positive_counts = [(label, count) for label, count in positive_counts if count > 0]
-    if not positive_counts:
-        return rows
-    labels = ", ".join(label for label, _count in sorted(positive_counts, key=lambda item: item[0].lower()))
+        if count_value > 0:
+            positive_counts.append((label_name, count_value))
+    sorted_counts = sorted(positive_counts, key=lambda item: item[0].lower())
+    object_counts = {label: count for label, count in sorted_counts}
+    visible_classes = list(source_annotations.get("visible_classes") or [label for label, _count in sorted_counts])
+    visible_classes = sorted({str(label) for label in visible_classes if str(label).strip()}, key=str.lower)
     rows.append(
         {
             "qa_id": f"{image_name}__metadata_classes",
             "question": "Which labeled object classes are present in this image?",
-            "answer": labels,
-            "row_type": "deterministic_metadata_qa",
-            "answer_source": "source_annotations",
+            "answer": _caption_instruction_json_answer({"visible_classes": visible_classes}),
+            "row_type": "deterministic_class_list",
+            "answer_format": "visible_class_json",
+            "answer_source": "source_annotations.visible_classes",
+            "source_fields": ["source_annotations.visible_classes"],
+            "validated_against": ["source_annotations.object_counts"],
+            "validation_status": "machine_validated",
+            "review_status": "machine_validated",
         }
-    )
-    count_answer = "; ".join(
-        f"{label}: {count}" for label, count in sorted(positive_counts, key=lambda item: item[0].lower())
     )
     rows.append(
         {
-            "qa_id": f"{image_name}__metadata_counts",
-            "question": "How many labeled objects are present for each class in this image?",
-            "answer": count_answer,
-            "row_type": "deterministic_metadata_qa",
-            "answer_source": "source_annotations",
+            "qa_id": f"{image_name}__metadata_object_counts",
+            "question": "Return the labeled object counts for this image as JSON.",
+            "answer": _caption_instruction_json_answer({"object_counts": object_counts}),
+            "row_type": "deterministic_object_count_schema",
+            "answer_format": "object_count_json",
+            "answer_source": "source_annotations.object_counts",
+            "source_fields": ["source_annotations.object_counts"],
+            "validated_against": ["source_annotations.object_counts"],
+            "validation_status": "machine_validated",
+            "review_status": "machine_validated",
         }
     )
+    for label, count in sorted_counts:
+        display = _caption_instruction_question_class_name(label)
+        rows.append(
+            {
+                "qa_id": f"{image_name}__count_{re.sub(r'[^a-z0-9]+', '_', label.lower()).strip('_')}",
+                "question": f"How many {display} objects are visible?",
+                "answer": _caption_instruction_json_answer({"object_counts": {label: count}}),
+                "row_type": "deterministic_count",
+                "answer_format": "object_count_json",
+                "answer_source": f"source_annotations.object_counts.{label}",
+                "source_fields": [f"source_annotations.object_counts.{label}"],
+                "validated_against": ["source_annotations.object_counts"],
+                "validation_status": "machine_validated",
+                "review_status": "machine_validated",
+            }
+        )
+        rows.append(
+            {
+                "qa_id": f"{image_name}__presence_{re.sub(r'[^a-z0-9]+', '_', label.lower()).strip('_')}",
+                "question": f"Is there at least one {display} object in this image?",
+                "answer": _caption_instruction_json_answer({"presence": {label: True}}),
+                "row_type": "deterministic_presence",
+                "answer_format": "boolean_json",
+                "answer_source": f"source_annotations.object_counts.{label}",
+                "source_fields": [f"source_annotations.object_counts.{label}"],
+                "validated_against": ["source_annotations.object_counts"],
+                "validation_status": "machine_validated",
+                "review_status": "machine_validated",
+            }
+        )
+    present_labels = {label for label, _count in sorted_counts}
+    absent_labels = [
+        str(label).strip()
+        for label in labelmap
+        if str(label).strip() and str(label).strip() not in present_labels
+    ]
+    for label in sorted(absent_labels, key=str.lower)[:5]:
+        display = _caption_instruction_question_class_name(label)
+        rows.append(
+            {
+                "qa_id": f"{image_name}__negative_presence_{re.sub(r'[^a-z0-9]+', '_', label.lower()).strip('_')}",
+                "question": f"Are any {display} objects visible in this image?",
+                "answer": _caption_instruction_json_answer({"presence": {label: False}}),
+                "row_type": "deterministic_negative_presence",
+                "answer_format": "boolean_json",
+                "answer_source": f"source_annotations.object_counts.{label}",
+                "source_fields": ["source_annotations.object_counts"],
+                "validated_against": ["source_annotations.object_counts"],
+                "validation_status": "machine_validated",
+                "review_status": "machine_validated",
+            }
+        )
+    for index, fact in enumerate(source_annotations.get("spatial_facts") or [], start=1):
+        if not isinstance(fact, Mapping):
+            continue
+        class_name = str(fact.get("class_name") or "").strip()
+        fact_text = str(fact.get("fact") or "").strip()
+        if not class_name or not fact_text:
+            continue
+        rows.append(
+            {
+                "qa_id": f"{image_name}__spatial_{index:04d}",
+                "question": f"Where are the { _caption_instruction_question_class_name(class_name) } objects concentrated?",
+                "answer": _caption_instruction_json_answer({"spatial_fact": fact_text}),
+                "row_type": "deterministic_spatial",
+                "answer_format": "spatial_fact_json",
+                "answer_source": "source_annotations.spatial_facts",
+                "source_fields": list(fact.get("source_fields") or ["source_annotations.spatial_facts"]),
+                "validated_against": ["source_annotations.bbox_geometry"],
+                "validation_status": "machine_validated",
+                "review_status": "machine_validated",
+            }
+        )
     return rows
 
 
@@ -20447,10 +20785,18 @@ def _caption_instruction_export_settings(options: Optional[Mapping[str, Any]] = 
             return False
         return default
 
+    qa_mix = str(options.get("qa_mix") or "balanced").strip().lower()
+    if qa_mix not in {"balanced", "scene", "object", "caption"}:
+        qa_mix = "balanced"
+    answer_format = str(options.get("answer_format") or "natural").strip().lower()
+    if answer_format not in {"natural", "json"}:
+        answer_format = "natural"
     return {
         "include_caption0_in_training": _as_bool("include_caption0_in_training", True),
         "include_generated_qa_in_training": _as_bool("include_generated_qa_in_training", True),
         "include_deterministic_metadata_qa": _as_bool("include_deterministic_metadata_qa", False),
+        "qa_mix": qa_mix,
+        "answer_format": answer_format,
     }
 
 
@@ -20462,19 +20808,95 @@ def _caption_instruction_training_row(
     row_type: str,
     answer_source: str,
     qa_id: str,
+    split: Optional[str] = None,
+    answer_format: Optional[str] = None,
+    validation_status: Optional[str] = None,
+    review_status: Optional[str] = None,
+    source_fields: Optional[Sequence[str]] = None,
+    validated_against: Optional[Sequence[str]] = None,
     metadata: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
+    row_metadata = {
+        "qa_id": qa_id,
+        "row_type": row_type,
+        "answer_source": answer_source,
+        **(dict(metadata) if isinstance(metadata, Mapping) else {}),
+    }
+    if split:
+        row_metadata["split"] = split
+    if answer_format:
+        row_metadata["answer_format"] = answer_format
+    if validation_status:
+        row_metadata["validation_status"] = validation_status
+    if review_status:
+        row_metadata["review_status"] = review_status
+    if source_fields:
+        row_metadata["source_fields"] = [str(field) for field in source_fields if str(field).strip()]
+    if validated_against:
+        row_metadata["validated_against"] = [str(field) for field in validated_against if str(field).strip()]
     return {
         "image_path": image_name,
         "question": question,
         "answer": answer,
-        "metadata": {
-            "qa_id": qa_id,
-            "row_type": row_type,
-            "answer_source": answer_source,
-            **(dict(metadata) if isinstance(metadata, Mapping) else {}),
-        },
+        "metadata": row_metadata,
     }
+
+
+_CAPTION_INSTRUCTION_UNAVAILABLE_CONTEXT_RE = re.compile(
+    r"\b(identity|identify|license plate|plate number|age|gender|ethnicity|intent|intention|why)\b",
+    flags=re.IGNORECASE,
+)
+_CAPTION_INSTRUCTION_STRUCTURED_CLAIM_RE = re.compile(
+    r"\b(how many|count|counts|which .*classes|what .*classes|visible classes|is there|are there any|uncertain|uncertainty)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _caption_instruction_generated_pair_for_archive(
+    pair: Mapping[str, Any],
+    *,
+    source_annotations: Mapping[str, Any],
+) -> Dict[str, Any]:
+    public = _dataset_caption_instruction_record_public(pair)
+    question = str(public.get("question") or "").strip()
+    answer = str(public.get("answer") or "").strip()
+    metadata = dict(public.get("metadata") or {})
+    validation = dict(public.get("validation") or {})
+    reasons: List[str] = []
+    if not question or not answer:
+        reasons.append("missing_question_or_answer")
+    if _CAPTION_INSTRUCTION_UNAVAILABLE_CONTEXT_RE.search(f"{question} {answer}"):
+        reasons.append("unavailable_or_sensitive_context")
+    source_status = str(source_annotations.get("status") or "").strip()
+    if _CAPTION_INSTRUCTION_STRUCTURED_CLAIM_RE.search(f"{question} {answer}"):
+        reasons.append("structured_claim_requires_deterministic_row")
+    incoming_status = str(validation.get("status") or public.get("validation_status") or "").strip().lower()
+    if incoming_status in {"rejected", "error", "failed"}:
+        reasons.append("upstream_validation_rejected")
+    validation_status = "rejected" if reasons else "accepted"
+    validated_against = list(metadata.get("validated_against") or public.get("validated_against") or [])
+    if not validated_against:
+        validated_against = ["image", "language_annotations.caption0"]
+        if source_status != "missing_label_file":
+            validated_against.append("source_annotations")
+    out = {
+        **public,
+        "qa_id": str(public.get("id") or public.get("qa_id") or "").strip(),
+        "row_type": str(public.get("row_type") or "generated_qa").strip() or "generated_qa",
+        "answer_source": str(public.get("answer_source") or "vlm_generated").strip() or "vlm_generated",
+        "validated_against": [str(item) for item in validated_against if str(item).strip()],
+        "validation_status": validation_status,
+        "review_status": str(public.get("review_status") or metadata.get("review_status") or "unreviewed").strip()
+        or "unreviewed",
+        "rejection_reasons": reasons,
+    }
+    out["metadata"] = metadata
+    out["validation"] = {
+        **validation,
+        "status": validation_status,
+        "rejection_reasons": reasons,
+    }
+    return out
 
 
 def _dataset_caption_instruction_archive(
@@ -20556,6 +20978,22 @@ def _dataset_caption_instruction_archive(
         if not image_path or not question or not answer:
             rejections.append({"reason": "missing_required_field", "row": row})
             return
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), Mapping) else {}
+        answer_format = str(metadata.get("answer_format") or "").strip().lower()
+        row_type = str(metadata.get("row_type") or "").strip().lower()
+        if answer_format.endswith("json") or row_type.startswith("deterministic_"):
+            try:
+                json.loads(answer)
+            except Exception:
+                rejections.append(
+                    {
+                        "reason": "invalid_json_answer",
+                        "image_path": image_path,
+                        "question": question,
+                        "row_type": row_type,
+                    }
+                )
+                return
         key = (image_path, question)
         if key in seen_image_question:
             rejections.append({"reason": "duplicate_image_question", "image_path": image_path, "question": question})
@@ -20581,27 +21019,44 @@ def _dataset_caption_instruction_archive(
             )
         )
         caption0 = captions[0] if captions else None
-        generated_pairs = instruction_by_key.get(image_key, [])
+        source_annotations = (
+            row_data.get("source_annotations") if isinstance(row_data.get("source_annotations"), Mapping) else {}
+        )
+        generated_pairs = [
+            _caption_instruction_generated_pair_for_archive(pair, source_annotations=source_annotations)
+            for pair in instruction_by_key.get(image_key, [])
+        ]
         deterministic_pairs = (
             _caption_instruction_deterministic_qa_pairs(
                 image_name,
-                row_data.get("source_annotations") if isinstance(row_data.get("source_annotations"), Mapping) else {},
+                source_annotations,
+                labelmap,
             )
             if bool(settings.get("include_deterministic_metadata_qa"))
             else []
         )
         image_entry = {
+            "image_id": Path(image_name).stem,
+            "image_path": image_name,
             "image": image_name,
             "image_name": image_name,
             "image_key": image_key,
             "split": row_data.get("split"),
-            "source_annotations": row_data.get("source_annotations"),
+            "source_annotations": source_annotations,
             "language_annotations": {
                 "caption0": {
                     "caption_id": str(caption0.get("id") or "").strip(),
+                    "qa_id": str(caption0.get("id") or f"{image_name}__caption0").strip(),
+                    "row_type": "caption0",
+                    "question": "Describe this image in detail.",
                     "caption": str(caption0.get("caption") or "").strip(),
+                    "answer": str(caption0.get("caption") or "").strip(),
+                    "answer_source": str(caption0.get("source") or "caption_record").strip() or "caption_record",
                     "source": str(caption0.get("source") or "").strip(),
                     "metadata": dict(caption0.get("metadata") or {}),
+                    "validated_against": ["image", "source_annotations"],
+                    "validation_status": "accepted",
+                    "review_status": "unreviewed",
                 }
                 if caption0
                 else None,
@@ -20618,6 +21073,11 @@ def _dataset_caption_instruction_archive(
                     row_type="caption0",
                     answer_source=str(caption0.get("source") or "caption_record").strip() or "caption_record",
                     qa_id=str(caption0.get("id") or f"{image_name}__caption0").strip(),
+                    split=str(row_data.get("split") or "").strip() or None,
+                    answer_format="natural",
+                    validation_status="accepted",
+                    review_status="unreviewed",
+                    validated_against=["image", "source_annotations"],
                     metadata={
                         "caption_id": str(caption0.get("id") or "").strip(),
                         "source_archive": CAPTION_INSTRUCTION_ARCHIVE_FORMAT,
@@ -20626,6 +21086,16 @@ def _dataset_caption_instruction_archive(
             )
         if bool(settings.get("include_generated_qa_in_training")):
             for pair in generated_pairs:
+                if str(pair.get("validation_status") or "").strip() != "accepted":
+                    rejections.append(
+                        {
+                            "reason": "generated_qa_validation_rejected",
+                            "image_path": image_name,
+                            "question": str(pair.get("question") or "").strip(),
+                            "rejection_reasons": list(pair.get("rejection_reasons") or []),
+                        }
+                    )
+                    continue
                 _append_training_row(
                     _caption_instruction_training_row(
                         image_name=image_name,
@@ -20633,7 +21103,12 @@ def _dataset_caption_instruction_archive(
                         answer=str(pair.get("answer") or "").strip(),
                         row_type=str(pair.get("row_type") or "generated_qa").strip() or "generated_qa",
                         answer_source=str(pair.get("answer_source") or "vlm_generated").strip() or "vlm_generated",
-                        qa_id=str(pair.get("id") or f"{image_name}__generated_qa").strip(),
+                        qa_id=str(pair.get("qa_id") or pair.get("id") or f"{image_name}__generated_qa").strip(),
+                        split=str(row_data.get("split") or "").strip() or None,
+                        answer_format=str(pair.get("answer_format") or "natural").strip() or "natural",
+                        validation_status=str(pair.get("validation_status") or "").strip() or None,
+                        review_status=str(pair.get("review_status") or "").strip() or None,
+                        validated_against=list(pair.get("validated_against") or []),
                         metadata={
                             "caption_id": str(pair.get("caption_id") or "").strip(),
                             "source_archive": CAPTION_INSTRUCTION_ARCHIVE_FORMAT,
@@ -20647,20 +21122,67 @@ def _dataset_caption_instruction_archive(
                     image_name=image_name,
                     question=str(pair.get("question") or "").strip(),
                     answer=str(pair.get("answer") or "").strip(),
-                    row_type="deterministic_metadata_qa",
-                    answer_source="source_annotations",
+                    row_type=str(pair.get("row_type") or "deterministic_metadata_qa").strip()
+                    or "deterministic_metadata_qa",
+                    answer_source=str(pair.get("answer_source") or "source_annotations").strip()
+                    or "source_annotations",
                     qa_id=str(pair.get("qa_id") or f"{image_name}__metadata_qa").strip(),
+                    split=str(row_data.get("split") or "").strip() or None,
+                    answer_format=str(pair.get("answer_format") or "json").strip() or "json",
+                    validation_status=str(pair.get("validation_status") or "machine_validated").strip(),
+                    review_status=str(pair.get("review_status") or "machine_validated").strip(),
+                    source_fields=list(pair.get("source_fields") or []),
+                    validated_against=list(pair.get("validated_against") or []),
                     metadata={"source_archive": CAPTION_INSTRUCTION_ARCHIVE_FORMAT},
                 )
             )
-        if caption0 or generated_pairs or deterministic_pairs:
-            images.append(image_entry)
+        images.append(image_entry)
+    qa_type_distribution = Counter(
+        str((row.get("metadata") or {}).get("row_type") or "unknown").strip() or "unknown"
+        for row in training_rows
+        if isinstance(row, Mapping)
+    )
+    split_image_counts = Counter(
+        str(image.get("split") or "unsplit").strip() or "unsplit"
+        for image in images
+        if isinstance(image, Mapping)
+    )
+    split_training_row_counts = Counter(
+        str(((row.get("metadata") or {}).get("split") or "unsplit")).strip() or "unsplit"
+        for row in training_rows
+        if isinstance(row, Mapping)
+    )
+    source_annotation_count = sum(
+        len((image.get("source_annotations") or {}).get("bbox_instances") or [])
+        for image in images
+        if isinstance(image.get("source_annotations"), Mapping)
+    )
+    rejection_reason_counts = Counter(
+        str(rejection.get("reason") or "unknown").strip() or "unknown"
+        for rejection in rejections
+        if isinstance(rejection, Mapping)
+    )
+    provenance_summary = Counter()
+    for image in images:
+        source_annotations = image.get("source_annotations") if isinstance(image, Mapping) else {}
+        field_provenance = (
+            source_annotations.get("field_provenance") if isinstance(source_annotations, Mapping) else {}
+        )
+        if not isinstance(field_provenance, Mapping):
+            continue
+        for field_name, provenance in field_provenance.items():
+            if isinstance(provenance, Mapping):
+                source = str(provenance.get("source") or "unknown").strip() or "unknown"
+                provenance_summary[f"{field_name}:{source}"] += 1
     return {
         "format": CAPTION_INSTRUCTION_ARCHIVE_FORMAT,
+        "archive_schema_version": CAPTION_INSTRUCTION_ARCHIVE_FORMAT,
+        "flattened_training_rows_format": CAPTION_INSTRUCTION_TRAINING_ROWS_FORMAT,
         "dataset_id": str(dataset_id or "").strip() or None,
         "exported_at": exported_at,
         "settings": dict(settings),
         "image_count": len(images),
+        "source_annotation_count": source_annotation_count,
         "caption0_count": sum(1 for image in images if (image.get("language_annotations") or {}).get("caption0")),
         "generated_qa_pair_count": sum(
             len((image.get("language_annotations") or {}).get("generated_qa_pairs") or [])
@@ -20672,9 +21194,15 @@ def _dataset_caption_instruction_archive(
         ),
         "training_row_count": len(training_rows),
         "rejected_training_row_count": len(rejections),
+        "qa_type_distribution": dict(sorted(qa_type_distribution.items())),
+        "split_image_counts": dict(sorted(split_image_counts.items())),
+        "split_training_row_counts": dict(sorted(split_training_row_counts.items())),
+        "rejection_reason_counts": dict(sorted(rejection_reason_counts.items())),
+        "provenance_summary": dict(sorted(provenance_summary.items())),
         "rejections": rejections,
         "images": images,
         "training_rows": training_rows,
+        "flattened_training_rows": training_rows,
     }
 
 
@@ -20706,8 +21234,14 @@ def _qwen_caption_dataset_generated_qa_pairs_from_row(row: Mapping[str, Any]) ->
             "id": str(raw_pair.get("id") or raw_pair.get("qa_id") or f"generated_qa_{index:04d}").strip(),
             "question": question,
             "answer": answer,
-            "row_type": "generated_qa",
+            "row_type": str(raw_pair.get("row_type") or "generated_qa").strip() or "generated_qa",
             "answer_source": str(raw_pair.get("answer_source") or "vlm_generated").strip() or "vlm_generated",
+            "answer_format": str(raw_pair.get("answer_format") or "").strip(),
+            "validated_against": list(raw_pair.get("validated_against") or [])
+            if isinstance(raw_pair.get("validated_against"), list)
+            else [],
+            "validation_status": str(raw_pair.get("validation_status") or "").strip(),
+            "review_status": str(raw_pair.get("review_status") or "").strip(),
             "metadata": dict(raw_pair.get("metadata")) if isinstance(raw_pair.get("metadata"), Mapping) else {},
             "validation": dict(raw_pair.get("validation")) if isinstance(raw_pair.get("validation"), Mapping) else {},
         }
@@ -22882,6 +23416,8 @@ def _run_qwen_caption_dataset_job(job: QwenCaptionDatasetJob, payload: QwenCapti
             cmd.append("--instruction-dataset")
         if int(payload.subcaptions_per_image or 0) > 0:
             cmd.extend(["--subcaptions-per-image", str(int(payload.subcaptions_per_image or 0))])
+        cmd.extend(["--qa-mix", str(payload.qa_mix or "balanced")])
+        cmd.extend(["--answer-format", str(payload.answer_format or "natural")])
         if not bool(payload.include_source_annotations_in_generator_context):
             cmd.append("--no-source-annotations-in-generator-context")
         if not bool(payload.strict_grounding):

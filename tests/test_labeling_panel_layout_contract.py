@@ -270,6 +270,10 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     assert "qwenCaptionDownloadVlmJsonl" in html
     assert "qwenCaptionSubcaptionsPerImage" in html
     assert 'id="qwenCaptionSubcaptionsPerImage" min="0" max="20" step="1" value="8"' in html
+    assert "qwenCaptionQaMix" in html
+    assert '<option value="balanced" selected>Balanced</option>' in html
+    assert "qwenCaptionAnswerFormat" in html
+    assert '<option value="natural" selected>Natural text</option>' in html
     assert "qwenCaptionIncludeCaption0Training" in html
     assert "qwenCaptionIncludeGeneratedQaTraining" in html
     assert "qwenCaptionIncludeDeterministicMetadataQa" in html

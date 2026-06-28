@@ -681,7 +681,7 @@ class QwenCaptionDatasetJobRequest(BaseModel):
     include_source_annotations_in_generator_context: Optional[bool] = True
     strict_grounding: Optional[bool] = True
     qa_mix: Optional[str] = "balanced"
-    answer_format: Optional[Literal["natural", "json"]] = "natural"
+    answer_format: Optional[str] = "natural"
     preview_only: Optional[bool] = False
     resume: Optional[bool] = True
     attempts: Optional[int] = 2
@@ -1086,7 +1086,7 @@ class QwenCaptionDatasetJobRequest(BaseModel):
             subcaptions = 0
         values["subcaptions_per_image"] = max(0, min(subcaptions, 20))
         qa_mix = str(values.get("qa_mix") or "balanced").strip().lower()
-        values["qa_mix"] = qa_mix or "balanced"
+        values["qa_mix"] = qa_mix if qa_mix in {"balanced", "scene", "object", "caption"} else "balanced"
         answer_format = str(values.get("answer_format") or "natural").strip().lower()
         values["answer_format"] = answer_format if answer_format in {"natural", "json"} else "natural"
         values["preview_only"] = _coerce_bool(values.get("preview_only"), False)

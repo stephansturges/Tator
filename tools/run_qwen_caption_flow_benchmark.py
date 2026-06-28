@@ -116,6 +116,8 @@ RUN_SETTINGS_ARG_DEFAULTS: dict[str, Any] = {
     "instruction_max_new_tokens": None,
     "include_source_annotations_in_generator_context": True,
     "strict_grounding": True,
+    "qa_mix": "balanced",
+    "answer_format": "natural",
 }
 
 
@@ -1883,7 +1885,13 @@ def _extract_json_payload(text: str) -> Any:
         return None
 
 
-def _normalize_generated_qa_pairs(payload: Any, *, requested: int, case: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _normalize_generated_qa_pairs(
+    payload: Any,
+    *,
+    requested: int,
+    case: Mapping[str, Any],
+    answer_format: str = "natural",
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if isinstance(payload, Mapping):
         raw_pairs = payload.get("qa_pairs")
         if raw_pairs is None:
@@ -1903,7 +1911,11 @@ def _normalize_generated_qa_pairs(payload: Any, *, requested: int, case: Mapping
             rejections.append({"index": index, "reason": "pair_not_object"})
             continue
         question = re.sub(r"\s+", " ", str(raw_pair.get("question") or "").strip())
-        answer = re.sub(r"\s+", " ", str(raw_pair.get("answer") or "").strip())
+        raw_answer = raw_pair.get("answer")
+        if isinstance(raw_answer, (dict, list)):
+            answer = json.dumps(raw_answer, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        else:
+            answer = re.sub(r"\s+", " ", str(raw_answer or "").strip())
         if not question or not answer:
             rejections.append({"index": index, "reason": "missing_question_or_answer"})
             continue
@@ -1912,12 +1924,26 @@ def _normalize_generated_qa_pairs(payload: Any, *, requested: int, case: Mapping
             rejections.append({"index": index, "reason": "duplicate_question", "question": question})
             continue
         seen_questions.add(question_key)
+        row_answer_format = str(raw_pair.get("answer_format") or answer_format or "natural").strip().lower()
+        if row_answer_format not in {"natural", "json"}:
+            row_answer_format = "natural"
+        if row_answer_format == "json":
+            try:
+                json.loads(answer)
+            except Exception:
+                rejections.append({"index": index, "reason": "invalid_json_answer", "question": question})
+                continue
         pairs.append(
             {
                 "qa_id": f"{case_id}__generated_qa_{len(pairs) + 1:04d}",
                 "question": question,
                 "answer": answer,
+                "row_type": str(raw_pair.get("row_type") or "generated_qa").strip() or "generated_qa",
+                "answer_format": row_answer_format,
                 "answer_source": "vlm_generated",
+                "validated_against": ["image", "language_annotations.caption0", "source_annotations"],
+                "validation_status": "candidate",
+                "review_status": "unreviewed",
                 "metadata": {
                     "case_id": case_id,
                     "generator": "qwen_caption_instruction_pass",
@@ -1983,12 +2009,35 @@ def generate_instruction_qa_pairs(
         if bool(getattr(args, "strict_grounding", True))
         else "Prefer visual grounding and avoid unsupported facts."
     )
+    qa_mix = str(getattr(args, "qa_mix", "balanced") or "balanced").strip().lower()
+    if qa_mix not in {"balanced", "scene", "object", "caption"}:
+        qa_mix = "balanced"
+    mix_text = {
+        "balanced": "Use a balanced mix of scene-level, object-focused, and caption-rephrasing questions.",
+        "scene": "Prefer scene-level questions about visible setting, layout, and conditions.",
+        "object": "Prefer object-focused questions whose answers are grounded in visible objects and read-only context.",
+        "caption": "Prefer caption-rephrasing questions that produce grounded alternate descriptions.",
+    }[qa_mix]
+    answer_format = str(getattr(args, "answer_format", "natural") or "natural").strip().lower()
+    if answer_format not in {"natural", "json"}:
+        answer_format = "natural"
+    answer_shape = (
+        '{"qa_pairs":[{"question":"...","answer":{"answer":"..."},"row_type":"generated_qa","answer_format":"json"}]}'
+        if answer_format == "json"
+        else '{"qa_pairs":[{"question":"...","answer":"...","row_type":"generated_qa","answer_format":"natural"}]}'
+    )
+    format_text = (
+        'Answers must be valid JSON strings. For general visual QA, use {"answer":"..."}; '
+        "do not invent structured count or class-list JSON."
+        if answer_format == "json"
+        else "Answers must be concise natural-language facts, not JSON strings."
+    )
     prompt = (
         f"Create up to {requested} diverse visual instruction question/answer pairs for this image.\n"
-        "Return only valid JSON with this shape: "
-        '{"qa_pairs":[{"question":"...","answer":"..."}]}.\n'
+        f"Return only valid JSON with this shape: {answer_shape}.\n"
         "Questions must be image-specific and useful for training a vision-language model.\n"
-        "Answers must be concise natural-language facts, not JSON strings.\n"
+        f"{mix_text}\n"
+        f"{format_text}\n"
         "Do not mention prompts, labels, bounding boxes, coordinates, source annotations, or that counts were provided.\n"
         "Do not ask about an object that is absent or only implied by missing labels.\n"
         f"{strict_text}\n\n"
@@ -2019,7 +2068,12 @@ def generate_instruction_qa_pairs(
             chat_template_kwargs={"enable_thinking": False},
         )
         parsed = _extract_json_payload(raw)
-        pairs, rejections = _normalize_generated_qa_pairs(parsed, requested=requested, case=case)
+        pairs, rejections = _normalize_generated_qa_pairs(
+            parsed,
+            requested=requested,
+            case=case,
+            answer_format=answer_format,
+        )
         status = "ok" if pairs else "empty"
         return {
             "status": status,
@@ -2406,6 +2460,8 @@ def _run_parent_locked(args: argparse.Namespace, runner_lock: ArtifactRunnerLock
                 cmd.extend(["--subcaptions-per-image", str(args.subcaptions_per_image)])
             if getattr(args, "instruction_max_new_tokens", None) is not None:
                 cmd.extend(["--instruction-max-new-tokens", str(args.instruction_max_new_tokens)])
+            cmd.extend(["--qa-mix", str(getattr(args, "qa_mix", "balanced") or "balanced")])
+            cmd.extend(["--answer-format", str(getattr(args, "answer_format", "natural") or "natural")])
             if not bool(getattr(args, "include_source_annotations_in_generator_context", True)):
                 cmd.append("--no-source-annotations-in-generator-context")
             if not bool(getattr(args, "strict_grounding", True)):
@@ -2921,6 +2977,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional token cap for the generated QA pass. Auto scales with requested QA count.",
     )
     parser.add_argument(
+        "--qa-mix",
+        choices=("balanced", "scene", "object", "caption"),
+        default="balanced",
+        help="Generated QA mix requested from the instruction pass.",
+    )
+    parser.add_argument(
+        "--answer-format",
+        choices=("natural", "json"),
+        default="natural",
+        help="Generated QA answer format requested from the instruction pass.",
+    )
+    parser.add_argument(
         "--no-source-annotations-in-generator-context",
         dest="include_source_annotations_in_generator_context",
         action="store_false",
@@ -3020,6 +3088,12 @@ def main() -> int:
         args.subcaptions_per_image = max(0, min(int(args.subcaptions_per_image or 0), 20))
     except (TypeError, ValueError, OverflowError):
         args.subcaptions_per_image = 0
+    args.qa_mix = str(getattr(args, "qa_mix", "balanced") or "balanced").strip().lower()
+    if args.qa_mix not in {"balanced", "scene", "object", "caption"}:
+        args.qa_mix = "balanced"
+    args.answer_format = str(getattr(args, "answer_format", "natural") or "natural").strip().lower()
+    if args.answer_format not in {"natural", "json"}:
+        args.answer_format = "natural"
     if args.worker:
         if not args.case_json:
             raise SystemExit("--worker requires --case-json")

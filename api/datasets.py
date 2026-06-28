@@ -163,6 +163,8 @@ def build_datasets_router(
         include_caption0_in_training: bool = Query(True),
         include_generated_qa_in_training: bool = Query(True),
         include_deterministic_metadata_qa: bool = Query(False),
+        qa_mix: str = Query("balanced"),
+        answer_format: str = Query("natural"),
     ):
         return export_captions_fn(
             dataset_id,
@@ -170,6 +172,8 @@ def build_datasets_router(
                 "include_caption0_in_training": include_caption0_in_training,
                 "include_generated_qa_in_training": include_generated_qa_in_training,
                 "include_deterministic_metadata_qa": include_deterministic_metadata_qa,
+                "qa_mix": qa_mix,
+                "answer_format": answer_format,
             },
         )
 

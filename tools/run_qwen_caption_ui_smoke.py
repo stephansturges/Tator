@@ -41,6 +41,8 @@ CRITICAL_CONTROLS = (
     "qwenCaptionDownloadGroupedJson",
     "qwenCaptionDownloadVlmJsonl",
     "qwenCaptionSubcaptionsPerImage",
+    "qwenCaptionQaMix",
+    "qwenCaptionAnswerFormat",
     "qwenCaptionIncludeCaption0Training",
     "qwenCaptionIncludeGeneratedQaTraining",
     "qwenCaptionIncludeDeterministicMetadataQa",
@@ -229,6 +231,8 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         subcaptions_value = page.locator("#qwenCaptionSubcaptionsPerImage").input_value()
         subcaptions_min = page.locator("#qwenCaptionSubcaptionsPerImage").get_attribute("min") or ""
         subcaptions_max = page.locator("#qwenCaptionSubcaptionsPerImage").get_attribute("max") or ""
+        qa_mix_value = page.locator("#qwenCaptionQaMix").input_value()
+        answer_format_value = page.locator("#qwenCaptionAnswerFormat").input_value()
         include_caption0_checked = page.locator("#qwenCaptionIncludeCaption0Training").is_checked()
         include_generated_qa_checked = page.locator("#qwenCaptionIncludeGeneratedQaTraining").is_checked()
         include_deterministic_checked = page.locator("#qwenCaptionIncludeDeterministicMetadataQa").is_checked()
@@ -297,6 +301,8 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
             "subcaptions_value": subcaptions_value,
             "subcaptions_min": subcaptions_min,
             "subcaptions_max": subcaptions_max,
+            "qa_mix_value": qa_mix_value,
+            "answer_format_value": answer_format_value,
             "include_caption0_checked": include_caption0_checked,
             "include_generated_qa_checked": include_generated_qa_checked,
             "include_deterministic_checked": include_deterministic_checked,
@@ -339,6 +345,8 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
             subcaptions_value == "8"
             and subcaptions_min == "0"
             and subcaptions_max == "20"
+            and qa_mix_value == "balanced"
+            and answer_format_value == "natural"
             and include_caption0_checked
             and include_generated_qa_checked
             and not include_deterministic_checked
@@ -349,6 +357,8 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         subcaptions_value=subcaptions_value,
         subcaptions_min=subcaptions_min,
         subcaptions_max=subcaptions_max,
+        qa_mix_value=qa_mix_value,
+        answer_format_value=answer_format_value,
         include_caption0_checked=include_caption0_checked,
         include_generated_qa_checked=include_generated_qa_checked,
         include_deterministic_checked=include_deterministic_checked,

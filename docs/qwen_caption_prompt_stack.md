@@ -743,13 +743,18 @@ alternate captions for review and archive workflows; and VLM JSONL, with one
 normal `image_path` / `question` / `answer` row per caption for caption-only
 training. VLM JSONL answers are explicit JSON caption strings, and alternate
 caption rows receive stable question variants so downstream validators do not
-see duplicate image/question pairs. The separate instruction-dataset path keeps
-caption0, VLM-generated visual question/answer rows, optional deterministic
-metadata QA, source annotations, provenance, rejected duplicate rows, and
-flattened trainer rows in a versioned `tator_caption_instruction_archive_v1`
-archive. Generated question/answer rows are language annotations only; they are
-never written back as source annotations. Deterministic metadata QA is off by
-default and appears only when explicitly enabled.
+  see duplicate image/question pairs. The separate instruction-dataset path keeps
+  caption0, VLM-generated visual question/answer rows, optional deterministic
+  metadata QA, source annotations, provenance, rejected rows, and flattened
+  trainer rows in a versioned `tator_caption_instruction_archive_v1` archive.
+  Generated question/answer rows are language annotations only; they are never
+  written back as source annotations. Source annotations are built from real label
+  evidence into `object_counts`, `visible_classes`, `bbox_instances`,
+  `bbox_geometry`, `spatial_facts`, `uncertainty`, and field provenance.
+  Deterministic metadata QA is off by default and appears only when explicitly
+  enabled; when enabled, its answers are typed JSON rows computed from source
+  annotations, including class-list, object-count, presence, absence, and simple
+  bbox-derived spatial rows when supported.
 The backend `/captions/export` response carries the same logical grouped
 archive as a versioned `tator_caption_grouped_v1` object, in addition to the
 flat records, compatibility grouped map, caption-only training rows, instruction
@@ -767,8 +772,11 @@ is enforced, while the VLM export health line reports client-side validation
 before a training JSONL file is written. The caption-only VLM export validator
 blocks rows with missing image paths, blank questions, non-JSON answers, answers
 without exactly one `caption` key, or duplicate `image_path`/`question` pairs.
-The instruction JSONL validator blocks missing `image_path`, blank question,
-blank answer, and duplicate `image_path`/`question` rows before download.
+  The instruction JSONL validator blocks missing `image_path`, blank question,
+  blank answer, invalid JSON for JSON row types, generated QA rejected by archive
+  validation, and duplicate `image_path`/`question` rows before download. The
+  instruction panel also exposes generated QA mix and generated answer format so
+  job launch and browser exports use the same row policy.
 For detailed/windowed jobs, set-and-forget also changes the Auto value of
 **Windowed full-image compose** to `text_only`. The crop observations still come
 from visual Qwen calls; only the later full-image composition avoids resending a

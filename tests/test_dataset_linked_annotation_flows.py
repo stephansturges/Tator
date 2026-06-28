@@ -2579,6 +2579,8 @@ def test_caption_alternate_routes_append_update_export_and_delete(
         "include_caption0_in_training": True,
         "include_generated_qa_in_training": True,
         "include_deterministic_metadata_qa": False,
+        "qa_mix": "balanced",
+        "answer_format": "natural",
     }
     assert instruction_archive["training_row_count"] == 2
     assert len(export_payload["instruction_training_rows"]) == 2
@@ -2597,7 +2599,11 @@ def test_caption_alternate_routes_append_update_export_and_delete(
     deterministic_payload = deterministic_response.json()
     assert deterministic_payload["instruction_summary"]["instruction_training_row_count"] >= 0
     assert all(
-        row["metadata"]["row_type"] == "deterministic_metadata_qa"
+        str(row["metadata"]["row_type"]).startswith("deterministic_")
+        for row in deterministic_payload["instruction_training_rows"]
+    )
+    assert all(
+        json.loads(row["answer"])
         for row in deterministic_payload["instruction_training_rows"]
     )
 

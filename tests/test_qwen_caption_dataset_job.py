@@ -501,11 +501,90 @@ def test_caption_instruction_archive_separates_generated_qa_from_source_annotati
         ),
         exported_at="2026-01-01T00:00:00Z",
     )
-    assert deterministic["deterministic_metadata_qa_pair_count"] == 2
-    assert deterministic["training_row_count"] == 2
-    assert {row["metadata"]["row_type"] for row in deterministic["training_rows"]} == {
-        "deterministic_metadata_qa"
+    assert deterministic["deterministic_metadata_qa_pair_count"] == 8
+    assert deterministic["training_row_count"] == 8
+    row_types = {row["metadata"]["row_type"] for row in deterministic["training_rows"]}
+    assert {
+        "deterministic_class_list",
+        "deterministic_object_count_schema",
+        "deterministic_count",
+        "deterministic_presence",
+        "deterministic_spatial",
+    }.issubset(row_types)
+    for row in deterministic["training_rows"]:
+        assert json.loads(row["answer"])
+        assert row["metadata"]["validation_status"] == "machine_validated"
+        assert row["metadata"]["source_fields"]
+    assert deterministic["qa_type_distribution"]["deterministic_count"] == 2
+    assert deterministic["split_training_row_counts"] == {"train": 8}
+
+
+def test_caption_instruction_archive_rejects_structured_generated_qa_without_source_labels(
+    monkeypatch,
+) -> None:
+    import localinferenceapi as api
+
+    manifest = {
+        "labelmap": ["Boat", "Building"],
+        "images": [
+            {
+                "split": "train",
+                "image_relpath": "missing-label.jpg",
+                "image_name": "missing-label.jpg",
+                "label_lines": [],
+                "label_source_present": False,
+                "label_source": "missing_label_file",
+            }
+        ],
     }
+    monkeypatch.setattr(api, "_annotation_manifest_for_entry", lambda _entry: manifest)
+    captions = [
+        {
+            "id": "caption-1",
+            "image_name": "missing-label.jpg",
+            "image_key": "train/missing-label.jpg",
+            "split": "train",
+            "caption": "A caption about the scene.",
+            "source": "qwen_caption_job",
+            "is_primary": True,
+            "caption_index": 1,
+        }
+    ]
+    generated = [
+        {
+            "id": "qa-1",
+            "image_name": "missing-label.jpg",
+            "image_key": "train/missing-label.jpg",
+            "split": "train",
+            "question": "How many boats are visible?",
+            "answer": "Two boats are visible.",
+            "row_type": "generated_qa",
+            "answer_source": "vlm_generated",
+        }
+    ]
+
+    archive = api._dataset_caption_instruction_archive(
+        captions,
+        generated,
+        dataset_id="ds",
+        entry={"id": "ds"},
+        settings=api._caption_instruction_export_settings(
+            {
+                "include_caption0_in_training": False,
+                "include_generated_qa_in_training": True,
+                "include_deterministic_metadata_qa": True,
+            }
+        ),
+        exported_at="2026-01-01T00:00:00Z",
+    )
+    image = archive["images"][0]
+
+    assert image["source_annotations"]["status"] == "missing_label_file"
+    assert image["source_annotations"]["uncertainty"][0]["type"] == "missing_source_annotations"
+    assert image["language_annotations"]["generated_qa_pairs"][0]["validation_status"] == "rejected"
+    assert archive["deterministic_metadata_qa_pair_count"] == 0
+    assert archive["training_row_count"] == 0
+    assert archive["rejection_reason_counts"] == {"generated_qa_validation_rejected": 1}
 
 
 def test_caption_dataset_runner_summary_counts_completed_cases_not_attempts() -> None:

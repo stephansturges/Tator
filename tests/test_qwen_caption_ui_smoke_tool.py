@@ -36,6 +36,8 @@ def test_qwen_caption_ui_smoke_tool_covers_critical_controls() -> None:
         "qwenCaptionDownloadGroupedJson",
         "qwenCaptionDownloadVlmJsonl",
         "qwenCaptionSubcaptionsPerImage",
+        "qwenCaptionQaMix",
+        "qwenCaptionAnswerFormat",
         "qwenCaptionIncludeCaption0Training",
         "qwenCaptionIncludeGeneratedQaTraining",
         "qwenCaptionIncludeDeterministicMetadataQa",

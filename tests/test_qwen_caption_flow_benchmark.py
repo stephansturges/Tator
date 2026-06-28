@@ -171,6 +171,32 @@ def test_instruction_qa_normalizer_limits_rows_and_rejects_duplicates() -> None:
     ]
 
 
+def test_instruction_qa_normalizer_serializes_json_answers_and_rejects_invalid_json() -> None:
+    pairs, rejections = bench._normalize_generated_qa_pairs(
+        {
+            "qa_pairs": [
+                {
+                    "question": "What is the general setting?",
+                    "answer": {"answer": "A waterfront scene."},
+                    "answer_format": "json",
+                },
+                {
+                    "question": "What is invalid?",
+                    "answer": "not json",
+                    "answer_format": "json",
+                },
+            ]
+        },
+        requested=2,
+        case={"case_id": "case-json"},
+        answer_format="json",
+    )
+
+    assert pairs[0]["answer"] == '{"answer":"A waterfront scene."}'
+    assert pairs[0]["answer_format"] == "json"
+    assert [item["reason"] for item in rejections] == ["invalid_json_answer"]
+
+
 def test_instruction_qa_token_budget_scales_and_respects_override() -> None:
     assert bench._instruction_qa_max_new_tokens(
         SimpleNamespace(instruction_max_new_tokens=None),

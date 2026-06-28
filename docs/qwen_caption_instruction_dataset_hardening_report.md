@@ -26,6 +26,9 @@ row before training.
   - source annotation counts can be passed to the generator as read-only context.
   - strict grounding is enabled by default.
   - generated QA per image is clamped to `0..20`; the default is `8`.
+  - generated QA mix is explicit: balanced, scene-level, object-focused, or
+    caption-variant oriented.
+  - generated answer format is explicit: natural text or JSON.
 - The backend exports:
   - `instruction_training_rows`: flattened `image_path` / `question` / `answer`
     rows for training.
@@ -38,10 +41,16 @@ row before training.
 ## Safety And Separation
 
 - Generated question/answer rows are stored as language annotations only.
-- Source annotations are derived from dataset manifest label lines and remain
-  separate from generated text.
+- Source annotations are derived from real label evidence and remain separate
+  from generated text. The archive records object counts, visible classes, bbox
+  instances, coarse bbox geometry, deterministic spatial facts, uncertainty, and
+  field provenance.
 - Deterministic metadata QA is only built from real source labels and is only
-  exported when explicitly enabled.
+  exported when explicitly enabled. Its answers are typed JSON rows for class
+  lists, object-count schemas, per-class counts, presence, negative presence, and
+  simple bbox-derived spatial facts when supported.
+- Generated QA candidates remain in the archive even when rejected, but only
+  accepted generated rows are flattened into trainer rows.
 - Exact duplicate image/question rows are rejected from instruction JSONL.
 - The UI blocks malformed instruction JSONL downloads before writing a file.
 
@@ -50,6 +59,8 @@ row before training.
 - Added a compact instruction-dataset panel under the batch caption controls.
 - Added explicit controls for:
   - generated QA rows per image
+  - generated QA mix
+  - generated answer format
   - include caption0
   - include generated QA
   - include deterministic metadata QA
@@ -72,8 +83,14 @@ row before training.
   instruction dataset mode is enabled and `subcaptions_per_image > 0`.
 - Generated QA rows are parsed from JSON, structurally validated, deduplicated by
   question within the image, and persisted as instruction records.
+- The export layer validates generated QA again before flattening and rejects
+  unsupported structured claims when trusted source labels are missing.
+- The instruction archive reports row-type distribution, split image counts,
+  split training-row counts, rejection reason counts, and source-field
+  provenance summary.
 - Export options let callers include or exclude caption0, generated QA, and
-  deterministic metadata QA without altering saved data.
+  deterministic metadata QA without altering saved data, while preserving the
+  requested generated-QA mix and answer format.
 
 ## Validation Completed
 
@@ -82,18 +99,24 @@ row before training.
   - `./.venv-macos/bin/python -m py_compile tools/run_qwen_caption_ui_smoke.py`
 - JavaScript syntax:
   - `node --check ybat-master/ybat.js`
-- Backend and runner tests:
-  - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py tests/test_qwen_caption_flow_benchmark.py -q`
-- API export test:
-  - `./.venv-macos/bin/python -m pytest tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete -q`
-- UI contract and smoke-tool tests:
-  - `./.venv-macos/bin/python -m pytest tests/test_labeling_panel_layout_contract.py tests/test_qwen_caption_ui_smoke_tool.py -q`
+- Focused instruction-dataset, export, and UI contract tests:
+  - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py tests/test_qwen_caption_flow_benchmark.py tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete tests/test_labeling_panel_layout_contract.py tests/test_qwen_caption_ui_smoke_tool.py -q`
+  - Result: 162 passed.
+- Prompt, progress, launcher, and unattended contracts:
+  - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_prompt.py tests/test_qwen_progress.py tests/test_macos_backend_launcher_contract.py -q`
+  - Result: 140 passed.
+  - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_operation_audit.py tests/test_qwen_caption_soak_audit.py tests/test_qwen_caption_soak_certification.py tests/test_qwen_caption_soak_drill.py -q`
+  - Result: 90 passed.
+  - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_soak_preflight.py tests/test_qwen_caption_soak_supervisor.py tests/test_qwen_caption_soak_watchdog.py tests/test_qwen_caption_unattended_launcher.py -q`
+  - Result: 135 passed.
 - Rendered browser smoke:
   - `./.venv-macos/bin/python tools/run_qwen_caption_ui_smoke.py --base-url http://127.0.0.1:8000 --out-json tmp/qwen_caption_ui_smoke_report.json --screenshot tmp/qwen_caption_ui_smoke.png`
-  - Result: `ok=true`, 29 readiness checks passing, no console errors, no failed
-    requests, no bad HTTP responses, no clipped caption action buttons.
+  - Result: `ok=true`, caption readiness reported 28 pass, 1 warning, 0 fail;
+    no console errors, no failed requests, no bad HTTP responses, no clipped
+    caption action buttons. The screenshot confirms the new generated-QA mix and
+    answer-format controls are visible and readable in the caption panel.
 - Restricted project-name scan:
-  - Full repository scan, excluding `.git`, Python bytecode, and cache folders.
+  - Source, docs, tests, tools, UI, and backend entrypoint scan.
   - Result: no matches.
 
 ## Remaining Training-Quality Work

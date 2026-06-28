@@ -729,6 +729,22 @@
                                                     <label for="qwenCaptionSubcaptionsPerImage">Generated QA per image<span class="help-icon" title="Additional VLM-created image-specific question/answer rows per image for instruction training. Range 0-20. Use 0 to keep only caption0 rows.">?</span></label>
                                                     <input type="number" id="qwenCaptionSubcaptionsPerImage" min="0" max="20" step="1" value="8" />
                                                 </div>
+                                                <div class="qwen-caption-settings__field">
+                                                    <label for="qwenCaptionQaMix">Generated QA mix<span class="help-icon" title="Controls the type mix requested from the generated-QA pass. Deterministic metadata QA is controlled separately.">?</span></label>
+                                                    <select id="qwenCaptionQaMix">
+                                                        <option value="balanced" selected>Balanced</option>
+                                                        <option value="scene">Scene-level</option>
+                                                        <option value="object">Object-focused</option>
+                                                        <option value="caption">Caption variants</option>
+                                                    </select>
+                                                </div>
+                                                <div class="qwen-caption-settings__field">
+                                                    <label for="qwenCaptionAnswerFormat">Generated answer format<span class="help-icon" title="Natural text is safest for generated QA. JSON asks the generator to wrap general answers as parseable JSON.">?</span></label>
+                                                    <select id="qwenCaptionAnswerFormat">
+                                                        <option value="natural" selected>Natural text</option>
+                                                        <option value="json">JSON answer</option>
+                                                    </select>
+                                                </div>
                                             </div>
                                             <div class="qwen-caption-settings__checks">
                                                 <label><input type="checkbox" id="qwenCaptionIncludeCaption0Training" checked /> Include caption0<span class="help-icon" title="Include the broad caption row in the instruction-training JSONL.">?</span></label>

@@ -108,14 +108,19 @@ caption0-only instruction export and high values cannot explode the prompt or
 artifact size. **Include caption0** and **Include generated QA** control the
 flattened instruction JSONL, while **Include deterministic metadata QA** is off
 by default and adds code-generated rows from real source labels only when
-explicitly enabled. **Give generator read-only label context** may pass source
+explicitly enabled. **Generated QA mix** controls whether the generated-QA pass
+leans balanced, scene-level, object-focused, or caption-variant oriented.
+**Generated answer format** controls whether generated answers are natural text
+or parseable JSON. **Give generator read-only label context** may pass source
 label counts into the generator as grounding context, but generated QA never
-becomes source annotations. **Strict QA grounding** asks the model to answer
-only from the image, caption0, or read-only source context.
+becomes source annotations. **Strict QA grounding** asks the model to answer only
+from the image, caption0, or read-only source context.
 
 **Download instruction JSONL** exports normal `image_path` / `question` /
 `answer` rows. The UI validates missing image paths, blank questions, blank
-answers, and duplicate image/question pairs before writing the file.
+answers, invalid JSON for JSON row types, and duplicate image/question pairs
+before writing the file.
 **Download instruction archive** exports the versioned per-image archive with
 caption0, generated QA, optional deterministic metadata QA, source annotation
-provenance, rejected rows, and the flattened training rows used for download.
+provenance, rejected rows, row-type distribution, split row counts, and the
+flattened training rows used for download.

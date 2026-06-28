@@ -1085,6 +1085,8 @@
         qwenCaptionDownloadGroupedJson: "Download one grouped caption archive object per image.",
         qwenCaptionDownloadVlmJsonl: "Download one image/question/answer VLM training row per saved caption.",
         qwenCaptionSubcaptionsPerImage: "Set how many generated image-specific question/answer rows to request per image.",
+        qwenCaptionQaMix: "Choose the generated question/answer mix requested from the model.",
+        qwenCaptionAnswerFormat: "Choose whether generated QA answers should be natural text or parseable JSON.",
         qwenCaptionBuildInstructionDataset: "Run caption0 plus generated QA creation for all loaded images.",
         qwenCaptionDownloadInstructionJsonl: "Download flattened instruction-training image/question/answer rows.",
         qwenCaptionDownloadInstructionArchive: "Download the per-image instruction archive with provenance and rejected rows.",
@@ -21942,6 +21944,8 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenElements.captionDownloadGroupedJson = document.getElementById("qwenCaptionDownloadGroupedJson");
         qwenElements.captionDownloadVlmJsonl = document.getElementById("qwenCaptionDownloadVlmJsonl");
         qwenElements.captionSubcaptionsPerImage = document.getElementById("qwenCaptionSubcaptionsPerImage");
+        qwenElements.captionQaMix = document.getElementById("qwenCaptionQaMix");
+        qwenElements.captionAnswerFormat = document.getElementById("qwenCaptionAnswerFormat");
         qwenElements.captionIncludeCaption0Training = document.getElementById("qwenCaptionIncludeCaption0Training");
         qwenElements.captionIncludeGeneratedQaTraining = document.getElementById("qwenCaptionIncludeGeneratedQaTraining");
         qwenElements.captionIncludeDeterministicMetadataQa = document.getElementById("qwenCaptionIncludeDeterministicMetadataQa");
@@ -29228,6 +29232,12 @@ async function cancelRfDetrTrainingJobRequest() {
         if (qwenElements.captionSubcaptionsPerImage && String(qwenElements.captionSubcaptionsPerImage.value) !== String(subcaptions)) {
             qwenElements.captionSubcaptionsPerImage.value = String(subcaptions);
         }
+        const qaMix = ["balanced", "scene", "object", "caption"].includes(qwenElements.captionQaMix?.value)
+            ? qwenElements.captionQaMix.value
+            : "balanced";
+        const answerFormat = ["natural", "json"].includes(qwenElements.captionAnswerFormat?.value)
+            ? qwenElements.captionAnswerFormat.value
+            : "natural";
         return {
             instruction_dataset: !!forceInstructionDataset,
             subcaptions_per_image: subcaptions,
@@ -29236,8 +29246,8 @@ async function cancelRfDetrTrainingJobRequest() {
             include_deterministic_metadata_qa: qwenElements.captionIncludeDeterministicMetadataQa?.checked === true,
             include_source_annotations_in_generator_context: qwenElements.captionIncludeSourceAnnotationsContext?.checked !== false,
             strict_grounding: qwenElements.captionStrictGrounding?.checked !== false,
-            qa_mix: "balanced",
-            answer_format: "natural",
+            qa_mix: qaMix,
+            answer_format: answerFormat,
         };
     }
 
@@ -30561,6 +30571,8 @@ async function cancelRfDetrTrainingJobRequest() {
         params.set("include_caption0_in_training", resolved.include_caption0_in_training ? "true" : "false");
         params.set("include_generated_qa_in_training", resolved.include_generated_qa_in_training ? "true" : "false");
         params.set("include_deterministic_metadata_qa", resolved.include_deterministic_metadata_qa ? "true" : "false");
+        params.set("qa_mix", resolved.qa_mix || "balanced");
+        params.set("answer_format", resolved.answer_format || "natural");
         return params.toString();
     }
 

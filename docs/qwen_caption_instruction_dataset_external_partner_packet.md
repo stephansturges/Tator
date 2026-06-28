@@ -247,8 +247,15 @@ report.
 The additional consistency checks are:
 
 - Trainer JSONL row count must match the report's selected flattened-row count.
+- Trainer JSONL row identities must match the selected review-row identities.
+- Trainer JSONL rows must match candidates in the per-image archive by image
+  path, QA id, and normalized question.
+- Selected review-row training answers and archive candidate answers must match
+  the flattened trainer answer where those fields are present.
 - Archive JSONL row count must match the report image count and the archive
   image count.
+- Each archive row's selected training-row count must match the actual
+  flattened rows for that image.
 - Archive JSONL must not contain duplicate `image_path` rows.
 - Review JSONL row count must match the report review-row count.
 - Selected review-row count must match the report selected flattened-row count.
@@ -505,22 +512,24 @@ Result:
 Result:
 
 ```text
-161 passed
+162 passed
 ```
 
-Focused artifact-consistency contract:
+Focused artifact-consistency contract, including same-count identity mismatch
+coverage:
 
 ```bash
 ./.venv-macos/bin/python -m pytest \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_blocks_same_count_identity_mismatches \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_blocks_mismatched_backend_counts \
   tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports \
-  tests/test_labeling_panel_layout_contract.py::test_qwen_caption_export_preserves_saved_alternates_and_primary_rows \
   -q
 ```
 
 Result:
 
 ```text
-2 passed
+3 passed
 ```
 
 Additional validation recorded in the hardening report includes trainer import

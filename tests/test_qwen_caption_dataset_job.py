@@ -1324,6 +1324,82 @@ def test_caption_instruction_artifact_consistency_validator_blocks_mismatched_ba
     assert validation["counts"]["review_row_count"] == 1
 
 
+def test_caption_instruction_artifact_consistency_validator_blocks_same_count_identity_mismatches() -> None:
+    import localinferenceapi as api
+
+    report = {
+        "format": "tator_caption_instruction_report_v1",
+        "image_count": 1,
+        "selected_flattened_row_count": 1,
+        "instruction_review_row_count": 1,
+        "manual_review_required_count": 1,
+        "corpus_quality_metrics": {
+            "image_count": 1,
+            "selected_flattened_row_count": 1,
+        },
+        "instruction_export_validation": {
+            "ok": True,
+            "error_count": 0,
+            "errors": [],
+            "row_count": 1,
+        },
+    }
+    validation = api._caption_instruction_artifact_consistency_validation(
+        training_rows=[
+            {
+                "image_path": "frame.jpg",
+                "question": "Describe this image in detail.",
+                "answer": "A correct caption.",
+                "metadata": {"qa_id": "caption0"},
+            }
+        ],
+        archive_rows=[
+            {
+                "image_path": "frame.jpg",
+                "language_annotations": {
+                    "caption0": {
+                        "qa_id": "caption0",
+                        "question": "Describe this image in detail.",
+                        "answer": "A stale archive caption.",
+                    }
+                },
+                "deterministic_metadata_qa_pairs": [],
+                "export_metadata": {"selected_training_row_count": 1},
+            }
+        ],
+        review_rows=[
+            {
+                "image_path": "frame.jpg",
+                "qa_id": "different-caption0",
+                "question": "Describe this image in detail.",
+                "training_answer": "A correct caption.",
+                "selected_for_training": True,
+                "requires_manual_review": True,
+            }
+        ],
+        report=report,
+        archive_image_count=1,
+    )
+
+    assert validation["ok"] is False
+    assert validation["error_count"] >= 3
+    assert (
+        "training row qa_id caption0 image frame.jpg question 'describe this image in detail.' "
+        "is missing from selected review rows"
+    ) in validation["errors"]
+    assert (
+        "selected review row qa_id different-caption0 image frame.jpg question 'describe this image in detail.' "
+        "is missing from training rows"
+    ) in validation["errors"]
+    assert (
+        "archive candidate qa_id caption0 image frame.jpg question 'describe this image in detail.' "
+        "answer does not match training row answer"
+    ) in validation["errors"]
+    assert validation["counts"]["training_identity_count"] == 1
+    assert validation["counts"]["selected_review_identity_count"] == 1
+    assert validation["counts"]["archive_candidate_identity_count"] == 1
+
+
 def test_caption_instruction_training_validator_requires_complete_row_metadata() -> None:
     import localinferenceapi as api
 

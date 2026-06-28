@@ -281,6 +281,12 @@ archive, report, API payload, and summary. A failed backend consistency check
 blocks training readiness with `instruction_artifacts_inconsistent`, and the UI
 also refuses the corresponding download.
 
+This is not only a count check. It also verifies that flattened trainer rows,
+selected review rows, and archive candidates refer to the same image path, QA
+id, and normalized question, and that selected review/archive answers match the
+flattened training answer when those fields are present. A stale review JSONL
+from another run can therefore fail even if it has the right number of rows.
+
 Flat-layout image keys are canonicalized before this check runs. That means a
 saved caption keyed as `sub/img.jpg` and a manifest row that temporarily appears
 as `train/sub/img.jpg` are merged into one instruction image, not exported as a
@@ -552,22 +558,24 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-161 passed
+162 passed
 ```
 
-Focused artifact-consistency contract:
+Focused artifact-consistency contract, including same-count identity mismatch
+coverage:
 
 ```bash
 ./.venv-macos/bin/python -m pytest \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_blocks_same_count_identity_mismatches \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_blocks_mismatched_backend_counts \
   tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports \
-  tests/test_labeling_panel_layout_contract.py::test_qwen_caption_export_preserves_saved_alternates_and_primary_rows \
   -q
 ```
 
 Latest recorded result:
 
 ```text
-2 passed
+3 passed
 ```
 
 Focused review-import fail-closed suite:
@@ -630,7 +638,7 @@ Focused instruction-dataset and UI contract suite:
 Latest recorded result:
 
 ```text
-136 passed
+137 passed
 ```
 
 Runtime and unattended hardening suites have also been run in prior hardening

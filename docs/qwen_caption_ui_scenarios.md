@@ -142,6 +142,10 @@ passes but the archive row count no longer matches the report image count or
 archive image count, or if the archive contains duplicate image paths. The
 backend also emits `instruction_artifact_consistency`; when it is not OK, the
 report readiness is blocked and the browser refuses the related download.
+This guard compares artifact row identities as well as counts, so trainer rows,
+selected review rows, and archive candidates must agree on image path, QA id,
+normalized question, per-image selected counts, and selected answers where
+available.
 Flat-layout image keys are canonicalized before export so a saved caption and a
 manifest row for the same nested image are not exported as duplicate instruction
 objects.

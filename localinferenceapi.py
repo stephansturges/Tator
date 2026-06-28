@@ -21790,6 +21790,49 @@ def _caption_instruction_artifact_consistency_validation(
     errors: List[str] = []
     warnings: List[str] = []
 
+    def _identity_label(identity: Tuple[str, str, str]) -> str:
+        image_path, qa_id, question = identity
+        question_label = question[:80] + ("..." if len(question) > 80 else "")
+        if qa_id:
+            return f"qa_id {qa_id} image {image_path} question {question_label!r}"
+        return f"image {image_path} question {question_label!r}"
+
+    def _candidate_identity(row: Mapping[str, Any], *, image_path: Optional[str] = None) -> Optional[Tuple[str, str, str]]:
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), Mapping) else {}
+        raw_image_path = str(image_path or row.get("image_path") or row.get("image_name") or "").strip()
+        raw_qa_id = str(row.get("qa_id") or row.get("id") or metadata.get("qa_id") or "").strip()
+        raw_question = str(row.get("question") or "").strip()
+        normalized_question = _caption_instruction_normalized_question(raw_question)
+        if not raw_image_path or not normalized_question:
+            return None
+        return (raw_image_path, raw_qa_id, normalized_question)
+
+    def _training_identity(row: Mapping[str, Any]) -> Optional[Tuple[str, str, str]]:
+        return _candidate_identity(row)
+
+    def _review_identity(row: Mapping[str, Any]) -> Optional[Tuple[str, str, str]]:
+        return _candidate_identity(row)
+
+    def _candidate_answer(row: Mapping[str, Any], *, prefer_training_answer: bool = False) -> str:
+        if prefer_training_answer:
+            answer = row.get("training_answer")
+            if str(answer or "").strip():
+                return str(answer or "").strip()
+        return str(row.get("answer") or row.get("caption") or row.get("training_answer") or "").strip()
+
+    def _add_identity(
+        target: Dict[Tuple[str, str, str], Mapping[str, Any]],
+        duplicates: Set[Tuple[str, str, str]],
+        identity: Optional[Tuple[str, str, str]],
+        row: Mapping[str, Any],
+    ) -> None:
+        if identity is None:
+            return
+        if identity in target:
+            duplicates.add(identity)
+            return
+        target[identity] = row
+
     def _optional_nonnegative_int(value: Any, field_name: str) -> Optional[int]:
         if value is None:
             errors.append(f"{field_name} is missing")
@@ -21921,6 +21964,96 @@ def _caption_instruction_artifact_consistency_validation(
     for image_path in sorted(duplicate_image_paths):
         errors.append(f"duplicate archive image_path {image_path}")
 
+    training_identities: Dict[Tuple[str, str, str], Mapping[str, Any]] = {}
+    selected_review_identities: Dict[Tuple[str, str, str], Mapping[str, Any]] = {}
+    archive_candidate_identities: Dict[Tuple[str, str, str], Mapping[str, Any]] = {}
+    duplicate_training_identities: Set[Tuple[str, str, str]] = set()
+    duplicate_selected_review_identities: Set[Tuple[str, str, str]] = set()
+    duplicate_archive_candidate_identities: Set[Tuple[str, str, str]] = set()
+    training_rows_by_image: Counter[str] = Counter()
+    for row in training_rows:
+        if not isinstance(row, Mapping):
+            continue
+        image_path = str(row.get("image_path") or "").strip()
+        if image_path:
+            training_rows_by_image[image_path] += 1
+        _add_identity(training_identities, duplicate_training_identities, _training_identity(row), row)
+    for row in review_rows:
+        if not isinstance(row, Mapping) or not bool(row.get("selected_for_training")):
+            continue
+        _add_identity(selected_review_identities, duplicate_selected_review_identities, _review_identity(row), row)
+    for row in archive_rows:
+        if not isinstance(row, Mapping):
+            continue
+        image_path = str(row.get("image_path") or "").strip()
+        if not image_path:
+            continue
+        export_metadata = row.get("export_metadata") if isinstance(row.get("export_metadata"), Mapping) else {}
+        if "selected_training_row_count" in export_metadata:
+            try:
+                archive_selected_count = int(export_metadata.get("selected_training_row_count") or 0)
+            except (TypeError, ValueError, OverflowError):
+                errors.append(f"archive row {image_path} selected_training_row_count is invalid")
+            else:
+                actual_selected_count = int(training_rows_by_image.get(image_path, 0))
+                if archive_selected_count != actual_selected_count:
+                    errors.append(
+                        f"archive row {image_path} selected_training_row_count {archive_selected_count} "
+                        f"does not match training rows for image {actual_selected_count}"
+                    )
+        language_annotations = row.get("language_annotations") if isinstance(row.get("language_annotations"), Mapping) else {}
+        caption0 = language_annotations.get("caption0") if isinstance(language_annotations, Mapping) else None
+        if isinstance(caption0, Mapping):
+            _add_identity(
+                archive_candidate_identities,
+                duplicate_archive_candidate_identities,
+                _candidate_identity(caption0, image_path=image_path),
+                caption0,
+            )
+        generated_pairs = language_annotations.get("generated_qa_pairs") if isinstance(language_annotations, Mapping) else []
+        for candidate in generated_pairs if isinstance(generated_pairs, list) else []:
+            if isinstance(candidate, Mapping):
+                _add_identity(
+                    archive_candidate_identities,
+                    duplicate_archive_candidate_identities,
+                    _candidate_identity(candidate, image_path=image_path),
+                    candidate,
+                )
+        deterministic_pairs = row.get("deterministic_metadata_qa_pairs")
+        for candidate in deterministic_pairs if isinstance(deterministic_pairs, list) else []:
+            if isinstance(candidate, Mapping):
+                _add_identity(
+                    archive_candidate_identities,
+                    duplicate_archive_candidate_identities,
+                    _candidate_identity(candidate, image_path=image_path),
+                    candidate,
+                )
+
+    for identity in sorted(duplicate_training_identities):
+        errors.append(f"duplicate training row identity {_identity_label(identity)}")
+    for identity in sorted(duplicate_selected_review_identities):
+        errors.append(f"duplicate selected review row identity {_identity_label(identity)}")
+    for identity in sorted(duplicate_archive_candidate_identities):
+        errors.append(f"duplicate archive candidate identity {_identity_label(identity)}")
+    for identity, row in sorted(training_identities.items()):
+        if identity not in selected_review_identities:
+            errors.append(f"training row {_identity_label(identity)} is missing from selected review rows")
+        if identity not in archive_candidate_identities:
+            errors.append(f"training row {_identity_label(identity)} is missing from archive candidates")
+            continue
+        archive_answer = _candidate_answer(archive_candidate_identities[identity])
+        training_answer = _candidate_answer(row)
+        if archive_answer and training_answer and archive_answer != training_answer:
+            errors.append(f"archive candidate {_identity_label(identity)} answer does not match training row answer")
+    for identity, row in sorted(selected_review_identities.items()):
+        if identity not in training_identities:
+            errors.append(f"selected review row {_identity_label(identity)} is missing from training rows")
+            continue
+        review_answer = _candidate_answer(row, prefer_training_answer=True)
+        training_answer = _candidate_answer(training_identities[identity])
+        if review_answer and training_answer and review_answer != training_answer:
+            errors.append(f"selected review row {_identity_label(identity)} training_answer does not match training row answer")
+
     return {
         "format": CAPTION_INSTRUCTION_ARTIFACT_CONSISTENCY_FORMAT,
         "ok": not errors,
@@ -21939,6 +22072,9 @@ def _caption_instruction_artifact_consistency_validation(
             "report_manual_review_required_count": report_manual_review_count,
             "archive_image_count": archive_image_count,
             "instruction_export_validation_row_count": export_row_count,
+            "training_identity_count": len(training_identities),
+            "selected_review_identity_count": len(selected_review_identities),
+            "archive_candidate_identity_count": len(archive_candidate_identities),
         },
     }
 

@@ -613,6 +613,12 @@ the current reviewed export set. The backend emits the same versioned
 payload, and summary; failures force readiness to `blocked` with
 `instruction_artifacts_inconsistent`.
 
+The consistency check also compares row identities, not only totals. Flattened
+trainer rows, selected review rows, and archive candidates must agree on image
+path, QA id, normalized question, per-image selected counts, and selected
+training answers where available. This blocks same-count artifact swaps, such as
+a stale review JSONL or archive JSONL from another generation run.
+
 The export merge also canonicalizes flat-layout image keys before constructing
 instruction artifacts. Saved captions, text-label mirrors, source manifest rows,
 and generated QA for `sub/img.jpg` are therefore merged into one instruction
@@ -885,22 +891,24 @@ Current combined caption/instruction/trainer/UI contract suite:
 Result:
 
 ```text
-161 passed
+162 passed
 ```
 
-Focused artifact-consistency contract:
+Focused artifact-consistency contract, including same-count identity mismatch
+coverage:
 
 ```bash
 ./.venv-macos/bin/python -m pytest \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_blocks_same_count_identity_mismatches \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_blocks_mismatched_backend_counts \
   tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports \
-  tests/test_labeling_panel_layout_contract.py::test_qwen_caption_export_preserves_saved_alternates_and_primary_rows \
   -q
 ```
 
 Result:
 
 ```text
-2 passed
+3 passed
 ```
 
 Focused review-import fail-closed tests:
@@ -965,7 +973,7 @@ Caption/instruction/UI contract suite outside the trainer file:
 Result:
 
 ```text
-136 passed
+137 passed
 ```
 
 Syntax and formatting checks:

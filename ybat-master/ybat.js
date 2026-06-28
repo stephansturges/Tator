@@ -35127,6 +35127,117 @@ async function cancelRfDetrTrainingJobRequest() {
                 errors.push(`backend artifact consistency failed${firstErrors ? `: ${firstErrors}${suffix}` : ""}`);
             }
         }
+        const normalizeQuestion = (value) => String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
+        const identityKey = (identity) => identity ? `${identity.imagePath}\u0000${identity.qaId}\u0000${identity.question}` : "";
+        const identityLabel = (identity) => {
+            if (!identity) {
+                return "unknown row";
+            }
+            const question = identity.question.length > 80 ? `${identity.question.slice(0, 80)}...` : identity.question;
+            return identity.qaId
+                ? `qa_id ${identity.qaId} image ${identity.imagePath} question ${JSON.stringify(question)}`
+                : `image ${identity.imagePath} question ${JSON.stringify(question)}`;
+        };
+        const candidateIdentity = (row, imagePathOverride = "") => {
+            const metadata = row?.metadata && typeof row.metadata === "object" ? row.metadata : {};
+            const imagePath = String(imagePathOverride || row?.image_path || row?.image_name || "").trim();
+            const qaId = String(row?.qa_id || row?.id || metadata.qa_id || "").trim();
+            const question = normalizeQuestion(row?.question);
+            if (!imagePath || !question) {
+                return null;
+            }
+            return { imagePath, qaId, question };
+        };
+        const candidateAnswer = (row, preferTrainingAnswer = false) => {
+            if (preferTrainingAnswer) {
+                const trainingAnswer = String(row?.training_answer || "").trim();
+                if (trainingAnswer) {
+                    return trainingAnswer;
+                }
+            }
+            return String(row?.answer || row?.caption || row?.training_answer || "").trim();
+        };
+        const addIdentity = (target, duplicates, identity, row) => {
+            const key = identityKey(identity);
+            if (!key) {
+                return;
+            }
+            if (target.has(key)) {
+                duplicates.set(key, identity);
+                return;
+            }
+            target.set(key, { identity, row });
+        };
+        const trainingRows = Array.isArray(payload?.instruction_training_rows) ? payload.instruction_training_rows : [];
+        const reviewRows = Array.isArray(payload?.instruction_review_rows) ? payload.instruction_review_rows : [];
+        const archiveRows = Array.isArray(payload?.instruction_archive_rows) ? payload.instruction_archive_rows : [];
+        if (trainingRows.length || reviewRows.length || archiveRows.length) {
+            const trainingByIdentity = new Map();
+            const selectedReviewByIdentity = new Map();
+            const archiveCandidateByIdentity = new Map();
+            const duplicateTrainingIdentities = new Map();
+            const duplicateSelectedReviewIdentities = new Map();
+            const duplicateArchiveCandidateIdentities = new Map();
+            const trainingRowsByImage = new Map();
+            trainingRows.forEach((row) => {
+                const imagePath = String(row?.image_path || "").trim();
+                if (imagePath) {
+                    trainingRowsByImage.set(imagePath, (trainingRowsByImage.get(imagePath) || 0) + 1);
+                }
+                addIdentity(trainingByIdentity, duplicateTrainingIdentities, candidateIdentity(row), row);
+            });
+            reviewRows.forEach((row) => {
+                if (row?.selected_for_training === true) {
+                    addIdentity(selectedReviewByIdentity, duplicateSelectedReviewIdentities, candidateIdentity(row), row);
+                }
+            });
+            archiveRows.forEach((row) => {
+                const imagePath = String(row?.image_path || "").trim();
+                if (!imagePath) {
+                    return;
+                }
+                const selectedCount = Number(row?.export_metadata?.selected_training_row_count);
+                if (Number.isFinite(selectedCount) && selectedCount !== (trainingRowsByImage.get(imagePath) || 0)) {
+                    errors.push(`archive row ${imagePath} selected_training_row_count ${selectedCount} does not match training rows for image ${trainingRowsByImage.get(imagePath) || 0}`);
+                }
+                const language = row?.language_annotations && typeof row.language_annotations === "object" ? row.language_annotations : {};
+                if (language.caption0 && typeof language.caption0 === "object") {
+                    addIdentity(archiveCandidateByIdentity, duplicateArchiveCandidateIdentities, candidateIdentity(language.caption0, imagePath), language.caption0);
+                }
+                (Array.isArray(language.generated_qa_pairs) ? language.generated_qa_pairs : []).forEach((candidate) => {
+                    if (candidate && typeof candidate === "object") {
+                        addIdentity(archiveCandidateByIdentity, duplicateArchiveCandidateIdentities, candidateIdentity(candidate, imagePath), candidate);
+                    }
+                });
+                (Array.isArray(row?.deterministic_metadata_qa_pairs) ? row.deterministic_metadata_qa_pairs : []).forEach((candidate) => {
+                    if (candidate && typeof candidate === "object") {
+                        addIdentity(archiveCandidateByIdentity, duplicateArchiveCandidateIdentities, candidateIdentity(candidate, imagePath), candidate);
+                    }
+                });
+            });
+            duplicateTrainingIdentities.forEach((identity) => errors.push(`duplicate training row identity ${identityLabel(identity)}`));
+            duplicateSelectedReviewIdentities.forEach((identity) => errors.push(`duplicate selected review row identity ${identityLabel(identity)}`));
+            duplicateArchiveCandidateIdentities.forEach((identity) => errors.push(`duplicate archive candidate identity ${identityLabel(identity)}`));
+            trainingByIdentity.forEach(({ identity, row }, key) => {
+                if (!selectedReviewByIdentity.has(key)) {
+                    errors.push(`training row ${identityLabel(identity)} is missing from selected review rows`);
+                }
+                const archiveCandidate = archiveCandidateByIdentity.get(key);
+                if (!archiveCandidate) {
+                    errors.push(`training row ${identityLabel(identity)} is missing from archive candidates`);
+                } else if (candidateAnswer(archiveCandidate.row) && candidateAnswer(row) && candidateAnswer(archiveCandidate.row) !== candidateAnswer(row)) {
+                    errors.push(`archive candidate ${identityLabel(identity)} answer does not match training row answer`);
+                }
+            });
+            selectedReviewByIdentity.forEach(({ identity, row }, key) => {
+                const trainingRow = trainingByIdentity.get(key);
+                if (!trainingRow) {
+                    errors.push(`selected review row ${identityLabel(identity)} is missing from training rows`);
+                } else if (candidateAnswer(row, true) && candidateAnswer(trainingRow.row) && candidateAnswer(row, true) !== candidateAnswer(trainingRow.row)) {
+                    errors.push(`selected review row ${identityLabel(identity)} training_answer does not match training row answer`);
+                }
+            });
+        }
         const metrics = report?.corpus_quality_metrics || {};
         const rowCount = Number(rowValidation?.rowCount);
         const selectedCount = Number(metrics.selected_flattened_row_count);

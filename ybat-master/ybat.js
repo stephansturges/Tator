@@ -1089,7 +1089,8 @@
         qwenCaptionAnswerFormat: "Choose whether generated QA answers should be natural text or parseable JSON.",
         qwenCaptionBuildInstructionDataset: "Run caption0 plus generated QA creation for all loaded images.",
         qwenCaptionDownloadInstructionJsonl: "Download flattened instruction-training image/question/answer rows.",
-        qwenCaptionDownloadInstructionArchive: "Download the per-image instruction archive with provenance and rejected rows.",
+        qwenCaptionDownloadInstructionArchive: "Download one per-image instruction archive row per line.",
+        qwenCaptionDownloadInstructionReport: "Download instruction-dataset counts, provenance, splits, and rejection summary.",
         qwenCaptionReadinessRun: "Run a fast caption-panel readiness check before loading a dataset or starting Qwen.",
         qwenCaptionGeneratedPrimary: "Promote generated captions to the primary text label instead of appending them as alternates.",
         qwenCaptionGlossary: "Edit the caption glossary that maps label names to broad visual meanings.",
@@ -2510,6 +2511,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         captionBuildInstructionDataset: null,
         captionDownloadInstructionJsonl: null,
         captionDownloadInstructionArchive: null,
+        captionDownloadInstructionReport: null,
         captionReadinessRun: null,
         captionReadinessStatus: null,
         captionReadinessResults: null,
@@ -21954,6 +21956,7 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenElements.captionBuildInstructionDataset = document.getElementById("qwenCaptionBuildInstructionDataset");
         qwenElements.captionDownloadInstructionJsonl = document.getElementById("qwenCaptionDownloadInstructionJsonl");
         qwenElements.captionDownloadInstructionArchive = document.getElementById("qwenCaptionDownloadInstructionArchive");
+        qwenElements.captionDownloadInstructionReport = document.getElementById("qwenCaptionDownloadInstructionReport");
         qwenElements.captionReadinessRun = document.getElementById("qwenCaptionReadinessRun");
         qwenElements.captionReadinessStatus = document.getElementById("qwenCaptionReadinessStatus");
         qwenElements.captionReadinessResults = document.getElementById("qwenCaptionReadinessResults");
@@ -22730,6 +22733,14 @@ async function cancelRfDetrTrainingJobRequest() {
                 downloadCaptionInstructionArchive().catch((error) => {
                     console.warn("Instruction archive download failed", error);
                     setSamStatus(`Instruction archive export failed: ${error.message || error}`, { variant: "error", duration: 4000 });
+                });
+            });
+        }
+        if (qwenElements.captionDownloadInstructionReport) {
+            qwenElements.captionDownloadInstructionReport.addEventListener("click", () => {
+                downloadCaptionInstructionReport().catch((error) => {
+                    console.warn("Instruction report download failed", error);
+                    setSamStatus(`Instruction report export failed: ${error.message || error}`, { variant: "error", duration: 4000 });
                 });
             });
         }
@@ -26489,6 +26500,7 @@ async function cancelRfDetrTrainingJobRequest() {
             ["captionBuildInstructionDataset", "VLM training dataset control"],
             ["captionDownloadInstructionJsonl", "Instruction JSONL export"],
             ["captionDownloadInstructionArchive", "Instruction archive export"],
+            ["captionDownloadInstructionReport", "Instruction report export"],
             ["captionExportHealth", "VLM export validation status"],
             ["captionBackendJobStatus", "Set-and-forget backend status"],
         ].forEach(([key, label]) => requireControl(key, label));
@@ -34502,6 +34514,10 @@ async function cancelRfDetrTrainingJobRequest() {
             const imagePath = String(row?.image_path || "").trim();
             const question = String(row?.question || "").trim();
             const answer = String(row?.answer || "").trim();
+            const metadata = row?.metadata && typeof row.metadata === "object" ? row.metadata : {};
+            const rowType = String(metadata.row_type || "").trim();
+            const answerFormat = String(metadata.answer_format || "").trim().toLowerCase();
+            const validationStatus = String(metadata.validation_status || "").trim().toLowerCase();
             if (!imagePath) {
                 errors.push(`row ${rowNumber} missing image_path`);
             } else {
@@ -34579,6 +34595,16 @@ async function cancelRfDetrTrainingJobRequest() {
             if (!answer) {
                 errors.push(`row ${rowNumber} missing answer`);
             }
+            if (validationStatus === "rejected") {
+                errors.push(`row ${rowNumber} was rejected by archive validation`);
+            }
+            if (answer && (rowType.startsWith("deterministic_") || answerFormat === "json" || answerFormat.endsWith("_json"))) {
+                try {
+                    JSON.parse(answer);
+                } catch (_error) {
+                    errors.push(`row ${rowNumber} answer is not valid JSON`);
+                }
+            }
             if (imagePath && question) {
                 const pairKey = `${imagePath}\u0000${question}`;
                 if (imageQuestionPairs.has(pairKey)) {
@@ -34606,6 +34632,43 @@ async function cancelRfDetrTrainingJobRequest() {
             return `Instruction JSONL export blocked: ${firstErrors || "invalid rows"}${suffix}.`;
         }
         return `Instruction JSONL validated: ${validation.rowCount} row${validation.rowCount === 1 ? "" : "s"} across ${validation.imageCount} image${validation.imageCount === 1 ? "" : "s"}; unique image/question pairs passed.`;
+    }
+
+    function validateCaptionInstructionArchiveRows(rows) {
+        const errors = [];
+        const warnings = [];
+        const imagePaths = new Set();
+        (Array.isArray(rows) ? rows : []).forEach((row, index) => {
+            const rowNumber = index + 1;
+            const imagePath = String(row?.image_path || "").trim();
+            if (!imagePath) {
+                errors.push(`archive row ${rowNumber} missing image_path`);
+            } else {
+                imagePaths.add(imagePath);
+            }
+            if (!row?.source_annotations || typeof row.source_annotations !== "object") {
+                errors.push(`archive row ${rowNumber} missing source_annotations`);
+            }
+            if (!row?.language_annotations || typeof row.language_annotations !== "object") {
+                errors.push(`archive row ${rowNumber} missing language_annotations`);
+            }
+            if (!Array.isArray(row?.deterministic_metadata_qa_pairs)) {
+                errors.push(`archive row ${rowNumber} missing deterministic_metadata_qa_pairs`);
+            }
+            if (!row?.export_metadata || typeof row.export_metadata !== "object") {
+                errors.push(`archive row ${rowNumber} missing export_metadata`);
+            }
+        });
+        if (!rows.length) {
+            warnings.push("no instruction archive rows to export");
+        }
+        return {
+            ok: errors.length === 0,
+            errors,
+            warnings,
+            rowCount: Array.isArray(rows) ? rows.length : 0,
+            imageCount: imagePaths.size,
+        };
     }
 
     async function downloadCaptionJsonl() {
@@ -34733,14 +34796,41 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         const payload = await loadCaptionExportPayload(datasetId, getCaptionInstructionDatasetSettings(true));
-        const archive = payload?.instruction_archive;
-        if (!archive || typeof archive !== "object") {
-            setCaptionExportHealth("No instruction archive is ready for export yet.", "warn");
-            setSamStatus("No instruction archive is ready for export.", { variant: "warn", duration: 3000 });
+        const rows = Array.isArray(payload?.instruction_archive_rows) ? payload.instruction_archive_rows : [];
+        if (!rows.length) {
+            setCaptionExportHealth("No instruction archive rows are ready for export yet.", "warn");
+            setSamStatus("No instruction archive rows are ready for export.", { variant: "warn", duration: 3000 });
             return;
         }
-        const blob = new Blob([JSON.stringify(archive, null, 2)], { type: "application/json" });
-        saveBlobToDisk(blob, "caption_instruction_archive.json");
+        const validation = validateCaptionInstructionArchiveRows(rows);
+        if (!validation.ok) {
+            const firstErrors = (validation.errors || []).slice(0, 3).join("; ");
+            const suffix = (validation.errors || []).length > 3 ? `; +${validation.errors.length - 3} more` : "";
+            const message = `Instruction archive export blocked: ${firstErrors || "invalid rows"}${suffix}.`;
+            setCaptionExportHealth(message, "fail");
+            setSamStatus(message, { variant: "error", duration: 5000 });
+            return;
+        }
+        const lines = rows.map((row) => JSON.stringify(row));
+        const blob = new Blob([lines.join("\n")], { type: "application/jsonl" });
+        saveBlobToDisk(blob, "caption_instruction_archive.jsonl");
+    }
+
+    async function downloadCaptionInstructionReport() {
+        const datasetId = getCaptionDatasetId();
+        if (!datasetId) {
+            setCaptionExportHealth("Select a caption dataset before exporting the instruction report.", "warn");
+            return;
+        }
+        const payload = await loadCaptionExportPayload(datasetId, getCaptionInstructionDatasetSettings(true));
+        const report = payload?.instruction_report;
+        if (!report || typeof report !== "object") {
+            setCaptionExportHealth("No instruction report is ready for export yet.", "warn");
+            setSamStatus("No instruction report is ready for export.", { variant: "warn", duration: 3000 });
+            return;
+        }
+        const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
+        saveBlobToDisk(blob, "caption_instruction_report.json");
     }
 
     function buildSam3TextSnapshot() {

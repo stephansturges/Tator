@@ -32,9 +32,13 @@ row before training.
 - The backend exports:
   - `instruction_training_rows`: flattened `image_path` / `question` / `answer`
     rows for training.
+  - `instruction_archive_rows`: one per-image construction archive record per
+    image, ready to download as JSONL.
   - `instruction_archive`: a versioned per-image archive containing caption0,
     generated QA, optional deterministic metadata QA, source annotation
     provenance, rejected rows, and the flattened rows.
+  - `instruction_report`: run-level counts, provenance, split expansion, and
+    rejection summaries for audit.
   - `instruction_summary`: row, generated QA, deterministic QA, and rejection
     counts.
 
@@ -69,6 +73,7 @@ row before training.
 - Added separate downloads:
   - **Download instruction JSONL**
   - **Download instruction archive**
+  - **Download instruction report**
 - Fixed caption action layout so export and instruction buttons wrap into
   readable responsive columns instead of clipping in the sidebar.
 - Fixed readiness and attach/recover rows so long status text cannot squeeze the
@@ -85,9 +90,15 @@ row before training.
   question within the image, and persisted as instruction records.
 - The export layer validates generated QA again before flattening and rejects
   unsupported structured claims when trusted source labels are missing.
-- The instruction archive reports row-type distribution, split image counts,
-  split training-row counts, rejection reason counts, and source-field
-  provenance summary.
+- Supported generated count, class-list, presence, and simple spatial questions
+  are rewritten during export so their final answers come from
+  `source_annotations`, with the original generated answer preserved as
+  candidate metadata.
+- The instruction archive now exposes both a full JSON audit object and
+  per-image `instruction_archive_rows` for JSONL download. The report records
+  row-type distribution, split image counts, split training-row counts,
+  rejection reason counts, source-field provenance, QA count per image, and
+  exclusion categories.
 - Export options let callers include or exclude caption0, generated QA, and
   deterministic metadata QA without altering saved data, while preserving the
   requested generated-QA mix and answer format.
@@ -100,21 +111,22 @@ row before training.
 - JavaScript syntax:
   - `node --check ybat-master/ybat.js`
 - Focused instruction-dataset, export, and UI contract tests:
-  - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py tests/test_qwen_caption_flow_benchmark.py tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete tests/test_labeling_panel_layout_contract.py tests/test_qwen_caption_ui_smoke_tool.py -q`
-  - Result: 162 passed.
-- Prompt, progress, launcher, and unattended contracts:
-  - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_prompt.py tests/test_qwen_progress.py tests/test_macos_backend_launcher_contract.py -q`
-  - Result: 140 passed.
+  - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete tests/test_labeling_panel_layout_contract.py tests/test_qwen_caption_ui_smoke_tool.py -q`
+  - Result: 112 passed.
+- Prompt, runner, progress, launcher, and unattended contracts:
+  - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_flow_benchmark.py tests/test_qwen_caption_prompt.py tests/test_qwen_progress.py tests/test_macos_backend_launcher_contract.py -q`
+  - Result: 191 passed.
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_operation_audit.py tests/test_qwen_caption_soak_audit.py tests/test_qwen_caption_soak_certification.py tests/test_qwen_caption_soak_drill.py -q`
   - Result: 90 passed.
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_soak_preflight.py tests/test_qwen_caption_soak_supervisor.py tests/test_qwen_caption_soak_watchdog.py tests/test_qwen_caption_unattended_launcher.py -q`
   - Result: 135 passed.
 - Rendered browser smoke:
   - `./.venv-macos/bin/python tools/run_qwen_caption_ui_smoke.py --base-url http://127.0.0.1:8000 --out-json tmp/qwen_caption_ui_smoke_report.json --screenshot tmp/qwen_caption_ui_smoke.png`
-  - Result: `ok=true`, caption readiness reported 28 pass, 1 warning, 0 fail;
+  - Result: `ok=true`, caption readiness reported 29 pass, 1 warning, 0 fail;
     no console errors, no failed requests, no bad HTTP responses, no clipped
-    caption action buttons. The screenshot confirms the new generated-QA mix and
-    answer-format controls are visible and readable in the caption panel.
+    caption action buttons. The screenshot confirms the generated-QA mix,
+    answer-format, archive, and report controls are visible and readable in the
+    caption panel.
 - Restricted project-name scan:
   - Source, docs, tests, tools, UI, and backend entrypoint scan.
   - Result: no matches.

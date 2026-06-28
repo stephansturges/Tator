@@ -471,11 +471,34 @@ def test_caption_instruction_archive_separates_generated_qa_from_source_annotati
         exported_at="2026-01-01T00:00:00Z",
     )
     image = archive["images"][0]
+    archive_row = archive["archive_rows"][0]
+    report = archive["captioning_report"]
 
     assert archive["format"] == "tator_caption_instruction_archive_v1"
     assert archive["training_row_count"] == 2
     assert archive["rejected_training_row_count"] == 1
     assert archive["deterministic_metadata_qa_pair_count"] == 0
+    assert archive_row["image_id"] == "frame"
+    assert archive_row["image_path"] == "frame.jpg"
+    assert archive_row["split"] == "train"
+    assert set(archive_row) == {
+        "image_id",
+        "image_path",
+        "split",
+        "source_annotations",
+        "language_annotations",
+        "deterministic_metadata_qa_pairs",
+        "export_metadata",
+    }
+    assert archive_row["export_metadata"]["selected_training_row_count"] == 2
+    assert archive_row["export_metadata"]["generated_qa_candidate_count"] == 2
+    assert archive_row["export_metadata"]["accepted_generated_qa_count"] == 2
+    assert report["format"] == "tator_caption_instruction_report_v1"
+    assert report["image_count"] == 1
+    assert report["generated_qa_candidate_count"] == 2
+    assert report["accepted_generated_qa_count"] == 2
+    assert report["selected_flattened_row_count"] == 2
+    assert report["split_training_row_counts"] == {"train": 2}
     assert image["source_annotations"]["object_counts"] == {"Boat": 1, "Building": 1}
     assert image["source_annotations"]["annotations"][0]["class_name"] == "Boat"
     assert image["language_annotations"]["caption0"]["caption"] == "A caption about the waterfront."
@@ -517,6 +540,8 @@ def test_caption_instruction_archive_separates_generated_qa_from_source_annotati
         assert row["metadata"]["source_fields"]
     assert deterministic["qa_type_distribution"]["deterministic_count"] == 2
     assert deterministic["split_training_row_counts"] == {"train": 8}
+    assert deterministic["captioning_report"]["deterministic_metadata_qa_count"] == 8
+    assert deterministic["archive_rows"][0]["export_metadata"]["deterministic_metadata_qa_pair_count"] == 8
 
 
 def test_caption_instruction_archive_rejects_structured_generated_qa_without_source_labels(
@@ -585,6 +610,80 @@ def test_caption_instruction_archive_rejects_structured_generated_qa_without_sou
     assert archive["deterministic_metadata_qa_pair_count"] == 0
     assert archive["training_row_count"] == 0
     assert archive["rejection_reason_counts"] == {"generated_qa_validation_rejected": 1}
+    assert archive["captioning_report"]["rejected_generated_qa_count"] == 1
+    assert archive["captioning_report"]["rows_excluded_because_generated_answers_contradicted_source_annotations"] == 1
+    assert archive["archive_rows"][0]["export_metadata"]["selected_training_row_count"] == 0
+
+
+def test_caption_instruction_archive_rewrites_supported_structured_generated_qa_from_source_labels(
+    monkeypatch,
+) -> None:
+    import localinferenceapi as api
+
+    manifest = {
+        "labelmap": ["Boat", "Building"],
+        "images": [
+            {
+                "split": "train",
+                "image_relpath": "frame.jpg",
+                "image_name": "frame.jpg",
+                "label_lines": ["0 0.5 0.5 0.1 0.1"],
+                "label_source_present": True,
+                "label_source": "dataset_label_file",
+            }
+        ],
+    }
+    monkeypatch.setattr(api, "_annotation_manifest_for_entry", lambda _entry: manifest)
+    captions = [
+        {
+            "id": "caption-1",
+            "image_name": "frame.jpg",
+            "image_key": "train/frame.jpg",
+            "split": "train",
+            "caption": "A caption about a waterfront.",
+            "source": "qwen_caption_job",
+            "is_primary": True,
+            "caption_index": 1,
+        }
+    ]
+    generated = [
+        {
+            "id": "qa-1",
+            "image_name": "frame.jpg",
+            "image_key": "train/frame.jpg",
+            "split": "train",
+            "question": "How many boats are visible?",
+            "answer": "Two boats are visible.",
+            "row_type": "generated_qa",
+            "answer_source": "vlm_generated",
+        }
+    ]
+
+    archive = api._dataset_caption_instruction_archive(
+        captions,
+        generated,
+        dataset_id="ds",
+        entry={"id": "ds"},
+        settings=api._caption_instruction_export_settings(
+            {
+                "include_caption0_in_training": False,
+                "include_generated_qa_in_training": True,
+                "include_deterministic_metadata_qa": False,
+            }
+        ),
+        exported_at="2026-01-01T00:00:00Z",
+    )
+
+    generated_pair = archive["images"][0]["language_annotations"]["generated_qa_pairs"][0]
+    assert generated_pair["validation_status"] == "accepted"
+    assert generated_pair["row_type"] == "generated_count_validated"
+    assert generated_pair["answer_source"] == "source_annotations.object_counts.Boat"
+    assert json.loads(generated_pair["answer"]) == {"object_counts": {"Boat": 1}}
+    assert generated_pair["metadata"]["candidate_answer"] == "Two boats are visible."
+    assert archive["training_row_count"] == 1
+    assert archive["training_rows"][0]["metadata"]["row_type"] == "generated_count_validated"
+    assert archive["training_rows"][0]["metadata"]["answer_format"] == "object_count_json"
+    assert json.loads(archive["training_rows"][0]["answer"]) == {"object_counts": {"Boat": 1}}
 
 
 def test_caption_dataset_runner_summary_counts_completed_cases_not_attempts() -> None:

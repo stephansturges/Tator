@@ -120,7 +120,10 @@ from the image, caption0, or read-only source context.
 `answer` rows. The UI validates missing image paths, blank questions, blank
 answers, invalid JSON for JSON row types, and duplicate image/question pairs
 before writing the file.
-**Download instruction archive** exports the versioned per-image archive with
-caption0, generated QA, optional deterministic metadata QA, source annotation
-provenance, rejected rows, row-type distribution, split row counts, and the
-flattened training rows used for download.
+**Download instruction archive** exports one per-image construction archive
+record per JSONL line, keeping caption0, generated QA, optional deterministic
+metadata QA, source annotation provenance, and per-image export metadata separate
+from trainer rows.
+**Download instruction report** exports run-level counts, rejection reasons,
+source-field provenance, split image counts, split row counts, QA count per
+image, and selected flattened-row counts.

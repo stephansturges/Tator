@@ -2583,6 +2583,16 @@ def test_caption_alternate_routes_append_update_export_and_delete(
         "answer_format": "natural",
     }
     assert instruction_archive["training_row_count"] == 2
+    assert len(export_payload["instruction_archive_rows"]) == instruction_archive["image_count"]
+    archive_row_by_path = {
+        row["image_path"]: row
+        for row in export_payload["instruction_archive_rows"]
+    }
+    assert archive_row_by_path["sub/img.jpg"]["source_annotations"]["format"] == "tator_source_annotations_v1"
+    assert "export_metadata" in archive_row_by_path["sub/img.jpg"]
+    assert export_payload["instruction_report"]["format"] == "tator_caption_instruction_report_v1"
+    assert export_payload["instruction_report"]["image_count"] == instruction_archive["image_count"]
+    assert export_payload["instruction_report"]["selected_flattened_row_count"] == 2
     assert len(export_payload["instruction_training_rows"]) == 2
     assert {row["metadata"]["row_type"] for row in export_payload["instruction_training_rows"]} == {
         "caption0"

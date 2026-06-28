@@ -20259,6 +20259,14 @@ def _dataset_caption_instruction_record_public(record: Mapping[str, Any]) -> Dic
     out["answer"] = str(out.get("answer") or "").strip()
     out["row_type"] = str(out.get("row_type") or "generated_qa").strip() or "generated_qa"
     out["answer_source"] = str(out.get("answer_source") or "vlm_generated").strip() or "vlm_generated"
+    out["answer_format"] = str(out.get("answer_format") or "").strip()
+    out["validated_against"] = (
+        [str(item) for item in out.get("validated_against") or [] if str(item).strip()]
+        if isinstance(out.get("validated_against"), list)
+        else []
+    )
+    out["validation_status"] = str(out.get("validation_status") or "").strip()
+    out["review_status"] = str(out.get("review_status") or "").strip()
     out["caption_id"] = str(out.get("caption_id") or "").strip()
     out["caption"] = str(out.get("caption") or "").strip()
     out["created_at"] = str(out.get("created_at") or "").strip()
@@ -20847,9 +20855,105 @@ _CAPTION_INSTRUCTION_UNAVAILABLE_CONTEXT_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _CAPTION_INSTRUCTION_STRUCTURED_CLAIM_RE = re.compile(
-    r"\b(how many|count|counts|which .*classes|what .*classes|visible classes|is there|are there any|uncertain|uncertainty)\b",
+    r"\b(how many|count|counts|which .*classes|what .*classes|visible classes|is there|are there any|where|which part|uncertain|uncertainty)\b",
     flags=re.IGNORECASE,
 )
+
+
+def _caption_instruction_label_terms(label: str) -> List[str]:
+    raw = str(label or "").strip()
+    if not raw:
+        return []
+    spaced = _caption_instruction_question_class_name(raw)
+    camel = re.sub(r"(?<!^)(?=[A-Z])", " ", spaced)
+    terms = {raw, spaced, camel}
+    terms.update(term.lower() for term in list(terms))
+    return sorted((term for term in terms if term.strip()), key=len, reverse=True)
+
+
+def _caption_instruction_match_source_label(text: str, source_annotations: Mapping[str, Any]) -> Optional[str]:
+    counts = source_annotations.get("object_counts") if isinstance(source_annotations, Mapping) else {}
+    if not isinstance(counts, Mapping):
+        return None
+    haystack = str(text or "")
+    for label in sorted((str(item) for item in counts.keys()), key=len, reverse=True):
+        for term in _caption_instruction_label_terms(label):
+            escaped = re.escape(term).replace(r"\ ", r"\s+")
+            if re.search(rf"\b{escaped}s?\b", haystack, flags=re.IGNORECASE):
+                return label
+    return None
+
+
+def _caption_instruction_visible_classes_answer(source_annotations: Mapping[str, Any]) -> Dict[str, Any]:
+    visible = source_annotations.get("visible_classes") if isinstance(source_annotations, Mapping) else []
+    visible_classes = sorted({str(label) for label in visible or [] if str(label).strip()}, key=str.lower)
+    return {
+        "answer": _caption_instruction_json_answer({"visible_classes": visible_classes}),
+        "answer_format": "visible_class_json",
+        "answer_source": "source_annotations.visible_classes",
+        "source_fields": ["source_annotations.visible_classes"],
+        "validated_against": ["source_annotations.object_counts"],
+        "row_type": "generated_class_list_validated",
+    }
+
+
+def _caption_instruction_structured_source_rewrite(
+    *,
+    question: str,
+    source_annotations: Mapping[str, Any],
+) -> Optional[Dict[str, Any]]:
+    if str(source_annotations.get("status") or "").strip() == "missing_label_file":
+        return None
+    counts = source_annotations.get("object_counts") if isinstance(source_annotations, Mapping) else {}
+    if not isinstance(counts, Mapping):
+        return None
+    question_text = str(question or "")
+    if re.search(r"\b(which|what)\b.*\b(classes|object types?)\b|\bvisible classes\b", question_text, flags=re.IGNORECASE):
+        return _caption_instruction_visible_classes_answer(source_annotations)
+    matched_label = _caption_instruction_match_source_label(question_text, source_annotations)
+    if not matched_label:
+        return None
+    try:
+        count_value = int(counts.get(matched_label) or 0)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    display = _caption_instruction_question_class_name(matched_label)
+    if re.search(r"\bhow many\b|\bcount\b", question_text, flags=re.IGNORECASE):
+        return {
+            "answer": _caption_instruction_json_answer({"object_counts": {matched_label: count_value}}),
+            "answer_format": "object_count_json",
+            "answer_source": f"source_annotations.object_counts.{matched_label}",
+            "source_fields": [f"source_annotations.object_counts.{matched_label}"],
+            "validated_against": ["source_annotations.object_counts"],
+            "row_type": "generated_count_validated",
+        }
+    if re.search(r"\b(is there|are there any|do you see|can you see)\b", question_text, flags=re.IGNORECASE):
+        return {
+            "answer": _caption_instruction_json_answer({"presence": {matched_label: count_value > 0}}),
+            "answer_format": "boolean_json",
+            "answer_source": f"source_annotations.object_counts.{matched_label}",
+            "source_fields": [f"source_annotations.object_counts.{matched_label}"],
+            "validated_against": ["source_annotations.object_counts"],
+            "row_type": "generated_presence_validated",
+        }
+    if re.search(r"\bwhere\b|\bwhich part\b", question_text, flags=re.IGNORECASE):
+        for fact in source_annotations.get("spatial_facts") or []:
+            if not isinstance(fact, Mapping):
+                continue
+            if str(fact.get("class_name") or "").strip() != matched_label:
+                continue
+            fact_text = str(fact.get("fact") or "").strip()
+            if not fact_text:
+                continue
+            return {
+                "answer": _caption_instruction_json_answer({"spatial_fact": fact_text}),
+                "answer_format": "spatial_fact_json",
+                "answer_source": "source_annotations.spatial_facts",
+                "source_fields": list(fact.get("source_fields") or ["source_annotations.spatial_facts"]),
+                "validated_against": ["source_annotations.bbox_geometry"],
+                "row_type": "generated_spatial_validated",
+            }
+    return None
 
 
 def _caption_instruction_generated_pair_for_archive(
@@ -20868,8 +20972,14 @@ def _caption_instruction_generated_pair_for_archive(
     if _CAPTION_INSTRUCTION_UNAVAILABLE_CONTEXT_RE.search(f"{question} {answer}"):
         reasons.append("unavailable_or_sensitive_context")
     source_status = str(source_annotations.get("status") or "").strip()
+    rewrite = None
     if _CAPTION_INSTRUCTION_STRUCTURED_CLAIM_RE.search(f"{question} {answer}"):
-        reasons.append("structured_claim_requires_deterministic_row")
+        rewrite = _caption_instruction_structured_source_rewrite(
+            question=question,
+            source_annotations=source_annotations,
+        )
+        if rewrite is None:
+            reasons.append("structured_claim_requires_deterministic_row")
     incoming_status = str(validation.get("status") or public.get("validation_status") or "").strip().lower()
     if incoming_status in {"rejected", "error", "failed"}:
         reasons.append("upstream_validation_rejected")
@@ -20879,17 +20989,37 @@ def _caption_instruction_generated_pair_for_archive(
         validated_against = ["image", "language_annotations.caption0"]
         if source_status != "missing_label_file":
             validated_against.append("source_annotations")
+    final_question = question
+    final_answer = answer
+    final_row_type = str(public.get("row_type") or "generated_qa").strip() or "generated_qa"
+    final_answer_source = str(public.get("answer_source") or "vlm_generated").strip() or "vlm_generated"
+    final_answer_format = str(public.get("answer_format") or metadata.get("answer_format") or "natural").strip() or "natural"
+    source_fields = list(metadata.get("source_fields") or public.get("source_fields") or [])
+    if rewrite and not reasons:
+        final_answer = str(rewrite.get("answer") or "").strip()
+        final_row_type = str(rewrite.get("row_type") or final_row_type).strip() or final_row_type
+        final_answer_source = str(rewrite.get("answer_source") or final_answer_source).strip() or final_answer_source
+        final_answer_format = str(rewrite.get("answer_format") or final_answer_format).strip() or final_answer_format
+        source_fields = list(rewrite.get("source_fields") or source_fields)
+        validated_against = list(rewrite.get("validated_against") or validated_against)
+        metadata.setdefault("candidate_answer", answer)
+        metadata.setdefault("candidate_question", question)
     out = {
         **public,
         "qa_id": str(public.get("id") or public.get("qa_id") or "").strip(),
-        "row_type": str(public.get("row_type") or "generated_qa").strip() or "generated_qa",
-        "answer_source": str(public.get("answer_source") or "vlm_generated").strip() or "vlm_generated",
+        "row_type": final_row_type,
+        "question": final_question,
+        "answer": final_answer,
+        "answer_source": final_answer_source,
+        "answer_format": final_answer_format,
         "validated_against": [str(item) for item in validated_against if str(item).strip()],
         "validation_status": validation_status,
         "review_status": str(public.get("review_status") or metadata.get("review_status") or "unreviewed").strip()
         or "unreviewed",
         "rejection_reasons": reasons,
     }
+    if source_fields:
+        out["source_fields"] = [str(field) for field in source_fields if str(field).strip()]
     out["metadata"] = metadata
     out["validation"] = {
         **validation,
@@ -21063,6 +21193,27 @@ def _dataset_caption_instruction_archive(
                 "generated_qa_pairs": generated_pairs,
             },
             "deterministic_metadata_qa_pairs": deterministic_pairs,
+            "export_metadata": {
+                "archive_schema_version": CAPTION_INSTRUCTION_ARCHIVE_FORMAT,
+                "training_rows_format": CAPTION_INSTRUCTION_TRAINING_ROWS_FORMAT,
+                "flattening_eligible": bool(caption0 or generated_pairs or deterministic_pairs),
+                "selected_training_row_count": 0,
+                "generated_qa_candidate_count": len(generated_pairs),
+                "accepted_generated_qa_count": sum(
+                    1 for pair in generated_pairs if str(pair.get("validation_status") or "").strip() == "accepted"
+                ),
+                "rejected_generated_qa_count": sum(
+                    1 for pair in generated_pairs if str(pair.get("validation_status") or "").strip() == "rejected"
+                ),
+                "deterministic_metadata_qa_pair_count": len(deterministic_pairs),
+                "settings": {
+                    "include_caption0_in_training": bool(settings.get("include_caption0_in_training")),
+                    "include_generated_qa_in_training": bool(settings.get("include_generated_qa_in_training")),
+                    "include_deterministic_metadata_qa": bool(settings.get("include_deterministic_metadata_qa")),
+                    "qa_mix": str(settings.get("qa_mix") or "balanced"),
+                    "answer_format": str(settings.get("answer_format") or "natural"),
+                },
+            },
         }
         if caption0 and bool(settings.get("include_caption0_in_training")):
             _append_training_row(
@@ -21152,6 +21303,56 @@ def _dataset_caption_instruction_archive(
         for row in training_rows
         if isinstance(row, Mapping)
     )
+    flattened_count_by_image = Counter(
+        str(row.get("image_path") or "").strip()
+        for row in training_rows
+        if isinstance(row, Mapping) and str(row.get("image_path") or "").strip()
+    )
+    qa_count_per_image: Dict[str, int] = {}
+    accepted_generated_qa_count = 0
+    rejected_generated_qa_count = 0
+    generated_qa_candidate_count = 0
+    for image in images:
+        if not isinstance(image, Mapping):
+            continue
+        image_name = str(image.get("image_path") or image.get("image_name") or "").strip()
+        language_annotations = image.get("language_annotations") if isinstance(image.get("language_annotations"), Mapping) else {}
+        generated_pairs = (
+            language_annotations.get("generated_qa_pairs")
+            if isinstance(language_annotations, Mapping)
+            else []
+        )
+        if not isinstance(generated_pairs, list):
+            generated_pairs = []
+        deterministic_pairs = image.get("deterministic_metadata_qa_pairs")
+        if not isinstance(deterministic_pairs, list):
+            deterministic_pairs = []
+        caption0_count = 1 if isinstance(language_annotations, Mapping) and language_annotations.get("caption0") else 0
+        generated_qa_candidate_count += len(generated_pairs)
+        image_accepted = sum(
+            1 for pair in generated_pairs if str((pair or {}).get("validation_status") or "").strip() == "accepted"
+        )
+        image_rejected = sum(
+            1 for pair in generated_pairs if str((pair or {}).get("validation_status") or "").strip() == "rejected"
+        )
+        accepted_generated_qa_count += image_accepted
+        rejected_generated_qa_count += image_rejected
+        qa_count = caption0_count + len(generated_pairs) + len(deterministic_pairs)
+        if image_name:
+            qa_count_per_image[image_name] = qa_count
+        export_metadata = dict(image.get("export_metadata") or {})
+        export_metadata.update(
+            {
+                "selected_training_row_count": int(flattened_count_by_image.get(image_name, 0)),
+                "qa_count": qa_count,
+                "caption0_count": caption0_count,
+                "generated_qa_candidate_count": len(generated_pairs),
+                "accepted_generated_qa_count": image_accepted,
+                "rejected_generated_qa_count": image_rejected,
+                "deterministic_metadata_qa_pair_count": len(deterministic_pairs),
+            }
+        )
+        image["export_metadata"] = export_metadata
     source_annotation_count = sum(
         len((image.get("source_annotations") or {}).get("bbox_instances") or [])
         for image in images
@@ -21174,6 +21375,75 @@ def _dataset_caption_instruction_archive(
             if isinstance(provenance, Mapping):
                 source = str(provenance.get("source") or "unknown").strip() or "unknown"
                 provenance_summary[f"{field_name}:{source}"] += 1
+    contradiction_rejection_count = 0
+    unavailable_context_rejection_count = 0
+    invalid_provenance_rejection_count = 0
+    uncertainty_rejection_count = 0
+    for rejection in rejections:
+        if not isinstance(rejection, Mapping):
+            continue
+        reason_tokens = {str(rejection.get("reason") or "").strip()}
+        reason_tokens.update(str(item).strip() for item in rejection.get("rejection_reasons") or [] if str(item).strip())
+        if reason_tokens & {"unavailable_or_sensitive_context"}:
+            unavailable_context_rejection_count += 1
+        if reason_tokens & {"structured_claim_requires_deterministic_row", "unsupported_count_claim", "unsupported_class_claim", "unsupported_spatial_claim"}:
+            contradiction_rejection_count += 1
+        if reason_tokens & {"missing_required_field", "invalid_json_answer", "upstream_validation_rejected"}:
+            invalid_provenance_rejection_count += 1
+        if reason_tokens & {"unsupported_uncertainty_claim"}:
+            uncertainty_rejection_count += 1
+    source_artifact_paths = {
+        "dataset_root": str(entry.get("dataset_root") or "").strip() or None,
+        "linked_root": str(entry.get("linked_root") or "").strip() or None,
+        "storage_mode": str(entry.get("storage_mode") or "managed").strip() or "managed",
+        "yolo_layout": str(entry.get("yolo_layout") or manifest.get("yolo_layout") or "flat").strip() or "flat",
+    }
+    captioning_report = {
+        "format": "tator_caption_instruction_report_v1",
+        "dataset_id": str(dataset_id or "").strip() or None,
+        "exported_at": exported_at,
+        "image_count": len(images),
+        "source_annotation_count": source_annotation_count,
+        "caption0_count": sum(1 for image in images if (image.get("language_annotations") or {}).get("caption0")),
+        "generated_qa_candidate_count": generated_qa_candidate_count,
+        "accepted_generated_qa_count": accepted_generated_qa_count,
+        "rejected_generated_qa_count": rejected_generated_qa_count,
+        "rejected_training_row_count": len(rejections),
+        "rejection_reason_counts": dict(sorted(rejection_reason_counts.items())),
+        "deterministic_metadata_qa_count": sum(
+            len(image.get("deterministic_metadata_qa_pairs") or [])
+            for image in images
+            if isinstance(image, Mapping)
+        ),
+        "qa_count_per_image": dict(sorted(qa_count_per_image.items())),
+        "qa_type_distribution": dict(sorted(qa_type_distribution.items())),
+        "selected_flattened_row_count": len(training_rows),
+        "source_artifact_paths": source_artifact_paths,
+        "class_map_version": {
+            "source": "dataset_labelmap",
+            "class_count": len(labelmap),
+        },
+        "provenance_summary": dict(sorted(provenance_summary.items())),
+        "split_image_counts": dict(sorted(split_image_counts.items())),
+        "split_training_row_counts": dict(sorted(split_training_row_counts.items())),
+        "rows_excluded_because_of_uncertainty": uncertainty_rejection_count,
+        "rows_excluded_because_of_missing_or_invalid_provenance": invalid_provenance_rejection_count,
+        "rows_excluded_because_generated_answers_contradicted_source_annotations": contradiction_rejection_count,
+        "rows_excluded_because_answers_relied_on_unavailable_image_context": unavailable_context_rejection_count,
+    }
+    archive_rows = [
+        {
+            "image_id": image.get("image_id"),
+            "image_path": image.get("image_path"),
+            "split": image.get("split"),
+            "source_annotations": image.get("source_annotations"),
+            "language_annotations": image.get("language_annotations"),
+            "deterministic_metadata_qa_pairs": image.get("deterministic_metadata_qa_pairs") or [],
+            "export_metadata": image.get("export_metadata") or {},
+        }
+        for image in images
+        if isinstance(image, Mapping)
+    ]
     return {
         "format": CAPTION_INSTRUCTION_ARCHIVE_FORMAT,
         "archive_schema_version": CAPTION_INSTRUCTION_ARCHIVE_FORMAT,
@@ -21199,7 +21469,10 @@ def _dataset_caption_instruction_archive(
         "split_training_row_counts": dict(sorted(split_training_row_counts.items())),
         "rejection_reason_counts": dict(sorted(rejection_reason_counts.items())),
         "provenance_summary": dict(sorted(provenance_summary.items())),
+        "captioning_report": captioning_report,
         "rejections": rejections,
+        "archive_rows": archive_rows,
+        "instruction_archive_rows": archive_rows,
         "images": images,
         "training_rows": training_rows,
         "flattened_training_rows": training_rows,
@@ -21478,6 +21751,12 @@ def export_captions(dataset_id: str, options: Optional[Mapping[str, Any]] = None
         settings=instruction_settings,
     )
     instruction_training_rows = list(instruction_archive.get("training_rows") or [])
+    instruction_archive_rows = list(instruction_archive.get("archive_rows") or [])
+    instruction_report = (
+        dict(instruction_archive.get("captioning_report"))
+        if isinstance(instruction_archive.get("captioning_report"), Mapping)
+        else {}
+    )
     summary = {
         "image_count": len(grouped),
         "caption_count": len(indexed_records),
@@ -21500,6 +21779,8 @@ def export_captions(dataset_id: str, options: Optional[Mapping[str, Any]] = None
         "grouped": dict(grouped),
         "training_rows": training_rows,
         "instruction_training_rows": instruction_training_rows,
+        "instruction_archive_rows": instruction_archive_rows,
+        "instruction_report": instruction_report,
         "instruction_archive": instruction_archive,
         "archive": _dataset_caption_grouped_archive(indexed_records, dataset_id=dataset_id, summary=summary),
         "summary": summary,

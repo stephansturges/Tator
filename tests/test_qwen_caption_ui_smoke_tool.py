@@ -46,6 +46,7 @@ def test_qwen_caption_ui_smoke_tool_covers_critical_controls() -> None:
         "qwenCaptionBuildInstructionDataset",
         "qwenCaptionDownloadInstructionJsonl",
         "qwenCaptionDownloadInstructionArchive",
+        "qwenCaptionDownloadInstructionReport",
         "qwenCaptionExportHealth",
         "qwenCaptionReadinessRun",
         "qwenCaptionReadinessStatus",
@@ -69,10 +70,12 @@ def test_qwen_caption_ui_smoke_tool_covers_critical_controls() -> None:
     assert "Create VLM training dataset" in text
     assert "Download instruction JSONL" in text
     assert "Download instruction archive" in text
+    assert "Download instruction report" in text
     assert "Instruction dataset defaults are set for caption0 plus generated QA" in text
     assert "Generated QA never becomes source annotations" in text
     assert "vlm_export_button_count" in text
     assert "instruction_build_button_count" in text
+    assert "instruction_report_button_count" in text
     assert "instruction_dataset_help_explains_separation" in text
     assert "caption_action_buttons_do_not_clip" in text
     assert "overflowing_action_buttons" in text

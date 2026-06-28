@@ -743,24 +743,26 @@ alternate captions for review and archive workflows; and VLM JSONL, with one
 normal `image_path` / `question` / `answer` row per caption for caption-only
 training. VLM JSONL answers are explicit JSON caption strings, and alternate
 caption rows receive stable question variants so downstream validators do not
-  see duplicate image/question pairs. The separate instruction-dataset path keeps
-  caption0, VLM-generated visual question/answer rows, optional deterministic
-  metadata QA, source annotations, provenance, rejected rows, and flattened
-  trainer rows in a versioned `tator_caption_instruction_archive_v1` archive.
-  Generated question/answer rows are language annotations only; they are never
-  written back as source annotations. Source annotations are built from real label
-  evidence into `object_counts`, `visible_classes`, `bbox_instances`,
-  `bbox_geometry`, `spatial_facts`, `uncertainty`, and field provenance.
-  Deterministic metadata QA is off by default and appears only when explicitly
-  enabled; when enabled, its answers are typed JSON rows computed from source
-  annotations, including class-list, object-count, presence, absence, and simple
-  bbox-derived spatial rows when supported.
+see duplicate image/question pairs. The separate instruction-dataset path keeps
+caption0, VLM-generated visual question/answer rows, optional deterministic
+metadata QA, source annotations, provenance, rejected rows, and flattened trainer
+rows in a full versioned `tator_caption_instruction_archive_v1` audit object.
+It also exposes `instruction_archive_rows`, one construction archive record per
+image for JSONL download, and `instruction_report`, a run-level count,
+provenance, split, and rejection summary. Generated question/answer rows are
+language annotations only; they are never written back as source annotations.
+Source annotations are built from real label evidence into `object_counts`,
+`visible_classes`, `bbox_instances`, `bbox_geometry`, `spatial_facts`,
+`uncertainty`, and field provenance. Deterministic metadata QA is off by default
+and appears only when explicitly enabled; when enabled, its answers are typed
+JSON rows computed from source annotations, including class-list, object-count,
+presence, absence, and simple bbox-derived spatial rows when supported.
 The backend `/captions/export` response carries the same logical grouped
 archive as a versioned `tator_caption_grouped_v1` object, in addition to the
 flat records, compatibility grouped map, caption-only training rows, instruction
-training rows, and instruction archive. This keeps browser downloads and
-scriptable exports aligned around stable multi-caption and instruction-dataset
-contracts.
+training rows, per-image instruction archive rows, the instruction report, and
+the full instruction audit object. This keeps browser downloads and scriptable
+exports aligned around stable multi-caption and instruction-dataset contracts.
 Generated captions append as alternate records by default. **Make generated
 caption primary** is a separate opt-in promotion control; when it is off, a
 generated caption can still become primary only if the image has no existing

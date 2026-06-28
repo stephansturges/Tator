@@ -282,6 +282,7 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     assert "qwenCaptionBuildInstructionDataset" in html
     assert "qwenCaptionDownloadInstructionJsonl" in html
     assert "qwenCaptionDownloadInstructionArchive" in html
+    assert "qwenCaptionDownloadInstructionReport" in html
     assert "Create VLM training dataset" in html
     assert "Generated QA never becomes source annotations" in html
     assert "deterministic metadata QA is included only when explicitly enabled" in html
@@ -306,10 +307,13 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     assert "subcaptions_per_image: subcaptions" in js
     assert "instructionDataset: true" in js
     assert "function validateCaptionInstructionTrainingRows" in js
+    assert "function validateCaptionInstructionArchiveRows" in js
     assert "function downloadCaptionInstructionJsonl" in js
     assert "function downloadCaptionInstructionArchive" in js
+    assert "function downloadCaptionInstructionReport" in js
     assert 'saveBlobToDisk(blob, "caption_instruction_training.jsonl")' in js
-    assert 'saveBlobToDisk(blob, "caption_instruction_archive.json")' in js
+    assert 'saveBlobToDisk(blob, "caption_instruction_archive.jsonl")' in js
+    assert 'saveBlobToDisk(blob, "caption_instruction_report.json")' in js
     assert "async function applyQwenCaptionBackendJobCaptions" not in js
     assert "function applyQwenCaptionBackendJobCaptions" in js
     assert "result.latest_caption" in js
@@ -346,6 +350,7 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "getCaptionVlmTrainingQuestion(captionIndex)" in js
     assert "function validateCaptionVlmTrainingRows" in js
     assert "function validateCaptionInstructionTrainingRows" in js
+    assert "function validateCaptionInstructionArchiveRows" in js
     assert "duplicate image_path + question" in js
     assert "function setCaptionExportHealth" in js
     assert "VLM JSONL export blocked" in js
@@ -358,7 +363,8 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "Generated captions append by default" in js
     assert 'saveBlobToDisk(blob, "captions_vlm_training.jsonl")' in js
     assert 'saveBlobToDisk(blob, "caption_instruction_training.jsonl")' in js
-    assert 'saveBlobToDisk(blob, "caption_instruction_archive.json")' in js
+    assert 'saveBlobToDisk(blob, "caption_instruction_archive.jsonl")' in js
+    assert 'saveBlobToDisk(blob, "caption_instruction_report.json")' in js
     assert "downloadCaptionGroupedJson().catch" in js
     assert "downloadCaptionVlmJsonl().catch" in js
     assert "downloadCaptionInstructionJsonl().catch" in js
@@ -1174,6 +1180,7 @@ def test_qwen_caption_ui_scenarios_document_set_and_forget_workflows():
     assert "0-20" in scenarios
     assert "Download instruction JSONL" in scenarios
     assert "Download instruction archive" in scenarios
+    assert "Download instruction report" in scenarios
     assert "generated QA never\nbecomes source annotations" in scenarios
     assert "duplicate image/question pairs" in scenarios
     assert "VLM export validation status" in scenarios

@@ -773,7 +773,11 @@ conversion step.
 The instruction report includes corpus-quality metrics for generated-QA
 diversity, duplicate-question rates, generated-QA acceptance/rejection,
 structured rewrites, source-grounded row coverage, answer-format distribution,
-and source-class coverage.
+and source-class coverage. It also includes `training_readiness`, a
+`ready`/`needs_review`/`blocked` status computed from selected training rows,
+manual-review decisions, and quality gate thresholds. Browser instruction JSONL
+export blocks `blocked` readiness and warns on `needs_review` instead of
+presenting a structurally valid but unreviewed corpus as training-ready.
 Generated captions append as alternate records by default. **Make generated
 caption primary** is a separate opt-in promotion control; when it is off, a
 generated caption can still become primary only if the image has no existing

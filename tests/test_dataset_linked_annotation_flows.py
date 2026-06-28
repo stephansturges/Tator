@@ -2573,6 +2573,7 @@ def test_caption_alternate_routes_append_update_export_and_delete(
         "deterministic_metadata_qa_pair_count": 0,
         "instruction_review_row_count": 2,
         "manual_review_required_count": 2,
+        "training_readiness_status": "needs_review",
         "rejected_training_row_count": 1,
     }
     instruction_archive = export_payload["instruction_archive"]
@@ -2589,6 +2590,8 @@ def test_caption_alternate_routes_append_update_export_and_delete(
     assert len(export_payload["instruction_archive_rows"]) == instruction_archive["image_count"]
     assert len(export_payload["instruction_review_rows"]) == 2
     assert export_payload["instruction_report"]["instruction_review_row_count"] == 2
+    assert export_payload["instruction_report"]["training_readiness"]["status"] == "needs_review"
+    assert export_payload["instruction_report"]["training_readiness"]["pending_manual_review_row_count"] == 1
     assert all(
         row["format"] == "tator_caption_instruction_review_rows_v1"
         and "review_decision" in row

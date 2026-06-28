@@ -291,6 +291,25 @@ The source-grounding metrics intentionally separate two concepts:
 This distinction prevents broad source-validation metadata from being confused
 with true class coverage.
 
+## Training Readiness
+
+The instruction report includes a `training_readiness` block with one of three
+statuses:
+
+- `ready`: selected rows pass structural checks, no selected language rows are
+  waiting for manual acceptance, and quality gates have no warnings.
+- `needs_review`: rows can be exported, but selected caption0 or generated-QA
+  rows still need human review, or corpus-quality gates raise warnings such as
+  duplicate questions, low generated-question diversity, high generated-QA
+  rejection rate, or low source-class coverage.
+- `blocked`: the export should not be used for training, for example when there
+  are no images, no selected training rows, or a selected row was rejected by
+  manual review.
+
+The browser validates this readiness block before writing instruction JSONL.
+Blocked exports are refused. `needs_review` exports are still downloadable, but
+the UI status is a warning instead of a training-ready pass.
+
 ## Review Rows
 
 The export payload also includes `instruction_review_rows`, a candidate-level

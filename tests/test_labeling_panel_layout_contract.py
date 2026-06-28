@@ -313,10 +313,12 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     assert "function validateCaptionInstructionReviewRows" in js
     assert "function validateCaptionInstructionReport" in js
     assert "corpus_quality_metrics" in js
+    assert "training_readiness" in js
     assert "function downloadCaptionInstructionJsonl" in js
     assert "function downloadCaptionInstructionArchive" in js
     assert "function downloadCaptionInstructionReview" in js
     assert "function downloadCaptionInstructionReport" in js
+    assert "captionInstructionReadinessSummary" in js
     assert 'saveBlobToDisk(blob, "caption_instruction_training.jsonl")' in js
     assert 'saveBlobToDisk(blob, "caption_instruction_archive.jsonl")' in js
     assert 'saveBlobToDisk(blob, "caption_instruction_review.jsonl")' in js
@@ -374,6 +376,13 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "generated_qa_question_diversity_ratio" in report_validator
     assert "source_class_coverage_rate" in report_validator
     assert "training_answer_format_distribution" in report_validator
+    assert "report missing training_readiness" in report_validator
+    assert "training_readiness.status is invalid" in report_validator
+    assert "training_readiness.ready_for_training must be boolean" in report_validator
+    assert "training_readiness.thresholds is missing" in report_validator
+    assert "Training readiness blocked" in js
+    assert "Training readiness needs review" in js
+    assert "Instruction JSONL export blocked: invalid readiness report" in js
     review_validator_start = js.index("function validateCaptionInstructionReviewRows")
     review_validator_end = js.index("function describeCaptionInstructionReviewValidation", review_validator_start)
     review_validator = js[review_validator_start:review_validator_end]
@@ -1215,6 +1224,8 @@ def test_qwen_caption_ui_scenarios_document_set_and_forget_workflows():
     assert "Download instruction archive" in scenarios
     assert "Download review JSONL" in scenarios
     assert "Download instruction report" in scenarios
+    assert "training-readiness block" in scenarios
+    assert "`ready` / `needs_review` / `blocked`" in scenarios
     assert "blank review decision/note fields" in scenarios
     assert "duplicate-question/diversity metrics" in scenarios
     assert "source-class coverage" in scenarios

@@ -126,6 +126,10 @@ row before training.
   diversity, duplicate-question rate, generated-QA acceptance/rejection rates,
   structured rewrite rate, image-level training coverage, source-grounded row
   coverage, answer-format distribution, and source-class coverage.
+- The instruction report now includes `training_readiness`, which classifies
+  the exported corpus as `ready`, `needs_review`, or `blocked`. The browser
+  blocks instruction JSONL when readiness is blocked and warns when selected
+  language rows or quality gates still need review.
 - Export options let callers include or exclude caption0, generated QA, and
   deterministic metadata QA without altering saved data, while preserving the
   requested generated-QA mix and answer format.

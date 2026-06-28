@@ -120,7 +120,10 @@ from the image, caption0, or read-only source context.
 `answer` rows. The trainer imports this flat shape directly and normalizes each
 row into an image/question/answer conversation. The UI validates missing image
 paths, blank questions, blank answers, invalid JSON for JSON row types, and
-duplicate image/question pairs before writing the file.
+duplicate image/question pairs before writing the file. It also validates the
+instruction report's training-readiness block: `blocked` readiness refuses the
+download, while `needs_review` readiness allows the file but shows a warning
+that selected language rows or quality gates still need review.
 **Download instruction archive** exports one per-image construction archive
 record per JSONL line, keeping caption0, generated QA, optional deterministic
 metadata QA, source annotation provenance, and per-image export metadata separate
@@ -133,4 +136,5 @@ can audit the corpus before fine-tuning.
 **Download instruction report** exports run-level counts, rejection reasons,
 source-field provenance, split image counts, split row counts, QA count per
 image, selected flattened-row counts, duplicate-question/diversity metrics,
-structured-rewrite rates, answer-format distribution, and source-class coverage.
+structured-rewrite rates, answer-format distribution, source-class coverage,
+and the `ready` / `needs_review` / `blocked` training-readiness status.

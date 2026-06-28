@@ -567,6 +567,15 @@ def test_caption_instruction_archive_separates_generated_qa_from_source_annotati
     assert report["instruction_review_row_count"] == 3
     assert report["manual_review_required_count"] == 3
     assert report["split_training_row_counts"] == {"train": 2}
+    readiness = report["training_readiness"]
+    assert readiness["status"] == "needs_review"
+    assert readiness["ready_for_training"] is False
+    assert readiness["selected_training_row_count"] == 2
+    assert readiness["selected_manual_review_row_count"] == 2
+    assert readiness["pending_manual_review_row_count"] == 2
+    assert "review_selected_language_rows" in readiness["required_actions"]
+    assert "generated_qa_question_diversity_ratio_below_threshold" in readiness["quality_warnings"]
+    assert "source_class_coverage_rate_below_threshold" in readiness["quality_warnings"]
     metrics = report["corpus_quality_metrics"]
     assert archive["corpus_quality_metrics"] == metrics
     assert metrics["generated_qa_candidate_count"] == 2
@@ -642,6 +651,9 @@ def test_caption_instruction_archive_separates_generated_qa_from_source_annotati
     assert deterministic["captioning_report"]["instruction_review_row_count"] == 11
     assert deterministic["captioning_report"]["manual_review_required_count"] == 3
     assert sum(1 for row in deterministic["instruction_review_rows"] if row["selected_for_training"]) == 8
+    assert deterministic["captioning_report"]["training_readiness"]["status"] == "ready"
+    assert deterministic["captioning_report"]["training_readiness"]["ready_for_training"] is True
+    assert deterministic["captioning_report"]["training_readiness"]["pending_manual_review_row_count"] == 0
     assert deterministic["archive_rows"][0]["export_metadata"]["deterministic_metadata_qa_pair_count"] == 8
     deterministic_metrics = deterministic["corpus_quality_metrics"]
     assert deterministic_metrics["source_validated_training_row_count"] == 8

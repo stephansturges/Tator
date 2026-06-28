@@ -34835,10 +34835,89 @@ async function cancelRfDetrTrainingJobRequest() {
                 errors.push("corpus_quality_metrics.image_count does not match report image_count");
             }
         }
+        const readiness = report.training_readiness;
+        if (!readiness || typeof readiness !== "object") {
+            errors.push("report missing training_readiness");
+        } else {
+            const status = String(readiness.status || "").trim();
+            if (!["ready", "needs_review", "blocked"].includes(status)) {
+                errors.push("training_readiness.status is invalid");
+            }
+            if (typeof readiness.ready_for_training !== "boolean") {
+                errors.push("training_readiness.ready_for_training must be boolean");
+            }
+            if (!Array.isArray(readiness.blocking_reasons)) {
+                errors.push("training_readiness.blocking_reasons must be an array");
+            }
+            if (!Array.isArray(readiness.required_actions)) {
+                errors.push("training_readiness.required_actions must be an array");
+            }
+            if (!Array.isArray(readiness.quality_warnings)) {
+                errors.push("training_readiness.quality_warnings must be an array");
+            }
+            if (!readiness.thresholds || typeof readiness.thresholds !== "object") {
+                errors.push("training_readiness.thresholds is missing");
+            }
+        }
         return {
             ok: errors.length === 0,
             errors,
             warnings,
+        };
+    }
+
+    function captionInstructionReadinessSummary(report) {
+        const readiness = report?.training_readiness && typeof report.training_readiness === "object"
+            ? report.training_readiness
+            : null;
+        if (!readiness) {
+            return {
+                severity: "warn",
+                blocked: false,
+                message: "Training readiness is missing from the instruction report.",
+            };
+        }
+        const status = String(readiness.status || "unknown").trim() || "unknown";
+        const blocking = Array.isArray(readiness.blocking_reasons) ? readiness.blocking_reasons.filter(Boolean) : [];
+        const actions = Array.isArray(readiness.required_actions) ? readiness.required_actions.filter(Boolean) : [];
+        const warnings = Array.isArray(readiness.quality_warnings) ? readiness.quality_warnings.filter(Boolean) : [];
+        if (status === "blocked") {
+            const reasonText = blocking.length ? `: ${blocking.slice(0, 3).join(", ")}` : "";
+            return {
+                severity: "fail",
+                blocked: true,
+                message: `Training readiness blocked${reasonText}.`,
+            };
+        }
+        if (status === "needs_review") {
+            const reviewCount = Number.parseInt(readiness.pending_manual_review_row_count || "0", 10) || 0;
+            const detailParts = [];
+            if (reviewCount > 0) {
+                detailParts.push(`${reviewCount} selected language row${reviewCount === 1 ? "" : "s"} pending review`);
+            }
+            if (actions.length) {
+                detailParts.push(`actions: ${actions.slice(0, 2).join(", ")}`);
+            }
+            if (warnings.length) {
+                detailParts.push(`warnings: ${warnings.slice(0, 2).join(", ")}`);
+            }
+            return {
+                severity: "warn",
+                blocked: false,
+                message: `Training readiness needs review${detailParts.length ? ` (${detailParts.join("; ")})` : ""}.`,
+            };
+        }
+        if (status === "ready") {
+            return {
+                severity: "pass",
+                blocked: false,
+                message: "Training readiness passed.",
+            };
+        }
+        return {
+            severity: "warn",
+            blocked: false,
+            message: `Training readiness status is ${status}.`,
         };
     }
 
@@ -34954,7 +35033,23 @@ async function cancelRfDetrTrainingJobRequest() {
             setSamStatus(message, { variant: "error", duration: 5000 });
             return;
         }
-        setCaptionExportHealth(describeCaptionInstructionValidation(validation), "pass");
+        const reportValidation = validateCaptionInstructionReport(payload?.instruction_report);
+        if (!reportValidation.ok) {
+            const firstErrors = (reportValidation.errors || []).slice(0, 3).join("; ");
+            const suffix = (reportValidation.errors || []).length > 3 ? `; +${reportValidation.errors.length - 3} more` : "";
+            const message = `Instruction JSONL export blocked: invalid readiness report (${firstErrors || "invalid report"}${suffix}).`;
+            setCaptionExportHealth(message, "fail");
+            setSamStatus(message, { variant: "error", duration: 5000 });
+            return;
+        }
+        const readinessSummary = captionInstructionReadinessSummary(payload?.instruction_report);
+        if (readinessSummary.blocked) {
+            const message = `Instruction JSONL export blocked: ${readinessSummary.message}`;
+            setCaptionExportHealth(message, "fail");
+            setSamStatus(message, { variant: "error", duration: 5000 });
+            return;
+        }
+        setCaptionExportHealth(`${describeCaptionInstructionValidation(validation)} ${readinessSummary.message}`, readinessSummary.severity);
         const lines = rows.map((row) => JSON.stringify(row));
         const blob = new Blob([lines.join("\n")], { type: "application/jsonl" });
         saveBlobToDisk(blob, "caption_instruction_training.jsonl");
@@ -35035,7 +35130,8 @@ async function cancelRfDetrTrainingJobRequest() {
             setSamStatus(message, { variant: "error", duration: 5000 });
             return;
         }
-        setCaptionExportHealth("Instruction report validated: corpus-quality metrics are present.", "pass");
+        const readinessSummary = captionInstructionReadinessSummary(report);
+        setCaptionExportHealth(`Instruction report validated: corpus-quality metrics and readiness are present. ${readinessSummary.message}`, readinessSummary.severity);
         const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
         saveBlobToDisk(blob, "caption_instruction_report.json");
     }

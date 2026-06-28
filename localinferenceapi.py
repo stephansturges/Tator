@@ -21536,6 +21536,121 @@ def _caption_instruction_review_rows(
     return review_rows
 
 
+def _caption_instruction_review_decision(value: Any) -> str:
+    decision = re.sub(r"\s+", "_", str(value or "").strip().lower())
+    if decision in {"accept", "accepted", "approve", "approved", "keep", "kept", "pass", "passed"}:
+        return "accepted"
+    if decision in {"reject", "rejected", "deny", "denied", "drop", "dropped", "fail", "failed"}:
+        return "rejected"
+    if decision in {"revise", "revised", "needs_revision", "needs_rewrite", "edit", "edited"}:
+        return "needs_revision"
+    return decision or "unreviewed"
+
+
+def _caption_instruction_training_readiness(
+    *,
+    corpus_quality_metrics: Mapping[str, Any],
+    review_rows: Sequence[Mapping[str, Any]],
+    settings: Mapping[str, Any],
+) -> Dict[str, Any]:
+    thresholds = {
+        "min_selected_flattened_rows": 1,
+        "max_generated_qa_rejection_rate": 0.25,
+        "max_generated_qa_global_duplicate_question_rate": 0.20,
+        "max_generated_qa_per_image_duplicate_question_rate": 0.20,
+        "min_generated_qa_question_diversity_ratio": 0.80,
+        "min_source_class_coverage_rate": 0.80,
+    }
+
+    selected_rows = int(corpus_quality_metrics.get("selected_flattened_row_count") or 0)
+    image_count = int(corpus_quality_metrics.get("image_count") or 0)
+    generated_count = int(corpus_quality_metrics.get("generated_qa_candidate_count") or 0)
+    source_class_count = int(corpus_quality_metrics.get("source_class_count") or 0)
+
+    selected_review_rows = [
+        row for row in review_rows if isinstance(row, Mapping) and bool(row.get("selected_for_training"))
+    ]
+    selected_manual_review_rows = [
+        row for row in selected_review_rows if bool(row.get("requires_manual_review"))
+    ]
+    accepted_manual_review_rows = [
+        row
+        for row in selected_manual_review_rows
+        if _caption_instruction_review_decision(row.get("review_decision")) == "accepted"
+    ]
+    rejected_manual_review_rows = [
+        row
+        for row in selected_manual_review_rows
+        if _caption_instruction_review_decision(row.get("review_decision")) == "rejected"
+    ]
+    manual_review_pending_count = max(0, len(selected_manual_review_rows) - len(accepted_manual_review_rows))
+
+    blocking_reasons: List[str] = []
+    required_actions: List[str] = []
+    quality_warnings: List[str] = []
+    if image_count <= 0:
+        blocking_reasons.append("no_images")
+    if selected_rows < thresholds["min_selected_flattened_rows"]:
+        blocking_reasons.append("no_selected_training_rows")
+    if rejected_manual_review_rows:
+        blocking_reasons.append("selected_row_rejected_by_manual_review")
+    if manual_review_pending_count > 0:
+        required_actions.append("review_selected_language_rows")
+
+    generated_rejection_rate = float(corpus_quality_metrics.get("generated_qa_rejection_rate") or 0.0)
+    generated_global_duplicate_rate = float(
+        corpus_quality_metrics.get("generated_qa_global_duplicate_question_rate") or 0.0
+    )
+    generated_per_image_duplicate_rate = float(
+        corpus_quality_metrics.get("generated_qa_per_image_duplicate_question_rate") or 0.0
+    )
+    generated_diversity_ratio = float(corpus_quality_metrics.get("generated_qa_question_diversity_ratio") or 0.0)
+    source_class_coverage_rate = float(corpus_quality_metrics.get("source_class_coverage_rate") or 0.0)
+
+    include_generated_qa = bool(settings.get("include_generated_qa_in_training"))
+    if include_generated_qa and generated_count > 0 and generated_rejection_rate > thresholds["max_generated_qa_rejection_rate"]:
+        quality_warnings.append("generated_qa_rejection_rate_above_threshold")
+    if include_generated_qa and generated_count > 1 and generated_global_duplicate_rate > thresholds["max_generated_qa_global_duplicate_question_rate"]:
+        quality_warnings.append("generated_qa_global_duplicate_question_rate_above_threshold")
+    if include_generated_qa and generated_count > 1 and generated_per_image_duplicate_rate > thresholds["max_generated_qa_per_image_duplicate_question_rate"]:
+        quality_warnings.append("generated_qa_per_image_duplicate_question_rate_above_threshold")
+    if include_generated_qa and generated_count > 1 and generated_diversity_ratio < thresholds["min_generated_qa_question_diversity_ratio"]:
+        quality_warnings.append("generated_qa_question_diversity_ratio_below_threshold")
+    if source_class_count > 0 and selected_rows > 0 and source_class_coverage_rate < thresholds["min_source_class_coverage_rate"]:
+        quality_warnings.append("source_class_coverage_rate_below_threshold")
+
+    if blocking_reasons:
+        status = "blocked"
+    elif required_actions or quality_warnings:
+        status = "needs_review"
+    else:
+        status = "ready"
+    return {
+        "status": status,
+        "ready_for_training": status == "ready",
+        "blocking_reasons": blocking_reasons,
+        "required_actions": required_actions,
+        "quality_warnings": quality_warnings,
+        "thresholds": thresholds,
+        "settings": {
+            "include_caption0_in_training": bool(settings.get("include_caption0_in_training")),
+            "include_generated_qa_in_training": bool(settings.get("include_generated_qa_in_training")),
+            "include_deterministic_metadata_qa": bool(settings.get("include_deterministic_metadata_qa")),
+        },
+        "selected_training_row_count": selected_rows,
+        "selected_review_row_count": len(selected_review_rows),
+        "selected_manual_review_row_count": len(selected_manual_review_rows),
+        "accepted_manual_review_row_count": len(accepted_manual_review_rows),
+        "pending_manual_review_row_count": manual_review_pending_count,
+        "rejected_manual_review_row_count": len(rejected_manual_review_rows),
+        "generated_qa_rejection_rate": generated_rejection_rate,
+        "generated_qa_global_duplicate_question_rate": generated_global_duplicate_rate,
+        "generated_qa_per_image_duplicate_question_rate": generated_per_image_duplicate_rate,
+        "generated_qa_question_diversity_ratio": generated_diversity_ratio,
+        "source_class_coverage_rate": source_class_coverage_rate,
+    }
+
+
 def _dataset_caption_instruction_archive(
     indexed_records: Sequence[Mapping[str, Any]],
     instruction_records: Sequence[Mapping[str, Any]],
@@ -21958,6 +22073,11 @@ def _dataset_caption_instruction_archive(
     manual_review_required_count = sum(
         1 for row in review_rows if isinstance(row, Mapping) and bool(row.get("requires_manual_review"))
     )
+    training_readiness = _caption_instruction_training_readiness(
+        corpus_quality_metrics=corpus_quality_metrics,
+        review_rows=review_rows,
+        settings=settings,
+    )
     captioning_report = {
         "format": "tator_caption_instruction_report_v1",
         "dataset_id": str(dataset_id or "").strip() or None,
@@ -21985,6 +22105,7 @@ def _dataset_caption_instruction_archive(
         },
         "provenance_summary": dict(sorted(provenance_summary.items())),
         "corpus_quality_metrics": corpus_quality_metrics,
+        "training_readiness": training_readiness,
         "instruction_review_row_count": len(review_rows),
         "manual_review_required_count": manual_review_required_count,
         "split_image_counts": dict(sorted(split_image_counts.items())),
@@ -22034,6 +22155,7 @@ def _dataset_caption_instruction_archive(
         "rejection_reason_counts": dict(sorted(rejection_reason_counts.items())),
         "provenance_summary": dict(sorted(provenance_summary.items())),
         "corpus_quality_metrics": corpus_quality_metrics,
+        "training_readiness": training_readiness,
         "captioning_report": captioning_report,
         "rejections": rejections,
         "archive_rows": archive_rows,
@@ -22345,6 +22467,12 @@ def export_captions(dataset_id: str, options: Optional[Mapping[str, Any]] = None
         "manual_review_required_count": sum(
             1 for row in instruction_review_rows if isinstance(row, Mapping) and bool(row.get("requires_manual_review"))
         ),
+        "training_readiness_status": str(
+            (instruction_report.get("training_readiness") or {}).get("status")
+            if isinstance(instruction_report.get("training_readiness"), Mapping)
+            else ""
+        ).strip()
+        or "unknown",
         "rejected_training_row_count": int(instruction_archive.get("rejected_training_row_count") or 0),
     }
     instruction_archive["summary"] = dict(instruction_summary)

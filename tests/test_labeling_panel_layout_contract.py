@@ -591,6 +591,31 @@ def test_qwen_caption_instruction_review_import_formats_backend_failures():
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
 
 
+def test_qwen_caption_vlm_training_validator_rejects_canonical_image_path_duplicates():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            _extract_js_function(js, "validateCaptionVlmTrainingRows"),
+            "const base = {",
+            "  image_path: './train//frame.jpg',",
+            "  question: 'Caption 0.',",
+            "  answer: JSON.stringify({ caption: 'A grounded caption.' }),",
+            "  metadata: {",
+            "    row_type: 'caption',",
+            "    answer_format: 'json',",
+            "    validation_status: 'accepted',",
+            "  },",
+            "};",
+            "const duplicate = validateCaptionVlmTrainingRows([base, { ...base, image_path: 'train/frame.jpg' }]);",
+            "assert.strictEqual(duplicate.ok, false);",
+            "assert.strictEqual(duplicate.imageCount, 1);",
+            "assert(duplicate.errors.some((error) => error.includes('duplicate image_path + question')));",
+        ]
+    )
+    subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
+
+
 def test_qwen_caption_instruction_training_validator_blocks_non_trainable_rows():
     js = _js()
     script = "\n".join(
@@ -637,6 +662,10 @@ def test_qwen_caption_instruction_training_validator_blocks_non_trainable_rows()
             "const normalizedDuplicate = validateCaptionInstructionTrainingRows([base, { ...base, question: ' describe   THE image. ', metadata: { ...base.metadata, qa_id: 'qa-2' } }]);",
             "assert.strictEqual(normalizedDuplicate.ok, false);",
             "assert(normalizedDuplicate.errors.some((error) => error.includes('duplicate image_path + question')));",
+            "const canonicalImageDuplicate = validateCaptionInstructionTrainingRows([{ ...base, image_path: './train//frame.jpg' }, { ...base, image_path: 'train/frame.jpg', metadata: { ...base.metadata, qa_id: 'qa-3' } }]);",
+            "assert.strictEqual(canonicalImageDuplicate.ok, false);",
+            "assert.strictEqual(canonicalImageDuplicate.imageCount, 1);",
+            "assert(canonicalImageDuplicate.errors.some((error) => error.includes('duplicate image_path + question')));",
         ]
     )
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
@@ -1695,9 +1724,9 @@ def test_qwen_caption_ui_scenarios_document_set_and_forget_workflows():
     assert "duplicate-question/diversity metrics" in scenarios
     assert "source-class coverage" in scenarios
     assert "generated QA never\nbecomes source annotations" in scenarios
-    assert "duplicate normalized image/question pairs" in scenarios
+    assert "duplicate canonical image-path/question pairs" in scenarios
     assert "VLM export validation status" in scenarios
-    assert "No export\nimposes a per-image caption limit" in scenarios
+    assert "No export imposes a per-image caption limit" in scenarios.replace("\n", " ")
     assert "bad\nrows are blocked instead of downloaded" in scenarios
     assert "Make generated caption primary" in scenarios
     assert "Generated caption jobs append variants by default" in scenarios

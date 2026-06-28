@@ -46,7 +46,7 @@ The new work adds a separate instruction-dataset path:
 - The browser validates instruction JSONL before download, including required
   row metadata, instruction archive provenance, known validation/review states,
   rejected/failed/invalid validation state, non-trainable review state,
-  duplicate normalized image/question pairs, and JSON answer formats.
+  duplicate canonical image-path/question pairs, and JSON answer formats.
 - The browser validates reviewed JSONL before import, including unsupported
   actionable row origins and duplicate or conflicting actionable review targets,
   and formats backend review-import failures into row-specific operator
@@ -56,7 +56,7 @@ The new work adds a separate instruction-dataset path:
 - The Qwen trainer refuses instruction flat rows that carry missing instruction
   provenance, missing or unknown validation/review state, rejected validation
   state, rejected or needs-revision review state, invalid deterministic JSON
-  answers, or duplicate normalized image/question pairs.
+  answers, or duplicate canonical image-path/question pairs.
 
 The key point is that instruction dataset creation is now a product workflow,
 not a manual script chain.
@@ -210,8 +210,8 @@ The trainer import is a final safety boundary, not a blind loader. It preserves
 metadata from exported rows, then rejects instruction rows with missing
 provenance, missing or unknown validation/review state, explicit non-trainable
 state, invalid JSON answers for deterministic or JSON-formatted types, and
-duplicate normalized image/question pairs. This protects fine-tuning runs from
-stale review artifacts or manual JSONL edits that bypass the normal export
+duplicate canonical image-path/question pairs. This protects fine-tuning runs
+from stale review artifacts or manual JSONL edits that bypass the normal export
 readiness gate.
 
 ### Instruction Archive Rows
@@ -330,7 +330,7 @@ Generated QA is validated before it can be flattened:
 
 - question must be present
 - answer must be present
-- normalized image/question pair must be unique
+- canonical image-path/question pair must be unique
 - JSON answers must parse when JSON format is requested
 - row must not be upstream-rejected
 - structured claims must be supported by source annotations or be rejected
@@ -580,7 +580,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-187 passed
+190 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch
@@ -633,6 +633,7 @@ Focused trainer-import boundary suite:
   tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_non_trainable_flat_rows \
   tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_duplicate_flat_questions \
   tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_normalized_duplicate_flat_questions \
+  tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_resolved_duplicate_flat_image_aliases \
   tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_ignores_blank_flat_rows_before_duplicate_check \
   -q
 ```
@@ -640,7 +641,7 @@ Focused trainer-import boundary suite:
 Latest recorded result:
 
 ```text
-8 passed
+9 passed
 ```
 
 Full trainer backend suite:
@@ -652,7 +653,7 @@ Full trainer backend suite:
 Latest recorded result:
 
 ```text
-26 passed
+27 passed
 ```
 
 Focused instruction-dataset and UI contract suite:
@@ -669,7 +670,7 @@ Focused instruction-dataset and UI contract suite:
 Latest recorded result:
 
 ```text
-161 passed
+163 passed
 ```
 
 Runtime and unattended hardening suites have also been run in prior hardening

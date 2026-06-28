@@ -248,8 +248,8 @@ The additional consistency checks are:
 
 - Trainer JSONL row count must match the report's selected flattened-row count.
 - Trainer JSONL row identities must match the selected review-row identities.
-- Trainer JSONL rows must match candidates in the per-image archive by image
-  path, QA id, and normalized question.
+- Trainer JSONL rows must match candidates in the per-image archive by
+  canonical image path, QA id, and normalized question.
 - Selected review-row training answers and archive candidate answers must match
   the flattened trainer answer where those fields are present.
 - Archive JSONL row count must match the report image count and the archive
@@ -362,7 +362,7 @@ Validation checks include:
 - missing or unknown validation status
 - missing or unknown review status
 - invalid JSON for JSON-formatted answers
-- duplicate normalized image/question pairs
+- duplicate canonical image-path/question pairs
 - rejected, failed, or invalid validation status
 - rejected or needs-revision review status
 
@@ -370,7 +370,7 @@ The Qwen trainer has its own final import boundary. It imports the flat row
 shape directly, converts each row into an image/question/answer conversation,
 preserves row metadata, and refuses instruction rows with missing provenance,
 missing or unknown validation/review state, non-trainable state, or duplicate
-normalized image/question pairs even if a file was edited after export.
+canonical image-path/question pairs even if a file was edited after export.
 When both `review_status` and `review_decision` are present, validators inspect
 both fields and fail closed if either field is rejected, needs revision, or
 unknown.
@@ -506,16 +506,19 @@ node --check ybat-master/ybat.js
 ./.venv-macos/bin/python -m pytest \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_training_readiness_blocks_invalid_export_rows \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_training_validator_rejects_normalized_duplicate_questions \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_training_validator_rejects_canonical_image_path_duplicates \
   tests/test_labeling_panel_layout_contract.py::test_qwen_caption_export_preserves_saved_alternates_and_primary_rows \
+  tests/test_labeling_panel_layout_contract.py::test_qwen_caption_vlm_training_validator_rejects_canonical_image_path_duplicates \
   tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_training_validator_blocks_non_trainable_rows \
   tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_normalized_duplicate_flat_questions \
+  tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_resolved_duplicate_flat_image_aliases \
   -q
 ```
 
 Result:
 
 ```text
-5 passed
+8 passed
 ```
 
 ```bash
@@ -531,7 +534,7 @@ Result:
 Result:
 
 ```text
-187 passed
+190 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

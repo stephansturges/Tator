@@ -2095,9 +2095,9 @@ def test_caption_instruction_training_readiness_blocks_invalid_export_rows() -> 
 def test_caption_instruction_training_validator_rejects_normalized_duplicate_questions() -> None:
     import localinferenceapi as api
 
-    def row(question: str, qa_id: str) -> dict:
+    def row(question: str, qa_id: str, image_path: str = "frame.jpg") -> dict:
         return {
-            "image_path": "frame.jpg",
+            "image_path": image_path,
             "question": question,
             "answer": "A grounded answer.",
             "metadata": {
@@ -2119,6 +2119,38 @@ def test_caption_instruction_training_validator_rejects_normalized_duplicate_que
     )
 
     assert validation["ok"] is False
+    assert validation["error_count"] == 1
+    assert "duplicate image_path + question at row 2" in validation["errors"]
+
+
+def test_caption_instruction_training_validator_rejects_canonical_image_path_duplicates() -> None:
+    import localinferenceapi as api
+
+    def row(image_path: str, qa_id: str) -> dict:
+        return {
+            "image_path": image_path,
+            "question": "Describe the image.",
+            "answer": "A grounded answer.",
+            "metadata": {
+                "qa_id": qa_id,
+                "row_type": "generated_qa",
+                "answer_source": "vlm_generated",
+                "answer_format": "natural",
+                "source_archive": api.CAPTION_INSTRUCTION_ARCHIVE_FORMAT,
+                "validation_status": "accepted",
+                "review_status": "unreviewed",
+            },
+        }
+
+    validation = api._caption_instruction_validate_training_rows(
+        [
+            row("./train//frame.jpg", "qa-1"),
+            row("train/frame.jpg", "qa-2"),
+        ]
+    )
+
+    assert validation["ok"] is False
+    assert validation["image_count"] == 1
     assert validation["error_count"] == 1
     assert "duplicate image_path + question at row 2" in validation["errors"]
 

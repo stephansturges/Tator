@@ -34643,6 +34643,13 @@ async function cancelRfDetrTrainingJobRequest() {
         (Array.isArray(rows) ? rows : []).forEach((row, index) => {
             const rowNumber = index + 1;
             const imagePath = String(row?.image_path || "").trim();
+            const normalizedImagePath = imagePath
+                .replace(/\\/g, "/")
+                .replace(/\/+/g, "/")
+                .replace(/^(\.\/)+/g, "")
+                .split("/")
+                .filter((part) => part && part !== ".")
+                .join("/");
             const question = String(row?.question || "").trim();
             const answer = String(row?.answer || "").trim();
             const metadata = row?.metadata && typeof row.metadata === "object" ? row.metadata : {};
@@ -34652,7 +34659,7 @@ async function cancelRfDetrTrainingJobRequest() {
             if (!imagePath) {
                 errors.push(`row ${rowNumber} missing image_path`);
             } else {
-                imagePaths.add(imagePath);
+                imagePaths.add(normalizedImagePath || imagePath);
             }
             if (!question) {
                 errors.push(`row ${rowNumber} missing question`);
@@ -34678,7 +34685,7 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             if (imagePath && question) {
                 const normalizedQuestion = question.replace(/\s+/g, " ").toLowerCase();
-                const pairKey = `${imagePath}\u0000${normalizedQuestion}`;
+                const pairKey = `${normalizedImagePath || imagePath}\u0000${normalizedQuestion}`;
                 if (imageQuestionPairs.has(pairKey)) {
                     errors.push(`duplicate image_path + question at row ${rowNumber}`);
                 }
@@ -34718,6 +34725,13 @@ async function cancelRfDetrTrainingJobRequest() {
         (Array.isArray(rows) ? rows : []).forEach((row, index) => {
             const rowNumber = index + 1;
             const imagePath = String(row?.image_path || "").trim();
+            const normalizedImagePath = imagePath
+                .replace(/\\/g, "/")
+                .replace(/\/+/g, "/")
+                .replace(/^(\.\/)+/g, "")
+                .split("/")
+                .filter((part) => part && part !== ".")
+                .join("/");
             const question = String(row?.question || "").trim();
             const answer = String(row?.answer || "").trim();
             const metadata = row?.metadata && typeof row.metadata === "object" ? row.metadata : {};
@@ -34734,7 +34748,7 @@ async function cancelRfDetrTrainingJobRequest() {
             if (!imagePath) {
                 errors.push(`row ${rowNumber} missing image_path`);
             } else {
-                imagePaths.add(imagePath);
+                imagePaths.add(normalizedImagePath || imagePath);
             }
             if (!question) {
                 errors.push(`row ${rowNumber} missing question`);
@@ -34787,7 +34801,7 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             if (imagePath && question) {
                 const normalizedQuestion = question.replace(/\s+/g, " ").toLowerCase();
-                const pairKey = `${imagePath}\u0000${normalizedQuestion}`;
+                const pairKey = `${normalizedImagePath || imagePath}\u0000${normalizedQuestion}`;
                 if (imageQuestionPairs.has(pairKey)) {
                     errors.push(`duplicate image_path + question at row ${rowNumber}`);
                 }

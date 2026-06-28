@@ -387,6 +387,25 @@ def _normalise_flat_training_question(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip().lower())
 
 
+def _normalise_flat_training_image_path(value: Any) -> str:
+    raw = re.sub(r"/+", "/", str(value or "").replace("\\", "/").strip())
+    while raw.startswith("./"):
+        raw = raw[2:].strip()
+    parts = [part for part in raw.split("/") if part and part != "."]
+    return "/".join(parts)
+
+
+def _normalise_flat_training_image_key(dataset_root: Path, split: str, value: Any) -> str:
+    image_path = _normalise_flat_training_image_path(value)
+    resolved = _resolve_image_path(dataset_root, split, str(value or ""))
+    if resolved is not None:
+        try:
+            return resolved.resolve(strict=False).relative_to(dataset_root.resolve(strict=False)).as_posix()
+        except (OSError, RuntimeError, ValueError):
+            pass
+    return image_path
+
+
 def _flat_training_row_error_suffix(line_number: Optional[int]) -> str:
     return f":line_{line_number}" if line_number is not None else ""
 
@@ -551,7 +570,8 @@ class QwenConversationDataset(Dataset):
                     )
                     if entry is not None:
                         question = _normalise_flat_training_question(payload.get("question"))
-                        flat_key = (image_name, question)
+                        image_key = _normalise_flat_training_image_key(dataset_root, split, image_name)
+                        flat_key = (image_key, question)
                         if flat_key in seen_flat_image_questions:
                             raise TrainingError(
                                 f"qwen_training_duplicate_flat_question:line_{line_number}"

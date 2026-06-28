@@ -20906,6 +20906,7 @@ def _caption_instruction_validate_training_rows(rows: Sequence[Any]) -> Dict[str
             errors.append(f"row {row_number} is not an object")
             continue
         image_path = str(row.get("image_path") or "").strip()
+        normalized_image_path = _caption_instruction_normalized_image_path(image_path)
         question = str(row.get("question") or "").strip()
         answer = str(row.get("answer") or "").strip()
         metadata = row.get("metadata") if isinstance(row.get("metadata"), Mapping) else {}
@@ -20925,7 +20926,7 @@ def _caption_instruction_validate_training_rows(rows: Sequence[Any]) -> Dict[str
         if not image_path:
             errors.append(f"row {row_number} missing image_path")
         else:
-            image_paths.add(image_path)
+            image_paths.add(normalized_image_path or image_path)
         if not question:
             errors.append(f"row {row_number} missing question")
         if not answer:
@@ -20960,7 +20961,10 @@ def _caption_instruction_validate_training_rows(rows: Sequence[Any]) -> Dict[str
             except Exception:
                 errors.append(f"row {row_number} answer is not valid JSON")
         if image_path and question:
-            pair_key = (image_path, _caption_instruction_normalized_question(question))
+            pair_key = (
+                normalized_image_path or image_path,
+                _caption_instruction_normalized_question(question),
+            )
             if pair_key in image_question_pairs:
                 errors.append(f"duplicate image_path + question at row {row_number}")
             image_question_pairs.add(pair_key)
@@ -21300,6 +21304,14 @@ def _caption_instruction_generated_pair_for_archive(
 
 def _caption_instruction_normalized_question(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _caption_instruction_normalized_image_path(value: Any) -> str:
+    raw = re.sub(r"/+", "/", str(value or "").replace("\\", "/").strip())
+    while raw.startswith("./"):
+        raw = raw[2:].strip()
+    parts = [part for part in raw.split("/") if part and part != "."]
+    return "/".join(parts)
 
 
 def _caption_instruction_rate(numerator: int, denominator: int) -> float:

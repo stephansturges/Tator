@@ -402,6 +402,41 @@ def test_qwen_conversation_dataset_rejects_normalized_duplicate_flat_questions(t
         training.QwenConversationDataset(dataset_root, "train", processor=object())
 
 
+def test_qwen_conversation_dataset_rejects_resolved_duplicate_flat_image_aliases(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    image_dir = dataset_root / "train" / "images"
+    image_dir.mkdir(parents=True)
+    Image.new("RGB", (4, 4), (8, 16, 32)).save(image_dir / "sample.png")
+
+    def row(image_path: str, qa_id: str) -> dict:
+        return {
+            "image_path": image_path,
+            "question": "Describe the image.",
+            "answer": "A compact scene is shown.",
+            "metadata": {
+                "qa_id": qa_id,
+                "row_type": "generated_qa",
+                "answer_source": "vlm_generated",
+                "answer_format": "natural",
+                "source_archive": "tator_caption_instruction_archive_v1",
+                "validation_status": "accepted",
+                "review_status": "unreviewed",
+            },
+        }
+
+    rows = [
+        row("sample.png", "qa-1"),
+        row("images/sample.png", "qa-2"),
+    ]
+    (dataset_root / "train" / "annotations.jsonl").write_text(
+        "".join(json.dumps(item) + "\n" for item in rows),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(training.TrainingError, match="qwen_training_duplicate_flat_question:line_2"):
+        training.QwenConversationDataset(dataset_root, "train", processor=object())
+
+
 def test_qwen_conversation_dataset_ignores_blank_flat_rows_before_duplicate_check(tmp_path):
     dataset_root = tmp_path / "dataset"
     image_dir = dataset_root / "train" / "images"

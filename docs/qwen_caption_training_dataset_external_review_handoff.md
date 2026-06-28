@@ -95,7 +95,7 @@ The final training loader is now deliberately defensive. It accepts the flat
 instruction JSONL shape exported by the caption workflow, but it does not trust
 that file blindly. If the file has been edited after export, or if stale rows
 carry rejected validation, rejected or needs-revision review state, invalid JSON
-answers, or duplicate normalized image/question pairs, the trainer import fails before any
+answers, or duplicate canonical image-path/question pairs, the trainer import fails before any
 fine-tuning step starts.
 
 The runtime was hardened around the failure modes observed during captioning:
@@ -142,7 +142,7 @@ What is implemented in this checkpoint:
 - Training-readiness classification.
 - Browser-side instruction export validation for required row metadata,
   instruction archive provenance, known validation/review states, JSON answers,
-  duplicate normalized image/question pairs, rejected/failed/invalid validation status, and
+  duplicate canonical image-path/question pairs, rejected/failed/invalid validation status, and
   non-trainable review status.
 - Browser-side review import validation for unsupported actionable row origins
   and duplicate or conflicting actionable review targets, plus operator-readable
@@ -159,7 +159,7 @@ What is implemented in this checkpoint:
 - Trainer-side fail-closed checks for stale or hand-edited instruction flat rows
   carrying missing provenance, missing or unknown validation/review state,
   rejected validation state, rejected/needs-revision review state, invalid
-  deterministic JSON answers, or duplicate normalized image/question pairs.
+  deterministic JSON answers, or duplicate canonical image-path/question pairs.
 - Runtime hardening for prompt size, output-token overrides, loop detection,
   fallback, set-and-forget supervision, and model-download state.
 - Ready-report gating for trainer JSONL export, enabled in the UI by default and
@@ -515,7 +515,7 @@ archive exports, if a stale or hand-edited JSONL file is missing provenance,
 missing validation or review state, carries unknown status values, contains
 explicit rejected validation status, rejected or needs-revision review status,
 invalid JSON for deterministic or JSON-formatted rows, or duplicate
-normalized image/question pairs, import fails before fine-tuning starts.
+canonical image-path/question pairs, import fails before fine-tuning starts.
 
 ## Validation And Rejection Rules
 
@@ -525,7 +525,7 @@ JSONL. This is intentional: auditability and trainability are separate.
 Rows are rejected from flattened training output when:
 
 - image path, question, or answer is missing
-- normalized image/question pair is a duplicate
+- canonical image-path/question pair is a duplicate
 - JSON answer formats contain invalid JSON
 - upstream validation marked the row rejected or failed
 - generated QA asks for unavailable or sensitive context
@@ -606,7 +606,7 @@ same server-side behavior with
 
 The report also includes `instruction_export_validation`, which is the backend
 equivalent of the browser's trainer JSONL validator. It checks required fields,
-row metadata, instruction archive provenance, duplicate normalized image/question pairs,
+row metadata, instruction archive provenance, duplicate canonical image-path/question pairs,
 invalid JSON answers, missing or unknown validation/review state, rejected
 validation status, and non-trainable review status. Any validation error blocks
 training readiness with `instruction_training_rows_invalid`.
@@ -624,7 +624,7 @@ payload, and summary; failures force readiness to `blocked` with
 
 The consistency check also compares row identities, not only totals. Flattened
 trainer rows, selected review rows, and archive candidates must agree on image
-path, QA id, normalized question, per-image selected counts, and selected
+canonical image path, QA id, normalized question, per-image selected counts, and selected
 training answers where available. This blocks same-count artifact swaps, such as
 a stale review JSONL or archive JSONL from another generation run.
 
@@ -732,7 +732,7 @@ The UI validates instruction JSONL before writing a file:
 - blank answer
 - invalid JSON for JSON row types
 - rejected generated QA
-- duplicate normalized image/question rows
+- duplicate canonical image-path/question rows
 
 Rendered browser smoke verifies that the instruction controls are visible,
 defaults are correct, action buttons do not clip text, and no console or network
@@ -875,7 +875,7 @@ Training loader:
   - preservation of row metadata
   - fail-closed rejection of non-trainable review state
   - invalid deterministic or JSON-formatted answer rejection
-  - duplicate normalized image/question pair rejection
+  - duplicate canonical image-path/question pair rejection
 
 UI:
 
@@ -915,7 +915,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Result:
 
 ```text
-187 passed
+190 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch
@@ -968,6 +968,7 @@ Focused trainer-import boundary tests:
   tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_non_trainable_flat_rows \
   tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_duplicate_flat_questions \
   tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_normalized_duplicate_flat_questions \
+  tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_resolved_duplicate_flat_image_aliases \
   tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_ignores_blank_flat_rows_before_duplicate_check \
   -q
 ```
@@ -975,7 +976,7 @@ Focused trainer-import boundary tests:
 Result:
 
 ```text
-8 passed
+9 passed
 ```
 
 Full trainer backend test file:
@@ -989,7 +990,7 @@ Full trainer backend test file:
 Result:
 
 ```text
-26 passed
+27 passed
 ```
 
 Caption/instruction/UI contract suite outside the trainer file:
@@ -1006,7 +1007,7 @@ Caption/instruction/UI contract suite outside the trainer file:
 Result:
 
 ```text
-161 passed
+163 passed
 ```
 
 Syntax and formatting checks:
@@ -1071,7 +1072,7 @@ no matches
 3. Inspect the rejection behavior:
    - missing label source
    - missing manifest row
-   - duplicate normalized image/question pair
+   - duplicate canonical image-path/question pair
    - invalid JSON answer
    - unsupported structured generated claim
    - caption0 count contradiction
@@ -1110,7 +1111,7 @@ no matches
     image paths resolve and rows are converted to conversations.
 11. Attempt trainer import with a deliberately rejected review row, a
     needs-revision review row, an invalid deterministic JSON answer, and a
-    duplicate normalized image/question pair. Each case should fail before training.
+    duplicate canonical image-path/question pair. Each case should fail before training.
 
 ## Remaining Work Before Treating The Corpus As Training-Ready
 

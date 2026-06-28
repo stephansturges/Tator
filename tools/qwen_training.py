@@ -78,6 +78,11 @@ TelemetryCallback = Callable[[Dict[str, Any]], None]
 
 QWEN_MIN_TRANSFORMERS = "4.57.0"
 QWEN_PLATFORM_TRANSFORMERS = "transformers"
+CAPTION_INSTRUCTION_ARCHIVE_FORMAT = "tator_caption_instruction_archive_v1"
+CAPTION_INSTRUCTION_TRAINABLE_VALIDATION_STATUSES = {"accepted", "machine_validated"}
+CAPTION_INSTRUCTION_NONTRAINABLE_VALIDATION_STATUSES = {"rejected", "failed", "invalid"}
+CAPTION_INSTRUCTION_TRAINABLE_REVIEW_STATUSES = {"accepted", "unreviewed", "machine_validated"}
+CAPTION_INSTRUCTION_NONTRAINABLE_REVIEW_STATUSES = {"rejected", "needs_revision"}
 QWEN_PLATFORM_MLX = "mlx_vlm"
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -389,17 +394,55 @@ def _validate_flat_training_row_metadata(
 ) -> None:
     metadata = payload.get("metadata")
     metadata = metadata if isinstance(metadata, dict) else {}
+    source_archive = str(metadata.get("source_archive") or "").strip()
+    is_caption_instruction_row = source_archive == CAPTION_INSTRUCTION_ARCHIVE_FORMAT
+    if is_caption_instruction_row:
+        for field in ("qa_id", "row_type", "answer_source", "answer_format"):
+            if not str(metadata.get(field) or "").strip():
+                raise TrainingError(
+                    f"qwen_training_row_missing_{field}{_flat_training_row_error_suffix(line_number)}"
+                )
     validation_status = str(metadata.get("validation_status") or "").strip().lower()
-    if validation_status in {"rejected", "failed", "invalid"}:
+    if is_caption_instruction_row and not validation_status:
+        raise TrainingError(
+            f"qwen_training_row_missing_validation_status{_flat_training_row_error_suffix(line_number)}"
+        )
+    if validation_status in CAPTION_INSTRUCTION_NONTRAINABLE_VALIDATION_STATUSES:
         raise TrainingError(
             f"qwen_training_row_validation_rejected{_flat_training_row_error_suffix(line_number)}"
         )
-    review_status = _normalise_training_review_decision(
-        metadata.get("review_status") or metadata.get("review_decision")
-    )
-    if review_status in {"rejected", "needs_revision"}:
+    if (
+        is_caption_instruction_row
+        and validation_status
+        and validation_status not in CAPTION_INSTRUCTION_TRAINABLE_VALIDATION_STATUSES
+    ):
         raise TrainingError(
-            f"qwen_training_row_review_not_trainable:{review_status}{_flat_training_row_error_suffix(line_number)}"
+            f"qwen_training_row_unsupported_validation_status:{validation_status}{_flat_training_row_error_suffix(line_number)}"
+        )
+    raw_review_values = [
+        value for value in (metadata.get("review_status"), metadata.get("review_decision"))
+        if str(value or "").strip()
+    ]
+    review_statuses = [_normalise_training_review_decision(value) for value in raw_review_values]
+    if is_caption_instruction_row and not raw_review_values:
+        raise TrainingError(
+            f"qwen_training_row_missing_review_status{_flat_training_row_error_suffix(line_number)}"
+        )
+    nontrainable_review_status = next(
+        (status for status in review_statuses if status in CAPTION_INSTRUCTION_NONTRAINABLE_REVIEW_STATUSES),
+        "",
+    )
+    if nontrainable_review_status:
+        raise TrainingError(
+            f"qwen_training_row_review_not_trainable:{nontrainable_review_status}{_flat_training_row_error_suffix(line_number)}"
+        )
+    unsupported_review_status = next(
+        (status for status in review_statuses if status not in CAPTION_INSTRUCTION_TRAINABLE_REVIEW_STATUSES),
+        "",
+    )
+    if is_caption_instruction_row and unsupported_review_status:
+        raise TrainingError(
+            f"qwen_training_row_unsupported_review_status:{unsupported_review_status}{_flat_training_row_error_suffix(line_number)}"
         )
     row_type = str(metadata.get("row_type") or "").strip().lower()
     answer_format = str(metadata.get("answer_format") or "").strip().lower()

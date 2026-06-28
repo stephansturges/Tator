@@ -20239,6 +20239,10 @@ CAPTION_INSTRUCTION_SOURCE_ANNOTATIONS_FORMAT = "tator_source_annotations_v1"
 CAPTION_INSTRUCTION_TRAINING_ROWS_FORMAT = "tator_caption_instruction_rows_v1"
 CAPTION_INSTRUCTION_REVIEW_ROWS_FORMAT = "tator_caption_instruction_review_rows_v1"
 CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ROWS = 200000
+CAPTION_INSTRUCTION_TRAINABLE_VALIDATION_STATUSES = {"accepted", "machine_validated"}
+CAPTION_INSTRUCTION_NONTRAINABLE_VALIDATION_STATUSES = {"rejected", "failed", "invalid"}
+CAPTION_INSTRUCTION_TRAINABLE_REVIEW_STATUSES = {"accepted", "unreviewed", "machine_validated"}
+CAPTION_INSTRUCTION_NONTRAINABLE_REVIEW_STATUSES = {"rejected", "needs_revision"}
 
 
 def _dataset_caption_instruction_records_path(
@@ -20894,11 +20898,14 @@ def _caption_instruction_validate_training_rows(rows: Sequence[Any]) -> Dict[str
         qa_id = str(metadata.get("qa_id") or "").strip()
         row_type = str(metadata.get("row_type") or "").strip()
         answer_source = str(metadata.get("answer_source") or "").strip()
+        source_archive = str(metadata.get("source_archive") or "").strip()
         answer_format = str(metadata.get("answer_format") or "").strip().lower()
         validation_status = str(metadata.get("validation_status") or "").strip().lower()
-        review_status = _caption_instruction_review_decision(
-            metadata.get("review_status") or metadata.get("review_decision")
-        )
+        raw_review_values = [
+            value for value in (metadata.get("review_status"), metadata.get("review_decision"))
+            if str(value or "").strip()
+        ]
+        review_statuses = [_caption_instruction_review_decision(value) for value in raw_review_values]
         if not image_path:
             errors.append(f"row {row_number} missing image_path")
         else:
@@ -20913,10 +20920,24 @@ def _caption_instruction_validate_training_rows(rows: Sequence[Any]) -> Dict[str
             errors.append(f"row {row_number} metadata missing row_type")
         if not answer_source:
             errors.append(f"row {row_number} metadata missing answer_source")
-        if validation_status in {"rejected", "failed", "invalid"}:
+        if not source_archive:
+            errors.append(f"row {row_number} metadata missing source_archive")
+        elif source_archive != CAPTION_INSTRUCTION_ARCHIVE_FORMAT:
+            errors.append(f"row {row_number} metadata source_archive is unsupported")
+        if not answer_format:
+            errors.append(f"row {row_number} metadata missing answer_format")
+        if not validation_status:
+            errors.append(f"row {row_number} metadata missing validation_status")
+        elif validation_status in CAPTION_INSTRUCTION_NONTRAINABLE_VALIDATION_STATUSES:
             errors.append(f"row {row_number} was rejected by archive validation")
-        if review_status in {"rejected", "needs_revision"}:
+        elif validation_status not in CAPTION_INSTRUCTION_TRAINABLE_VALIDATION_STATUSES:
+            errors.append(f"row {row_number} metadata validation_status is unsupported")
+        if not raw_review_values:
+            errors.append(f"row {row_number} metadata missing review_status")
+        elif any(status in CAPTION_INSTRUCTION_NONTRAINABLE_REVIEW_STATUSES for status in review_statuses):
             errors.append(f"row {row_number} has non-trainable review status")
+        elif any(status not in CAPTION_INSTRUCTION_TRAINABLE_REVIEW_STATUSES for status in review_statuses):
+            errors.append(f"row {row_number} metadata review_status is unsupported")
         if answer and (row_type.startswith("deterministic_") or answer_format == "json" or answer_format.endswith("_json")):
             try:
                 json.loads(answer)

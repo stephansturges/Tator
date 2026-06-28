@@ -406,10 +406,18 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "metadata missing qa_id" in instruction_validator
     assert "metadata missing row_type" in instruction_validator
     assert "metadata missing answer_source" in instruction_validator
+    assert "metadata missing source_archive" in instruction_validator
+    assert "metadata missing answer_format" in instruction_validator
+    assert "metadata missing validation_status" in instruction_validator
+    assert "metadata missing review_status" in instruction_validator
+    assert "metadata validation_status is unsupported" in instruction_validator
+    assert "metadata review_status is unsupported" in instruction_validator
     assert "const rowType = String(metadata.row_type" in instruction_validator
+    assert "const sourceArchive = String(metadata.source_archive" in instruction_validator
     assert "const answerFormat = String(metadata.answer_format" in instruction_validator
     assert "const validationStatus = String(metadata.validation_status" in instruction_validator
-    assert "metadata.review_status || metadata.review_decision" in instruction_validator
+    assert "[metadata.review_status, metadata.review_decision]" in instruction_validator
+    assert "reviewStatuses.some" in instruction_validator
     assert "has non-trainable review status" in instruction_validator
     report_validator_start = js.index("function validateCaptionInstructionReport")
     report_validator_end = js.index("async function downloadCaptionJsonl", report_validator_start)
@@ -527,7 +535,10 @@ def test_qwen_caption_instruction_training_validator_blocks_non_trainable_rows()
             "    qa_id: 'qa-1',",
             "    row_type: 'generated_qa',",
             "    answer_source: 'vlm_generated',",
+            "    answer_format: 'natural',",
+            "    source_archive: 'tator_caption_instruction_archive_v1',",
             "    validation_status: 'accepted',",
+            "    review_status: 'unreviewed',",
             "  },",
             "};",
             "assert.strictEqual(validateCaptionInstructionTrainingRows([base]).ok, true);",
@@ -542,6 +553,16 @@ def test_qwen_caption_instruction_training_validator_blocks_non_trainable_rows()
             "assert(missingMetadata.errors.some((error) => error.includes('metadata missing qa_id')));",
             "assert(missingMetadata.errors.some((error) => error.includes('metadata missing row_type')));",
             "assert(missingMetadata.errors.some((error) => error.includes('metadata missing answer_source')));",
+            "assert(missingMetadata.errors.some((error) => error.includes('metadata missing source_archive')));",
+            "assert(missingMetadata.errors.some((error) => error.includes('metadata missing answer_format')));",
+            "assert(missingMetadata.errors.some((error) => error.includes('metadata missing validation_status')));",
+            "assert(missingMetadata.errors.some((error) => error.includes('metadata missing review_status')));",
+            "const unknownValidation = validateCaptionInstructionTrainingRows([{ ...base, metadata: { ...base.metadata, validation_status: 'maybe' } }]);",
+            "assert.strictEqual(unknownValidation.ok, false);",
+            "assert(unknownValidation.errors.some((error) => error.includes('validation_status is unsupported')));",
+            "const unknownReview = validateCaptionInstructionTrainingRows([{ ...base, metadata: { ...base.metadata, review_status: 'maybe' } }]);",
+            "assert.strictEqual(unknownReview.ok, false);",
+            "assert(unknownReview.errors.some((error) => error.includes('review_status is unsupported')));",
         ]
     )
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)

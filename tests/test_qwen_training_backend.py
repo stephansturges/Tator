@@ -280,6 +280,65 @@ def test_qwen_conversation_dataset_rejects_non_trainable_flat_rows(
         training.QwenConversationDataset(dataset_root, "train", processor=object())
 
 
+@pytest.mark.parametrize(
+    ("metadata_update", "error_pattern"),
+    [
+        (
+            {"validation_status": ""},
+            "qwen_training_row_missing_validation_status:line_1",
+        ),
+        (
+            {"review_status": ""},
+            "qwen_training_row_missing_review_status:line_1",
+        ),
+        (
+            {"validation_status": "maybe"},
+            "qwen_training_row_unsupported_validation_status:maybe:line_1",
+        ),
+        (
+            {"review_status": "maybe"},
+            "qwen_training_row_unsupported_review_status:maybe:line_1",
+        ),
+        (
+            {"review_status": "unreviewed", "review_decision": "needs-revision"},
+            "qwen_training_row_review_not_trainable:needs_revision:line_1",
+        ),
+    ],
+)
+def test_qwen_conversation_dataset_rejects_incomplete_instruction_flat_metadata(
+    tmp_path,
+    metadata_update,
+    error_pattern,
+):
+    dataset_root = tmp_path / "dataset"
+    image_dir = dataset_root / "train" / "images"
+    image_dir.mkdir(parents=True)
+    Image.new("RGB", (4, 4), (8, 16, 32)).save(image_dir / "sample.png")
+    metadata = {
+        "qa_id": "qa-1",
+        "row_type": "generated_qa",
+        "answer_source": "vlm_generated",
+        "answer_format": "natural",
+        "source_archive": "tator_caption_instruction_archive_v1",
+        "validation_status": "accepted",
+        "review_status": "unreviewed",
+        **metadata_update,
+    }
+    row = {
+        "image_path": "sample.png",
+        "question": "Describe this image in detail.",
+        "answer": "A compact scene is shown.",
+        "metadata": metadata,
+    }
+    (dataset_root / "train" / "annotations.jsonl").write_text(
+        json.dumps(row) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(training.TrainingError, match=error_pattern):
+        training.QwenConversationDataset(dataset_root, "train", processor=object())
+
+
 def test_qwen_conversation_dataset_rejects_duplicate_flat_questions(tmp_path):
     dataset_root = tmp_path / "dataset"
     image_dir = dataset_root / "train" / "images"

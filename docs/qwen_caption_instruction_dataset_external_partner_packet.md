@@ -276,6 +276,10 @@ Validation checks include:
 - missing `qa_id`
 - missing `row_type`
 - missing `answer_source`
+- missing or unsupported `source_archive`
+- missing `answer_format`
+- missing or unknown validation status
+- missing or unknown review status
 - invalid JSON for JSON-formatted answers
 - duplicate image/question pairs
 - rejected, failed, or invalid validation status
@@ -283,8 +287,12 @@ Validation checks include:
 
 The Qwen trainer has its own final import boundary. It imports the flat row
 shape directly, converts each row into an image/question/answer conversation,
-preserves row metadata, and refuses non-trainable rows even if a file was edited
-after export.
+preserves row metadata, and refuses instruction rows with missing provenance,
+missing or unknown validation/review state, or non-trainable state even if a
+file was edited after export.
+When both `review_status` and `review_decision` are present, validators inspect
+both fields and fail closed if either field is rejected, needs revision, or
+unknown.
 
 ## Runtime Hardening
 
@@ -440,7 +448,7 @@ Result:
 Result:
 
 ```text
-151 passed
+157 passed
 ```
 
 Additional validation recorded in the hardening report includes trainer import
@@ -468,8 +476,8 @@ Use this checklist to review the implementation.
 8. Confirm that review import applies decisions only to saved language records.
 9. Confirm that rejected and needs-revision language rows remain auditable but
    do not enter flattened trainer rows.
-10. Confirm that browser, server, and trainer validation all block stale or
-    non-trainable rows.
+10. Confirm that browser, server, and trainer validation all block stale,
+    incomplete, unknown-status, or non-trainable instruction rows.
 11. Confirm that dense prompt box lists are representative while counts remain
     authoritative.
 12. Confirm that loop detection, safe retry, fallback, and deterministic

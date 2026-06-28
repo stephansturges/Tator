@@ -34641,6 +34641,10 @@ async function cancelRfDetrTrainingJobRequest() {
         const warnings = [];
         const imagePaths = new Set();
         const imageQuestionPairs = new Set();
+        const trainableValidationStatuses = new Set(["accepted", "machine_validated"]);
+        const nonTrainableValidationStatuses = new Set(["rejected", "failed", "invalid"]);
+        const trainableReviewStatuses = new Set(["accepted", "unreviewed", "machine_validated"]);
+        const nonTrainableReviewStatuses = new Set(["rejected", "needs_revision"]);
         (Array.isArray(rows) ? rows : []).forEach((row, index) => {
             const rowNumber = index + 1;
             const imagePath = String(row?.image_path || "").trim();
@@ -34651,9 +34655,12 @@ async function cancelRfDetrTrainingJobRequest() {
             const qaId = String(metadata.qa_id || "").trim();
             const rowType = String(metadata.row_type || "").trim();
             const answerSource = String(metadata.answer_source || "").trim();
+            const sourceArchive = String(metadata.source_archive || "").trim();
             const answerFormat = String(metadata.answer_format || "").trim().toLowerCase();
             const validationStatus = String(metadata.validation_status || "").trim().toLowerCase();
-            const reviewStatus = normalizeCaptionInstructionReviewDecision(metadata.review_status || metadata.review_decision);
+            const rawReviewValues = [metadata.review_status, metadata.review_decision]
+                .filter((value) => String(value || "").trim());
+            const reviewStatuses = rawReviewValues.map((value) => normalizeCaptionInstructionReviewDecision(value));
             if (!imagePath) {
                 errors.push(`row ${rowNumber} missing image_path`);
             } else {
@@ -34677,11 +34684,29 @@ async function cancelRfDetrTrainingJobRequest() {
             if (!answerSource) {
                 errors.push(`row ${rowNumber} metadata missing answer_source`);
             }
-            if (["rejected", "failed", "invalid"].includes(validationStatus)) {
+            if (!sourceArchive) {
+                errors.push(`row ${rowNumber} metadata missing source_archive`);
+            } else if (sourceArchive !== "tator_caption_instruction_archive_v1") {
+                errors.push(`row ${rowNumber} metadata source_archive is unsupported`);
+            }
+            if (!answerFormat) {
+                errors.push(`row ${rowNumber} metadata missing answer_format`);
+            }
+            if (!validationStatus) {
+                errors.push(`row ${rowNumber} metadata missing validation_status`);
+            } else if (nonTrainableValidationStatuses.has(validationStatus)) {
                 errors.push(`row ${rowNumber} was rejected by archive validation`);
             }
-            if (["rejected", "needs_revision"].includes(reviewStatus)) {
+            else if (!trainableValidationStatuses.has(validationStatus)) {
+                errors.push(`row ${rowNumber} metadata validation_status is unsupported`);
+            }
+            if (!rawReviewValues.length) {
+                errors.push(`row ${rowNumber} metadata missing review_status`);
+            } else if (reviewStatuses.some((status) => nonTrainableReviewStatuses.has(status))) {
                 errors.push(`row ${rowNumber} has non-trainable review status`);
+            }
+            else if (reviewStatuses.some((status) => !trainableReviewStatuses.has(status))) {
+                errors.push(`row ${rowNumber} metadata review_status is unsupported`);
             }
             if (answer && (rowType.startsWith("deterministic_") || answerFormat === "json" || answerFormat.endsWith("_json"))) {
                 try {

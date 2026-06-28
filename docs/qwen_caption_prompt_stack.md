@@ -790,10 +790,12 @@ before a training JSONL file is written. The caption-only VLM export validator
 blocks rows with missing image paths, blank questions, non-JSON answers, answers
 without exactly one `caption` key, or duplicate `image_path`/`question` pairs.
   The instruction JSONL validator blocks missing `image_path`, blank question,
-  blank answer, invalid JSON for JSON row types, generated QA rejected by archive
-  validation, and duplicate `image_path`/`question` rows before download. The
-  instruction panel also exposes generated QA mix and generated answer format so
-  job launch and browser exports use the same row policy.
+  blank answer, missing instruction row metadata, missing or unsupported
+  instruction archive provenance, missing or unknown validation/review state,
+  invalid JSON for JSON row types, generated QA rejected by archive validation,
+  non-trainable review state, and duplicate `image_path`/`question` rows before
+  download. The instruction panel also exposes generated QA mix and generated
+  answer format so job launch and browser exports use the same row policy.
 For detailed/windowed jobs, set-and-forget also changes the Auto value of
 **Windowed full-image compose** to `text_only`. The crop observations still come
 from visual Qwen calls; only the later full-image composition avoids resending a

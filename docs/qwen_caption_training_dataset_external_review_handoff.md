@@ -140,15 +140,17 @@ What is implemented in this checkpoint:
   generated-QA metadata.
 - Run-level instruction reports with corpus quality metrics.
 - Training-readiness classification.
-- Browser-side instruction export validation for required row metadata, JSON
-  answers, duplicate image/question pairs, rejected/failed/invalid validation
-  status, and non-trainable review status.
+- Browser-side instruction export validation for required row metadata,
+  instruction archive provenance, known validation/review states, JSON answers,
+  duplicate image/question pairs, rejected/failed/invalid validation status, and
+  non-trainable review status.
 - Browser-side review import validation for unsupported actionable row origins
   and duplicate or conflicting actionable review targets.
 - Server-side flattened trainer-row validation exposed as
   `instruction_export_validation` in the archive, report, and API payload.
 - Direct trainer import of the flat instruction JSONL row shape.
-- Trainer-side fail-closed checks for stale or hand-edited flat rows carrying
+- Trainer-side fail-closed checks for stale or hand-edited instruction flat rows
+  carrying missing provenance, missing or unknown validation/review state,
   rejected validation state, rejected/needs-revision review state, invalid
   deterministic JSON answers, or duplicate image/question pairs.
 - Runtime hardening for prompt size, output-token overrides, loop detection,
@@ -497,9 +499,11 @@ fine-tuning:
 This removes the need for a manual conversion step between browser export and
 training import.
 
-The loader does not blindly trust flat rows. If a stale or hand-edited JSONL file
-contains explicit rejected validation status, rejected or needs-revision review
-status, invalid JSON for deterministic or JSON-formatted rows, or duplicate
+The loader does not blindly trust flat rows. For rows marked as instruction
+archive exports, if a stale or hand-edited JSONL file is missing provenance,
+missing validation or review state, carries unknown status values, contains
+explicit rejected validation status, rejected or needs-revision review status,
+invalid JSON for deterministic or JSON-formatted rows, or duplicate
 image/question pairs, import fails before fine-tuning starts.
 
 ## Validation And Rejection Rules
@@ -591,7 +595,8 @@ same server-side behavior with
 
 The report also includes `instruction_export_validation`, which is the backend
 equivalent of the browser's trainer JSONL validator. It checks required fields,
-row metadata, duplicate image/question pairs, invalid JSON answers, rejected
+row metadata, instruction archive provenance, duplicate image/question pairs,
+invalid JSON answers, missing or unknown validation/review state, rejected
 validation status, and non-trainable review status. Any validation error blocks
 training readiness with `instruction_training_rows_invalid`.
 
@@ -861,7 +866,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Result:
 
 ```text
-151 passed
+157 passed
 ```
 
 Focused review-import fail-closed tests:
@@ -909,7 +914,7 @@ Full trainer backend test file:
 Result:
 
 ```text
-20 passed
+25 passed
 ```
 
 Caption/instruction/UI contract suite outside the trainer file:
@@ -926,7 +931,7 @@ Caption/instruction/UI contract suite outside the trainer file:
 Result:
 
 ```text
-131 passed
+132 passed
 ```
 
 Syntax and formatting checks:

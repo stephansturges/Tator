@@ -1141,6 +1141,7 @@ def test_caption_instruction_training_readiness_blocks_selected_needs_revision_r
 def test_caption_instruction_training_readiness_blocks_invalid_export_rows() -> None:
     import localinferenceapi as api
 
+    source_archive = api.CAPTION_INSTRUCTION_ARCHIVE_FORMAT
     validation = api._caption_instruction_validate_training_rows(
         [
             {
@@ -1152,7 +1153,9 @@ def test_caption_instruction_training_readiness_blocks_invalid_export_rows() -> 
                     "row_type": "deterministic_object_count_schema",
                     "answer_source": "source_annotations.object_counts",
                     "answer_format": "object_count_json",
+                    "source_archive": source_archive,
                     "validation_status": "machine_validated",
+                    "review_status": "machine_validated",
                 },
             },
             {
@@ -1164,7 +1167,9 @@ def test_caption_instruction_training_readiness_blocks_invalid_export_rows() -> 
                     "row_type": "deterministic_object_count_schema",
                     "answer_source": "source_annotations.object_counts",
                     "answer_format": "object_count_json",
+                    "source_archive": source_archive,
                     "validation_status": "machine_validated",
+                    "review_status": "machine_validated",
                 },
             },
             {
@@ -1175,6 +1180,8 @@ def test_caption_instruction_training_readiness_blocks_invalid_export_rows() -> 
                     "qa_id": "qa-3",
                     "row_type": "caption0",
                     "answer_source": "caption_record",
+                    "answer_format": "natural",
+                    "source_archive": source_archive,
                     "validation_status": "accepted",
                     "review_status": "rejected",
                 },
@@ -1187,7 +1194,10 @@ def test_caption_instruction_training_readiness_blocks_invalid_export_rows() -> 
                     "qa_id": "qa-4",
                     "row_type": "caption0",
                     "answer_source": "caption_record",
+                    "answer_format": "natural",
+                    "source_archive": source_archive,
                     "validation_status": "invalid",
+                    "review_status": "unreviewed",
                 },
             },
             {
@@ -1198,6 +1208,8 @@ def test_caption_instruction_training_readiness_blocks_invalid_export_rows() -> 
                     "qa_id": "qa-5",
                     "row_type": "generated_qa",
                     "answer_source": "vlm_generated",
+                    "answer_format": "natural",
+                    "source_archive": source_archive,
                     "validation_status": "accepted",
                     "review_decision": "needs-revision",
                 },
@@ -1230,6 +1242,107 @@ def test_caption_instruction_training_readiness_blocks_invalid_export_rows() -> 
     assert readiness["instruction_export_validation_error_count"] == 5
     assert "instruction_training_rows_invalid" in readiness["blocking_reasons"]
     assert "fix_instruction_training_rows" in readiness["required_actions"]
+
+
+def test_caption_instruction_training_validator_requires_complete_row_metadata() -> None:
+    import localinferenceapi as api
+
+    source_archive = api.CAPTION_INSTRUCTION_ARCHIVE_FORMAT
+    rows = [
+        {
+            "image_path": "frame.jpg",
+            "question": "Describe the row missing validation status.",
+            "answer": "A caption.",
+            "metadata": {
+                "qa_id": "qa-missing-validation",
+                "row_type": "caption0",
+                "answer_source": "caption_record",
+                "answer_format": "natural",
+                "source_archive": source_archive,
+                "review_status": "unreviewed",
+            },
+        },
+        {
+            "image_path": "frame.jpg",
+            "question": "Describe the row missing review status.",
+            "answer": "A caption.",
+            "metadata": {
+                "qa_id": "qa-missing-review",
+                "row_type": "generated_qa",
+                "answer_source": "vlm_generated",
+                "answer_format": "natural",
+                "source_archive": source_archive,
+                "validation_status": "accepted",
+            },
+        },
+        {
+            "image_path": "frame.jpg",
+            "question": "Describe the row with an unknown validation status.",
+            "answer": "A caption.",
+            "metadata": {
+                "qa_id": "qa-unknown-validation",
+                "row_type": "generated_qa",
+                "answer_source": "vlm_generated",
+                "answer_format": "natural",
+                "source_archive": source_archive,
+                "validation_status": "maybe",
+                "review_status": "unreviewed",
+            },
+        },
+        {
+            "image_path": "frame.jpg",
+            "question": "Describe the row with an unknown review status.",
+            "answer": "A caption.",
+            "metadata": {
+                "qa_id": "qa-unknown-review",
+                "row_type": "generated_qa",
+                "answer_source": "vlm_generated",
+                "answer_format": "natural",
+                "source_archive": source_archive,
+                "validation_status": "accepted",
+                "review_status": "maybe",
+            },
+        },
+        {
+            "image_path": "frame.jpg",
+            "question": "Describe the row missing archive provenance.",
+            "answer": "A caption.",
+            "metadata": {
+                "qa_id": "qa-missing-archive",
+                "row_type": "generated_qa",
+                "answer_source": "vlm_generated",
+                "answer_format": "natural",
+                "validation_status": "accepted",
+                "review_status": "unreviewed",
+            },
+        },
+        {
+            "image_path": "frame.jpg",
+            "question": "Describe the row with conflicting review fields.",
+            "answer": "A caption.",
+            "metadata": {
+                "qa_id": "qa-conflicting-review",
+                "row_type": "generated_qa",
+                "answer_source": "vlm_generated",
+                "answer_format": "natural",
+                "source_archive": source_archive,
+                "validation_status": "accepted",
+                "review_status": "unreviewed",
+                "review_decision": "needs-revision",
+            },
+        },
+    ]
+
+    validation = api._caption_instruction_validate_training_rows(rows)
+
+    assert validation["ok"] is False
+    assert validation["error_count"] == 6
+    assert "row 1 metadata missing validation_status" in validation["errors"]
+    assert "row 2 metadata missing review_status" in validation["errors"]
+    assert "row 3 metadata validation_status is unsupported" in validation["errors"]
+    assert "row 4 metadata review_status is unsupported" in validation["errors"]
+    assert "row 5 metadata missing source_archive" in validation["errors"]
+    assert "row 6 has non-trainable review status" in validation["errors"]
 
 
 def test_caption_instruction_archive_excludes_needs_revision_generated_qa_from_training_rows(

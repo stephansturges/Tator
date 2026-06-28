@@ -44,15 +44,17 @@ The new work adds a separate instruction-dataset path:
 - The backend exports trainer rows, per-image archive rows, review rows, and a
   run-level report.
 - The browser validates instruction JSONL before download, including required
-  row metadata, rejected/failed/invalid validation state, non-trainable review
-  state, duplicate image/question pairs, and JSON answer formats.
+  row metadata, instruction archive provenance, known validation/review states,
+  rejected/failed/invalid validation state, non-trainable review state,
+  duplicate image/question pairs, and JSON answer formats.
 - The browser validates reviewed JSONL before import, including unsupported
   actionable row origins and duplicate or conflicting actionable review targets.
 - A reviewer can import reviewed JSONL decisions back into the dataset.
 - The Qwen trainer can import the flat exported instruction rows directly.
-- The Qwen trainer refuses flat rows that carry rejected validation state,
-  rejected or needs-revision review state, invalid deterministic JSON answers,
-  or duplicate image/question pairs.
+- The Qwen trainer refuses instruction flat rows that carry missing instruction
+  provenance, missing or unknown validation/review state, rejected validation
+  state, rejected or needs-revision review state, invalid deterministic JSON
+  answers, or duplicate image/question pairs.
 
 The key point is that instruction dataset creation is now a product workflow,
 not a manual script chain.
@@ -193,11 +195,11 @@ The Qwen trainer imports this flat shape directly and converts each row into an
 image/question/answer conversation.
 
 The trainer import is a final safety boundary, not a blind loader. It preserves
-metadata from exported rows, then rejects rows that are explicitly marked
-non-trainable, rows with invalid JSON answers for deterministic or JSON-formatted
-types, and duplicate image/question pairs. This protects fine-tuning runs from
-stale review artifacts or manual JSONL edits that bypass the normal export
-readiness gate.
+metadata from exported rows, then rejects instruction rows with missing
+provenance, missing or unknown validation/review state, explicit non-trainable
+state, invalid JSON answers for deterministic or JSON-formatted types, and
+duplicate image/question pairs. This protects fine-tuning runs from stale review
+artifacts or manual JSONL edits that bypass the normal export readiness gate.
 
 ### Instruction Archive Rows
 
@@ -523,7 +525,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-151 passed
+157 passed
 ```
 
 Focused review-import fail-closed suite:
@@ -569,7 +571,7 @@ Full trainer backend suite:
 Latest recorded result:
 
 ```text
-20 passed
+25 passed
 ```
 
 Focused instruction-dataset and UI contract suite:
@@ -586,7 +588,7 @@ Focused instruction-dataset and UI contract suite:
 Latest recorded result:
 
 ```text
-131 passed
+132 passed
 ```
 
 Runtime and unattended hardening suites have also been run in prior hardening

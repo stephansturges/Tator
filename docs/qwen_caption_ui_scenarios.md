@@ -120,6 +120,7 @@ from the image, caption0, or read-only source context.
 `answer` rows. The trainer imports this flat shape directly and normalizes each
 row into an image/question/answer conversation. The UI validates missing image
 paths, blank questions, blank answers, required row metadata,
+instruction archive provenance, missing or unknown validation/review state,
 rejected/failed/invalid validation state, non-trainable review state, invalid
 JSON for JSON row types, and duplicate image/question pairs before writing the
 file. It also validates the instruction report's training-readiness block:

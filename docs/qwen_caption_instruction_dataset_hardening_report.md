@@ -112,10 +112,12 @@ row before training.
   are rewritten during export so their final answers come from
   `source_annotations`, with the original generated answer preserved as
   candidate metadata.
-- The browser-side instruction JSONL validator now validates row type, answer
-  format, required row metadata, validation status, and review status from row
-  metadata before writing a download, preventing rejected, failed, invalid,
-  needs-revision, or otherwise malformed rows from being saved by the UI.
+- The browser-side instruction JSONL validator now validates row id, row type,
+  answer source, answer format, instruction archive provenance, validation
+  status, and review status from row metadata before writing a download,
+  preventing missing-provenance rows, unknown statuses, rejected, failed,
+  invalid, needs-revision, or otherwise malformed rows from being saved by the
+  UI.
 - The browser-side review JSONL import validator now rejects unsupported
   actionable row origins and duplicate or conflicting actionable review targets
   before calling the backend, giving operators immediate feedback on review
@@ -170,10 +172,11 @@ row before training.
   requested generated-QA mix and answer format.
 - The Qwen training dataset loader now accepts exported flat instruction rows
   directly, preserving row metadata while converting each row into the
-  conversation format used by fine-tuning. The loader now also fails closed on
-  stale or hand-edited flat rows that carry rejected validation state,
-  rejected/needs-revision review state, invalid deterministic JSON answers, or
-  duplicate image/question pairs.
+  conversation format used by fine-tuning. For rows marked as instruction
+  archive exports, the loader now also fails closed on stale or hand-edited rows
+  with missing provenance, missing or unknown validation/review state, rejected
+  validation state, rejected/needs-revision review state, invalid deterministic
+  JSON answers, or duplicate image/question pairs.
 
 ## Validation Completed
 
@@ -184,7 +187,7 @@ row before training.
   - `node --check ybat-master/ybat.js`
 - Focused instruction-dataset, export, and UI contract tests:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py tests/test_qwen_training_backend.py tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete tests/test_labeling_panel_layout_contract.py tests/test_qwen_caption_ui_smoke_tool.py -q`
-  - Current result: 151 passed.
+  - Current result: 157 passed.
 - Current review-import fail-closed tests:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_persists_review_metadata tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_mismatched_dataset_id tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_duplicate_actionable_targets tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_unmatchable_actionable_rows_atomically -q`
   - Result: 7 passed.
@@ -193,10 +196,10 @@ row before training.
   - Result: 7 passed.
 - Current full trainer backend test file:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_training_backend.py -q`
-  - Result: 20 passed.
+  - Result: 25 passed.
 - Current caption/instruction/UI contract tests outside the trainer file:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete tests/test_labeling_panel_layout_contract.py tests/test_qwen_caption_ui_smoke_tool.py -q`
-  - Result: 131 passed.
+  - Result: 132 passed.
 - Earlier targeted trainer import compatibility:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_imports_flat_question_answer_rows tests/test_qwen_caption_dataset_job.py::test_caption_instruction_training_rows_import_into_qwen_trainer -q`
   - Result: 2 passed.

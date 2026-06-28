@@ -2592,6 +2592,9 @@ def test_caption_alternate_routes_append_update_export_and_delete(
     assert export_payload["instruction_report"]["instruction_review_row_count"] == 2
     assert export_payload["instruction_report"]["training_readiness"]["status"] == "needs_review"
     assert export_payload["instruction_report"]["training_readiness"]["pending_manual_review_row_count"] == 1
+    strict_export_response = client.get("/datasets/ds/captions/export?require_ready_instruction_export=true")
+    assert strict_export_response.status_code == 409
+    assert "instruction_export_not_ready:needs_review" in strict_export_response.text
     assert all(
         row["format"] == "tator_caption_instruction_review_rows_v1"
         and "review_decision" in row

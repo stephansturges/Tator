@@ -472,17 +472,21 @@ statuses:
 
 - `ready`: selected rows pass structural checks, no selected language rows are
   waiting for manual acceptance, and quality gates have no warnings.
-- `needs_review`: rows can be exported, but selected caption0 or generated-QA
-  rows still need human review, or corpus-quality gates raise warnings such as
-  duplicate questions, low generated-question diversity, high generated-QA
-  rejection rate, or low source-class coverage.
+- `needs_review`: selected caption0 or generated-QA rows still need human
+  review, or corpus-quality gates raise warnings such as duplicate questions,
+  low generated-question diversity, high generated-QA rejection rate, or low
+  source-class coverage.
 - `blocked`: the export should not be used for training, for example when there
   are no images, no selected training rows, or a selected row was rejected or
   marked as needing revision by manual review.
 
 The browser validates this readiness block before writing instruction JSONL.
-Blocked exports are refused. `needs_review` exports are still downloadable, but
-the UI status is a warning instead of a training-ready pass.
+Blocked exports are refused. `needs_review` exports are refused by default by
+the **Require ready report for trainer JSONL** gate; operators can disable that
+gate only for deliberate review-pending diagnostics. Scripts can request the
+same server-side behavior with
+`/captions/export?require_ready_instruction_export=true`, which returns HTTP
+409 unless readiness is `ready`.
 
 ## Review Rows
 
@@ -770,12 +774,13 @@ Result:
 
 ```text
 ok=true
-caption readiness: 30 pass, 1 warning, 0 fail
+caption readiness: 39 pass, 1 warning, 0 fail
 no console errors
 no failed requests
 no bad HTTP responses
 no clipped caption action buttons
 instruction import button present
+ready-report trainer JSONL gate checked
 ```
 
 Restricted project-name scan:
@@ -892,8 +897,8 @@ Recommended pilot shape:
 - Is the current review JSONL schema sufficient for external audit tools?
 - Should review import remain metadata-only, or should a future guarded workflow
   also support edited replacement answers and edited questions?
-- Should `needs_review` block training JSONL download in strict set-and-forget
-  mode, or is the current warning sufficient?
+- Should the review-pending override remain available for diagnostic exports,
+  or should all non-ready trainer JSONL downloads be impossible?
 - Which quality gates should be hard blockers for the first real fine-tuning
   run: duplicate-question rate, source-class coverage, generated-QA rejection
   rate, review coverage, or all of them?

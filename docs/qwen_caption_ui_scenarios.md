@@ -122,10 +122,12 @@ row into an image/question/answer conversation. The UI validates missing image
 paths, blank questions, blank answers, invalid JSON for JSON row types, and
 duplicate image/question pairs before writing the file. It also validates the
 instruction report's training-readiness block: `blocked` readiness refuses the
-download, while `needs_review` readiness allows the file but shows a warning
-that selected language rows or quality gates still need review. A selected row
-that a reviewer marks rejected or needs-revision moves readiness to `blocked`
-until the row is removed, regenerated, or accepted.
+download, while `needs_review` readiness is blocked by default by **Require
+ready report for trainer JSONL**. Operators can disable that gate only for
+deliberate review-pending diagnostics. Scripted exports can use
+`require_ready_instruction_export=true` for the same server-side refusal. A
+selected row that a reviewer marks rejected or needs-revision moves readiness to
+`blocked` until the row is removed, regenerated, or accepted.
 **Download instruction archive** exports one per-image construction archive
 record per JSONL line, keeping caption0, generated QA, optional deterministic
 metadata QA, source annotation provenance, and per-image export metadata separate

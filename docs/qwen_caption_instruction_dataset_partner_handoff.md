@@ -356,14 +356,18 @@ The instruction report classifies the corpus as:
 are accepted or otherwise do not require manual acceptance, and corpus-quality
 gates do not warn.
 
-`needs_review` means rows may be downloadable, but the corpus still has pending
-manual review or quality warnings.
+`needs_review` means the corpus still has pending manual review or quality
+warnings.
 
 `blocked` means the export should not be used for training. Examples include no
 selected rows, no images, or a selected row marked rejected or needs-revision.
 
-The browser refuses blocked instruction JSONL downloads. It warns, but does not
-refuse, needs-review downloads.
+The browser refuses blocked instruction JSONL downloads. It also refuses
+needs-review trainer JSONL by default through **Require ready report for trainer
+JSONL**. Operators can disable that gate only for deliberate review-pending
+diagnostics. Scripted API clients can request the same server-side behavior with
+`/captions/export?require_ready_instruction_export=true`, which returns HTTP
+409 unless readiness is `ready`.
 
 ## Runtime Hardening
 
@@ -564,7 +568,8 @@ Known remaining risks:
 - Generated QA may be structurally valid but low value for training.
 - Some visually plausible answers may still be unsupported by source labels.
 - Dense scenes may need better question diversity than the current mix selector.
-- `needs_review` currently warns rather than hard-blocking download.
+- Review-pending trainer JSONL can still be downloaded if an operator
+  deliberately disables the ready-report gate.
 - Process-level GPU faults require supervisor restart and resume; they cannot be
   fully handled inside the model call.
 - The current tests prove contracts and wiring, not final corpus quality.
@@ -574,8 +579,8 @@ Known remaining risks:
 Reviewers should decide:
 
 - whether deterministic metadata QA should remain off by default;
-- whether `needs_review` should block instruction JSONL download in strict
-  training mode;
+- whether the review-pending override should remain available, or whether
+  non-ready trainer JSONL downloads should be impossible;
 - what generated-QA rejection rate is acceptable;
 - what duplicate-question rate is acceptable;
 - what minimum source-class coverage is required;

@@ -48,6 +48,7 @@ CRITICAL_CONTROLS = (
     "qwenCaptionIncludeDeterministicMetadataQa",
     "qwenCaptionIncludeSourceAnnotationsContext",
     "qwenCaptionStrictGrounding",
+    "qwenCaptionRequireReadyInstructionExport",
     "qwenCaptionBuildInstructionDataset",
     "qwenCaptionDownloadInstructionJsonl",
     "qwenCaptionDownloadInstructionArchive",
@@ -244,6 +245,7 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         include_deterministic_checked = page.locator("#qwenCaptionIncludeDeterministicMetadataQa").is_checked()
         include_source_context_checked = page.locator("#qwenCaptionIncludeSourceAnnotationsContext").is_checked()
         strict_grounding_checked = page.locator("#qwenCaptionStrictGrounding").is_checked()
+        require_ready_instruction_export_checked = page.locator("#qwenCaptionRequireReadyInstructionExport").is_checked()
         page.locator("#qwenCaptionReadinessRun").click(timeout=args.timeout_ms)
         page.wait_for_function(
             """
@@ -317,6 +319,7 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
             "include_deterministic_checked": include_deterministic_checked,
             "include_source_context_checked": include_source_context_checked,
             "strict_grounding_checked": strict_grounding_checked,
+            "require_ready_instruction_export_checked": require_ready_instruction_export_checked,
             "readiness_status": readiness_status,
             "readiness_result_count": readiness_result_count,
             "console_errors": app_console_errors,
@@ -369,8 +372,9 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
             and not include_deterministic_checked
             and include_source_context_checked
             and strict_grounding_checked
+            and require_ready_instruction_export_checked
         ),
-        "Instruction dataset defaults are set for caption0 plus generated QA with deterministic metadata off.",
+        "Instruction dataset defaults are set for caption0 plus generated QA with deterministic metadata off and ready-gated trainer export on.",
         subcaptions_value=subcaptions_value,
         subcaptions_min=subcaptions_min,
         subcaptions_max=subcaptions_max,
@@ -381,6 +385,7 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         include_deterministic_checked=include_deterministic_checked,
         include_source_context_checked=include_source_context_checked,
         strict_grounding_checked=strict_grounding_checked,
+        require_ready_instruction_export_checked=require_ready_instruction_export_checked,
     )
     add_check(
         report,

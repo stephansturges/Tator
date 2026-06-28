@@ -301,6 +301,8 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     assert "qwenCaptionIncludeDeterministicMetadataQa" in html
     assert "qwenCaptionIncludeSourceAnnotationsContext" in html
     assert "qwenCaptionStrictGrounding" in html
+    assert "qwenCaptionRequireReadyInstructionExport" in html
+    assert 'id="qwenCaptionRequireReadyInstructionExport" checked' in html
     assert "qwenCaptionBuildInstructionDataset" in html
     assert "qwenCaptionDownloadInstructionJsonl" in html
     assert "qwenCaptionDownloadInstructionArchive" in html
@@ -313,6 +315,7 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     assert "Generated QA never becomes source annotations" in html
     assert "review JSONL can be exported for audit then imported" in html
     assert "deterministic metadata QA is included only when explicitly enabled" in html
+    assert "Trainer JSONL download requires a ready instruction report by default" in html
     assert "qwenCaptionExportHealth" in html
     assert "qwenCaptionReadinessRun" in html
     assert "qwenCaptionReadinessStatus" in html
@@ -348,6 +351,7 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     assert "function importCaptionInstructionReviewFile" in js
     assert "function downloadCaptionInstructionReport" in js
     assert "captionInstructionReadinessSummary" in js
+    assert "require_ready_instruction_export" in js
     assert 'saveBlobToDisk(blob, "caption_instruction_training.jsonl")' in js
     assert 'saveBlobToDisk(blob, "caption_instruction_archive.jsonl")' in js
     assert 'saveBlobToDisk(blob, "caption_instruction_review.jsonl")' in js
@@ -415,6 +419,7 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "Training readiness blocked" in js
     assert "Training readiness needs review" in js
     assert "Instruction JSONL export blocked: invalid readiness report" in js
+    assert "Disable Require ready report only for deliberate review-pending diagnostics" in js
     review_validator_start = js.index("function validateCaptionInstructionReviewRows")
     review_validator_end = js.index("function describeCaptionInstructionReviewValidation", review_validator_start)
     review_validator = js[review_validator_start:review_validator_end]
@@ -515,9 +520,21 @@ def test_qwen_caption_instruction_readiness_summary_formats_blockers_for_operato
             "  quality_warnings: [],",
             "} });",
             "assert.strictEqual(summary.blocked, true);",
+            "assert.strictEqual(summary.status, 'blocked');",
             "assert.strictEqual(summary.severity, 'fail');",
             "assert(summary.message.includes('a selected row needs revision'));",
             "assert(!summary.message.includes('selected_row_needs_revision_by_manual_review'));",
+            "const needsReview = captionInstructionReadinessSummary({ training_readiness: {",
+            "  status: 'needs_review',",
+            "  ready_for_training: false,",
+            "  pending_manual_review_row_count: 2,",
+            "  blocking_reasons: [],",
+            "  required_actions: ['review_selected_language_rows'],",
+            "  quality_warnings: [],",
+            "} });",
+            "assert.strictEqual(needsReview.status, 'needs_review');",
+            "assert.strictEqual(needsReview.blocked, false);",
+            "assert(needsReview.message.includes('2 selected language rows pending review'));",
         ]
     )
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
@@ -1322,6 +1339,8 @@ def test_qwen_caption_ui_scenarios_document_set_and_forget_workflows():
     assert "Download instruction report" in scenarios
     assert "training-readiness block" in scenarios
     assert "`ready` / `needs_review` / `blocked`" in scenarios
+    assert "Require\nready report for trainer JSONL" in scenarios
+    assert "review-pending diagnostics" in scenarios
     assert "blank review decision/note fields" in scenarios
     assert "duplicate-question/diversity metrics" in scenarios
     assert "source-class coverage" in scenarios

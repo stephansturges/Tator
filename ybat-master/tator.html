@@ -752,6 +752,7 @@
                                                 <label><input type="checkbox" id="qwenCaptionIncludeDeterministicMetadataQa" /> Include deterministic metadata QA<span class="help-icon" title="Add code-generated QA rows from real source labels. This is off by default so source metadata and generated language stay clearly separated.">?</span></label>
                                                 <label><input type="checkbox" id="qwenCaptionIncludeSourceAnnotationsContext" checked /> Give generator read-only label context<span class="help-icon" title="Pass source annotation counts as read-only grounding context for generated QA. The VLM cannot write these source annotations.">?</span></label>
                                                 <label><input type="checkbox" id="qwenCaptionStrictGrounding" checked /> Strict QA grounding<span class="help-icon" title="Ask the generator to answer only from image evidence, caption0, or read-only source context.">?</span></label>
+                                                <label><input type="checkbox" id="qwenCaptionRequireReadyInstructionExport" checked /> Require ready report for trainer JSONL<span class="help-icon" title="Block instruction JSONL download unless the report is ready. Turn off only for deliberate review-pending diagnostics.">?</span></label>
                                             </div>
                                             <div class="qwen-caption-row qwen-caption-actions-row qwen-caption-instruction-actions">
                                                 <button type="button" id="qwenCaptionBuildInstructionDataset" class="training-button secondary">Create VLM training dataset</button>
@@ -762,7 +763,7 @@
                                                 <input type="file" id="qwenCaptionImportInstructionReviewFile" accept=".jsonl,.json,application/json,application/jsonl" hidden />
                                                 <button type="button" id="qwenCaptionDownloadInstructionReport" class="training-button secondary">Download instruction report</button>
                                             </div>
-                                            <div class="training-help">The training-dataset path writes caption0 plus optional generated QA rows into a separate instruction archive. Generated QA never becomes source annotations, deterministic metadata QA is included only when explicitly enabled, and review JSONL can be exported for audit then imported to apply accepted, rejected, or needs-revision decisions before training.</div>
+                                            <div class="training-help">The training-dataset path writes caption0 plus optional generated QA rows into a separate instruction archive. Generated QA never becomes source annotations, deterministic metadata QA is included only when explicitly enabled, and review JSONL can be exported for audit then imported to apply accepted, rejected, or needs-revision decisions before training. Trainer JSONL download requires a ready instruction report by default; disable that gate only for deliberate review-pending diagnostics.</div>
                                         </div>
                                     </div>
                                 </div>

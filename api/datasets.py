@@ -2,7 +2,7 @@
 
 from typing import Any, Callable, Optional
 
-from fastapi import APIRouter, UploadFile, File, Form, Body, Query
+from fastapi import APIRouter, UploadFile, File, Form, Body, HTTPException, Query
 
 
 def build_datasets_router(
@@ -166,8 +166,9 @@ def build_datasets_router(
         include_deterministic_metadata_qa: bool = Query(False),
         qa_mix: str = Query("balanced"),
         answer_format: str = Query("natural"),
+        require_ready_instruction_export: bool = Query(False),
     ):
-        return export_captions_fn(
+        result = export_captions_fn(
             dataset_id,
             {
                 "include_caption0_in_training": include_caption0_in_training,
@@ -177,6 +178,18 @@ def build_datasets_router(
                 "answer_format": answer_format,
             },
         )
+        readiness = (
+            ((result.get("instruction_report") or {}).get("training_readiness") or {})
+            if isinstance(result, dict)
+            else {}
+        )
+        readiness_status = str(readiness.get("status") or "unknown").strip() or "unknown"
+        if require_ready_instruction_export and readiness_status != "ready":
+            raise HTTPException(
+                status_code=409,
+                detail=f"instruction_export_not_ready:{readiness_status}",
+            )
+        return result
 
     @router.post("/datasets/{dataset_id}/captions/instruction_review")
     def apply_caption_instruction_review(dataset_id: str, payload: dict = Body(...)):  # noqa: B008

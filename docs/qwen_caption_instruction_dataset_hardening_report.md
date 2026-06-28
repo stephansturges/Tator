@@ -137,10 +137,14 @@ row before training.
   coverage, answer-format distribution, and source-class coverage.
 - The instruction report now includes `training_readiness`, which classifies
   the exported corpus as `ready`, `needs_review`, or `blocked`. The browser
-  blocks instruction JSONL when readiness is blocked and warns when selected
-  language rows or quality gates still need review. Reviewed-out language rows
-  are removed from flattened output; any selected row that still carries a
-  rejected or needs-revision decision is a hard blocker.
+  blocks instruction JSONL when readiness is blocked and, by default, also
+  blocks trainer JSONL when selected language rows or quality gates still need
+  review. Operators must deliberately disable the ready-report gate for
+  review-pending diagnostic exports. The caption export API also exposes
+  `require_ready_instruction_export=true` for scripts that need server-side
+  refusal of non-ready instruction exports. Reviewed-out language rows are
+  removed from flattened output; any selected row that still carries a rejected
+  or needs-revision decision is a hard blocker.
 - Export options let callers include or exclude caption0, generated QA, and
   deterministic metadata QA without altering saved data, while preserving the
   requested generated-QA mix and answer format.
@@ -177,11 +181,11 @@ row before training.
   - Result: 135 passed.
 - Rendered browser smoke:
   - `./.venv-macos/bin/python tools/run_qwen_caption_ui_smoke.py --base-url http://127.0.0.1:8000 --out-json tmp/qwen_caption_ui_smoke_report.json --screenshot tmp/qwen_caption_ui_smoke.png`
-  - Result: `ok=true`, caption readiness reported 30 pass, 1 warning, 0 fail;
+  - Result: `ok=true`, caption readiness reported 39 pass, 1 warning, 0 fail;
     no console errors, no failed requests, no bad HTTP responses, no clipped
     caption action buttons. The screenshot confirms the generated-QA mix,
-    answer-format, archive, review import, and report controls are visible and
-    readable in the caption panel.
+    answer-format, ready-report gate, archive, review import, and report
+    controls are visible and readable in the caption panel.
 - Restricted project-name scan:
   - Source, docs, tests, tools, UI, and backend entrypoint scan.
   - Result: no matches.

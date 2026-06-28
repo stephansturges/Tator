@@ -1135,6 +1135,163 @@ def test_caption_instruction_review_import_rejects_unmatchable_actionable_rows_a
     assert "review_decision" not in records[0]["metadata"]
 
 
+@pytest.mark.parametrize(
+    "bad_row_update",
+    [
+        {"question": "What stale question was reviewed?"},
+        {
+            "candidate_answer": "A stale reviewed answer.",
+            "training_answer": "A stale reviewed answer.",
+        },
+    ],
+)
+def test_caption_instruction_review_import_rejects_stale_generated_qa_text(
+    monkeypatch,
+    tmp_path,
+    bad_row_update,
+) -> None:
+    import localinferenceapi as api
+
+    entry = {"id": "ds", "dataset_root": str(tmp_path), "registry_root": str(tmp_path)}
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: entry)
+    monkeypatch.setattr(
+        api,
+        "_annotation_manifest_for_entry",
+        lambda _entry: {
+            "labelmap": [],
+            "images": [
+                {
+                    "image_name": "frame.jpg",
+                    "image_relpath": "frame.jpg",
+                    "split": "train",
+                    "label_source_present": True,
+                    "label_lines": [],
+                }
+            ],
+        },
+    )
+    api._write_dataset_caption_instruction_records(
+        entry,
+        [
+            {
+                "id": "qa-1",
+                "image_name": "frame.jpg",
+                "image_key": "train/frame.jpg",
+                "split": "train",
+                "question": "What is the scene type?",
+                "answer": "A waterfront area.",
+                "row_type": "generated_qa",
+                "answer_source": "vlm_generated",
+                "validation_status": "accepted",
+            }
+        ],
+    )
+    row = {
+        "format": "tator_caption_instruction_review_rows_v1",
+        "dataset_id": "ds",
+        "image_path": "frame.jpg",
+        "split": "train",
+        "row_origin": "generated_qa",
+        "qa_id": "qa-1",
+        "row_type": "generated_qa",
+        "question": "What is the scene type?",
+        "candidate_answer": "A waterfront area.",
+        "training_answer": "A waterfront area.",
+        "validation_status": "accepted",
+        "selected_for_training": True,
+        "requires_manual_review": True,
+        "review_decision": "accepted",
+        "review_notes": "stale text should fail",
+        "rejection_reasons": [],
+        "source_summary": {"status": "empty_label_file"},
+        **bad_row_update,
+    }
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.apply_caption_instruction_review("ds", {"rows": [row]})
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "review_rows_generated_qa_not_found:row_1"
+    records = api._load_dataset_caption_instruction_records(entry)
+    assert records[0]["review_status"] == ""
+    assert "review_decision" not in records[0]["metadata"]
+
+
+def test_caption_instruction_review_import_rejects_stale_caption0_text(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import localinferenceapi as api
+
+    entry = {"id": "ds", "dataset_root": str(tmp_path), "registry_root": str(tmp_path)}
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: entry)
+    monkeypatch.setattr(
+        api,
+        "_annotation_manifest_for_entry",
+        lambda _entry: {
+            "labelmap": [],
+            "images": [
+                {
+                    "image_name": "frame.jpg",
+                    "image_relpath": "frame.jpg",
+                    "split": "train",
+                    "label_source_present": True,
+                    "label_lines": [],
+                }
+            ],
+        },
+    )
+    api._write_dataset_caption_records(
+        entry,
+        [
+            {
+                "id": "caption-existing",
+                "image_name": "frame.jpg",
+                "image_key": "train/frame.jpg",
+                "split": "train",
+                "caption": "Current caption text.",
+                "source": "manual",
+                "metadata": {},
+            }
+        ],
+    )
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.apply_caption_instruction_review(
+            "ds",
+            {
+                "rows": [
+                    {
+                        "format": "tator_caption_instruction_review_rows_v1",
+                        "dataset_id": "ds",
+                        "image_path": "frame.jpg",
+                        "split": "train",
+                        "row_origin": "caption0",
+                        "qa_id": "caption-existing",
+                        "row_type": "caption0",
+                        "question": "Describe this image in detail.",
+                        "candidate_answer": "Stale caption text.",
+                        "training_answer": "Stale caption text.",
+                        "validation_status": "accepted",
+                        "selected_for_training": True,
+                        "requires_manual_review": True,
+                        "review_decision": "accepted",
+                        "review_notes": "stale review should fail",
+                        "rejection_reasons": [],
+                        "source_summary": {"status": "empty_label_file"},
+                    }
+                ]
+            },
+        )
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "review_rows_caption0_not_found:row_1"
+    records = api._load_dataset_caption_records(entry)
+    assert len(records) == 1
+    assert records[0]["caption"] == "Current caption text."
+    assert "review_decision" not in records[0]["metadata"]
+
+
 def test_caption_instruction_training_readiness_blocks_selected_needs_revision_rows() -> None:
     import localinferenceapi as api
 

@@ -1,6 +1,6 @@
 # Qwen Caption Instruction Dataset External Partner Packet
 
-Date: 2026-06-28
+Date: 2026-06-29
 
 ## Purpose
 
@@ -296,6 +296,8 @@ Review import fails closed on:
 - stale generated-QA targets
 - QA ids whose review-row image path does not match the stored caption or
   generated-QA record
+- QA ids whose image path matches but whose reviewed question, candidate answer,
+  or training answer no longer matches the stored caption or generated-QA record
 - ambiguous generated-QA or caption0 matches
 - unresolvable caption0 targets
 
@@ -517,7 +519,7 @@ Result:
 Result:
 
 ```text
-163 passed
+166 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch
@@ -538,9 +540,9 @@ Result:
 ```
 
 Additional validation recorded in the hardening report includes trainer import
-boundary tests, review-import fail-closed tests, caption prompt tests,
-set-and-forget supervision tests, unattended soak certification tests, rendered
-browser smoke, and a restricted project-name scan.
+boundary tests, review-import fail-closed tests, stale review-text rejection
+tests, caption prompt tests, set-and-forget supervision tests, unattended soak
+certification tests, rendered browser smoke, and a restricted project-name scan.
 
 ## External Review Checklist
 
@@ -563,7 +565,9 @@ Use this checklist to review the implementation.
 9. Confirm that rejected and needs-revision language rows remain auditable but
    do not enter flattened trainer rows.
 10. Confirm that browser, server, and trainer validation all block stale,
-    incomplete, unknown-status, or non-trainable instruction rows.
+    incomplete, unknown-status, or non-trainable instruction rows, including
+    review rows whose QA id and image still match but whose question or answer
+    text is no longer current.
 11. Confirm that browser downloads block mismatched training/archive/review
     artifacts when their counts disagree with the instruction report.
 12. Confirm that dense prompt box lists are representative while counts remain

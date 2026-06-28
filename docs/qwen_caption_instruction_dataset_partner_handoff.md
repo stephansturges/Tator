@@ -1,6 +1,6 @@
 # Qwen Caption Instruction Dataset External Team Handoff
 
-Date: 2026-06-28
+Date: 2026-06-29
 
 ## Start Here
 
@@ -126,6 +126,9 @@ These rules define the correctness of the implementation:
   boxes, generated questions, generated answers, or final annotations.
 - Human review target matching requires image context as well as QA id; a known
   QA id with a mismatched image path is rejected before any metadata is written.
+- Human review target matching also requires current reviewed text; a known QA
+  id with the right image is still rejected when the reviewed question,
+  candidate answer, or training answer no longer matches the saved record.
 - Training readiness is based on selected rows, validation state, manual review
   state, and corpus-quality gates.
 - A row that is rejected or marked needs-revision by review is excluded from
@@ -392,6 +395,8 @@ It fails closed on:
 - rows with an embedded dataset id that does not match the selected dataset
 - generated-QA or caption0 targets whose QA id does not match the row's image
   context
+- generated-QA or caption0 targets whose QA id and image context match but
+  whose reviewed question or answer text is stale
 - malformed review rows
 - duplicate actionable review targets
 - unsupported actionable row origins
@@ -562,7 +567,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-163 passed
+166 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch
@@ -590,13 +595,15 @@ Focused review-import fail-closed suite:
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_mismatched_dataset_id \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_duplicate_actionable_targets \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_unmatchable_actionable_rows_atomically \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_stale_generated_qa_text \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_stale_caption0_text \
   -q
 ```
 
 Latest recorded result:
 
 ```text
-8 passed
+11 passed
 ```
 
 Focused trainer-import boundary suite:
@@ -642,7 +649,7 @@ Focused instruction-dataset and UI contract suite:
 Latest recorded result:
 
 ```text
-138 passed
+141 passed
 ```
 
 Runtime and unattended hardening suites have also been run in prior hardening

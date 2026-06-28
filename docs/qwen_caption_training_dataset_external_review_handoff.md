@@ -1,6 +1,6 @@
 # Qwen Caption Training Dataset Complete External Review Handoff
 
-Date: 2026-06-28
+Date: 2026-06-29
 
 ## Canonical Review Packet
 
@@ -29,8 +29,8 @@ Supporting documents:
 
 Validated checkpoint:
 
-- This packet describes the implementation through the trainer-import
-  fail-closed boundary hardening on 2026-06-28.
+- This packet describes the implementation through the review-import
+  identity-and-text fail-closed hardening on 2026-06-29.
 - Recent preceding checkpoints added review import, review parsing hardening,
   reviewed-out row exclusion, ready-report gating, caption instruction export
   compatibility, duplicate review-target rejection, and server-side instruction
@@ -146,6 +146,10 @@ What is implemented in this checkpoint:
   non-trainable review status.
 - Browser-side review import validation for unsupported actionable row origins
   and duplicate or conflicting actionable review targets.
+- Server-side review import target matching requires image context and current
+  reviewed text, so a stale review row with the same QA id is rejected if its
+  question or candidate/training answer no longer matches the saved language
+  record.
 - Server-side flattened trainer-row validation exposed as
   `instruction_export_validation` in the archive, report, and API payload.
 - Direct trainer import of the flat instruction JSONL row shape.
@@ -177,6 +181,8 @@ The latest hardening pass specifically closed the review loop:
 - imported decisions are persisted as review metadata only;
 - `accepted`, `rejected`, and `needs_revision` affect subsequent readiness and
   export decisions;
+- matching a reviewed language row requires the persisted image identity and
+  current reviewed question/answer text, not QA id alone;
 - deterministic metadata QA review rows are skipped on import because those rows
   are rebuilt from source labels during export and are not saved language
   records.
@@ -661,8 +667,10 @@ The review import is deliberately conservative:
 - It rejects malformed review rows, unsupported actionable row origins,
   actionable rows without an image path, stale generated-QA targets, ambiguous
   generated-QA or caption0 matches, QA ids whose review-row image path does not
-  match the stored caption/generated-QA record, and unresolvable synthetic
-  caption0 review targets before applying any imported metadata.
+  match the stored caption/generated-QA record, same-id rows whose reviewed
+  question or answer no longer matches the saved language record, and
+  unresolvable synthetic caption0 review targets before applying any imported
+  metadata.
 - It ignores blank or unknown decisions instead of inventing a review result.
 - It applies decisions only to matching caption0 or generated-QA records.
 - It skips deterministic metadata QA decisions because those rows are rebuilt
@@ -894,7 +902,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Result:
 
 ```text
-163 passed
+166 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch
@@ -922,13 +930,15 @@ Focused review-import fail-closed tests:
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_mismatched_dataset_id \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_duplicate_actionable_targets \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_unmatchable_actionable_rows_atomically \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_stale_generated_qa_text \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_stale_caption0_text \
   -q
 ```
 
 Result:
 
 ```text
-8 passed
+11 passed
 ```
 
 Focused trainer-import boundary tests:
@@ -976,7 +986,7 @@ Caption/instruction/UI contract suite outside the trainer file:
 Result:
 
 ```text
-138 passed
+141 passed
 ```
 
 Syntax and formatting checks:

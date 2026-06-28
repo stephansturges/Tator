@@ -23169,19 +23169,19 @@ def _caption_instruction_match_instruction_record(
     record_image_key = str(record.get("image_key") or record.get("image_name") or "").strip()
     if record_image_key not in image_keys:
         return False
-    qa_id = str(row.get("qa_id") or "").strip()
-    if qa_id and str(record.get("id") or "").strip() == qa_id:
-        return True
     row_question = _caption_instruction_normalized_question(row.get("question"))
     if row_question and _caption_instruction_normalized_question(record.get("question")) != row_question:
         return False
-    candidate_answer = str(row.get("candidate_answer") or row.get("training_answer") or "").strip()
-    if candidate_answer and str(record.get("answer") or "").strip() not in {
-        candidate_answer,
-        str(row.get("training_answer") or "").strip(),
-    }:
+    candidate_answer = str(row.get("candidate_answer") or "").strip()
+    training_answer = str(row.get("training_answer") or "").strip()
+    if candidate_answer and str(record.get("answer") or "").strip() != candidate_answer:
         return False
-    return bool(row_question or candidate_answer)
+    if not candidate_answer and training_answer and str(record.get("answer") or "").strip() != training_answer:
+        return False
+    qa_id = str(row.get("qa_id") or "").strip()
+    if qa_id and str(record.get("id") or "").strip() == qa_id:
+        return True
+    return bool(row_question or candidate_answer or training_answer)
 
 
 def _caption_instruction_match_caption_record(
@@ -23193,11 +23193,13 @@ def _caption_instruction_match_caption_record(
     record_image_key = str(record.get("image_key") or record.get("image_name") or "").strip()
     if record_image_key not in image_keys:
         return False
+    candidate_caption = str(row.get("candidate_answer") or row.get("training_answer") or "").strip()
+    if candidate_caption and str(record.get("caption") or "").strip() != candidate_caption:
+        return False
     qa_id = str(row.get("qa_id") or "").strip()
     if qa_id and str(record.get("id") or "").strip() == qa_id:
         return True
-    candidate_caption = str(row.get("candidate_answer") or row.get("training_answer") or "").strip()
-    return bool(candidate_caption and str(record.get("caption") or "").strip() == candidate_caption)
+    return bool(candidate_caption)
 
 
 def _caption_instruction_review_can_resolve_caption_context(
@@ -23280,10 +23282,19 @@ def _caption_instruction_reject_unmatchable_actionable_review_rows(
                 for record in caption_records
                 if _caption_instruction_match_caption_record(record, row, image_keys=image_keys)
             ]
+            qa_id_known = bool(
+                qa_id
+                and any(str(record.get("id") or "").strip() == qa_id for record in caption_records)
+            )
             if len(matches) > 1:
                 raise HTTPException(
                     status_code=HTTP_400_BAD_REQUEST,
                     detail=f"review_rows_caption0_ambiguous:row_{index}",
+                )
+            if not matches and qa_id_known:
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail=f"review_rows_caption0_not_found:row_{index}",
                 )
             if not matches:
                 caption = str(row.get("candidate_answer") or row.get("training_answer") or "").strip()

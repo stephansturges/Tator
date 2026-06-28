@@ -542,6 +542,8 @@ def test_caption_instruction_archive_separates_generated_qa_from_source_annotati
     assert archive["training_row_count"] == 2
     assert archive["rejected_training_row_count"] == 1
     assert archive["deterministic_metadata_qa_pair_count"] == 0
+    assert archive["review_rows_format"] == "tator_caption_instruction_review_rows_v1"
+    assert len(archive["instruction_review_rows"]) == 3
     assert archive_row["image_id"] == "frame"
     assert archive_row["image_path"] == "frame.jpg"
     assert archive_row["split"] == "train"
@@ -562,6 +564,8 @@ def test_caption_instruction_archive_separates_generated_qa_from_source_annotati
     assert report["generated_qa_candidate_count"] == 2
     assert report["accepted_generated_qa_count"] == 2
     assert report["selected_flattened_row_count"] == 2
+    assert report["instruction_review_row_count"] == 3
+    assert report["manual_review_required_count"] == 3
     assert report["split_training_row_counts"] == {"train": 2}
     metrics = report["corpus_quality_metrics"]
     assert archive["corpus_quality_metrics"] == metrics
@@ -589,6 +593,19 @@ def test_caption_instruction_archive_separates_generated_qa_from_source_annotati
         "caption0",
         "generated_qa",
     ]
+    review_rows = archive["instruction_review_rows"]
+    assert {row["format"] for row in review_rows} == {"tator_caption_instruction_review_rows_v1"}
+    assert {row["row_origin"] for row in review_rows} == {"caption0", "generated_qa"}
+    assert all("review_decision" in row and "review_notes" in row for row in review_rows)
+    assert all(row["source_summary"]["object_counts"] == {"Boat": 1, "Building": 1} for row in review_rows)
+    assert sum(1 for row in review_rows if row["selected_for_training"]) == 2
+    assert sum(1 for row in review_rows if row["requires_manual_review"]) == 3
+    assert any(
+        row["row_origin"] == "generated_qa"
+        and row["question"] == "What borders the water?"
+        and not row["selected_for_training"]
+        for row in review_rows
+    )
     assert archive["rejections"][0]["reason"] == "duplicate_image_question"
 
     deterministic = api._dataset_caption_instruction_archive(
@@ -622,6 +639,9 @@ def test_caption_instruction_archive_separates_generated_qa_from_source_annotati
     assert deterministic["qa_type_distribution"]["deterministic_count"] == 2
     assert deterministic["split_training_row_counts"] == {"train": 8}
     assert deterministic["captioning_report"]["deterministic_metadata_qa_count"] == 8
+    assert deterministic["captioning_report"]["instruction_review_row_count"] == 11
+    assert deterministic["captioning_report"]["manual_review_required_count"] == 3
+    assert sum(1 for row in deterministic["instruction_review_rows"] if row["selected_for_training"]) == 8
     assert deterministic["archive_rows"][0]["export_metadata"]["deterministic_metadata_qa_pair_count"] == 8
     deterministic_metrics = deterministic["corpus_quality_metrics"]
     assert deterministic_metrics["source_validated_training_row_count"] == 8

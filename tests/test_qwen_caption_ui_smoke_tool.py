@@ -46,6 +46,7 @@ def test_qwen_caption_ui_smoke_tool_covers_critical_controls() -> None:
         "qwenCaptionBuildInstructionDataset",
         "qwenCaptionDownloadInstructionJsonl",
         "qwenCaptionDownloadInstructionArchive",
+        "qwenCaptionDownloadInstructionReview",
         "qwenCaptionDownloadInstructionReport",
         "qwenCaptionExportHealth",
         "qwenCaptionReadinessRun",
@@ -75,6 +76,7 @@ def test_qwen_caption_ui_smoke_tool_covers_critical_controls() -> None:
     assert "Generated QA never becomes source annotations" in text
     assert "vlm_export_button_count" in text
     assert "instruction_build_button_count" in text
+    assert "instruction_review_button_count" in text
     assert "instruction_report_button_count" in text
     assert "instruction_dataset_help_explains_separation" in text
     assert "caption_action_buttons_do_not_clip" in text

@@ -126,6 +126,7 @@ The instruction mode exports:
 
 - `instruction_training_rows`
 - `instruction_archive_rows`
+- `instruction_review_rows`
 - `instruction_archive`
 - `instruction_report`
 - `instruction_summary`
@@ -290,6 +291,24 @@ The source-grounding metrics intentionally separate two concepts:
 This distinction prevents broad source-validation metadata from being confused
 with true class coverage.
 
+## Review Rows
+
+The export payload also includes `instruction_review_rows`, a candidate-level
+JSONL review artifact for human audit before training. Each row records:
+
+- image path, split, row origin, row type, and stable QA id
+- question, candidate answer, and selected training answer when applicable
+- whether the candidate was selected for flattened training JSONL
+- whether manual review is required
+- validation status, review status, rejection reasons, and source fields
+- source-label summary with counts, visible classes, annotation count, and
+  uncertainty count
+- blank `review_decision` and `review_notes` fields for downstream review
+
+This artifact is deliberately separate from `instruction_training_rows`: editing
+or annotating review rows must not mutate trusted source annotations or silently
+change what is exported for training.
+
 ## UI/UX Work
 
 The caption panel now includes:
@@ -303,6 +322,7 @@ The caption panel now includes:
 - separate downloads for:
   - instruction JSONL
   - instruction archive
+  - instruction review JSONL
   - instruction report
 - readiness check button and rendered readiness results
 - set-and-forget defaults and backend supervision status text
@@ -484,7 +504,7 @@ Result:
 
 ```text
 ok=true
-caption readiness: 29 pass, 1 warning, 0 fail
+caption readiness: 29 pass, 2 warnings, 0 fail
 no console errors
 no failed requests
 no bad HTTP responses
@@ -533,6 +553,7 @@ no matches
    - instruction-dataset controls
    - generated QA defaults
    - download buttons
+   - review JSONL export button
    - readiness output
    - model availability coloring
    - button clipping
@@ -565,7 +586,6 @@ Remaining work:
 - Decide acceptance thresholds for generated QA rows before training.
 - Run an actual small fine-tuning dry run with the exported rows, not only the
   loader import smoke.
-- Add a review artifact that records manual QA decisions for the pilot corpus.
 
 ## Important Non-Goals
 

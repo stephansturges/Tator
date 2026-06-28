@@ -35,6 +35,10 @@ row before training.
     normalizes each row into a two-turn image/question/answer conversation.
   - `instruction_archive_rows`: one per-image construction archive record per
     image, ready to download as JSONL.
+  - `instruction_review_rows`: one candidate-level review row per caption0,
+    generated QA, and deterministic metadata QA item, with source summaries,
+    selected-for-training flags, rejection reasons, and blank decision/note
+    fields for human audit before training.
   - `instruction_archive`: a versioned per-image archive containing caption0,
     generated QA, optional deterministic metadata QA, source annotation
     provenance, rejected rows, and the flattened rows.
@@ -81,6 +85,7 @@ row before training.
 - Added separate downloads:
   - **Download instruction JSONL**
   - **Download instruction archive**
+  - **Download review JSONL**
   - **Download instruction report**
 - Fixed caption action layout so export and instruction buttons wrap into
   readable responsive columns instead of clipping in the sidebar.
@@ -114,6 +119,9 @@ row before training.
   row-type distribution, split image counts, split training-row counts,
   rejection reason counts, source-field provenance, QA count per image, and
   exclusion categories.
+- The instruction export also exposes `instruction_review_rows`, a
+  candidate-level audit queue that records caption0, generated-QA, and
+  deterministic metadata candidates separately from flattened trainer rows.
 - The instruction report now includes `corpus_quality_metrics` for generated-QA
   diversity, duplicate-question rate, generated-QA acceptance/rejection rates,
   structured rewrite rate, image-level training coverage, source-grounded row
@@ -154,7 +162,7 @@ row before training.
   - Result: 135 passed.
 - Rendered browser smoke:
   - `./.venv-macos/bin/python tools/run_qwen_caption_ui_smoke.py --base-url http://127.0.0.1:8000 --out-json tmp/qwen_caption_ui_smoke_report.json --screenshot tmp/qwen_caption_ui_smoke.png`
-  - Result: `ok=true`, caption readiness reported 29 pass, 1 warning, 0 fail;
+  - Result: `ok=true`, caption readiness reported 29 pass, 2 warnings, 0 fail;
     no console errors, no failed requests, no bad HTTP responses, no clipped
     caption action buttons. The screenshot confirms the generated-QA mix,
     answer-format, archive, and report controls are visible and readable in the
@@ -168,5 +176,5 @@ row before training.
 - Run a small real VLM instruction dataset pilot with at least one dense scene,
   one empty-label image, one image with multiple object classes, and one image
   with existing alternate captions.
-- Review generated QA content manually for grounding quality before using it for
-  fine-tuning.
+- Review generated QA content manually with the review JSONL before using it
+  for fine-tuning.

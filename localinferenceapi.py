@@ -20237,6 +20237,7 @@ def delete_caption(dataset_id: str, caption_id: str, payload: Optional[Dict[str,
 CAPTION_INSTRUCTION_ARCHIVE_FORMAT = "tator_caption_instruction_archive_v1"
 CAPTION_INSTRUCTION_SOURCE_ANNOTATIONS_FORMAT = "tator_source_annotations_v1"
 CAPTION_INSTRUCTION_TRAINING_ROWS_FORMAT = "tator_caption_instruction_rows_v1"
+CAPTION_INSTRUCTION_REVIEW_ROWS_FORMAT = "tator_caption_instruction_review_rows_v1"
 
 
 def _dataset_caption_instruction_records_path(
@@ -21380,6 +21381,161 @@ def _caption_instruction_corpus_quality_metrics(
     }
 
 
+def _caption_instruction_review_source_summary(source_annotations: Mapping[str, Any]) -> Dict[str, Any]:
+    if not isinstance(source_annotations, Mapping):
+        source_annotations = {}
+    counts = source_annotations.get("object_counts") if isinstance(source_annotations.get("object_counts"), Mapping) else {}
+    visible_classes = source_annotations.get("visible_classes") if isinstance(source_annotations.get("visible_classes"), list) else []
+    annotations = source_annotations.get("annotations") if isinstance(source_annotations.get("annotations"), list) else []
+    uncertainty = source_annotations.get("uncertainty") if isinstance(source_annotations.get("uncertainty"), list) else []
+    return {
+        "status": str(source_annotations.get("status") or "").strip() or "unknown",
+        "object_counts": dict(sorted((str(key), value) for key, value in counts.items())),
+        "visible_classes": [str(item) for item in visible_classes if str(item).strip()],
+        "annotation_count": len(annotations),
+        "uncertainty_count": len(uncertainty),
+    }
+
+
+def _caption_instruction_candidate_review_row(
+    *,
+    dataset_id: str,
+    image: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    row_origin: str,
+    selected_training_qa_ids: Set[str],
+    selected_training_image_questions: Set[Tuple[str, str]],
+) -> Dict[str, Any]:
+    image_path = str(image.get("image_path") or image.get("image_name") or "").strip()
+    qa_id = str(candidate.get("qa_id") or candidate.get("id") or "").strip()
+    question = str(candidate.get("question") or "").strip()
+    selected_for_training = bool(qa_id and qa_id in selected_training_qa_ids)
+    if not qa_id and image_path and question:
+        selected_for_training = (image_path, question) in selected_training_image_questions
+    metadata = dict(candidate.get("metadata")) if isinstance(candidate.get("metadata"), Mapping) else {}
+    candidate_answer = str(
+        metadata.get("candidate_answer")
+        or candidate.get("candidate_answer")
+        or candidate.get("answer")
+        or candidate.get("caption")
+        or ""
+    ).strip()
+    training_answer = str(candidate.get("answer") or candidate.get("caption") or "").strip() if selected_for_training else ""
+    validation_status = str(candidate.get("validation_status") or "").strip() or "unknown"
+    review_status = str(candidate.get("review_status") or metadata.get("review_status") or "unreviewed").strip() or "unreviewed"
+    source_fields = (
+        [str(field) for field in candidate.get("source_fields") or [] if str(field).strip()]
+        if isinstance(candidate.get("source_fields"), list)
+        else []
+    )
+    validated_against = (
+        [str(field) for field in candidate.get("validated_against") or [] if str(field).strip()]
+        if isinstance(candidate.get("validated_against"), list)
+        else []
+    )
+    rejection_reasons = (
+        [str(reason) for reason in candidate.get("rejection_reasons") or [] if str(reason).strip()]
+        if isinstance(candidate.get("rejection_reasons"), list)
+        else []
+    )
+    return {
+        "format": CAPTION_INSTRUCTION_REVIEW_ROWS_FORMAT,
+        "dataset_id": str(dataset_id or "").strip() or None,
+        "image_id": str(image.get("image_id") or Path(image_path).stem).strip(),
+        "image_path": image_path,
+        "split": str(image.get("split") or "").strip() or None,
+        "row_origin": str(row_origin or "").strip() or "unknown",
+        "qa_id": qa_id,
+        "row_type": str(candidate.get("row_type") or row_origin or "").strip() or "unknown",
+        "question": question,
+        "candidate_answer": candidate_answer,
+        "training_answer": training_answer,
+        "answer_source": str(candidate.get("answer_source") or "").strip() or None,
+        "answer_format": str(candidate.get("answer_format") or metadata.get("answer_format") or "natural").strip() or "natural",
+        "validation_status": validation_status,
+        "review_status": review_status,
+        "selected_for_training": selected_for_training,
+        "requires_manual_review": row_origin in {"caption0", "generated_qa"},
+        "review_decision": str(metadata.get("review_decision") or candidate.get("review_decision") or "").strip(),
+        "review_notes": str(metadata.get("review_notes") or candidate.get("review_notes") or "").strip(),
+        "rejection_reasons": rejection_reasons,
+        "source_fields": source_fields,
+        "validated_against": validated_against,
+        "source_summary": _caption_instruction_review_source_summary(
+            image.get("source_annotations") if isinstance(image.get("source_annotations"), Mapping) else {}
+        ),
+        "metadata": metadata,
+    }
+
+
+def _caption_instruction_review_rows(
+    images: Sequence[Mapping[str, Any]],
+    training_rows: Sequence[Mapping[str, Any]],
+    *,
+    dataset_id: str,
+) -> List[Dict[str, Any]]:
+    selected_training_qa_ids: Set[str] = set()
+    selected_training_image_questions: Set[Tuple[str, str]] = set()
+    for row in training_rows:
+        if not isinstance(row, Mapping):
+            continue
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), Mapping) else {}
+        qa_id = str(metadata.get("qa_id") or "").strip()
+        if qa_id:
+            selected_training_qa_ids.add(qa_id)
+        image_path = str(row.get("image_path") or "").strip()
+        question = str(row.get("question") or "").strip()
+        if image_path and question:
+            selected_training_image_questions.add((image_path, question))
+
+    review_rows: List[Dict[str, Any]] = []
+    for image in images:
+        if not isinstance(image, Mapping):
+            continue
+        language_annotations = image.get("language_annotations") if isinstance(image.get("language_annotations"), Mapping) else {}
+        caption0 = language_annotations.get("caption0") if isinstance(language_annotations, Mapping) else None
+        if isinstance(caption0, Mapping):
+            review_rows.append(
+                _caption_instruction_candidate_review_row(
+                    dataset_id=dataset_id,
+                    image=image,
+                    candidate=caption0,
+                    row_origin="caption0",
+                    selected_training_qa_ids=selected_training_qa_ids,
+                    selected_training_image_questions=selected_training_image_questions,
+                )
+            )
+        generated_pairs = language_annotations.get("generated_qa_pairs") if isinstance(language_annotations, Mapping) else []
+        for pair in (generated_pairs if isinstance(generated_pairs, list) else []):
+            if not isinstance(pair, Mapping):
+                continue
+            review_rows.append(
+                _caption_instruction_candidate_review_row(
+                    dataset_id=dataset_id,
+                    image=image,
+                    candidate=pair,
+                    row_origin="generated_qa",
+                    selected_training_qa_ids=selected_training_qa_ids,
+                    selected_training_image_questions=selected_training_image_questions,
+                )
+            )
+        deterministic_pairs = image.get("deterministic_metadata_qa_pairs")
+        for pair in (deterministic_pairs if isinstance(deterministic_pairs, list) else []):
+            if not isinstance(pair, Mapping):
+                continue
+            review_rows.append(
+                _caption_instruction_candidate_review_row(
+                    dataset_id=dataset_id,
+                    image=image,
+                    candidate=pair,
+                    row_origin="deterministic_metadata_qa",
+                    selected_training_qa_ids=selected_training_qa_ids,
+                    selected_training_image_questions=selected_training_image_questions,
+                )
+            )
+    return review_rows
+
+
 def _dataset_caption_instruction_archive(
     indexed_records: Sequence[Mapping[str, Any]],
     instruction_records: Sequence[Mapping[str, Any]],
@@ -21794,6 +21950,14 @@ def _dataset_caption_instruction_archive(
         training_rows,
         rejections,
     )
+    review_rows = _caption_instruction_review_rows(
+        images,
+        training_rows,
+        dataset_id=str(dataset_id or "").strip(),
+    )
+    manual_review_required_count = sum(
+        1 for row in review_rows if isinstance(row, Mapping) and bool(row.get("requires_manual_review"))
+    )
     captioning_report = {
         "format": "tator_caption_instruction_report_v1",
         "dataset_id": str(dataset_id or "").strip() or None,
@@ -21821,6 +21985,8 @@ def _dataset_caption_instruction_archive(
         },
         "provenance_summary": dict(sorted(provenance_summary.items())),
         "corpus_quality_metrics": corpus_quality_metrics,
+        "instruction_review_row_count": len(review_rows),
+        "manual_review_required_count": manual_review_required_count,
         "split_image_counts": dict(sorted(split_image_counts.items())),
         "split_training_row_counts": dict(sorted(split_training_row_counts.items())),
         "rows_excluded_because_of_uncertainty": uncertainty_rejection_count,
@@ -21845,6 +22011,7 @@ def _dataset_caption_instruction_archive(
         "format": CAPTION_INSTRUCTION_ARCHIVE_FORMAT,
         "archive_schema_version": CAPTION_INSTRUCTION_ARCHIVE_FORMAT,
         "flattened_training_rows_format": CAPTION_INSTRUCTION_TRAINING_ROWS_FORMAT,
+        "review_rows_format": CAPTION_INSTRUCTION_REVIEW_ROWS_FORMAT,
         "dataset_id": str(dataset_id or "").strip() or None,
         "exported_at": exported_at,
         "settings": dict(settings),
@@ -21871,6 +22038,8 @@ def _dataset_caption_instruction_archive(
         "rejections": rejections,
         "archive_rows": archive_rows,
         "instruction_archive_rows": archive_rows,
+        "review_rows": review_rows,
+        "instruction_review_rows": review_rows,
         "images": images,
         "training_rows": training_rows,
         "flattened_training_rows": training_rows,
@@ -22153,6 +22322,7 @@ def export_captions(dataset_id: str, options: Optional[Mapping[str, Any]] = None
     )
     instruction_training_rows = list(instruction_archive.get("training_rows") or [])
     instruction_archive_rows = list(instruction_archive.get("archive_rows") or [])
+    instruction_review_rows = list(instruction_archive.get("review_rows") or [])
     instruction_report = (
         dict(instruction_archive.get("captioning_report"))
         if isinstance(instruction_archive.get("captioning_report"), Mapping)
@@ -22171,6 +22341,10 @@ def export_captions(dataset_id: str, options: Optional[Mapping[str, Any]] = None
         "deterministic_metadata_qa_pair_count": int(
             instruction_archive.get("deterministic_metadata_qa_pair_count") or 0
         ),
+        "instruction_review_row_count": len(instruction_review_rows),
+        "manual_review_required_count": sum(
+            1 for row in instruction_review_rows if isinstance(row, Mapping) and bool(row.get("requires_manual_review"))
+        ),
         "rejected_training_row_count": int(instruction_archive.get("rejected_training_row_count") or 0),
     }
     instruction_archive["summary"] = dict(instruction_summary)
@@ -22181,6 +22355,7 @@ def export_captions(dataset_id: str, options: Optional[Mapping[str, Any]] = None
         "training_rows": training_rows,
         "instruction_training_rows": instruction_training_rows,
         "instruction_archive_rows": instruction_archive_rows,
+        "instruction_review_rows": instruction_review_rows,
         "instruction_report": instruction_report,
         "instruction_archive": instruction_archive,
         "archive": _dataset_caption_grouped_archive(indexed_records, dataset_id=dataset_id, summary=summary),

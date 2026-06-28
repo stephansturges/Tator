@@ -51,6 +51,7 @@ CRITICAL_CONTROLS = (
     "qwenCaptionBuildInstructionDataset",
     "qwenCaptionDownloadInstructionJsonl",
     "qwenCaptionDownloadInstructionArchive",
+    "qwenCaptionDownloadInstructionReview",
     "qwenCaptionDownloadInstructionReport",
     "qwenCaptionExportHealth",
     "qwenCaptionReadinessRun",
@@ -201,6 +202,7 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         instruction_build_count = page.locator("text=Create VLM training dataset").count()
         instruction_jsonl_count = page.locator("text=Download instruction JSONL").count()
         instruction_archive_count = page.locator("text=Download instruction archive").count()
+        instruction_review_count = page.locator("text=Download review JSONL").count()
         instruction_report_count = page.locator("text=Download instruction report").count()
         instruction_help = page.locator(".qwen-caption-instruction-panel .training-help").inner_text(timeout=args.timeout_ms)
         action_button_metrics = page.evaluate(
@@ -297,6 +299,7 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
             "instruction_build_button_count": instruction_build_count,
             "instruction_jsonl_button_count": instruction_jsonl_count,
             "instruction_archive_button_count": instruction_archive_count,
+            "instruction_review_button_count": instruction_review_count,
             "instruction_report_button_count": instruction_report_count,
             "instruction_help": instruction_help,
             "action_button_metrics": action_button_metrics,
@@ -338,11 +341,13 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         instruction_build_count == 1
         and instruction_jsonl_count == 1
         and instruction_archive_count == 1
+        and instruction_review_count == 1
         and instruction_report_count == 1,
         "Instruction dataset action and export buttons are visible.",
         build_count=instruction_build_count,
         jsonl_count=instruction_jsonl_count,
         archive_count=instruction_archive_count,
+        review_count=instruction_review_count,
         report_count=instruction_report_count,
     )
     add_check(

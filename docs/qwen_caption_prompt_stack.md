@@ -748,9 +748,11 @@ caption0, VLM-generated visual question/answer rows, optional deterministic
 metadata QA, source annotations, provenance, rejected rows, and flattened trainer
 rows in a full versioned `tator_caption_instruction_archive_v1` audit object.
 It also exposes `instruction_archive_rows`, one construction archive record per
-image for JSONL download, and `instruction_report`, a run-level count,
-provenance, split, and rejection summary. Generated question/answer rows are
-language annotations only; they are never written back as source annotations.
+image for JSONL download; `instruction_review_rows`, one candidate-level review
+row per caption0, generated-QA, and deterministic metadata item; and
+`instruction_report`, a run-level count, provenance, split, and rejection
+summary. Generated question/answer rows are language annotations only; they are
+never written back as source annotations.
 Source annotations are built from real label evidence into `object_counts`,
 `visible_classes`, `bbox_instances`, `bbox_geometry`, `spatial_facts`,
 `uncertainty`, and field provenance. Deterministic metadata QA is off by default
@@ -760,9 +762,10 @@ presence, absence, and simple bbox-derived spatial rows when supported.
 The backend `/captions/export` response carries the same logical grouped
 archive as a versioned `tator_caption_grouped_v1` object, in addition to the
 flat records, compatibility grouped map, caption-only training rows, instruction
-training rows, per-image instruction archive rows, the instruction report, and
-the full instruction audit object. This keeps browser downloads and scriptable
-exports aligned around stable multi-caption and instruction-dataset contracts.
+training rows, per-image instruction archive rows, instruction review rows, the
+instruction report, and the full instruction audit object. This keeps browser
+downloads and scriptable exports aligned around stable multi-caption and
+instruction-dataset contracts.
 The Qwen trainer accepts the flat `image_path` / `question` / `answer` training
 row shape directly and normalizes each row into the conversation format used for
 fine-tuning, so the download remains easy to inspect without requiring a manual

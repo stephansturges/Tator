@@ -125,6 +125,11 @@ duplicate image/question pairs before writing the file.
 record per JSONL line, keeping caption0, generated QA, optional deterministic
 metadata QA, source annotation provenance, and per-image export metadata separate
 from trainer rows.
+**Download review JSONL** exports one candidate-level row for each caption0,
+generated QA, and deterministic metadata QA item. Review rows preserve candidate
+answers, selected training answers, source summaries, rejection reasons,
+selected-for-training flags, and blank review decision/note fields so a human
+can audit the corpus before fine-tuning.
 **Download instruction report** exports run-level counts, rejection reasons,
 source-field provenance, split image counts, split row counts, QA count per
 image, selected flattened-row counts, duplicate-question/diversity metrics,

@@ -475,8 +475,8 @@ statuses:
   duplicate questions, low generated-question diversity, high generated-QA
   rejection rate, or low source-class coverage.
 - `blocked`: the export should not be used for training, for example when there
-  are no images, no selected training rows, or a selected row was rejected by
-  manual review.
+  are no images, no selected training rows, or a selected row was rejected or
+  marked as needing revision by manual review.
 
 The browser validates this readiness block before writing instruction JSONL.
 Blocked exports are refused. `needs_review` exports are still downloadable, but
@@ -732,7 +732,7 @@ Result:
 Result:
 
 ```text
-133 passed
+135 passed
 ```
 
 Syntax and formatting checks:

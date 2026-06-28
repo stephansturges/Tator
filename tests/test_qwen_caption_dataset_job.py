@@ -827,6 +827,40 @@ def test_caption_instruction_review_decision_normalizes_external_review_values()
     assert api._caption_instruction_review_decision("Needs-Rewrite") == "needs_revision"
 
 
+def test_caption_instruction_training_readiness_blocks_selected_needs_revision_rows() -> None:
+    import localinferenceapi as api
+
+    readiness = api._caption_instruction_training_readiness(
+        corpus_quality_metrics={
+            "selected_flattened_row_count": 2,
+            "image_count": 1,
+            "generated_qa_candidate_count": 0,
+            "source_class_count": 0,
+        },
+        review_rows=[
+            {
+                "selected_for_training": True,
+                "requires_manual_review": True,
+                "review_decision": "accepted",
+            },
+            {
+                "selected_for_training": True,
+                "requires_manual_review": True,
+                "review_decision": "needs-revision",
+            },
+        ],
+        settings={"include_generated_qa_in_training": True},
+    )
+
+    assert readiness["status"] == "blocked"
+    assert readiness["ready_for_training"] is False
+    assert readiness["accepted_manual_review_row_count"] == 1
+    assert readiness["pending_manual_review_row_count"] == 0
+    assert readiness["needs_revision_manual_review_row_count"] == 1
+    assert "selected_row_needs_revision_by_manual_review" in readiness["blocking_reasons"]
+    assert "revise_selected_language_rows" in readiness["required_actions"]
+
+
 def test_caption_instruction_training_rows_import_into_qwen_trainer(
     monkeypatch,
     tmp_path,

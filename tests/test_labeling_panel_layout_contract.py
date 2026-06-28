@@ -493,6 +493,33 @@ def test_qwen_caption_instruction_review_import_parser_accepts_reviewer_file_sha
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
 
 
+def test_qwen_caption_instruction_readiness_summary_formats_blockers_for_operators():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            _extract_js_function(js, "captionInstructionReadinessLabel"),
+            _extract_js_function_before(
+                js,
+                "captionInstructionReadinessSummary",
+                "\n    async function downloadCaptionJsonl",
+            ),
+            "const summary = captionInstructionReadinessSummary({ training_readiness: {",
+            "  status: 'blocked',",
+            "  ready_for_training: false,",
+            "  blocking_reasons: ['selected_row_needs_revision_by_manual_review'],",
+            "  required_actions: ['revise_selected_language_rows'],",
+            "  quality_warnings: [],",
+            "} });",
+            "assert.strictEqual(summary.blocked, true);",
+            "assert.strictEqual(summary.severity, 'fail');",
+            "assert(summary.message.includes('a selected row needs revision'));",
+            "assert(!summary.message.includes('selected_row_needs_revision_by_manual_review'));",
+        ]
+    )
+    subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
+
+
 def test_qwen_single_caption_uses_isolated_backend_job_when_dataset_backed():
     js = _js()
 

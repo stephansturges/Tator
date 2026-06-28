@@ -21592,7 +21592,18 @@ def _caption_instruction_training_readiness(
         for row in selected_manual_review_rows
         if _caption_instruction_review_decision(row.get("review_decision")) == "rejected"
     ]
-    manual_review_pending_count = max(0, len(selected_manual_review_rows) - len(accepted_manual_review_rows))
+    needs_revision_manual_review_rows = [
+        row
+        for row in selected_manual_review_rows
+        if _caption_instruction_review_decision(row.get("review_decision")) == "needs_revision"
+    ]
+    manual_review_pending_count = max(
+        0,
+        len(selected_manual_review_rows)
+        - len(accepted_manual_review_rows)
+        - len(rejected_manual_review_rows)
+        - len(needs_revision_manual_review_rows),
+    )
 
     blocking_reasons: List[str] = []
     required_actions: List[str] = []
@@ -21603,6 +21614,9 @@ def _caption_instruction_training_readiness(
         blocking_reasons.append("no_selected_training_rows")
     if rejected_manual_review_rows:
         blocking_reasons.append("selected_row_rejected_by_manual_review")
+    if needs_revision_manual_review_rows:
+        blocking_reasons.append("selected_row_needs_revision_by_manual_review")
+        required_actions.append("revise_selected_language_rows")
     if manual_review_pending_count > 0:
         required_actions.append("review_selected_language_rows")
 
@@ -21652,6 +21666,7 @@ def _caption_instruction_training_readiness(
         "accepted_manual_review_row_count": len(accepted_manual_review_rows),
         "pending_manual_review_row_count": manual_review_pending_count,
         "rejected_manual_review_row_count": len(rejected_manual_review_rows),
+        "needs_revision_manual_review_row_count": len(needs_revision_manual_review_rows),
         "generated_qa_rejection_rate": generated_rejection_rate,
         "generated_qa_global_duplicate_question_rate": generated_global_duplicate_rate,
         "generated_qa_per_image_duplicate_question_rate": generated_per_image_duplicate_rate,

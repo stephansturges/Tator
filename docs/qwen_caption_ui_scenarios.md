@@ -123,7 +123,9 @@ paths, blank questions, blank answers, invalid JSON for JSON row types, and
 duplicate image/question pairs before writing the file. It also validates the
 instruction report's training-readiness block: `blocked` readiness refuses the
 download, while `needs_review` readiness allows the file but shows a warning
-that selected language rows or quality gates still need review.
+that selected language rows or quality gates still need review. A selected row
+that a reviewer marks rejected or needs-revision moves readiness to `blocked`
+until the row is removed, regenerated, or accepted.
 **Download instruction archive** exports one per-image construction archive
 record per JSONL line, keeping caption0, generated QA, optional deterministic
 metadata QA, source annotation provenance, and per-image export metadata separate

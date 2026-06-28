@@ -34902,6 +34902,24 @@ async function cancelRfDetrTrainingJobRequest() {
         };
     }
 
+    function captionInstructionReadinessLabel(value) {
+        const labels = {
+            no_images: "no images in the export",
+            no_selected_training_rows: "no selected training rows",
+            selected_row_rejected_by_manual_review: "a selected row was rejected",
+            selected_row_needs_revision_by_manual_review: "a selected row needs revision",
+            review_selected_language_rows: "review selected language rows",
+            revise_selected_language_rows: "revise selected language rows",
+            generated_qa_rejection_rate_above_threshold: "generated QA rejection rate is high",
+            generated_qa_global_duplicate_question_rate_above_threshold: "duplicate generated questions are high",
+            generated_qa_per_image_duplicate_question_rate_above_threshold: "per-image duplicate generated questions are high",
+            generated_qa_question_diversity_ratio_below_threshold: "generated question diversity is low",
+            source_class_coverage_rate_below_threshold: "source class coverage is low",
+        };
+        const key = String(value || "").trim();
+        return labels[key] || key.replace(/_/g, " ");
+    }
+
     function captionInstructionReadinessSummary(report) {
         const readiness = report?.training_readiness && typeof report.training_readiness === "object"
             ? report.training_readiness
@@ -34918,7 +34936,9 @@ async function cancelRfDetrTrainingJobRequest() {
         const actions = Array.isArray(readiness.required_actions) ? readiness.required_actions.filter(Boolean) : [];
         const warnings = Array.isArray(readiness.quality_warnings) ? readiness.quality_warnings.filter(Boolean) : [];
         if (status === "blocked") {
-            const reasonText = blocking.length ? `: ${blocking.slice(0, 3).join(", ")}` : "";
+            const reasonText = blocking.length
+                ? `: ${blocking.slice(0, 3).map(captionInstructionReadinessLabel).join(", ")}`
+                : "";
             return {
                 severity: "fail",
                 blocked: true,
@@ -34932,10 +34952,10 @@ async function cancelRfDetrTrainingJobRequest() {
                 detailParts.push(`${reviewCount} selected language row${reviewCount === 1 ? "" : "s"} pending review`);
             }
             if (actions.length) {
-                detailParts.push(`actions: ${actions.slice(0, 2).join(", ")}`);
+                detailParts.push(`actions: ${actions.slice(0, 2).map(captionInstructionReadinessLabel).join(", ")}`);
             }
             if (warnings.length) {
-                detailParts.push(`warnings: ${warnings.slice(0, 2).join(", ")}`);
+                detailParts.push(`warnings: ${warnings.slice(0, 2).map(captionInstructionReadinessLabel).join(", ")}`);
             }
             return {
                 severity: "warn",

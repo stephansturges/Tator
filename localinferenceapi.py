@@ -23130,6 +23130,18 @@ def _caption_instruction_review_resolved_target_key(
     return (origin, "content", image_key, caption)
 
 
+def _caption_instruction_review_has_current_text(row_origin: str, row: Mapping[str, Any]) -> bool:
+    origin = str(row_origin or "").strip()
+    if origin == "generated_qa":
+        question = _caption_instruction_normalized_question(row.get("question"))
+        answer = str(row.get("candidate_answer") or row.get("training_answer") or "").strip()
+        return bool(question and answer)
+    if origin == "caption0":
+        caption = str(row.get("candidate_answer") or row.get("training_answer") or "").strip()
+        return bool(caption)
+    return True
+
+
 def _caption_instruction_reject_duplicate_review_targets(
     rows: Sequence[Any],
     *,
@@ -23348,6 +23360,11 @@ def _caption_instruction_reject_unmatchable_actionable_review_rows(
                 detail=f"review_rows_missing_image_path:row_{index}",
             )
         if row_origin == "generated_qa":
+            if not _caption_instruction_review_has_current_text(row_origin, row):
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail=f"review_rows_generated_qa_text_missing:row_{index}",
+                )
             matches = [
                 record
                 for record in instruction_records
@@ -23379,6 +23396,11 @@ def _caption_instruction_reject_unmatchable_actionable_review_rows(
             resolved_seen[resolved_key] = (index, decision)
             continue
         if row_origin == "caption0":
+            if not _caption_instruction_review_has_current_text(row_origin, row):
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail=f"review_rows_caption0_answer_missing:row_{index}",
+                )
             matches = [
                 record
                 for record in caption_records

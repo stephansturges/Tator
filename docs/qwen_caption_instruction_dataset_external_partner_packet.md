@@ -294,6 +294,8 @@ Review import fails closed on:
 - unsupported actionable row origins
 - duplicate actionable review targets, including rows that use different row
   identities but resolve to the same saved caption or generated-QA record
+- generated-QA review rows missing the reviewed question or answer text
+- caption0 review rows missing the reviewed caption text
 - stale generated-QA targets
 - QA ids whose review-row image path does not match the stored caption or
   generated-QA record
@@ -523,7 +525,7 @@ Result:
 Result:
 
 ```text
-175 passed
+178 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

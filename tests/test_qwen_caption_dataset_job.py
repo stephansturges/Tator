@@ -833,6 +833,82 @@ def test_caption_instruction_review_decision_normalizes_external_review_values()
     assert api._caption_instruction_review_decision("Needs-Rewrite") == "needs_revision"
 
 
+def test_caption_instruction_review_import_skips_mismatched_dataset_id(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import localinferenceapi as api
+
+    entry = {"id": "ds", "dataset_root": str(tmp_path), "registry_root": str(tmp_path)}
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: entry)
+    monkeypatch.setattr(
+        api,
+        "_annotation_manifest_for_entry",
+        lambda _entry: {
+            "labelmap": [],
+            "images": [
+                {
+                    "image_name": "frame.jpg",
+                    "image_relpath": "frame.jpg",
+                    "split": "train",
+                    "label_source_present": True,
+                    "label_lines": [],
+                }
+            ],
+        },
+    )
+    api._write_dataset_caption_instruction_records(
+        entry,
+        [
+            {
+                "id": "qa-1",
+                "image_name": "frame.jpg",
+                "image_key": "train/frame.jpg",
+                "split": "train",
+                "question": "What is the scene type?",
+                "answer": "A waterfront area.",
+                "row_type": "generated_qa",
+                "answer_source": "vlm_generated",
+                "validation_status": "accepted",
+            }
+        ],
+    )
+
+    result = api.apply_caption_instruction_review(
+        "ds",
+        {
+            "rows": [
+                {
+                    "format": "tator_caption_instruction_review_rows_v1",
+                    "dataset_id": "other-dataset",
+                    "image_path": "frame.jpg",
+                    "split": "train",
+                    "row_origin": "generated_qa",
+                    "qa_id": "qa-1",
+                    "row_type": "generated_qa",
+                    "question": "What is the scene type?",
+                    "candidate_answer": "A waterfront area.",
+                    "training_answer": "A waterfront area.",
+                    "validation_status": "accepted",
+                    "selected_for_training": True,
+                    "requires_manual_review": True,
+                    "review_decision": "rejected",
+                    "review_notes": "wrong dataset",
+                    "rejection_reasons": [],
+                    "source_summary": {"status": "empty_label_file"},
+                }
+            ]
+        },
+    )
+
+    assert result["applied_count"] == 0
+    assert result["skipped_count"] == 1
+    assert result["skipped_rows"][0]["reason"] == "dataset_id_mismatch"
+    records = api._load_dataset_caption_instruction_records(entry)
+    assert records[0]["review_status"] == ""
+    assert "review_decision" not in records[0]["metadata"]
+
+
 def test_caption_instruction_training_readiness_blocks_selected_needs_revision_rows() -> None:
     import localinferenceapi as api
 

@@ -512,6 +512,8 @@ at export time rather than persisted language records.
 The review import is deliberately conservative:
 
 - It accepts JSON arrays, JSON objects containing row arrays, and JSONL files.
+- It refuses to apply rows whose embedded dataset id does not match the selected
+  dataset.
 - It ignores blank or unknown decisions instead of inventing a review result.
 - It applies decisions only to matching caption0 or generated-QA records.
 - It records reviewer, notes, source row metadata, and decision timestamps.
@@ -701,6 +703,7 @@ UI:
 
 Docs:
 
+- `docs/qwen_caption_instruction_dataset_partner_handoff.md`
 - `docs/qwen_caption_instruction_dataset_hardening_report.md`
 - `docs/qwen_caption_prompt_stack.md`
 - `docs/qwen_caption_ui_scenarios.md`
@@ -736,7 +739,7 @@ Result:
 Result:
 
 ```text
-136 passed
+137 passed
 ```
 
 Syntax and formatting checks:

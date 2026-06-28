@@ -474,6 +474,7 @@ def test_qwen_caption_instruction_review_import_parser_accepts_reviewer_file_sha
                 "parseCaptionInstructionReviewRowsText",
                 "\n    async function importCaptionInstructionReviewFile",
             ),
+            _extract_js_function(js, "captionInstructionReviewDatasetMismatches"),
             "const row = {",
             "  format: 'tator_caption_instruction_review_rows_v1',",
             "  image_path: 'train/frame.jpg',",
@@ -488,6 +489,8 @@ def test_qwen_caption_instruction_review_import_parser_accepts_reviewer_file_sha
             "assert.strictEqual(parseCaptionInstructionReviewRowsText(JSON.stringify(row, null, 2))[0].qa_id, 'qa-1');",
             "const jsonl = JSON.stringify(row) + '\\n' + JSON.stringify({ ...row, qa_id: 'qa-2', review_decision: 'accepted' });",
             "assert.strictEqual(parseCaptionInstructionReviewRowsText(jsonl).length, 2);",
+            "assert.deepStrictEqual(captionInstructionReviewDatasetMismatches([{ ...row, dataset_id: 'ds' }], 'ds'), []);",
+            "assert.deepStrictEqual(captionInstructionReviewDatasetMismatches([{ ...row, dataset_id: 'other' }], 'ds'), ['other']);",
         ]
     )
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)

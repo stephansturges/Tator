@@ -35204,6 +35204,21 @@ async function cancelRfDetrTrainingJobRequest() {
         return rows;
     }
 
+    function captionInstructionReviewDatasetMismatches(rows, datasetId) {
+        const expected = String(datasetId || "").trim();
+        if (!expected) {
+            return [];
+        }
+        const mismatches = new Set();
+        (Array.isArray(rows) ? rows : []).forEach((row) => {
+            const rowDatasetId = String(row?.dataset_id || "").trim();
+            if (rowDatasetId && rowDatasetId !== expected) {
+                mismatches.add(rowDatasetId);
+            }
+        });
+        return Array.from(mismatches).sort();
+    }
+
     async function importCaptionInstructionReviewFile(file) {
         const datasetId = getCaptionDatasetId();
         if (!datasetId) {
@@ -35215,6 +35230,13 @@ async function cancelRfDetrTrainingJobRequest() {
         const validation = validateCaptionInstructionReviewRows(rows);
         if (!validation.ok) {
             const message = describeCaptionInstructionReviewValidation(validation).replace("export blocked", "import blocked");
+            setCaptionExportHealth(message, "fail");
+            setSamStatus(message, { variant: "error", duration: 6000 });
+            return;
+        }
+        const datasetMismatches = captionInstructionReviewDatasetMismatches(rows, datasetId);
+        if (datasetMismatches.length) {
+            const message = `Instruction review import blocked: file is for dataset ${datasetMismatches.slice(0, 3).join(", ")}, not ${datasetId}.`;
             setCaptionExportHealth(message, "fail");
             setSamStatus(message, { variant: "error", duration: 6000 });
             return;

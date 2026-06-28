@@ -22566,6 +22566,13 @@ def _caption_instruction_review_payload_rows(payload: Any) -> List[Any]:
     return list(raw_rows)
 
 
+def _caption_instruction_review_dataset_id_matches(row: Mapping[str, Any], dataset_id: str) -> bool:
+    row_dataset_id = str(row.get("dataset_id") or "").strip()
+    if not row_dataset_id:
+        return True
+    return row_dataset_id == str(dataset_id or "").strip()
+
+
 def _caption_instruction_review_image_candidates(
     entry: Dict[str, Any],
     row: Mapping[str, Any],
@@ -22696,6 +22703,9 @@ def apply_caption_instruction_review(dataset_id: str, payload: Dict[str, Any]):
         row_origin = str(row.get("row_origin") or "").strip()
         if str(row.get("format") or "").strip() != CAPTION_INSTRUCTION_REVIEW_ROWS_FORMAT:
             skipped_rows.append({"row_index": index, "qa_id": qa_id, "row_origin": row_origin, "reason": "invalid_format"})
+            continue
+        if not _caption_instruction_review_dataset_id_matches(row, dataset_id):
+            skipped_rows.append({"row_index": index, "qa_id": qa_id, "row_origin": row_origin, "reason": "dataset_id_mismatch"})
             continue
         decision = _caption_instruction_review_decision(row.get("review_decision"))
         if decision not in {"accepted", "rejected", "needs_revision"}:

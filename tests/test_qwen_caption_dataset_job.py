@@ -817,6 +817,16 @@ def test_caption_instruction_review_import_persists_review_metadata(
     assert "selected_row_rejected_by_manual_review" in readiness["blocking_reasons"]
 
 
+def test_caption_instruction_review_decision_normalizes_external_review_values() -> None:
+    import localinferenceapi as api
+
+    assert api._caption_instruction_review_decision("accepted") == "accepted"
+    assert api._caption_instruction_review_decision("reject") == "rejected"
+    assert api._caption_instruction_review_decision("needs-revision") == "needs_revision"
+    assert api._caption_instruction_review_decision("needs review") == "needs_revision"
+    assert api._caption_instruction_review_decision("Needs-Rewrite") == "needs_revision"
+
+
 def test_caption_instruction_training_rows_import_into_qwen_trainer(
     monkeypatch,
     tmp_path,

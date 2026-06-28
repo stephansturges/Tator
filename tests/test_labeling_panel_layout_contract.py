@@ -1,5 +1,6 @@
 from html.parser import HTMLParser
 import re
+import subprocess
 from pathlib import Path
 
 
@@ -54,6 +55,27 @@ def _js() -> str:
 
 def _read(rel_path: str) -> str:
     return (REPO_ROOT / rel_path).read_text(encoding="utf-8")
+
+
+def _extract_js_function(source: str, name: str) -> str:
+    start = source.index(f"function {name}")
+    brace_start = source.index("{", start)
+    depth = 0
+    for index in range(brace_start, len(source)):
+        char = source[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : index + 1]
+    raise AssertionError(f"Could not extract JS function {name}")
+
+
+def _extract_js_function_before(source: str, name: str, next_marker: str) -> str:
+    start = source.index(f"function {name}")
+    end = source.index(next_marker, start)
+    return source[start:end].rstrip()
 
 
 def _mobile_review_html() -> str:
@@ -439,6 +461,36 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert init_helper.count("renderCaptionAlternatesForCurrentImage();") >= 2
     assert "const datasetId = getCaptionRecordDatasetId();" in load_helper
     assert "isAnnotationDatasetModeActive()" not in load_helper
+
+
+def test_qwen_caption_instruction_review_import_parser_accepts_reviewer_file_shapes():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            _extract_js_function(js, "normalizeCaptionInstructionReviewDecision"),
+            _extract_js_function_before(
+                js,
+                "parseCaptionInstructionReviewRowsText",
+                "\n    async function importCaptionInstructionReviewFile",
+            ),
+            "const row = {",
+            "  format: 'tator_caption_instruction_review_rows_v1',",
+            "  image_path: 'train/frame.jpg',",
+            "  qa_id: 'qa-1',",
+            "  review_decision: 'needs-revision'",
+            "};",
+            "assert.strictEqual(normalizeCaptionInstructionReviewDecision('needs-revision'), 'needs_revision');",
+            "assert.strictEqual(normalizeCaptionInstructionReviewDecision('needs review'), 'needs_revision');",
+            "assert.strictEqual(normalizeCaptionInstructionReviewDecision('Needs-Rewrite'), 'needs_revision');",
+            "assert.strictEqual(parseCaptionInstructionReviewRowsText(JSON.stringify([row], null, 2))[0].qa_id, 'qa-1');",
+            "assert.strictEqual(parseCaptionInstructionReviewRowsText(JSON.stringify({ instruction_review_rows: [row] }, null, 2))[0].qa_id, 'qa-1');",
+            "assert.strictEqual(parseCaptionInstructionReviewRowsText(JSON.stringify(row, null, 2))[0].qa_id, 'qa-1');",
+            "const jsonl = JSON.stringify(row) + '\\n' + JSON.stringify({ ...row, qa_id: 'qa-2', review_decision: 'accepted' });",
+            "assert.strictEqual(parseCaptionInstructionReviewRowsText(jsonl).length, 2);",
+        ]
+    )
+    subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
 
 
 def test_qwen_single_caption_uses_isolated_backend_job_when_dataset_backed():

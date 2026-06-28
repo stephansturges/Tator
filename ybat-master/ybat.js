@@ -34802,14 +34802,14 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function normalizeCaptionInstructionReviewDecision(value) {
-        const decision = String(value || "").trim().toLowerCase().replace(/\s+/g, "_");
+        const decision = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
         if (["accept", "accepted", "approve", "approved", "keep", "kept", "pass", "passed"].includes(decision)) {
             return "accepted";
         }
         if (["reject", "rejected", "deny", "denied", "drop", "dropped", "fail", "failed"].includes(decision)) {
             return "rejected";
         }
-        if (["revise", "revised", "needs_revision", "needs_rewrite", "edit", "edited"].includes(decision)) {
+        if (["revise", "revised", "needs_revision", "needs_review", "needs_rewrite", "edit", "edited"].includes(decision)) {
             return "needs_revision";
         }
         return decision || "unreviewed";
@@ -35150,18 +35150,27 @@ async function cancelRfDetrTrainingJobRequest() {
             throw new Error("Review file is empty.");
         }
         const lines = raw.split(/\r?\n/).filter((line) => line.trim());
-        if (raw.startsWith("[") || (raw.startsWith("{") && lines.length === 1)) {
-            const parsed = JSON.parse(raw);
-            if (Array.isArray(parsed)) {
-                return parsed;
-            }
-            if (parsed && typeof parsed === "object") {
-                const rows = parsed.rows || parsed.review_rows || parsed.instruction_review_rows;
-                if (Array.isArray(rows)) {
-                    return rows;
+        if (raw.startsWith("[") || raw.startsWith("{")) {
+            try {
+                const parsed = JSON.parse(raw);
+                if (Array.isArray(parsed)) {
+                    return parsed;
+                }
+                if (parsed && typeof parsed === "object") {
+                    const rows = parsed.rows || parsed.review_rows || parsed.instruction_review_rows;
+                    if (Array.isArray(rows)) {
+                        return rows;
+                    }
+                    if (String(parsed.format || "").trim() === "tator_caption_instruction_review_rows_v1") {
+                        return [parsed];
+                    }
+                }
+                throw new Error("Review JSON must be an array, a review row, or an object with rows.");
+            } catch (error) {
+                if (raw.startsWith("[") || lines.length === 1) {
+                    throw error;
                 }
             }
-            throw new Error("Review JSON must be an array or an object with rows.");
         }
         const rows = [];
         lines.forEach((line, index) => {
@@ -35193,6 +35202,9 @@ async function cancelRfDetrTrainingJobRequest() {
         const reviewedRows = rows.filter((row) => {
             const decision = normalizeCaptionInstructionReviewDecision(row?.review_decision);
             return ["accepted", "rejected", "needs_revision"].includes(decision);
+        }).map((row) => {
+            const decision = normalizeCaptionInstructionReviewDecision(row?.review_decision);
+            return { ...row, review_decision: decision };
         });
         if (!reviewedRows.length) {
             const message = "Instruction review import found no accepted, rejected, or needs-revision decisions to apply.";

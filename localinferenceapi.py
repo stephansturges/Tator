@@ -21546,12 +21546,12 @@ def _caption_instruction_review_rows(
 
 
 def _caption_instruction_review_decision(value: Any) -> str:
-    decision = re.sub(r"\s+", "_", str(value or "").strip().lower())
+    decision = re.sub(r"[\s-]+", "_", str(value or "").strip().lower())
     if decision in {"accept", "accepted", "approve", "approved", "keep", "kept", "pass", "passed"}:
         return "accepted"
     if decision in {"reject", "rejected", "deny", "denied", "drop", "dropped", "fail", "failed"}:
         return "rejected"
-    if decision in {"revise", "revised", "needs_revision", "needs_rewrite", "edit", "edited"}:
+    if decision in {"revise", "revised", "needs_revision", "needs_review", "needs_rewrite", "edit", "edited"}:
         return "needs_revision"
     return decision or "unreviewed"
 

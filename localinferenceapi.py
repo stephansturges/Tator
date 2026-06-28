@@ -21827,12 +21827,13 @@ def _caption_instruction_artifact_consistency_validation(
     def _candidate_identity(row: Mapping[str, Any], *, image_path: Optional[str] = None) -> Optional[Tuple[str, str, str]]:
         metadata = row.get("metadata") if isinstance(row.get("metadata"), Mapping) else {}
         raw_image_path = str(image_path or row.get("image_path") or row.get("image_name") or "").strip()
+        normalized_image_path = _caption_instruction_normalized_image_path(raw_image_path)
         raw_qa_id = str(row.get("qa_id") or row.get("id") or metadata.get("qa_id") or "").strip()
         raw_question = str(row.get("question") or "").strip()
         normalized_question = _caption_instruction_normalized_question(raw_question)
         if not raw_image_path or not normalized_question:
             return None
-        return (raw_image_path, raw_qa_id, normalized_question)
+        return (normalized_image_path or raw_image_path, raw_qa_id, normalized_question)
 
     def _training_identity(row: Mapping[str, Any]) -> Optional[Tuple[str, str, str]]:
         return _candidate_identity(row)
@@ -21985,9 +21986,10 @@ def _caption_instruction_artifact_consistency_validation(
         if not image_path:
             errors.append(f"archive row {index} missing image_path")
             continue
-        if image_path in image_paths:
-            duplicate_image_paths.add(image_path)
-        image_paths.add(image_path)
+        image_key = _caption_instruction_normalized_image_path(image_path) or image_path
+        if image_key in image_paths:
+            duplicate_image_paths.add(image_key)
+        image_paths.add(image_key)
     for image_path in sorted(duplicate_image_paths):
         errors.append(f"duplicate archive image_path {image_path}")
 
@@ -22003,7 +22005,7 @@ def _caption_instruction_artifact_consistency_validation(
             continue
         image_path = str(row.get("image_path") or "").strip()
         if image_path:
-            training_rows_by_image[image_path] += 1
+            training_rows_by_image[_caption_instruction_normalized_image_path(image_path) or image_path] += 1
         _add_identity(training_identities, duplicate_training_identities, _training_identity(row), row)
     for row in review_rows:
         if not isinstance(row, Mapping) or not bool(row.get("selected_for_training")):
@@ -22015,6 +22017,7 @@ def _caption_instruction_artifact_consistency_validation(
         image_path = str(row.get("image_path") or "").strip()
         if not image_path:
             continue
+        image_key = _caption_instruction_normalized_image_path(image_path) or image_path
         export_metadata = row.get("export_metadata") if isinstance(row.get("export_metadata"), Mapping) else {}
         if "selected_training_row_count" in export_metadata:
             try:
@@ -22022,7 +22025,7 @@ def _caption_instruction_artifact_consistency_validation(
             except (TypeError, ValueError, OverflowError):
                 errors.append(f"archive row {image_path} selected_training_row_count is invalid")
             else:
-                actual_selected_count = int(training_rows_by_image.get(image_path, 0))
+                actual_selected_count = int(training_rows_by_image.get(image_key, 0))
                 if archive_selected_count != actual_selected_count:
                     errors.append(
                         f"archive row {image_path} selected_training_row_count {archive_selected_count} "
@@ -23131,11 +23134,14 @@ def _caption_instruction_review_target_key(row: Mapping[str, Any]) -> Tuple[str,
     qa_id = str(row.get("qa_id") or "").strip()
     image_path = str(row.get("image_path") or row.get("image_name") or row.get("image") or "").strip()
     split = str(row.get("split") or "").strip()
+    image_key = _caption_instruction_normalized_image_path(image_path)
+    if split and image_key and not re.match(r"^(?:train|val|valid|test)/", image_key):
+        image_key = _caption_instruction_normalized_image_path(f"{split}/{image_key}")
     if qa_id:
-        return ("qa_id", row_origin, qa_id, image_path, split)
+        return ("qa_id", row_origin, qa_id, image_key or image_path, "")
     question = _caption_instruction_normalized_question(row.get("question"))
     answer = str(row.get("candidate_answer") or row.get("training_answer") or "").strip()
-    return ("question_answer", row_origin, image_path, split, f"{question}\u0000{answer}")
+    return ("question_answer", row_origin, image_key or image_path, "", f"{question}\u0000{answer}")
 
 
 def _caption_instruction_review_resolved_target_key(
@@ -23146,7 +23152,9 @@ def _caption_instruction_review_resolved_target_key(
     record_id = str(record.get("id") or "").strip()
     if record_id:
         return (origin, "id", record_id, "")
-    image_key = str(record.get("image_key") or record.get("image_name") or record.get("image") or "").strip()
+    image_key = _caption_instruction_normalized_image_path(
+        record.get("image_key") or record.get("image_name") or record.get("image") or ""
+    )
     if origin == "generated_qa":
         question = _caption_instruction_normalized_question(record.get("question"))
         answer = str(record.get("answer") or "").strip()

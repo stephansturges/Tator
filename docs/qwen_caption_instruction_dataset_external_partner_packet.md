@@ -268,7 +268,11 @@ stale, partial, or mixed artifact belongs to the current run. The backend emits
 the same versioned `instruction_artifact_consistency` object in the archive,
 report, API payload, and summary. If the object is not OK, training readiness is
 forced to `blocked` with `instruction_artifacts_inconsistent`. The UI also
-fails closed before writing a mismatched download, while the trainer keeps its
+canonicalizes image paths before archive duplicate checks, selected-row counts,
+review-target identity checks, and trainer/archive/review comparisons, so path
+aliases such as `./frame.jpg`, `frame.jpg`, and split-prefixed forms cannot
+hide duplicate rows or create ambiguous training targets. It fails closed
+before writing a mismatched download, while the trainer keeps its
 own final validation boundary for hand-edited paths.
 
 Flat-layout image keys are canonicalized before merge so `foo.jpg` and
@@ -534,7 +538,7 @@ Result:
 Result:
 
 ```text
-190 passed
+191 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch
@@ -544,6 +548,7 @@ coverage:
 ./.venv-macos/bin/python -m pytest \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_blocks_same_count_identity_mismatches \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_blocks_mismatched_backend_counts \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_canonicalizes_image_paths \
   tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports \
   -q
 ```
@@ -551,7 +556,7 @@ coverage:
 Result:
 
 ```text
-3 passed
+4 passed
 ```
 
 Additional validation recorded in the hardening report includes trainer import

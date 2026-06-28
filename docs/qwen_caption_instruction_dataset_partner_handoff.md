@@ -47,6 +47,9 @@ The new work adds a separate instruction-dataset path:
   row metadata, instruction archive provenance, known validation/review states,
   rejected/failed/invalid validation state, non-trainable review state,
   duplicate canonical image-path/question pairs, and JSON answer formats.
+- The browser and backend use canonical image paths when comparing trainer
+  rows, archive rows, selected review rows, and review-import targets, so path
+  aliases cannot hide duplicate or mismatched training identities.
 - The browser validates reviewed JSONL before import, including unsupported
   actionable row origins and duplicate or conflicting actionable review targets,
   and formats backend review-import failures into row-specific operator
@@ -580,7 +583,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-190 passed
+191 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch
@@ -590,6 +593,7 @@ coverage:
 ./.venv-macos/bin/python -m pytest \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_blocks_same_count_identity_mismatches \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_blocks_mismatched_backend_counts \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_canonicalizes_image_paths \
   tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports \
   -q
 ```
@@ -597,7 +601,7 @@ coverage:
 Latest recorded result:
 
 ```text
-3 passed
+4 passed
 ```
 
 Focused review-import fail-closed suite:
@@ -609,7 +613,7 @@ Focused review-import fail-closed suite:
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_missing_dataset_id \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_missing_or_mismatched_qa_id \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_duplicate_actionable_targets \
-  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_duplicate_resolved_actionable_targets \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_canonical_duplicate_actionable_targets \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_rows_missing_current_text \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_unmatchable_actionable_rows_atomically \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_stale_generated_qa_text \
@@ -622,7 +626,7 @@ Focused review-import fail-closed suite:
 Latest recorded result:
 
 ```text
-30 passed
+29 passed
 ```
 
 Focused trainer-import boundary suite:
@@ -670,7 +674,7 @@ Focused instruction-dataset and UI contract suite:
 Latest recorded result:
 
 ```text
-163 passed
+164 passed
 ```
 
 Runtime and unattended hardening suites have also been run in prior hardening

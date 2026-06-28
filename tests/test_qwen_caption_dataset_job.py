@@ -1249,6 +1249,8 @@ def test_caption_instruction_review_import_rejects_duplicate_actionable_targets(
     }
     duplicate_row = {
         **base_row,
+        "image_path": "train/frame.jpg",
+        "split": "",
         "row_type": "unexpected_external_type",
         "review_decision": second_decision,
         "review_notes": "duplicate decision",
@@ -1267,13 +1269,13 @@ def test_caption_instruction_review_import_rejects_duplicate_actionable_targets(
 @pytest.mark.parametrize(
     ("row_origin", "second_decision", "expected_detail"),
     [
-        ("generated_qa", "rejected", "review_rows_conflicting_duplicate_resolved_target:row_1:row_2"),
-        ("generated_qa", "accepted", "review_rows_duplicate_resolved_target:row_1:row_2"),
-        ("caption0", "rejected", "review_rows_conflicting_duplicate_resolved_target:row_1:row_2"),
-        ("caption0", "accepted", "review_rows_duplicate_resolved_target:row_1:row_2"),
+        ("generated_qa", "rejected", "review_rows_conflicting_duplicate_target:row_1:row_2"),
+        ("generated_qa", "accepted", "review_rows_duplicate_target:row_1:row_2"),
+        ("caption0", "rejected", "review_rows_conflicting_duplicate_target:row_1:row_2"),
+        ("caption0", "accepted", "review_rows_duplicate_target:row_1:row_2"),
     ],
 )
-def test_caption_instruction_review_import_rejects_duplicate_resolved_actionable_targets(
+def test_caption_instruction_review_import_rejects_canonical_duplicate_actionable_targets(
     monkeypatch,
     tmp_path,
     row_origin,
@@ -2285,6 +2287,71 @@ def test_caption_instruction_artifact_consistency_validator_blocks_same_count_id
     ) in validation["errors"]
     assert validation["counts"]["training_identity_count"] == 1
     assert validation["counts"]["selected_review_identity_count"] == 1
+    assert validation["counts"]["archive_candidate_identity_count"] == 1
+
+
+def test_caption_instruction_artifact_consistency_validator_canonicalizes_image_paths() -> None:
+    import localinferenceapi as api
+
+    report = {
+        "format": "tator_caption_instruction_report_v1",
+        "image_count": 1,
+        "selected_flattened_row_count": 1,
+        "instruction_review_row_count": 1,
+        "manual_review_required_count": 1,
+        "corpus_quality_metrics": {
+            "image_count": 1,
+            "selected_flattened_row_count": 1,
+        },
+        "instruction_export_validation": {
+            "ok": True,
+            "error_count": 0,
+            "errors": [],
+            "row_count": 1,
+        },
+    }
+    validation = api._caption_instruction_artifact_consistency_validation(
+        training_rows=[
+            {
+                "image_path": "./train//frame.jpg",
+                "question": "What is shown?",
+                "answer": "A building.",
+                "metadata": {"qa_id": "qa-1"},
+            }
+        ],
+        archive_rows=[
+            {
+                "image_path": "train/frame.jpg",
+                "language_annotations": {
+                    "generated_qa_pairs": [
+                        {
+                            "qa_id": "qa-1",
+                            "question": "What is shown?",
+                            "answer": "A building.",
+                        }
+                    ]
+                },
+                "deterministic_metadata_qa_pairs": [],
+                "export_metadata": {"selected_training_row_count": 1},
+            }
+        ],
+        review_rows=[
+            {
+                "image_path": "train/frame.jpg",
+                "qa_id": "qa-1",
+                "question": "What is shown?",
+                "training_answer": "A building.",
+                "selected_for_training": True,
+                "requires_manual_review": True,
+            }
+        ],
+        report=report,
+        archive_image_count=1,
+    )
+
+    assert validation["ok"] is True
+    assert validation["error_count"] == 0
+    assert validation["counts"]["training_identity_count"] == 1
     assert validation["counts"]["archive_candidate_identity_count"] == 1
 
 

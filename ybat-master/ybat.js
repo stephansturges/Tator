@@ -34833,16 +34833,25 @@ async function cancelRfDetrTrainingJobRequest() {
         const errors = [];
         const warnings = [];
         const imagePaths = new Set();
+        const normalizeArchiveImagePath = (value) => String(value || "")
+            .trim()
+            .replace(/\\/g, "/")
+            .replace(/\/+/g, "/")
+            .replace(/^(\.\/)+/g, "")
+            .split("/")
+            .filter((part) => part && part !== ".")
+            .join("/");
         (Array.isArray(rows) ? rows : []).forEach((row, index) => {
             const rowNumber = index + 1;
             const imagePath = String(row?.image_path || "").trim();
+            const normalizedImagePath = normalizeArchiveImagePath(imagePath);
             if (!imagePath) {
                 errors.push(`archive row ${rowNumber} missing image_path`);
             } else {
-                if (imagePaths.has(imagePath)) {
+                if (imagePaths.has(normalizedImagePath || imagePath)) {
                     errors.push(`duplicate archive image_path at row ${rowNumber}`);
                 }
-                imagePaths.add(imagePath);
+                imagePaths.add(normalizedImagePath || imagePath);
             }
             if (!row?.source_annotations || typeof row.source_annotations !== "object") {
                 errors.push(`archive row ${rowNumber} missing source_annotations`);
@@ -34877,6 +34886,21 @@ async function cancelRfDetrTrainingJobRequest() {
         const actionableTargets = new Map();
         let selectedTrainingCount = 0;
         let manualReviewCount = 0;
+        const normalizeReviewImagePath = (value, splitValue = "") => {
+            const normalized = String(value || "")
+                .trim()
+                .replace(/\\/g, "/")
+                .replace(/\/+/g, "/")
+                .replace(/^(\.\/)+/g, "")
+                .split("/")
+                .filter((part) => part && part !== ".")
+                .join("/");
+            const split = String(splitValue || "").trim();
+            if (split && normalized && !/^(train|val|valid|test)\//.test(normalized)) {
+                return normalizeReviewImagePath(`${split}/${normalized}`);
+            }
+            return normalized;
+        };
         (Array.isArray(rows) ? rows : []).forEach((row, index) => {
             const rowNumber = index + 1;
             if (!row || typeof row !== "object") {
@@ -34894,12 +34918,14 @@ async function cancelRfDetrTrainingJobRequest() {
             const rowOrigin = String(row.row_origin || "").trim();
             const rowDatasetId = String(row.dataset_id || "").trim();
             const validationStatus = String(row.validation_status || "").trim();
+            const split = String(row.split || "").trim();
+            const normalizedImagePath = normalizeReviewImagePath(imagePath, split);
             const reviewDecision = normalizeCaptionInstructionReviewDecision(row.review_decision);
             const hasActionableDecision = ["accepted", "rejected", "needs_revision"].includes(reviewDecision);
             if (!imagePath) {
                 errors.push(`review row ${rowNumber} missing image_path`);
             } else {
-                imagePaths.add(imagePath);
+                imagePaths.add(normalizedImagePath || imagePath);
             }
             if (!qaId) {
                 errors.push(`review row ${rowNumber} missing qa_id`);
@@ -34950,12 +34976,11 @@ async function cancelRfDetrTrainingJobRequest() {
                 errors.push(`review row ${rowNumber} missing dataset_id`);
             }
             if (hasActionableDecision && ["caption0", "generated_qa"].includes(rowOrigin)) {
-                const split = String(row.split || "").trim();
                 const normalizedQuestion = question.replace(/\s+/g, " ").toLowerCase();
                 const answerForTarget = candidateAnswer || trainingAnswer;
                 const targetKey = qaId
-                    ? `qa_id\u0000${rowOrigin}\u0000${qaId}\u0000${imagePath}\u0000${split}`
-                    : `question_answer\u0000${rowOrigin}\u0000${imagePath}\u0000${split}\u0000${normalizedQuestion}\u0000${answerForTarget}`;
+                    ? `qa_id\u0000${rowOrigin}\u0000${qaId}\u0000${normalizedImagePath || imagePath}`
+                    : `question_answer\u0000${rowOrigin}\u0000${normalizedImagePath || imagePath}\u0000${normalizedQuestion}\u0000${answerForTarget}`;
                 const prior = actionableTargets.get(targetKey);
                 if (prior) {
                     const prefix = prior.decision === reviewDecision
@@ -34967,7 +34992,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 }
             }
             if (imagePath && qaId) {
-                const pairKey = `${imagePath}\u0000${qaId}`;
+                const pairKey = `${normalizedImagePath || imagePath}\u0000${qaId}`;
                 if (imageQaIds.has(pairKey)) {
                     errors.push(`duplicate image_path + qa_id at review row ${rowNumber}`);
                 }
@@ -35148,6 +35173,14 @@ async function cancelRfDetrTrainingJobRequest() {
             }
         }
         const normalizeQuestion = (value) => String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
+        const normalizeImagePath = (value) => String(value || "")
+            .trim()
+            .replace(/\\/g, "/")
+            .replace(/\/+/g, "/")
+            .replace(/^(\.\/)+/g, "")
+            .split("/")
+            .filter((part) => part && part !== ".")
+            .join("/");
         const identityKey = (identity) => identity ? `${identity.imagePath}\u0000${identity.qaId}\u0000${identity.question}` : "";
         const identityLabel = (identity) => {
             if (!identity) {
@@ -35160,10 +35193,11 @@ async function cancelRfDetrTrainingJobRequest() {
         };
         const candidateIdentity = (row, imagePathOverride = "") => {
             const metadata = row?.metadata && typeof row.metadata === "object" ? row.metadata : {};
-            const imagePath = String(imagePathOverride || row?.image_path || row?.image_name || "").trim();
+            const rawImagePath = String(imagePathOverride || row?.image_path || row?.image_name || "").trim();
+            const imagePath = normalizeImagePath(rawImagePath) || rawImagePath;
             const qaId = String(row?.qa_id || row?.id || metadata.qa_id || "").trim();
             const question = normalizeQuestion(row?.question);
-            if (!imagePath || !question) {
+            if (!rawImagePath || !question) {
                 return null;
             }
             return { imagePath, qaId, question };
@@ -35200,8 +35234,9 @@ async function cancelRfDetrTrainingJobRequest() {
             const duplicateArchiveCandidateIdentities = new Map();
             const trainingRowsByImage = new Map();
             trainingRows.forEach((row) => {
-                const imagePath = String(row?.image_path || "").trim();
-                if (imagePath) {
+                const rawImagePath = String(row?.image_path || "").trim();
+                const imagePath = normalizeImagePath(rawImagePath) || rawImagePath;
+                if (rawImagePath) {
                     trainingRowsByImage.set(imagePath, (trainingRowsByImage.get(imagePath) || 0) + 1);
                 }
                 addIdentity(trainingByIdentity, duplicateTrainingIdentities, candidateIdentity(row), row);
@@ -35212,8 +35247,9 @@ async function cancelRfDetrTrainingJobRequest() {
                 }
             });
             archiveRows.forEach((row) => {
-                const imagePath = String(row?.image_path || "").trim();
-                if (!imagePath) {
+                const rawImagePath = String(row?.image_path || "").trim();
+                const imagePath = normalizeImagePath(rawImagePath) || rawImagePath;
+                if (!rawImagePath) {
                     return;
                 }
                 const selectedCount = Number(row?.export_metadata?.selected_training_row_count);

@@ -35631,6 +35631,56 @@ async function cancelRfDetrTrainingJobRequest() {
         return Array.from(mismatches).sort();
     }
 
+    function formatCaptionInstructionReviewImportApiError(message) {
+        const raw = String(message || "").trim();
+        if (!raw) {
+            return "Instruction review import failed.";
+        }
+        const rowMatch = raw.match(/(?:^|:)row_(\d+)/);
+        const rowText = rowMatch ? ` at row ${rowMatch[1]}` : "";
+        const duplicateMatch = raw.match(/^review_rows_(conflicting_duplicate_target|duplicate_target):row_(\d+):row_(\d+)$/);
+        if (duplicateMatch) {
+            const conflict = duplicateMatch[1] === "conflicting_duplicate_target";
+            return `Instruction review import blocked: ${conflict ? "conflicting duplicate" : "duplicate"} actionable decision targeting rows ${duplicateMatch[2]} and ${duplicateMatch[3]}. Keep one reviewed row per caption0 or generated-QA target.`;
+        }
+        const datasetMatch = raw.match(/^review_rows_dataset_id_mismatch:row_(\d+):(.+)!=(.+)$/);
+        if (datasetMatch) {
+            return `Instruction review import blocked at row ${datasetMatch[1]}: this review file is for dataset ${datasetMatch[2]}, not ${datasetMatch[3]}. Select the matching dataset or export a fresh review JSONL.`;
+        }
+        const unsupportedMatch = raw.match(/^review_rows_unsupported_row_origin:row_(\d+):(.+)$/);
+        if (unsupportedMatch) {
+            return `Instruction review import blocked at row ${unsupportedMatch[1]}: ${unsupportedMatch[2]} is not a persisted review row type. Only caption0 and generated-QA decisions can be imported.`;
+        }
+        if (raw === "review_rows_list_required") {
+            return "Instruction review import blocked: the file must contain a JSON array, JSONL rows, or an object with review rows.";
+        }
+        if (raw === "review_rows_too_many") {
+            return "Instruction review import blocked: the file contains too many review rows. Split the review packet or export a smaller review JSONL.";
+        }
+        const messageByCode = {
+            review_rows_row_not_object: "the row is not a JSON object",
+            review_rows_invalid_format: "the row is not an instruction review row from the current export format",
+            review_rows_missing_image_path: "the row is missing image identity, so it cannot be matched safely",
+            review_rows_generated_qa_not_found: "the generated-QA row no longer matches a saved generated-QA record for that image, question, and answer",
+            review_rows_generated_qa_ambiguous: "the generated-QA row matches multiple saved records",
+            review_rows_caption0_ambiguous: "the caption0 row matches multiple saved caption records",
+            review_rows_caption0_not_found: "the caption0 row no longer matches the saved caption text for that image",
+            review_rows_caption0_answer_missing: "the caption0 row is missing the reviewed caption text",
+            review_rows_caption0_image_not_found: "the caption0 row image could not be resolved in the selected dataset",
+        };
+        const code = raw.split(":")[0];
+        if (Object.prototype.hasOwnProperty.call(messageByCode, code)) {
+            const action = [
+                "review_rows_generated_qa_not_found",
+                "review_rows_caption0_not_found",
+            ].includes(code)
+                ? " Export a fresh review JSONL after the latest generation/review changes, then reapply the decision."
+                : "";
+            return `Instruction review import blocked${rowText}: ${messageByCode[code]}.${action}`;
+        }
+        return `Instruction review import failed: ${raw}`;
+    }
+
     async function importCaptionInstructionReviewFile(file) {
         const datasetId = getCaptionDatasetId();
         if (!datasetId) {
@@ -35680,7 +35730,7 @@ async function cancelRfDetrTrainingJobRequest() {
         });
         if (!resp.ok) {
             const detail = await resp.text();
-            throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+            throw new Error(formatCaptionInstructionReviewImportApiError(parseApiError(detail, `HTTP ${resp.status}`)));
         }
         const result = await resp.json();
         const applied = Number.parseInt(result?.applied_count || "0", 10) || 0;

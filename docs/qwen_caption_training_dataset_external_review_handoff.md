@@ -145,7 +145,8 @@ What is implemented in this checkpoint:
   duplicate image/question pairs, rejected/failed/invalid validation status, and
   non-trainable review status.
 - Browser-side review import validation for unsupported actionable row origins
-  and duplicate or conflicting actionable review targets.
+  and duplicate or conflicting actionable review targets, plus operator-readable
+  formatting for server-side review-import failures.
 - Server-side review import target matching requires image context and current
   reviewed text, so a stale review row with the same QA id is rejected if its
   question or candidate/training answer no longer matches the saved language
@@ -902,7 +903,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Result:
 
 ```text
-166 passed
+167 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch
@@ -986,7 +987,7 @@ Caption/instruction/UI contract suite outside the trainer file:
 Result:
 
 ```text
-141 passed
+142 passed
 ```
 
 Syntax and formatting checks:

@@ -48,7 +48,9 @@ The new work adds a separate instruction-dataset path:
   rejected/failed/invalid validation state, non-trainable review state,
   duplicate image/question pairs, and JSON answer formats.
 - The browser validates reviewed JSONL before import, including unsupported
-  actionable row origins and duplicate or conflicting actionable review targets.
+  actionable row origins and duplicate or conflicting actionable review targets,
+  and formats backend review-import failures into row-specific operator
+  messages.
 - A reviewer can import reviewed JSONL decisions back into the dataset.
 - The Qwen trainer can import the flat exported instruction rows directly.
 - The Qwen trainer refuses instruction flat rows that carry missing instruction
@@ -567,7 +569,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-166 passed
+167 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch
@@ -649,7 +651,7 @@ Focused instruction-dataset and UI contract suite:
 Latest recorded result:
 
 ```text
-141 passed
+142 passed
 ```
 
 Runtime and unattended hardening suites have also been run in prior hardening

@@ -143,6 +143,12 @@ row before training.
   actionable row origins and duplicate or conflicting actionable review targets
   before calling the backend, giving operators immediate feedback on review
   packets that would fail the server-side transactional import.
+- Review-import backend failures are formatted into row-specific operator
+  messages instead of raw `review_rows_*` codes. Stale caption0/generated-QA
+  text, dataset mismatch, duplicate actionable decisions, unsupported row
+  origins, missing image context, and unresolved caption targets now tell the
+  operator whether to export a fresh review JSONL, select the matching dataset,
+  or keep one decision per target.
 - The backend now emits `instruction_export_validation` in the archive, report,
   API payload, and instruction summary. The same flattened trainer-row checks
   run server-side, and training readiness becomes blocked if malformed,
@@ -212,7 +218,7 @@ row before training.
   - `node --check ybat-master/ybat.js`
 - Focused instruction-dataset, export, and UI contract tests:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py tests/test_qwen_training_backend.py tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete tests/test_labeling_panel_layout_contract.py tests/test_qwen_caption_ui_smoke_tool.py -q`
-  - Current result: 166 passed.
+  - Current result: 167 passed.
 - Current artifact-consistency UI contract tests:
   - `./.venv-macos/bin/python -m pytest tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports tests/test_labeling_panel_layout_contract.py::test_qwen_caption_export_preserves_saved_alternates_and_primary_rows -q`
   - Result: 2 passed.

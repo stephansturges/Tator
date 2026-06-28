@@ -167,6 +167,9 @@ origins and duplicate or conflicting actionable review targets before sending
 the packet. It filters deterministic-only review files because deterministic
 rows are rebuilt from source labels rather than persisted. It does not edit
 source labels, generated answers, or deterministic metadata rows.
+Backend import failures are translated into row-specific operator messages,
+including stale caption0/generated-QA text, dataset mismatch, duplicate
+actionable decisions, unsupported row origins, and unresolved image context.
 Rejected or needs-revision language candidates stay auditable in the archive and
 review JSONL but are excluded from flattened trainer rows. Review downloads are
 also blocked when the review-row count, selected review-row count, or

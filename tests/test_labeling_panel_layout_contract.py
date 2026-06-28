@@ -463,8 +463,10 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "duplicate actionable review target" in review_validator
     assert "conflicting duplicate actionable review target" in review_validator
     assert "normalizeCaptionInstructionReviewDecision" in js
+    assert "formatCaptionInstructionReviewImportApiError" in js
     assert "accepted, rejected, or needs-revision decisions" in js
     assert "captionMutationPayload({ rows: persistableRows })" in js
+    assert "Export a fresh review JSONL" in js
     assert "duplicate image_path + question" in js
     assert "function setCaptionExportHealth" in js
     assert "VLM JSONL export blocked" in js
@@ -530,6 +532,33 @@ def test_qwen_caption_instruction_review_import_parser_accepts_reviewer_file_sha
             "assert.strictEqual(parseCaptionInstructionReviewRowsText(jsonl).length, 2);",
             "assert.deepStrictEqual(captionInstructionReviewDatasetMismatches([{ ...row, dataset_id: 'ds' }], 'ds'), []);",
             "assert.deepStrictEqual(captionInstructionReviewDatasetMismatches([{ ...row, dataset_id: 'other' }], 'ds'), ['other']);",
+        ]
+    )
+    subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
+
+
+def test_qwen_caption_instruction_review_import_formats_backend_failures():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            _extract_js_function(js, "formatCaptionInstructionReviewImportApiError"),
+            "const staleQa = formatCaptionInstructionReviewImportApiError('review_rows_generated_qa_not_found:row_3');",
+            "assert(staleQa.includes('blocked at row 3'));",
+            "assert(staleQa.includes('no longer matches a saved generated-QA record'));",
+            "assert(staleQa.includes('Export a fresh review JSONL'));",
+            "const staleCaption = formatCaptionInstructionReviewImportApiError('review_rows_caption0_not_found:row_4');",
+            "assert(staleCaption.includes('caption0 row no longer matches the saved caption text'));",
+            "const mismatch = formatCaptionInstructionReviewImportApiError('review_rows_dataset_id_mismatch:row_2:other-ds!=current-ds');",
+            "assert(mismatch.includes('blocked at row 2'));",
+            "assert(mismatch.includes('other-ds'));",
+            "assert(mismatch.includes('current-ds'));",
+            "const duplicate = formatCaptionInstructionReviewImportApiError('review_rows_conflicting_duplicate_target:row_1:row_5');",
+            "assert(duplicate.includes('conflicting duplicate actionable decision'));",
+            "assert(duplicate.includes('rows 1 and 5'));",
+            "const unsupported = formatCaptionInstructionReviewImportApiError('review_rows_unsupported_row_origin:row_6:freeform_review');",
+            "assert(unsupported.includes('freeform_review is not a persisted review row type'));",
+            "assert(formatCaptionInstructionReviewImportApiError('plain backend error').includes('plain backend error'));",
         ]
     )
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)

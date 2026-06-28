@@ -14,6 +14,10 @@ from utils.glossary import _normalize_labelmap_glossary, _parse_glossary_mapping
 
 
 _CAPTION_BAD_DISPLAY_TERMS = {"[", "]", "{", "}", "[]", "{}"}
+_FULL_IMAGE_AUTO_BOX_LIMIT = 80
+_CAPTION_RESTRICTED_BLOCKED_TERMS: Dict[str, Tuple[str, ...]] = {
+    "Crane": ("crane", "cranes", "gantry crane", "gantry cranes"),
+}
 
 
 def _caption_display_term(term: Any, *, max_len: int = 80) -> str:
@@ -171,6 +175,116 @@ def _caption_finite_float(value: Any) -> Optional[float]:
     except (TypeError, ValueError, OverflowError):
         return None
     return num if math.isfinite(num) else None
+
+
+def _caption_box_subset_score(entry: Mapping[str, Any], image_area: float) -> Tuple[float, float, int]:
+    confidence = _caption_finite_float(entry.get("confidence"))
+    area = _caption_finite_float(entry.get("area")) or 0.0
+    try:
+        index = int(entry.get("index") or 0)
+    except (TypeError, ValueError, OverflowError):
+        index = 0
+    return (
+        confidence if confidence is not None else 0.0,
+        min(1.0, max(0.0, area) / max(1.0, image_area)),
+        -index,
+    )
+
+
+def _caption_box_center(entry: Mapping[str, Any], image_width: int, image_height: int) -> Tuple[float, float]:
+    bbox = entry.get("bbox")
+    if isinstance(bbox, Sequence) and len(bbox) == 4:
+        coords = [_caption_finite_float(value) for value in bbox]
+        if all(value is not None for value in coords):
+            x1, y1, x2, y2 = coords
+            assert x1 is not None and y1 is not None and x2 is not None and y2 is not None
+            return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+    return (float(image_width) / 2.0, float(image_height) / 2.0)
+
+
+def _caption_spatial_order_key(entry: Mapping[str, Any], image_width: int, image_height: int) -> Tuple[int, int, int]:
+    cx, cy = _caption_box_center(entry, image_width, image_height)
+    try:
+        index = int(entry.get("index") or 0)
+    except (TypeError, ValueError, OverflowError):
+        index = 0
+    return (int(round(cy * 1000.0)), int(round(cx * 1000.0)), index)
+
+
+def _caption_select_representative_box_subset(
+    hints: Sequence[Mapping[str, Any]],
+    counts: Mapping[str, int],
+    *,
+    limit: int,
+    image_width: int,
+    image_height: int,
+) -> List[Mapping[str, Any]]:
+    """Choose a deterministic class-aware and spatially spread box subset."""
+
+    clean_limit = max(0, int(limit or 0))
+    if clean_limit <= 0 or len(hints) <= clean_limit:
+        return list(hints)
+
+    image_area = float(max(1, image_width) * max(1, image_height))
+
+    def entry_key(entry: Mapping[str, Any]) -> int:
+        try:
+            return int(entry.get("index") or 0)
+        except (TypeError, ValueError, OverflowError):
+            return id(entry)
+
+    def add(entry: Mapping[str, Any]) -> None:
+        key = entry_key(entry)
+        if key in selected_keys or len(selected) >= clean_limit:
+            return
+        selected.append(entry)
+        selected_keys.add(key)
+
+    selected: List[Mapping[str, Any]] = []
+    selected_keys: set[int] = set()
+    ranked = sorted(
+        hints,
+        key=lambda entry: _caption_box_subset_score(entry, image_area),
+        reverse=True,
+    )
+
+    best_by_label: Dict[str, Mapping[str, Any]] = {}
+    for entry in ranked:
+        label = str(entry.get("label") or "").strip()
+        if label and label not in best_by_label:
+            best_by_label[label] = entry
+
+    # First preserve class coverage when the cap is large enough for it.
+    if len(best_by_label) <= clean_limit:
+        for label in sorted(best_by_label, key=lambda key: (-int(counts.get(key, 0) or 0), key)):
+            add(best_by_label[label])
+
+    # Then add one high-scoring item from each occupied grid cell, walking the
+    # image in reading order. This makes "representative" mean spatially spread,
+    # not merely the highest confidence boxes clustered in one corner.
+    aspect = max(0.25, min(4.0, float(max(1, image_width)) / float(max(1, image_height))))
+    grid_cols = max(1, int(math.ceil(math.sqrt(clean_limit * aspect))))
+    grid_rows = max(1, int(math.ceil(clean_limit / grid_cols)))
+    cell_best: Dict[Tuple[int, int], Mapping[str, Any]] = {}
+    for entry in ranked:
+        cx, cy = _caption_box_center(entry, image_width, image_height)
+        col = min(grid_cols - 1, max(0, int((cx / max(1.0, float(image_width))) * grid_cols)))
+        row = min(grid_rows - 1, max(0, int((cy / max(1.0, float(image_height))) * grid_rows)))
+        cell_best.setdefault((row, col), entry)
+    for cell in sorted(cell_best):
+        add(cell_best[cell])
+        if len(selected) >= clean_limit:
+            break
+
+    for entry in ranked:
+        add(entry)
+        if len(selected) >= clean_limit:
+            break
+
+    return sorted(
+        selected[:clean_limit],
+        key=lambda entry: _caption_spatial_order_key(entry, image_width, image_height),
+    )
 
 
 def _resolve_caption_all_windows(
@@ -348,7 +462,7 @@ def _build_qwen_caption_prompt(
         ]
 
     hints_payload = []
-    for hint in label_hints:
+    for hint_index, hint in enumerate(label_hints):
         bbox = _caption_hint_value(hint, "bbox", None) or []
         label = str(_caption_hint_value(hint, "label", "") or "").strip()
         if not label:
@@ -376,6 +490,7 @@ def _build_qwen_caption_prompt(
             x1 = y1 = x2 = y2 = None
         hints_payload.append(
             {
+                "index": hint_index,
                 "label": label,
                 "bbox": [x1, y1, x2, y2] if x1 is not None else None,
                 "bbox_2d": _bbox_to_qwen_2d([x1, y1, x2, y2]) if x1 is not None else None,
@@ -383,24 +498,39 @@ def _build_qwen_caption_prompt(
                 "area": (x2 - x1) * (y2 - y1) if x1 is not None else 0.0,
             }
         )
+    sorted_hints = sorted(
+        hints_payload,
+        key=lambda entry: (
+            -(entry["confidence"] if entry["confidence"] is not None else 0.0),
+            -entry["area"],
+        ),
+    )
     if max_boxes <= 0:
-        selected = sorted(
-            hints_payload,
-            key=lambda entry: (
-                -(entry["confidence"] if entry["confidence"] is not None else 0.0),
-                -entry["area"],
-            ),
-        )
-        truncated = False
+        auto_limit = _FULL_IMAGE_AUTO_BOX_LIMIT
+        if auto_limit > 0 and len(sorted_hints) > auto_limit:
+            selected = list(
+                _caption_select_representative_box_subset(
+                    sorted_hints,
+                    counts,
+                    limit=auto_limit,
+                    image_width=safe_width,
+                    image_height=safe_height,
+                )
+            )
+            truncated = True
+        else:
+            selected = sorted_hints
+            truncated = False
     else:
-        sorted_hints = sorted(
-            hints_payload,
-            key=lambda entry: (
-                -(entry["confidence"] if entry["confidence"] is not None else 0.0),
-                -entry["area"],
-            ),
+        selected = list(
+            _caption_select_representative_box_subset(
+                sorted_hints,
+                counts,
+                limit=max_boxes,
+                image_width=safe_width,
+                image_height=safe_height,
+            )
         )
-        selected = sorted_hints[:max_boxes]
         truncated = len(sorted_hints) > len(selected)
     custom_context_prompt = _collapse_whitespace(context_prompt or "")
     has_custom_context_prompt = bool(custom_context_prompt)
@@ -453,12 +583,19 @@ def _build_qwen_caption_prompt(
             else:
                 lines.append(
                     f"Labeled class inventory: {allowed}. Treat these classes and counts as authoritative. "
-                    "Mention other visible scene/background context only generically; do not add extra counted object lists "
-                    "outside this inventory, and do not pluralize a class whose count is 1."
+                    "Mention other visible scene/background context only generically; do not name additional object "
+                    "types outside this inventory, do not add extra counted object lists outside this inventory, "
+                    "and do not pluralize a class whose count is 1."
                 )
     elif counts and not restrict_to_labels:
         lines.append("Label hints are suggestions; you may mention other visible objects too.")
     if selected:
+        if truncated:
+            lines.append(
+                f"Box list policy: this prompt lists a representative spatial subset of {len(selected)} boxes out of "
+                f"{len(hints_payload)} total boxes, selected for class coverage and spatial spread. "
+                "The listed boxes are layout examples, not the full object inventory; authoritative counts still reflect all label hints."
+            )
         if include_coords:
             lines.append(
                 "Labeled boxes (bbox_2d=[x1,y1,x2,y2], coords 0–1000 relative to this image/window):"
@@ -483,8 +620,6 @@ def _build_qwen_caption_prompt(
         )
     elif hints_payload and not include_counts:
         lines.append("Labels provided but box details omitted.")
-    if truncated:
-        lines.append("Note: Only a subset of boxes is shown; counts reflect all hints.")
     if has_custom_context_prompt:
         lines.append("Caption policy:")
         lines.append(custom_context_prompt)
@@ -735,7 +870,13 @@ def _caption_plural_variants(term: str) -> List[str]:
     words = term.split()
     last = words[-1]
     variants = {term}
-    if last.endswith(("s", "x", "ch", "sh")):
+    if last == "person":
+        people_words = list(words)
+        people_words[-1] = "people"
+        variants.add(" ".join(people_words))
+    if last.endswith("s") and not last.endswith(("ss", "us")):
+        plural = last
+    elif last.endswith(("s", "x", "ch", "sh")):
         plural = f"{last}es"
     elif last.endswith("y") and len(last) > 1 and last[-2] not in "aeiou":
         plural = f"{last[:-1]}ies"
@@ -752,6 +893,27 @@ def _caption_term_pattern(term: str) -> str:
 
 def _caption_count_number_pattern(count: int) -> str:
     return re.escape(str(count))
+
+
+_CAPTION_INEXACT_COUNT_QUALIFIER_PATTERN = (
+    r"(?:at\s+least|at\s+most|about|around|roughly|approximately|approx\.?|"
+    r"nearly|almost|over|more\s+than|fewer\s+than|less\s+than|"
+    r"no\s+more\s+than|no\s+fewer\s+than|up\s+to|as\s+many\s+as|"
+    r"estimated(?:\s+at)?)"
+)
+
+
+def _caption_count_match_has_inexact_qualifier(text: str, match_start: int) -> bool:
+    if match_start <= 0:
+        return False
+    prefix = str(text or "")[max(0, match_start - 80) : match_start].lower()
+    return bool(
+        re.search(
+            rf"(?:^|[\s,;:]){_CAPTION_INEXACT_COUNT_QUALIFIER_PATTERN}\s+$",
+            prefix,
+            flags=re.IGNORECASE,
+        )
+    )
 
 
 def _caption_term_present(text: str, term: str) -> bool:
@@ -771,6 +933,10 @@ def _caption_term_present(text: str, term: str) -> bool:
 
 def _caption_plural_term(term: str) -> str:
     base = _collapse_whitespace(str(term or "").strip()).lower()
+    words = base.split()
+    if words and words[-1] == "person":
+        words[-1] = "people"
+        return " ".join(words)
     for variant in _caption_plural_variants(base):
         if variant != base:
             return variant
@@ -941,7 +1107,7 @@ def _caption_missing_exact_counts(
             count_int = int(count)
         except (TypeError, ValueError):
             continue
-        if count_int <= 1:
+        if count_int <= 0:
             continue
         number_pattern = _caption_count_number_pattern(count_int)
         if not number_pattern:
@@ -956,25 +1122,389 @@ def _caption_missing_exact_counts(
             if not term_patterns:
                 continue
             term_pattern = "|".join(term_patterns)
-            if re.search(
+            front_count_pattern = (
                 rf"\b(?:a\s+total\s+of\s+|total\s+of\s+|exactly\s+)?(?:{number_pattern})\s+"
-                rf"(?:[\w'-]+\s+){{0,4}}(?:{term_pattern})\b",
-                text,
-                flags=re.IGNORECASE,
-            ):
+                rf"(?:[\w'-]+\s+){{0,4}}(?:{term_pattern})\b"
+            )
+            for match in re.finditer(front_count_pattern, text, flags=re.IGNORECASE):
+                if _caption_count_match_has_inexact_qualifier(text, match.start()):
+                    continue
                 exact_present = True
                 break
-            if re.search(
+            if exact_present:
+                break
+            trailing_count_pattern = (
                 rf"\b(?:{term_pattern})\s+(?:[\w'-]+\s+){{0,6}}"
-                rf"(?:total|in\s+total|overall|altogether)\s+(?:is|are|of\s+)?(?:{number_pattern})\b",
-                text,
-                flags=re.IGNORECASE,
-            ):
+                rf"(?:total|in\s+total|overall|altogether)\s+(?:is|are|of\s+)?(?:{number_pattern})\b"
+            )
+            if re.search(trailing_count_pattern, text, flags=re.IGNORECASE):
                 exact_present = True
                 break
         if not exact_present:
             missing.append(label)
     return missing
+
+
+def _caption_count_term_for_sentence(
+    label: str,
+    count: int,
+    glossary_map: Optional[Dict[str, List[str]]] = None,
+) -> str:
+    term = _caption_preferred_label(label, glossary_map).strip() or str(label or "").strip()
+    if not term:
+        return ""
+    if int(count) == 1:
+        return " ".join(
+            token if token.isupper() and len(token) <= 3 else token.lower()
+            for token in term.split()
+        )
+    plural = _caption_plural_term(term)
+    original_tokens = term.split()
+    plural_tokens = plural.split()
+    if (
+        original_tokens
+        and plural_tokens
+        and original_tokens[0].isupper()
+        and len(original_tokens[0]) <= 3
+    ):
+        plural_tokens[0] = original_tokens[0]
+    return " ".join(plural_tokens)
+
+
+def _caption_join_count_phrases(pieces: Sequence[str]) -> str:
+    cleaned = [piece for piece in pieces if piece]
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return cleaned[0]
+    if len(cleaned) == 2:
+        return f"{cleaned[0]} and {cleaned[1]}"
+    return f"{', '.join(cleaned[:-1])}, and {cleaned[-1]}"
+
+
+def _caption_split_sentences(text: str) -> List[str]:
+    cleaned = _sanitize_qwen_caption(text)
+    if not cleaned:
+        return []
+    parts = re.split(r"(?<=[.!?])\s+", cleaned)
+    return [part.strip() for part in parts if part.strip()]
+
+
+def _caption_sentence_contradicts_positive_count(
+    sentence: str,
+    counts: Dict[str, int],
+    glossary_map: Optional[Dict[str, List[str]]] = None,
+) -> bool:
+    if not sentence or not counts:
+        return False
+    lowered = sentence.lower()
+    for label, count in counts.items():
+        try:
+            count_int = int(count)
+        except (TypeError, ValueError):
+            continue
+        if count_int <= 0:
+            continue
+        for term in _caption_label_terms(label, glossary_map):
+            term_patterns = [
+                _caption_term_pattern(variant)
+                for variant in _caption_plural_variants(term)
+                if variant
+            ]
+            if not term_patterns:
+                continue
+            term_pattern = rf"(?:{'|'.join(term_patterns)})"
+            negative_patterns = [
+                rf"\bno\b(?:\s+[\w'-]+){{0,8}}\s+{term_pattern}\b",
+                rf"\bwithout\b(?:\s+[\w'-]+){{0,8}}\s+{term_pattern}\b",
+                rf"\bnot\s+any\b(?:\s+[\w'-]+){{0,8}}\s+{term_pattern}\b",
+            ]
+            if any(re.search(pattern, lowered, flags=re.IGNORECASE) for pattern in negative_patterns):
+                return True
+            if _caption_sentence_has_mismatched_quantity_for_term(
+                lowered,
+                term_pattern,
+                count_int,
+            ):
+                return True
+    return False
+
+
+_CAPTION_QUANTITY_WORDS: Dict[str, int] = {
+    "zero": 0,
+    "one": 1,
+    "single": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+}
+
+
+def _caption_parse_quantity_token(value: str) -> Optional[int]:
+    token = str(value or "").strip().lower()
+    if not token:
+        return None
+    if token.isdigit():
+        try:
+            return int(token)
+        except (TypeError, ValueError):
+            return None
+    return _CAPTION_QUANTITY_WORDS.get(token)
+
+
+def _caption_sentence_has_mismatched_quantity_for_term(
+    lowered_sentence: str,
+    term_pattern: str,
+    authoritative_count: int,
+) -> bool:
+    quantity_pattern = (
+        r"(?P<qty>\d+|zero|one|single|two|three|four|five|six|seven|eight|nine|"
+        r"ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|"
+        r"eighteen|nineteen|twenty)"
+    )
+    patterns = [
+        rf"\bthere\s+(?:is|are)\s+(?:only\s+|just\s+)?{quantity_pattern}\s+(?:[\w'-]+\s+){{0,3}}{term_pattern}\b",
+        rf"^\s*(?:only\s+|just\s+)?{quantity_pattern}\s+{term_pattern}\s+(?:is|are|was|were|can\s+be|could\s+be)\s+"
+        rf"(?:seen|visible|present|shown|spotted|parked|standing|located|resting|grouped|arranged)\b",
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, lowered_sentence, flags=re.IGNORECASE):
+            parsed = _caption_parse_quantity_token(match.group("qty"))
+            if parsed is not None and parsed != authoritative_count:
+                return True
+    return False
+
+
+def _caption_remove_count_contradiction_sentences(
+    text: str,
+    counts: Dict[str, int],
+    glossary_map: Optional[Dict[str, List[str]]] = None,
+) -> str:
+    sentences = _caption_split_sentences(text)
+    if not sentences:
+        return _sanitize_qwen_caption(text)
+    kept: List[str] = []
+    changed = False
+    for sentence in sentences:
+        if not _caption_sentence_contradicts_positive_count(sentence, counts, glossary_map):
+            kept.append(sentence)
+            continue
+        changed = True
+        salvage_match = re.search(r"\b(?:however|but|yet)\b,?\s+", sentence, flags=re.IGNORECASE)
+        if not salvage_match:
+            continue
+        salvage = sentence[salvage_match.end() :].strip(" ;,")
+        if not salvage or _caption_sentence_contradicts_positive_count(salvage, counts, glossary_map):
+            continue
+        kept.append(salvage[:1].upper() + salvage[1:])
+    if not kept or not changed:
+        return _sanitize_qwen_caption(text)
+    return _collapse_whitespace(" ".join(kept))
+
+
+def _caption_sentence_is_raw_count_inventory(
+    sentence: str,
+    counts: Dict[str, int],
+    glossary_map: Optional[Dict[str, List[str]]] = None,
+) -> bool:
+    if not sentence or not counts or ":" not in sentence:
+        return False
+    lowered = sentence.lower()
+    hits = 0
+    for label, count in counts.items():
+        try:
+            count_int = int(count)
+        except (TypeError, ValueError):
+            continue
+        if count_int <= 0:
+            continue
+        for term in _caption_label_terms(label, glossary_map):
+            term_patterns = [
+                _caption_term_pattern(variant)
+                for variant in _caption_plural_variants(term)
+                if variant
+            ]
+            if not term_patterns:
+                continue
+            if re.search(
+                rf"\b(?:{'|'.join(term_patterns)})\s*:\s*{re.escape(str(count_int))}\b",
+                lowered,
+                flags=re.IGNORECASE,
+            ):
+                hits += 1
+                break
+    if hits <= 0:
+        return False
+    return len(sentence) <= 180 and not re.search(
+        r"\b(?:contains|shows|captures|includes|arranged|standing|parked|moving)\b",
+        lowered,
+    )
+
+
+def _caption_strip_count_inventory_sentences(
+    text: str,
+    counts: Dict[str, int],
+    glossary_map: Optional[Dict[str, List[str]]] = None,
+) -> str:
+    sentences = _caption_split_sentences(text)
+    if not sentences:
+        return _sanitize_qwen_caption(text)
+    kept = [
+        sentence
+        for sentence in sentences
+        if not _caption_sentence_is_raw_count_inventory(sentence, counts, glossary_map)
+    ]
+    if not kept or len(kept) == len(sentences):
+        return _sanitize_qwen_caption(text)
+    return _collapse_whitespace(" ".join(kept))
+
+
+def _caption_remove_unsupported_specific_terms(
+    text: str,
+    counts: Dict[str, int],
+    glossary_map: Optional[Dict[str, List[str]]] = None,
+) -> str:
+    sentences = _caption_split_sentences(text)
+    if not sentences or not counts:
+        return _sanitize_qwen_caption(text)
+    allowed_terms: set[str] = set()
+    for label, count in counts.items():
+        try:
+            count_int = int(count)
+        except (TypeError, ValueError):
+            continue
+        if count_int <= 0:
+            continue
+        for term in _caption_label_terms(label, glossary_map):
+            for variant in _caption_plural_variants(term):
+                compact = _collapse_whitespace(variant).lower()
+                if compact:
+                    allowed_terms.add(compact)
+    blocked_patterns: List[str] = []
+    for canonical, variants in _CAPTION_RESTRICTED_BLOCKED_TERMS.items():
+        canonical_allowed = _collapse_whitespace(canonical).lower() in allowed_terms
+        variant_allowed = any(_collapse_whitespace(variant).lower() in allowed_terms for variant in variants)
+        if canonical_allowed or variant_allowed:
+            continue
+        blocked_patterns.extend(
+            rf"\b{re.escape(_collapse_whitespace(variant).lower())}\b"
+            for variant in variants
+            if _collapse_whitespace(variant)
+        )
+    if not blocked_patterns:
+        return _sanitize_qwen_caption(text)
+    kept = [
+        sentence
+        for sentence in sentences
+        if not any(
+            re.search(pattern, sentence.lower(), flags=re.IGNORECASE)
+            for pattern in blocked_patterns
+        )
+    ]
+    if not kept or len(kept) == len(sentences):
+        return _sanitize_qwen_caption(text)
+    return _collapse_whitespace(" ".join(kept))
+
+
+def _caption_ensure_exact_count_sentence(
+    text: str,
+    counts: Dict[str, int],
+    glossary_map: Optional[Dict[str, List[str]]] = None,
+) -> str:
+    if not text or not counts:
+        return _sanitize_qwen_caption(text)
+    missing = _caption_missing_exact_counts(text, counts, glossary_map)
+    if not missing:
+        return _sanitize_qwen_caption(text)
+    pieces: List[str] = []
+    for label in counts.keys():
+        try:
+            count_int = int(counts.get(label, 0))
+        except (TypeError, ValueError):
+            continue
+        if count_int <= 0:
+            continue
+        term = _caption_count_term_for_sentence(label, count_int, glossary_map)
+        if term:
+            pieces.append(f"{count_int} {term}")
+    joined = _caption_join_count_phrases(pieces)
+    cleaned = _sanitize_qwen_caption(text)
+    if not joined:
+        return cleaned
+    count_sentence = f"The scene contains {joined}."
+    if not cleaned:
+        return count_sentence
+    return _collapse_whitespace(f"{count_sentence} {cleaned}")
+
+
+def _caption_normalize_inexact_count_qualifiers(
+    text: str,
+    counts: Dict[str, int],
+    glossary_map: Optional[Dict[str, List[str]]] = None,
+) -> str:
+    output = _sanitize_qwen_caption(text)
+    if not output or not counts:
+        return output
+    for label, count in counts.items():
+        try:
+            count_int = int(count)
+        except (TypeError, ValueError):
+            continue
+        if count_int <= 0:
+            continue
+        number_pattern = _caption_count_number_pattern(count_int)
+        if not number_pattern:
+            continue
+        for term in _caption_label_terms(label, glossary_map):
+            term_patterns = [
+                _caption_term_pattern(variant)
+                for variant in _caption_plural_variants(term)
+                if variant
+            ]
+            if not term_patterns:
+                continue
+            term_pattern = "|".join(term_patterns)
+            pattern = (
+                rf"\b(?P<qual>{_CAPTION_INEXACT_COUNT_QUALIFIER_PATTERN})\s+"
+                rf"(?P<count>{number_pattern})\s+"
+                rf"(?P<middle>(?:[\w'-]+\s+){{0,4}})"
+                rf"(?P<term>{term_pattern})\b"
+            )
+
+            def repl(match: re.Match[str]) -> str:
+                middle = match.group("middle") or ""
+                return f"{match.group('count')} {middle}{match.group('term')}"
+
+            output = re.sub(pattern, repl, output, flags=re.IGNORECASE)
+    return _collapse_whitespace(output)
+
+
+def _caption_repair_count_text_artifacts(
+    text: str,
+    counts: Dict[str, int],
+    glossary_map: Optional[Dict[str, List[str]]] = None,
+) -> str:
+    cleaned = _caption_remove_count_contradiction_sentences(text, counts, glossary_map)
+    cleaned = _caption_strip_count_inventory_sentences(cleaned, counts, glossary_map)
+    cleaned = _caption_remove_unsupported_specific_terms(cleaned, counts, glossary_map)
+    cleaned = _caption_normalize_inexact_count_qualifiers(cleaned, counts, glossary_map)
+    return _caption_ensure_exact_count_sentence(cleaned, counts, glossary_map)
 
 
 def _caption_missing_labels(
@@ -1825,6 +2355,7 @@ def _run_qwen_caption_cleanup(
     cleanup_system_prompt_override: Optional[str] = None,
     chat_template_kwargs: Optional[Dict[str, Any]] = None,
     run_qwen_inference_fn: Callable[..., Tuple[str, Any, Any]],
+    run_qwen_text_inference_fn: Optional[Callable[..., Tuple[str, Any, Any]]] = None,
     resolve_variant_fn: Callable[[str, str], str],
     extract_caption_fn: Callable[[str, Optional[str]], Tuple[str, bool]],
     sanitize_caption_fn: Callable[[str], str],
@@ -1886,16 +2417,27 @@ def _run_qwen_caption_cleanup(
         if "thinking" in str(cleanup_model or "").lower()
         else {"do_sample": False}
     )
-    qwen_text, _, _ = run_qwen_inference_fn(
-        cleanup_prompt,
-        pil_img,
-        max_new_tokens=max_new_tokens,
-        system_prompt_override=cleanup_system,
-        model_id_override=cleanup_model if use_caption_cache and runtime_override is None else None,
-        runtime_override=runtime_override,
-        decode_override=cleanup_decode,
-        chat_template_kwargs=chat_template_kwargs,
-    )
+    if run_qwen_text_inference_fn is not None:
+        qwen_text, _, _ = run_qwen_text_inference_fn(
+            cleanup_prompt,
+            max_new_tokens=max_new_tokens,
+            system_prompt_override=cleanup_system,
+            model_id_override=cleanup_model if use_caption_cache and runtime_override is None else None,
+            runtime_override=runtime_override,
+            decode_override=cleanup_decode,
+            chat_template_kwargs=chat_template_kwargs,
+        )
+    else:
+        qwen_text, _, _ = run_qwen_inference_fn(
+            cleanup_prompt,
+            pil_img,
+            max_new_tokens=max_new_tokens,
+            system_prompt_override=cleanup_system,
+            model_id_override=cleanup_model if use_caption_cache and runtime_override is None else None,
+            runtime_override=runtime_override,
+            decode_override=cleanup_decode,
+            chat_template_kwargs=chat_template_kwargs,
+        )
     caption_text, _ = extract_caption_fn(qwen_text, marker=None)
     cleaned = sanitize_caption_fn(caption_text)
     if _caption_degenerate_reason(cleaned, allow_short_caption=True):

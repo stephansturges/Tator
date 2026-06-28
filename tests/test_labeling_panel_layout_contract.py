@@ -60,6 +60,21 @@ def _mobile_review_html() -> str:
     return MOBILE_REVIEW_PATH.read_text(encoding="utf-8")
 
 
+def test_backend_api_root_defaults_to_serving_origin_with_manual_override():
+    html = _html()
+    js = _js()
+
+    assert 'const FALLBACK_API_ROOT = "http://localhost:8000";' in js
+    assert "function resolveDefaultApiRoot()" in js
+    assert "window.location.origin" in js
+    assert 'const DEFAULT_API_ROOT = resolveDefaultApiRoot();' in js
+    assert "const normalized = normalizeApiRoot(saved)" in js
+    assert "return normalized || DEFAULT_API_ROOT" in js
+    assert 'placeholder="Current backend origin"' in html
+    assert "By default, the UI uses the same backend origin that served this page." in html
+    assert "Override this only for tunnels or split frontend/backend setups" in html
+
+
 class _HtmlNode:
     def __init__(self, tag: str, attrs: dict[str, str | None], parent=None, position=(0, 0)):
         self.tag = tag
@@ -231,6 +246,179 @@ def test_labeling_tool_panels_default_closed_and_ordered():
     assert "Detection Recipe" in html
     assert "Ensemble Detection Recipe" in html
     assert "[wip]" not in html.lower()
+
+
+def test_qwen_caption_all_advertises_resumable_backend_job():
+    html = _html()
+    js = _js()
+
+    assert "Set-and-forget is the default dataset-backed path for Caption image, next-N, and Caption all" in html
+    assert "uses persisted backend jobs, isolated retries, health gates, and auto-resume after backend restarts" in html
+    assert "Direct single-image captioning is only for deliberate non-set-and-forget diagnostics" in html
+    assert "Saved generated captions are appended as alternate caption records" in html
+    assert "qwenCaptionAlternates" in html
+    assert "qwenCaptionArchiveStatus" in html
+    assert "qwenCaptionGeneratedPrimary" in html
+    assert "Make generated caption primary" in html
+    assert "Off by default for alternate-caption training" in html
+    assert "qwenCaptionSaveAlternate" in html
+    assert "qwenCaptionUpdateSelected" in html
+    assert "qwenCaptionSetPrimary" in html
+    assert "qwenCaptionDeleteSelected" in html
+    assert "qwenCaptionDownloadJsonl" in html
+    assert "qwenCaptionDownloadGroupedJson" in html
+    assert "qwenCaptionDownloadVlmJsonl" in html
+    assert "qwenCaptionSubcaptionsPerImage" in html
+    assert 'id="qwenCaptionSubcaptionsPerImage" min="0" max="20" step="1" value="8"' in html
+    assert "qwenCaptionIncludeCaption0Training" in html
+    assert "qwenCaptionIncludeGeneratedQaTraining" in html
+    assert "qwenCaptionIncludeDeterministicMetadataQa" in html
+    assert "qwenCaptionIncludeSourceAnnotationsContext" in html
+    assert "qwenCaptionStrictGrounding" in html
+    assert "qwenCaptionBuildInstructionDataset" in html
+    assert "qwenCaptionDownloadInstructionJsonl" in html
+    assert "qwenCaptionDownloadInstructionArchive" in html
+    assert "Create VLM training dataset" in html
+    assert "Generated QA never becomes source annotations" in html
+    assert "deterministic metadata QA is included only when explicitly enabled" in html
+    assert "qwenCaptionExportHealth" in html
+    assert "qwenCaptionReadinessRun" in html
+    assert "qwenCaptionReadinessStatus" in html
+    assert "qwenCaptionReadinessResults" in html
+    assert "Check caption readiness" in html
+    assert "Download grouped JSON" in html
+    assert "Download VLM JSONL" in html
+    assert "Flat JSONL is the audit record stream" in html
+    assert "grouped JSON keeps each image with all of its ordered alternate captions" in html
+    assert "VLM JSONL emits one normal image/question/answer training row per caption" in html
+    assert "Caption archive status will appear here" in html
+    assert "VLM export validation has not run yet" in html
+    assert "backend launcher or another process supervisor is running" in html
+    assert "tools/run_macos_backend.sh or another process supervisor" in html
+    assert "Requires a caption dataset so the request runs as a persisted backend job" in html
+    assert "/qwen/caption/jobs" in js
+    assert "qwenCaptionBatchBackendJobId" in js
+    assert "function getCaptionInstructionDatasetSettings" in js
+    assert "subcaptions_per_image: subcaptions" in js
+    assert "instructionDataset: true" in js
+    assert "function validateCaptionInstructionTrainingRows" in js
+    assert "function downloadCaptionInstructionJsonl" in js
+    assert "function downloadCaptionInstructionArchive" in js
+    assert 'saveBlobToDisk(blob, "caption_instruction_training.jsonl")' in js
+    assert 'saveBlobToDisk(blob, "caption_instruction_archive.json")' in js
+    assert "async function applyQwenCaptionBackendJobCaptions" not in js
+    assert "function applyQwenCaptionBackendJobCaptions" in js
+    assert "result.latest_caption" in js
+    assert "/datasets/${encodeURIComponent(datasetId)}/captions/export" in js
+
+
+def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
+    js = _js()
+
+    ensure_start = js.index("async function ensureCaptionsForExport")
+    export_start = js.index("async function loadCaptionExportRecords", ensure_start)
+    ensure_helper = js[ensure_start:export_start]
+    export_end = js.index("async function loadCaptionForCurrentImage", export_start)
+    export_helper = js[export_start:export_end]
+    load_end = js.index("async function captionExistsForImage", export_end)
+    load_helper = js[export_end:load_end]
+
+    assert "if (!missingImageNames.length)" in ensure_helper
+    assert "await loadCaptionExportRecords(datasetId).catch" in ensure_helper
+    assert "const hasCaptionExportContent = (record)" in export_helper
+    assert "if (!hasCaptionExportContent(record))" in export_helper
+    assert "const backendContentKeys = new Set(backendExportRecords.map(exportContentKey))" in export_helper
+    assert "!backendContentKeys.has(key) && !seenContentKeys.has(key)" in export_helper
+    assert "const perImageCaptionCounts = {}" in export_helper
+    assert "record.caption_index = perImageCaptionCounts[imageName]" in export_helper
+    assert 'caption_index: Number.parseInt(source.caption_index || "0", 10) || 0' in js
+    assert "async function prepareCaptionExportRecords" in js
+    assert "function buildGroupedCaptionExport" in js
+    assert 'format: "tator_caption_grouped_v1"' in js
+    assert "caption_count: imagesOut.reduce" in js
+    assert 'saveBlobToDisk(blob, "captions_grouped.json")' in js
+    assert "function buildCaptionVlmTrainingRows" in js
+    assert 'answer: JSON.stringify({ caption })' in js
+    assert "getCaptionVlmTrainingQuestion(captionIndex)" in js
+    assert "function validateCaptionVlmTrainingRows" in js
+    assert "function validateCaptionInstructionTrainingRows" in js
+    assert "duplicate image_path + question" in js
+    assert "function setCaptionExportHealth" in js
+    assert "VLM JSONL export blocked" in js
+    assert "VLM JSONL validated:" in js
+    assert "Instruction JSONL export blocked" in js
+    assert "Instruction JSONL validated:" in js
+    assert "generated_make_primary" in js
+    assert "generated_make_primary: !!qwenElements.captionGeneratedPrimary?.checked" in js
+    assert "qwenElements.captionGeneratedPrimary?.checked === true" in js
+    assert "Generated captions append by default" in js
+    assert 'saveBlobToDisk(blob, "captions_vlm_training.jsonl")' in js
+    assert 'saveBlobToDisk(blob, "caption_instruction_training.jsonl")' in js
+    assert 'saveBlobToDisk(blob, "caption_instruction_archive.json")' in js
+    assert "downloadCaptionGroupedJson().catch" in js
+    assert "downloadCaptionVlmJsonl().catch" in js
+    assert "downloadCaptionInstructionJsonl().catch" in js
+    assert "downloadCaptionInstructionArchive().catch" in js
+    assert "async function runQwenCaptionReadinessCheck" in js
+    assert "function collectQwenCaptionReadinessChecks" in js
+    assert "renderQwenCaptionReadinessChecks" in js
+    assert "Caption readiness:" in js
+    assert "Unlimited per-image captions" in js
+    assert "captionReadinessRun.addEventListener" in js
+    assert "if (updated?.is_primary)" in js
+    assert "captionAutoSaveState.lastSaved.set(imageName, updated.caption || caption)" in js
+    init_start = js.index("function initQwenPanel")
+    init_end = js.index("function refreshQwenStatus", init_start)
+    init_helper = js[init_start:init_end]
+    assert init_helper.count("renderCaptionAlternatesForCurrentImage();") >= 2
+    assert "const datasetId = getCaptionRecordDatasetId();" in load_helper
+    assert "isAnnotationDatasetModeActive()" not in load_helper
+
+
+def test_qwen_single_caption_uses_isolated_backend_job_when_dataset_backed():
+    js = _js()
+
+    assert "async function runQwenCaptionSingleBackendJob" in js
+    helper_start = js.index("async function runQwenCaptionSingleBackendJob")
+    helper_end = js.index("async function runQwenCaptionBackendBatch", helper_start)
+    helper = js[helper_start:helper_end]
+    assert "/qwen/caption/jobs" in helper
+    assert "Set-and-forget captioning requires a selected caption dataset" in helper
+    assert "image_names: [imageName]" in helper
+    assert "save_text_labels: qwenElements.captionSaveText?.checked !== false" in helper
+    assert "set_and_forget: setAndForget" in helper
+    assert "qwenBackendCrashSupervisionMessage()" in helper
+    assert "Isolated caption job auto-resumed as ${autoResumeJobId}" in helper
+    assert "latest_caption" in helper
+    assert "caption backend job completed without a caption" in helper
+
+    handle_start = js.index("async function handleQwenCaption")
+    handle_end = js.index("function getCaptionImageList", handle_start)
+    handle = js[handle_start:handle_end]
+    assert "runQwenCaptionSingleBackendJob(" in handle
+    assert "datasetBackedResult || await invokeQwenCaption" not in handle
+    assert "if (!result)" in handle
+    assert "qwenElements.captionSetAndForget?.checked !== false" in handle
+    assert "Running one-off direct caption request; set-and-forget is disabled." in handle
+    assert "await invokeQwenCaption" in handle
+
+
+def test_qwen_next_n_caption_prefers_resumable_backend_job():
+    js = _js()
+
+    listener_start = js.index("qwenElements.captionBatchRun.addEventListener")
+    listener_end = js.index("if (qwenElements.captionBatchRunAll)", listener_start)
+    listener = js[listener_start:listener_end]
+    assert "runQwenCaptionBatch(batch" in listener
+    assert "backend: true" in listener
+
+    batch_start = js.index("async function runQwenCaptionBatch")
+    batch_end = js.index("function setQwenAgentStatus", batch_start)
+    batch = js[batch_start:batch_end]
+    assert "Backend dataset required" in batch
+    assert "batch captioning uses isolated backend jobs so Metal crashes cannot take down" in batch
+    assert "runQwenCaptionBackendBatch(imageNames, { ...options, backend: true })" in batch
+    assert "invokeQwenCaptionForImage(" not in batch
 
 
 def test_top_navigation_tabs_have_tooltips():
@@ -445,12 +633,17 @@ def test_qwen_caption_recipes_are_portable_and_cover_prompt_stack():
         "qwenCaptionRecipeUploadButton",
         "qwenCaptionRecipeUpload",
         "qwenCaptionRecipeStatus",
+        "qwenCaptionFallbackModel",
+        "qwenCaptionLoopRecovery",
+        "qwenCaptionLoopCooldown",
     ]:
         assert f'id="{control_id}"' in html
         assert control_id in js
 
     assert "Caption recipes" in html
     assert "Advanced guard/editor prompts" in html
+    assert "Loop recovery" in html
+    assert "Auto stable fallback" in html
     assert "never image pixels, per-image boxes, image tokens, or generated captions" in html
     assert "complete prompt-flow preview" in html
     assert "CAPTION_RECIPE_KIND" in js
@@ -465,6 +658,10 @@ def test_qwen_caption_recipes_are_portable_and_cover_prompt_stack():
     assert "caption_editor_system_prompt" in js
     assert "caption_coverage_prompt" in js
     assert "caption_language_rewrite_prompt" in js
+    assert "caption_loop_recovery_mode" in js
+    assert "caption_fallback_model_id" in js
+    assert "caption_loop_cooldown" in js
+    assert "recovery_events" in js
 
     collect_start = js.index("function collectCaptionRecipeFromUi")
     collect_end = js.index("function buildCaptionRecipeExportItem", collect_start)
@@ -799,6 +996,31 @@ def test_qwen_runtime_selects_keep_full_model_refresh_authoritative():
 
     assert "populateQwenRuntimeModelSelects(items);" not in settings_block
     assert "populateQwenRuntimeModelSelects(qwenModelState.models);" in js
+    assert "applyQwenModelAvailabilityStyle(option, entry);" in settings_block
+
+
+def test_qwen_model_select_options_color_downloads_red_and_local_white():
+    js = _js()
+    css = _css()
+    start = js.index("function applyQwenModelAvailabilityStyle")
+    end = js.index("function styleQwenModelSelectOptions", start)
+    block = js[start:end]
+    select_start = js.index("function applyQwenModelSelectAvailabilityState")
+    select_end = js.index("function styleQwenCaptionModelSelects", select_start)
+    select_block = js[select_start:select_end]
+
+    assert "availability.needs_download" in block
+    assert 'option.style.color = "#ff4d4f";' in block
+    assert 'option.style.color = "#ffffff";' in block
+    assert "qwen-model-option--download" in block
+    assert "qwen-model-option--local" in block
+    assert "applyQwenModelSelectAvailabilityState(select);" in js
+    assert "qwen-model-select--download" in select_block
+    assert "qwen-model-select--local" in select_block
+    assert ".qwen-model-select--download" in css
+    assert "color: #ff4d4f;" in css
+    assert ".qwen-model-select--local" in css
+    assert "color: #ffffff;" in css
 
 
 def test_qwen_caption_and_agent_selects_share_workable_vlm_catalog():
@@ -871,9 +1093,254 @@ def test_qwen_caption_workflow_can_preview_complete_prompt_flow():
     assert "/qwen/caption/preview_prompt" in js
     assert "invokeQwenCaptionPromptPreview" in js
     assert "buildQwenCaptionRequestFields(requestImageName)" in js
+    assert "max prompt ~" in js
+    assert "output ${effectiveMin === effectiveMax" in js
     assert ".qwen-caption-prompt-preview-toast" in css
     assert ".qwen-caption-prompt-preview-toast__body" in css
     assert "max-height: calc(86vh - 118px);" in css
+
+
+def test_qwen_caption_max_boxes_explains_auto_representative_subset():
+    html = _html()
+    js = _js()
+
+    assert "Auto keeps full counts but sends representative spatial boxes when scenes are dense" in html
+    assert "omitted boxes are not absent objects" in html
+    assert "Auto estimates prompt size and adapts output tokens at runtime" in html
+    assert "Max boxes is set to Auto" in js
+    assert "representative spatial subset of boxes" in js
+    assert "omitted boxes are not absent objects" in js
+
+
+def test_qwen_caption_windowed_full_image_compose_is_set_and_forget_aware():
+    html = _html()
+    js = _js()
+
+    assert "qwenCaptionWindowFullImageStrategy" in html
+    assert "Windowed full-image compose" in html
+    assert "Auto: set-and-forget text-only" in html
+    assert "Text-only from windows" in html
+    assert "Visual full-image pass" in html
+    assert "function resolveCaptionWindowedFullImageStrategy" in js
+    assert 'return backendSetAndForget ? "text_only" : "visual";' in js
+    assert 'caption_windowed_full_image_strategy: captionMode === "windowed" ? windowedFullImageStrategy : "visual"' in js
+    assert "Text-only full-image composition" in js
+    assert "windowed_full_image_strategy" in js
+
+
+def test_qwen_caption_ui_scenarios_document_set_and_forget_workflows():
+    scenarios = _read("docs/qwen_caption_ui_scenarios.md")
+    html = _html()
+    js = _js()
+
+    for index, title in enumerate(
+        [
+            "Caption The Current Image With Defaults",
+            "Run A Direct Diagnostic Caption",
+            "Caption The Next N Images",
+            "Caption All Images As A Walk-Away Job",
+            "Launch A 10k-Scale Certified Run",
+            "Reuse A Saved Caption Recipe",
+            "Select A Missing Model Intentionally",
+            "Use A Thinking Model Safely",
+            "Caption Dense Label Scenes",
+            "Auto-Recover Or Attach To Existing Work",
+            "Export Alternate Captions For Training",
+            "Create A VLM Instruction Dataset",
+        ],
+        start=1,
+    ):
+        assert f"## {index}. {title}" in scenarios
+
+    assert "set-and-forget" in scenarios
+    assert "Check caption readiness" in scenarios
+    assert "direct diagnostic" in scenarios
+    assert "Pilot min cases" in scenarios
+    assert "300 or higher" in scenarios
+    assert "deterministic-recovery confidence" in scenarios
+    assert "Download-needed model options are red" in scenarios
+    assert "local\nmodel options are white" in scenarios
+    assert "Max output tokens" in scenarios
+    assert "Max boxes" in scenarios
+    assert "Attach / recover now" in scenarios
+    assert "Download grouped JSON" in scenarios
+    assert "Download VLM JSONL" in scenarios
+    assert "Create VLM training dataset" in scenarios
+    assert "Generated QA per image" in scenarios
+    assert "0-20" in scenarios
+    assert "Download instruction JSONL" in scenarios
+    assert "Download instruction archive" in scenarios
+    assert "generated QA never\nbecomes source annotations" in scenarios
+    assert "duplicate image/question pairs" in scenarios
+    assert "VLM export validation status" in scenarios
+    assert "No export\nimposes a per-image caption limit" in scenarios
+    assert "bad\nrows are blocked instead of downloaded" in scenarios
+    assert "Make generated caption primary" in scenarios
+    assert "Generated caption jobs append variants by default" in scenarios
+    assert "primary-first order" in scenarios
+    assert "generated captions append as saved alternate caption records" in scenarios
+    assert "qwenCaptionSetAndForget" in html
+    assert "qwenCaptionPilotDeterministicRecoveryConfidence" in html
+    assert "qwenCaptionAllowModelDownload" in html
+    assert "qwen-model-option--download" in js
+    assert "qwenCaptionBackendJobAutoResumeId" in js
+
+
+def test_qwen_caption_backend_batch_explicitly_keeps_going_after_failures():
+    html = _html()
+    js = _js()
+
+    single_start = js.index("async function runQwenCaptionSingleBackendJob")
+    single_end = js.index("async function runQwenCaptionBackendBatch", single_start)
+    single_helper = js[single_start:single_end]
+    batch_start = single_end
+    batch_end = js.index("function setQwenAgentStatus", batch_start)
+    batch_helper = js[batch_start:batch_end]
+    finish_start = js.index("async function finishQwenCaptionBackendJob")
+    finish_end = js.index("async function monitorQwenCaptionBackendJob", finish_start)
+    finish_helper = js[finish_start:finish_end]
+
+    assert "max_failures: 0" in single_helper
+    assert "max_failures: 0" in batch_helper
+    assert "Backend batch complete • ${finalFailed} failed" in finish_helper
+    assert "Backend caption batch complete with ${finalFailed} failed image" in finish_helper
+    assert "qwenCaptionSetAndForget" in html
+    assert "Set-and-forget backend run" in html
+    assert "qwenCaptionAllowModelDownload" in html
+    assert "Allow model downloads" in html
+    assert "qwenCaptionAttempts" in html
+    assert "VLM attempts" in html
+    assert "Auto: set-and-forget uses 3 attempts" in html
+    assert "qwenCaptionArtifactLogMb" in html
+    assert "Attempt log cap (MB)" in html
+    assert "qwenCaptionMaxRecoveryRate" in html
+    assert "Max recovery rate" in html
+    assert "qwenCaptionMaxLoopRecoveryRate" in html
+    assert "Max loop recovery rate" in html
+    assert "qwenCaptionMaxDeterministicRecoveryRate" in html
+    assert "Max deterministic fallback rate" in html
+    assert "qwenCaptionMaxFailedAttemptRate" in html
+    assert "Max failed attempt rate" in html
+    assert "qwenCaptionMaxSignalExitRate" in html
+    assert "Max native signal-exit rate" in html
+    assert "qwenCaptionMinRateCases" in html
+    assert "Min live-rate cases" in html
+    assert "qwenCaptionRequirePilotCertification" in html
+    assert "Require certified pilot" in html
+    assert "qwenCaptionPilotOutputDir" in html
+    assert "Certified pilot artifact dir" in html
+    assert "Required for 10k-scale set-and-forget backend launches" in html
+    assert "qwenCaptionPilotTargetCases" in html
+    assert "Pilot target cases" in html
+    assert "qwenCaptionPilotMaxDurationHours" in html
+    assert "Pilot max hours" in html
+    assert "Pilot p95 max hours" in html
+    assert "qwenCaptionPilotMinCases" in html
+    assert "Pilot min cases" in html
+    assert 'id="qwenCaptionPilotMinCases" min="1" max="1000000" step="1" value="300"' in html
+    assert "default is 300 for 10k-scale deterministic-recovery confidence" in html
+    assert "qwenCaptionPilotSafetyFactor" in html
+    assert "Pilot safety factor" in html
+    assert "qwenCaptionPilotDeterministicRecoveryConfidence" in html
+    assert "Pilot deterministic confidence" in html
+    assert 'id="qwenCaptionPilotDeterministicRecoveryConfidence" min="0" max="0.999999" step="0.01" value="0.95"' in html
+    assert "qwenCaptionPilotRequirePromptBudget" in html
+    assert "Require prompt-budget telemetry" in html
+    assert "qwenCaptionPilotMaxPromptTokens" in html
+    assert "Pilot max prompt tokens" in html
+    assert 'id="qwenCaptionPilotMaxPromptTokens" min="0" max="1000000" step="100" value="9000"' in html
+    assert "10k set-and-forget requires a positive ceiling" in html
+    assert "qwenCaptionPilotPromptAdaptedRate" in html
+    assert "Pilot max prompt adaptation rate" in html
+    assert "const DEFAULT_CAPTION_PILOT_MIN_CASES = 300" in js
+    assert "const DEFAULT_CAPTION_PILOT_DETERMINISTIC_RECOVERY_CONFIDENCE = 0.95" in js
+    assert "const DEFAULT_CAPTION_PILOT_MAX_PROMPT_TOKENS = 9000" in js
+    assert "generation.pilot_max_prompt_tokens ?? DEFAULT_CAPTION_PILOT_MAX_PROMPT_TOKENS" in js
+    assert "const setAndForget = qwenElements.captionSetAndForget?.checked !== false" in single_helper
+    assert "const healthGates = getCaptionHealthGateSettings()" in single_helper
+    assert "const pilotCertification = getCaptionPilotCertificationSettings(setAndForget)" in single_helper
+    assert "save_text_labels: qwenElements.captionSaveText?.checked !== false" in single_helper
+    assert "set_and_forget: setAndForget" in single_helper
+    assert "allow_model_download: !!qwenElements.captionAllowModelDownload?.checked" in single_helper
+    assert "runner_artifact_log_bytes: getCaptionRunnerArtifactLogBytes()" in single_helper
+    assert "...healthGates" in single_helper
+    assert "...pilotCertification" in single_helper
+    assert "Isolated caption job auto-resumed as ${autoResumeJobId}" in single_helper
+    assert "qwenCaptionBackendJobAutoResumeId(job)" in single_helper
+    assert "const setAndForget = qwenElements.captionSetAndForget?.checked !== false" in batch_helper
+    assert "const pilotCertification = getCaptionPilotCertificationSettings(setAndForget)" in batch_helper
+    assert "set_and_forget: setAndForget" in batch_helper
+    assert "allow_model_download: !!qwenElements.captionAllowModelDownload?.checked" in batch_helper
+    assert "runner_artifact_log_bytes: getCaptionRunnerArtifactLogBytes()" in batch_helper
+    assert "const healthGates = getCaptionHealthGateSettings()" in batch_helper
+    assert "...healthGates" in batch_helper
+    assert "...pilotCertification" in batch_helper
+    assert "set_and_forget_backend" in js
+    assert "require_pilot_certification" in js
+    assert "pilot_output_dir" in js
+    assert "pilot_target_cases" in js
+    assert "pilot_require_prompt_budget_data" in js
+    assert "pilot_max_prompt_tokens" in js
+    assert "pilot_max_prompt_budget_adapted_case_rate" in js
+    assert "pilot_deterministic_recovery_confidence" in js
+    assert "pilot_max_duration_hours" in js
+    assert "pilot_max_p95_duration_hours" in js
+    assert "pilot_min_cases" in js
+    assert "pilot_duration_safety_factor" in js
+    assert "allow_model_download_backend" in js
+    assert "let qwenBackendSupervision = null" in js
+    assert "function qwenBackendCrashSupervisionMessage()" in js
+    assert "progress.supervision" in js
+    assert "status.supervision" in js
+    assert "set_and_forget_ready" in js
+    assert "restart_policy" in js
+    assert "restart policy is not large-run ready" in js
+    assert "not advertising crash-restart supervision" in js
+    assert "large-run-ready crash supervision" in html
+    assert "updateQwenCaptionSetAndForgetSupervisionStatus({ force: true })" in js
+    assert "max_recovery_event_case_rate" in js
+    assert "max_loop_recovery_case_rate" in js
+    assert "max_deterministic_recovery_case_rate" in js
+    assert "max_failed_attempt_row_rate" in js
+    assert "max_signal_exit_attempt_row_rate" in js
+    assert "min_rate_cases" in js
+    assert "DEFAULT_CAPTION_HEALTH_MAX_LOOP_RECOVERY_RATE = 0.05" in js
+    assert "DEFAULT_CAPTION_HEALTH_MAX_DETERMINISTIC_RECOVERY_RATE = 0.01" in js
+    assert "DEFAULT_CAPTION_HEALTH_MAX_SIGNAL_EXIT_RATE = 0.05" in js
+    assert "DEFAULT_CAPTION_SET_AND_FORGET_ATTEMPTS = 3" in js
+    assert "function getCaptionBackendAttempts" in js
+    assert "attempts: getCaptionBackendAttempts(setAndForget)" in js
+    assert 'id="qwenCaptionMaxLoopRecoveryRate" min="-1" max="1" step="0.01" value="0.05"' in html
+    assert "enter 0 to require zero loop recoveries" in html
+    assert 'id="qwenCaptionMaxDeterministicRecoveryRate" min="-1" max="1" step="0.01" value="0.01"' in html
+    assert 'id="qwenCaptionMaxSignalExitRate" min="-1" max="1" step="0.01" value="0.05"' in html
+    assert "function getCaptionRunnerArtifactLogBytes" in js
+    assert "function getCaptionHealthGateSettings" in js
+    assert "function getCaptionPilotCertificationSettings" in js
+    assert "Enter a certified pilot artifact directory" in js
+    assert "Pilot certification" in js
+    assert "deterministic-recovery confidence" in js
+    assert "function qwenCaptionBackendJobAutoResumeId" in js
+    assert "function updateQwenSetAndForgetAutoAttachWatcher" in js
+    assert "function qwenCaptionBackendJobDisplayError" in js
+    assert "job?.message || job?.error" in js
+    assert "auto_resumed_job_id" in js
+    assert "Backend batch auto-resumed as ${autoResumeJobId}" in js
+    assert "qwenCaptionResumeBackendJob" in html
+    assert "Attach / recover now" in html
+    assert "this page auto-attaches immediately and periodically when backend state is available" in html
+    assert "async function recoverLatestQwenCaptionBackendJob" in js
+    assert "recoverLatestQwenCaptionBackendJob({ auto: true })" in js
+    assert "/qwen/caption/jobs/${encodeURIComponent(job.job_id)}/resume" in js
+    assert "selectRecoverableQwenCaptionBackendJob(jobs, datasetId, { auto })" in js
+    assert '["queued", "running", "interrupted", "failed"].includes(status)' in js
+    assert "options.auto ? null : candidates[0] || null" in js
+    assert 'status === "cancelled"' in js
+    assert "Cancelled caption jobs stay cancelled" in js
+    assert "function runQwenSetAndForgetAutoAttachCheck" in js
+    assert "function scheduleQwenSetAndForgetAutoAttachCheck" in js
+    assert "window.setInterval(runQwenSetAndForgetAutoAttachCheck, 5000)" in js
+    assert "scheduleQwenSetAndForgetAutoAttachCheck();" in js
 
 
 def test_qwen_caption_model_defaults_to_active_runtime():

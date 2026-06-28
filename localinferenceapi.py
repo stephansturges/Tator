@@ -24,6 +24,7 @@ from typing import (
     Iterable,
 )
 from collections import Counter, defaultdict, deque
+from types import SimpleNamespace
 import torch, clip, joblib
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 from fastapi import FastAPI, UploadFile, File, Form, Query, Body, HTTPException, Request
@@ -115,6 +116,7 @@ from models.schemas import (
     QwenInferenceResponse,
     QwenCaptionHint,
     QwenCaptionRequest,
+    QwenCaptionDatasetJobRequest,
     QwenCaptionPromptPreviewResponse,
     QwenCaptionPromptPreviewSection,
     QwenCaptionResponse,
@@ -719,6 +721,7 @@ from services.qwen import (
     _caption_missing_labels as _caption_missing_labels_impl,
     _caption_count_conflicts as _caption_count_conflicts_impl,
     _caption_missing_exact_counts as _caption_missing_exact_counts_impl,
+    _caption_repair_count_text_artifacts as _caption_repair_count_text_artifacts_impl,
     _caption_needs_refine as _caption_needs_refine_impl,
     _sanitize_qwen_caption as _sanitize_qwen_caption_impl,
     _caption_repetition_loop_detected as _caption_repetition_loop_detected_impl,
@@ -1193,6 +1196,81 @@ QWEN_MLX_CAPTION_MODEL_NAME = os.environ.get(
 QWEN_MLX_DEFAULT_QUANTIZATION = os.environ.get("QWEN_MLX_DEFAULT_QUANTIZATION", "4bit").strip() or "4bit"
 QWEN_MLX_LAZY_LOAD = os.environ.get("QWEN_MLX_LAZY_LOAD", "auto").strip().lower() or "auto"
 QWEN_CAPTION_CACHE_LIMIT = _env_int("QWEN_CAPTION_CACHE_LIMIT", 0)
+QWEN_CAPTION_LOOP_COOLDOWN_SECONDS = _env_int("QWEN_CAPTION_LOOP_COOLDOWN_SECONDS", 3600)
+QWEN_CAPTION_MLX_MAX_IMAGE_SIDE = _env_int("QWEN_CAPTION_MLX_MAX_IMAGE_SIDE", 512)
+QWEN_CAPTION_SET_AND_FORGET_MLX_MAX_IMAGE_SIDE = max(
+    1,
+    _env_int("QWEN_CAPTION_SET_AND_FORGET_MLX_MAX_IMAGE_SIDE", 224),
+)
+QWEN_CAPTION_RETRY_IMAGE_SIDE_SCALE = _env_float("QWEN_CAPTION_RETRY_IMAGE_SIDE_SCALE", 0.75)
+QWEN_CAPTION_MIN_RETRY_IMAGE_SIDE = max(
+    1,
+    _env_int("QWEN_CAPTION_MIN_RETRY_IMAGE_SIDE", 256),
+)
+QWEN_CAPTION_SET_AND_FORGET_MIN_RETRY_IMAGE_SIDE = max(
+    1,
+    _env_int("QWEN_CAPTION_SET_AND_FORGET_MIN_RETRY_IMAGE_SIDE", 192),
+)
+QWEN_CAPTION_SET_AND_FORGET_COOLDOWN_AFTER_SUCCESS_SECONDS = max(
+    0.0,
+    _env_float("QWEN_CAPTION_SET_AND_FORGET_COOLDOWN_AFTER_SUCCESS_SECONDS", 5.0),
+)
+QWEN_CAPTION_IO_RUN_LOG_MAX_FILES = max(
+    0,
+    _env_int("QWEN_CAPTION_IO_RUN_LOG_MAX_FILES", 400),
+)
+QWEN_CAPTION_IO_RUN_LOG_MAX_BYTES = max(
+    0,
+    _env_int("QWEN_CAPTION_IO_RUN_LOG_MAX_BYTES", 512 * 1024 * 1024),
+)
+QWEN_CAPTION_PROMPT_OUTPUT_TOKEN_TARGET = _env_int(
+    "QWEN_CAPTION_PROMPT_OUTPUT_TOKEN_TARGET",
+    6000,
+)
+QWEN_CAPTION_THINKING_PROMPT_OUTPUT_TOKEN_TARGET = _env_int(
+    "QWEN_CAPTION_THINKING_PROMPT_OUTPUT_TOKEN_TARGET",
+    12000,
+)
+QWEN_CAPTION_PROMPT_AWARE_MIN_NEW_TOKENS = _env_int(
+    "QWEN_CAPTION_PROMPT_AWARE_MIN_NEW_TOKENS",
+    512,
+)
+QWEN_CAPTION_INSTRUCT_WINDOW_AUTO_MAX_NEW_TOKENS = _env_int(
+    "QWEN_CAPTION_INSTRUCT_WINDOW_AUTO_MAX_NEW_TOKENS",
+    1200,
+)
+QWEN_CAPTION_INSTRUCT_MERGE_AUTO_MAX_NEW_TOKENS = _env_int(
+    "QWEN_CAPTION_INSTRUCT_MERGE_AUTO_MAX_NEW_TOKENS",
+    1500,
+)
+QWEN_CAPTION_SET_AND_FORGET_MAX_LOOP_RECOVERY_RATE = _env_float(
+    "QWEN_CAPTION_SET_AND_FORGET_MAX_LOOP_RECOVERY_RATE",
+    0.05,
+)
+QWEN_CAPTION_SET_AND_FORGET_MAX_DETERMINISTIC_RECOVERY_RATE = _env_float(
+    "QWEN_CAPTION_SET_AND_FORGET_MAX_DETERMINISTIC_RECOVERY_RATE",
+    0.01,
+)
+QWEN_CAPTION_SET_AND_FORGET_MAX_SIGNAL_EXIT_ATTEMPT_RATE = _env_float(
+    "QWEN_CAPTION_SET_AND_FORGET_MAX_SIGNAL_EXIT_ATTEMPT_RATE",
+    0.05,
+)
+QWEN_CAPTION_SET_AND_FORGET_MIN_BACKEND_RESTARTS = max(
+    1,
+    _env_int("QWEN_CAPTION_SET_AND_FORGET_MIN_BACKEND_RESTARTS", 25),
+)
+QWEN_CAPTION_SET_AND_FORGET_MAX_BACKEND_RESTART_DELAY_SECONDS = max(
+    0.0,
+    _env_float("QWEN_CAPTION_SET_AND_FORGET_MAX_BACKEND_RESTART_DELAY_SECONDS", 300.0),
+)
+QWEN_CAPTION_MIN_LOOP_RECOVERY_RATE_EVENTS = _env_int(
+    "QWEN_CAPTION_MIN_LOOP_RECOVERY_RATE_EVENTS",
+    3,
+)
+QWEN_CAPTION_MIN_DETERMINISTIC_RECOVERY_RATE_EVENTS = _env_int(
+    "QWEN_CAPTION_MIN_DETERMINISTIC_RECOVERY_RATE_EVENTS",
+    2,
+)
 QWEN_WINDOW_DEFAULT_SIZE = _env_int("QWEN_WINDOW_SIZE", 672)
 QWEN_WINDOW_DEFAULT_OVERLAP = _env_float("QWEN_WINDOW_OVERLAP", 0.2)
 
@@ -1248,6 +1326,20 @@ except (TypeError, ValueError):
     QWEN_PROGRESS_STALE_SECONDS = 1800.0
 if not math.isfinite(QWEN_PROGRESS_STALE_SECONDS) or QWEN_PROGRESS_STALE_SECONDS <= 0:
     QWEN_PROGRESS_STALE_SECONDS = 1800.0
+try:
+    QWEN_CAPTION_PROGRESS_STALE_SECONDS = float(
+        os.environ.get(
+            "TATOR_QWEN_CAPTION_PROGRESS_STALE_SECONDS",
+            str(min(QWEN_PROGRESS_STALE_SECONDS, 300.0)),
+        )
+    )
+except (TypeError, ValueError):
+    QWEN_CAPTION_PROGRESS_STALE_SECONDS = min(QWEN_PROGRESS_STALE_SECONDS, 300.0)
+if (
+    not math.isfinite(QWEN_CAPTION_PROGRESS_STALE_SECONDS)
+    or QWEN_CAPTION_PROGRESS_STALE_SECONDS <= 0
+):
+    QWEN_CAPTION_PROGRESS_STALE_SECONDS = min(QWEN_PROGRESS_STALE_SECONDS, 300.0)
 qwen_progress_state: Dict[str, Any] = {
     "run_id": None,
     "active": False,
@@ -1285,9 +1377,10 @@ qwen_progress_state: Dict[str, Any] = {
     "log_lines": [],
 }
 qwen_caption_cache: Dict[str, Any] = {}
-QWEN_CAPTION_PROGRESS_IO_EVENT_LIMIT = 64
-QWEN_CAPTION_PROGRESS_IO_TEXT_LIMIT = 120_000
+QWEN_CAPTION_PROGRESS_IO_EVENT_LIMIT = 24
+QWEN_CAPTION_PROGRESS_IO_TEXT_LIMIT = 20_000
 qwen_caption_order: deque[str] = deque()
+qwen_caption_loop_cooldowns: Dict[str, float] = {}
 _HF_OFFLINE_AUTO_ENABLED = False
 _CAPTION_WINDOW_HOOK: ContextVar[Optional[Callable[[int, int, int, str], None]]] = ContextVar(
     "caption_window_hook",
@@ -2124,6 +2217,111 @@ class QwenCancellationRequested(RuntimeError):
     """Raised when the active Qwen request has been cancelled."""
 
 
+class QwenCaptionLoopDetected(RuntimeError):
+    """Raised when caption generation enters a repeated output loop."""
+
+
+class QwenCaptionRecoverableGenerationError(RuntimeError):
+    """Raised when caption generation fails in a way the caption ladder can recover."""
+
+
+def _normalize_qwen_caption_loop_recovery_mode(value: Any) -> str:
+    mode = str(value or "safe_retry_fallback").strip().lower()
+    if mode not in {"off", "safe_retry", "safe_retry_fallback"}:
+        return "safe_retry_fallback"
+    return mode
+
+
+def _qwen_caption_safe_retry_decode(
+    decode_override: Optional[Mapping[str, Any]],
+    *,
+    is_thinking: bool,
+) -> Dict[str, Any]:
+    """Return a lower-risk decode override after a caption loop is detected."""
+
+    base = dict(decode_override or {})
+
+    def _safe_float(value: Any, default: float) -> float:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return default
+        return parsed if math.isfinite(parsed) else default
+
+    def _safe_int(value: Any, default: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError):
+            return default
+
+    if is_thinking:
+        safe = {
+            "do_sample": True,
+            "temperature": 0.35,
+            "top_p": 0.75,
+            "top_k": 20,
+            "presence_penalty": 0.0,
+        }
+    else:
+        safe = {"do_sample": False}
+    safe["repetition_penalty"] = max(1.15, _safe_float(base.get("repetition_penalty"), 1.0))
+    safe["repetition_context_size"] = max(256, _safe_int(base.get("repetition_context_size"), 128))
+    safe["no_repeat_ngram_size"] = max(8, _safe_int(base.get("no_repeat_ngram_size"), 0))
+    return safe
+
+
+def _qwen_caption_safe_retry_tokens(max_new_tokens: Optional[int]) -> int:
+    try:
+        requested = int(max_new_tokens) if max_new_tokens is not None else 1000
+    except (TypeError, ValueError, OverflowError):
+        requested = 1000
+    requested = max(256, min(requested, QWEN_CAPTION_MAX_NEW_TOKENS))
+    return max(768, min(requested, 2200))
+
+
+def _qwen_caption_recovery_key(
+    *,
+    stage_id: str,
+    stage_label: str,
+    call_kind: str,
+    model_id: str,
+    prompt: str,
+    system_prompt: Optional[str],
+    decode_override: Optional[Mapping[str, Any]],
+) -> str:
+    prompt_hash = hashlib.sha256(
+        f"{system_prompt or ''}\n{prompt or ''}".encode("utf-8", "ignore")
+    ).hexdigest()[:16]
+    decode_hash = hashlib.sha256(
+        json.dumps(dict(decode_override or {}), sort_keys=True, default=str).encode(
+            "utf-8", "ignore"
+        )
+    ).hexdigest()[:12]
+    raw = json.dumps(
+        {
+            "stage_id": stage_id,
+            "stage_label": stage_label,
+            "kind": call_kind,
+            "model_id": model_id,
+            "prompt": prompt_hash,
+            "decode": decode_hash,
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(raw.encode("utf-8", "ignore")).hexdigest()
+
+
+def _qwen_caption_loop_cooldown_remaining(key: str, *, now: Optional[float] = None) -> float:
+    if not key:
+        return 0.0
+    current = time.time() if now is None else float(now)
+    until = float(qwen_caption_loop_cooldowns.get(key) or 0.0)
+    if until <= current:
+        qwen_caption_loop_cooldowns.pop(key, None)
+        return 0.0
+    return max(0.0, until - current)
+
+
 def _qwen_cancel_requested() -> bool:
     return qwen_cancel_event.is_set()
 
@@ -2300,6 +2498,7 @@ def _build_qwen_caption_step_plan(
     force_unload: bool,
     caption_model_id: str,
     refinement_model_id: str,
+    windowed_full_image_strategy: str = "visual",
 ) -> List[Dict[str, str]]:
     plan: List[Dict[str, str]] = [
         _qwen_caption_step_entry("prepare", "Prepare image and prompts"),
@@ -2341,14 +2540,22 @@ def _build_qwen_caption_step_plan(
             ]
         )
     else:
+        full_compose_detail = "Uses the full image, generated detection context, and any window observations already collected."
+        if caption_mode == "windowed" and windowed_full_image_strategy == "text_only":
+            full_compose_detail = (
+                "Uses completed window observations, authoritative counts, and prompt context without "
+                "sending a second full-image tensor."
+            )
         plan.append(
             _qwen_caption_step_entry(
                 "generate_full",
                 "Compose full-image caption",
-                "Uses the full image, generated detection context, and any window observations already collected.",
+                full_compose_detail,
             )
         )
-    if caption_mode == "windowed":
+    if caption_mode == "windowed" and not (
+        windowed_full_image_strategy == "text_only" and not (two_stage and is_thinking)
+    ):
         plan.append(
             _qwen_caption_step_entry(
                 "merge_windows",
@@ -2360,7 +2567,7 @@ def _build_qwen_caption_step_plan(
         _qwen_caption_step_entry(
             "postprocess",
             "Quality guard checks",
-            "Cleanup, coverage refinement, and language checks run only if needed.",
+            "Cleanup, coverage/count guards, and language checks run only if needed.",
         )
     )
     if force_unload:
@@ -2644,6 +2851,89 @@ def _qwen_caption_io_paths(run_id: Optional[str]) -> Tuple[Path, Path, Path, Pat
     )
 
 
+def _qwen_caption_io_prune_run_logs(active_run_id: Optional[str]) -> None:
+    max_files = max(0, int(globals().get("QWEN_CAPTION_IO_RUN_LOG_MAX_FILES", 0) or 0))
+    max_bytes = max(0, int(globals().get("QWEN_CAPTION_IO_RUN_LOG_MAX_BYTES", 0) or 0))
+    if max_files <= 0 and max_bytes <= 0:
+        return
+    try:
+        active_jsonl, active_log, _latest_jsonl, _latest_log = _qwen_caption_io_paths(active_run_id)
+        run_root = active_jsonl.parent
+        if _storage_path_has_symlink_component(run_root):
+            return
+        if not run_root.exists() or not run_root.is_dir() or run_root.is_symlink():
+            return
+        root_resolved = run_root.resolve(strict=True)
+        active_paths = {
+            active_jsonl.resolve(strict=False),
+            active_log.resolve(strict=False),
+        }
+    except Exception:
+        return
+
+    records: List[Dict[str, Any]] = []
+    for path in run_root.iterdir():
+        try:
+            if path.is_symlink() or not path.is_file() or path.suffix not in {".jsonl", ".log"}:
+                continue
+            resolved = path.resolve(strict=False)
+            resolved.relative_to(root_resolved)
+            stat_result = path.stat()
+        except Exception:
+            continue
+        records.append(
+            {
+                "path": path,
+                "resolved": resolved,
+                "bytes": int(getattr(stat_result, "st_size", 0) or 0),
+                "mtime": float(getattr(stat_result, "st_mtime", 0.0) or 0.0),
+                "active": resolved in active_paths,
+            }
+        )
+
+    if not records:
+        return
+    records.sort(
+        key=lambda item: (
+            1 if bool(item.get("active")) else 0,
+            float(item.get("mtime") or 0.0),
+            str(item.get("path") or ""),
+        ),
+        reverse=True,
+    )
+    keep: set[Path] = set()
+    if max_files > 0:
+        for record in records[:max_files]:
+            keep.add(record["path"])
+    else:
+        keep = {record["path"] for record in records}
+    for record in records:
+        if bool(record.get("active")):
+            keep.add(record["path"])
+
+    total_bytes = sum(int(record.get("bytes") or 0) for record in records if record["path"] in keep)
+    if max_bytes > 0:
+        for record in sorted(records, key=lambda item: (float(item.get("mtime") or 0.0), str(item.get("path") or ""))):
+            path = record["path"]
+            if bool(record.get("active")) or path not in keep or total_bytes <= max_bytes:
+                continue
+            keep.remove(path)
+            total_bytes -= int(record.get("bytes") or 0)
+
+    for record in records:
+        path = record["path"]
+        if path in keep:
+            continue
+        try:
+            if path.is_symlink():
+                continue
+            resolved = path.resolve(strict=False)
+            resolved.relative_to(root_resolved)
+            path.unlink(missing_ok=True)
+        except Exception:
+            logger.debug("[qwen-caption-io] failed to prune stale run log %s", path, exc_info=True)
+
+
 def _qwen_caption_io_prepare_parent(path: Path) -> Optional[Path]:
     try:
         if _storage_path_has_symlink_component(path.parent):
@@ -2714,6 +3004,10 @@ def _write_temp_binary_no_follow(
 
 def _qwen_caption_io_reset_latest(run_id: Optional[str]) -> None:
     jsonl_path, text_path, latest_jsonl_path, latest_text_path = _qwen_caption_io_paths(run_id)
+    try:
+        _qwen_caption_io_prune_run_logs(run_id)
+    except Exception:
+        logger.debug("[qwen-caption-io] failed to prune stale run logs", exc_info=True)
     for path in (latest_jsonl_path, latest_text_path):
         try:
             _qwen_caption_io_write_file(path, "", append=False)
@@ -2816,7 +3110,12 @@ def _qwen_caption_io_readable(record: Mapping[str, Any]) -> str:
         "source",
         "runtime_platform",
         "model_id",
+        "prompt_tokens",
+        "input_tokens",
+        "requested_max_new_tokens",
+        "effective_max_new_tokens",
         "max_new_tokens",
+        "explicit_max_new_tokens",
         "decode_override",
         "chat_template_kwargs",
         "image_width",
@@ -2830,6 +3129,7 @@ def _qwen_caption_io_readable(record: Mapping[str, Any]) -> str:
     message_text = _qwen_caption_io_message_text(messages if isinstance(messages, (list, tuple)) else None)
     if message_text:
         lines.extend(["", "--- messages ---", message_text])
+    skip_duplicate_prompt_fields = bool(message_text)
     for key, heading in (
         ("system_prompt", "system prompt"),
         ("user_prompt", "user prompt"),
@@ -2839,6 +3139,8 @@ def _qwen_caption_io_readable(record: Mapping[str, Any]) -> str:
         ("trimmed_output", "trimmed output"),
         ("output_text", "output text"),
     ):
+        if skip_duplicate_prompt_fields and key in {"system_prompt", "user_prompt", "prompt_text"}:
+            continue
         value = record.get(key)
         if value:
             lines.extend(["", f"--- {heading} ---", str(value)])
@@ -2867,6 +3169,7 @@ def _qwen_caption_io_progress_event(record: Mapping[str, Any], readable: str) ->
     return {
         "event": event,
         "kind": kind,
+        "run_id": str(record.get("run_id") or ""),
         "title": " • ".join(title_bits),
         "time": str(record.get("time") or ""),
         "call_id": str(record.get("call_id") or ""),
@@ -2922,9 +3225,40 @@ def _qwen_caption_io_input(
             "user_prompt": user_prompt,
             "image_width": image_width,
             "image_height": image_height,
+            "requested_max_new_tokens": _qwen_caption_io_safe_int(max_new_tokens),
             "max_new_tokens": _qwen_caption_io_safe_int(max_new_tokens),
             "decode_override": decode_override,
             "chat_template_kwargs": chat_template_kwargs,
+        }
+    )
+
+
+def _qwen_caption_io_prompt_budget(
+    *,
+    call_id: Optional[str],
+    source: str,
+    model_id: str,
+    runtime_platform: Optional[str] = None,
+    prompt_tokens: Optional[int] = None,
+    requested_max_new_tokens: Optional[int] = None,
+    effective_max_new_tokens: Optional[int] = None,
+    explicit_max_new_tokens: Optional[bool] = None,
+) -> None:
+    _qwen_caption_io_record(
+        {
+            "event": "prompt_budget",
+            "call_id": call_id,
+            "source": source,
+            "runtime_platform": runtime_platform,
+            "model_id": model_id,
+            "prompt_tokens": _qwen_caption_io_safe_int(prompt_tokens),
+            "input_tokens": _qwen_caption_io_safe_int(prompt_tokens),
+            "requested_max_new_tokens": _qwen_caption_io_safe_int(requested_max_new_tokens),
+            "effective_max_new_tokens": _qwen_caption_io_safe_int(effective_max_new_tokens),
+            "max_new_tokens": _qwen_caption_io_safe_int(effective_max_new_tokens),
+            "explicit_max_new_tokens": (
+                bool(explicit_max_new_tokens) if explicit_max_new_tokens is not None else None
+            ),
         }
     )
 
@@ -2987,6 +3321,84 @@ def _qwen_maybe_trim_repetition_loop_output(
     _qwen_progress_update(**update_kwargs)
     logger.warning("[qwen] stopped repeated caption loop after %s generated chars", len(output_text))
     return cleaned
+
+
+class _QwenCaptionStreamLoopGuard:
+    """Incremental repeated-output guard for live caption token streams."""
+
+    def __init__(
+        self,
+        *,
+        min_chars: int = 32,
+        check_chars: int = 24,
+        max_tail_chars: int = 4096,
+    ) -> None:
+        self.min_chars = max(1, int(min_chars))
+        self.check_chars = max(1, int(check_chars))
+        self.max_tail_chars = max(self.min_chars, int(max_tail_chars))
+        self._parts: List[str] = []
+        self._tail = ""
+        self._total_chars = 0
+        self._chars_since_check = 0
+        self.triggered = False
+        self.reason: Optional[str] = None
+
+    def append(self, piece: str) -> bool:
+        if self.triggered:
+            return True
+        text = str(piece or "")
+        if not text:
+            return False
+        self._parts.append(text)
+        self._total_chars += len(text)
+        self._chars_since_check += len(text)
+        self._tail = (self._tail + text)[-self.max_tail_chars :]
+        if self._total_chars < self.min_chars or self._chars_since_check < self.check_chars:
+            return False
+        self._chars_since_check = 0
+        if _caption_repetition_loop_detected_impl(self._tail):
+            self.triggered = True
+            self.reason = (
+                _caption_degenerate_reason_impl(self._tail, allow_short_caption=True)
+                or "repetition_loop"
+            )
+        return self.triggered
+
+    def text(self) -> str:
+        return "".join(self._parts)
+
+
+def _qwen_caption_stream_loop_detected_event(
+    *,
+    source: str,
+    model_id: str,
+    runtime_platform: Optional[str],
+    guard: _QwenCaptionStreamLoopGuard,
+) -> None:
+    _qwen_caption_io_record(
+        {
+            "event": "stream_loop_detected",
+            "call_id": qwen_llm_call_id_var.get(),
+            "source": source,
+            "runtime_platform": runtime_platform,
+            "model_id": model_id,
+            "loop_detected": True,
+            "degenerate_reason": guard.reason,
+            "generated_chars": len(guard.text()),
+        }
+    )
+    _qwen_progress_update(
+        phase="generate",
+        phase_label="Stopping Loop",
+        progress=0.88,
+        message="Detected repeated caption text during generation",
+        token_preview=guard.text(),
+    )
+
+
+def _qwen_caption_generation_active() -> bool:
+    with qwen_progress_lock:
+        return qwen_progress_state.get("kind") == "caption"
 
 
 def _qwen_progress_finish(message: str, *, token_preview: Optional[str] = None) -> None:
@@ -3075,10 +3487,15 @@ def _qwen_progress_expire_stale_locked(now: Optional[float] = None) -> bool:
         return False
     current_time = time.time() if now is None else float(now)
     age = current_time - last_update
-    if age < QWEN_PROGRESS_STALE_SECONDS:
+    kind = str(qwen_progress_state.get("kind") or "qwen").replace("_", " ")
+    stale_seconds = (
+        QWEN_CAPTION_PROGRESS_STALE_SECONDS
+        if kind == "caption"
+        else QWEN_PROGRESS_STALE_SECONDS
+    )
+    if age < stale_seconds:
         return False
     qwen_cancel_event.set()
-    kind = str(qwen_progress_state.get("kind") or "qwen").replace("_", " ")
     if qwen_progress_state.get("cancel_requested"):
         phase = "cancelled"
         phase_label = "Cancelled"
@@ -3125,6 +3542,164 @@ def _http_exception_detail_text(exc: HTTPException) -> str:
         return str(detail)
 
 
+def _env_flag_enabled(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_backend_restart_int(value: Any) -> Optional[int]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _parse_backend_restart_float(value: Any) -> Optional[float]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = float(text)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(parsed):
+        return None
+    return parsed
+
+
+def _qwen_backend_restart_policy_status(
+    *,
+    restart_capable: bool,
+    restart_max_raw: Any,
+    restart_delay_raw: Any,
+    restart_max_delay_raw: Any,
+) -> Dict[str, Any]:
+    restart_max = _parse_backend_restart_int(restart_max_raw)
+    restart_delay = _parse_backend_restart_float(restart_delay_raw)
+    restart_max_delay = _parse_backend_restart_float(restart_max_delay_raw)
+    checks: List[Dict[str, Any]] = []
+
+    def add(name: str, ok: bool, detail: str, **extra: Any) -> None:
+        checks.append(
+            {
+                "name": name,
+                "status": "ok" if ok else "error",
+                "detail": detail,
+                **extra,
+            }
+        )
+
+    add(
+        "restart_capable",
+        bool(restart_capable),
+        (
+            "backend advertises crash-restart capability"
+            if restart_capable
+            else "backend does not advertise crash-restart capability"
+        ),
+    )
+
+    restart_count_ok = (
+        restart_max == 0
+        or (
+            restart_max is not None
+            and restart_max >= QWEN_CAPTION_SET_AND_FORGET_MIN_BACKEND_RESTARTS
+        )
+    )
+    add(
+        "restart_count_budget",
+        restart_count_ok,
+        (
+            "backend restart count is unlimited"
+            if restart_max == 0
+            else (
+                f"backend restart count is at least {QWEN_CAPTION_SET_AND_FORGET_MIN_BACKEND_RESTARTS}"
+                if restart_count_ok
+                else f"large set-and-forget jobs require unlimited backend restarts or at least "
+                f"{QWEN_CAPTION_SET_AND_FORGET_MIN_BACKEND_RESTARTS} restart attempts"
+            )
+        ),
+        restart_max=restart_max,
+        min_restart_attempts=QWEN_CAPTION_SET_AND_FORGET_MIN_BACKEND_RESTARTS,
+    )
+
+    delay_ok = restart_delay is not None and restart_delay >= 0
+    add(
+        "restart_delay",
+        delay_ok,
+        (
+            "backend restart base delay is valid"
+            if delay_ok
+            else "backend restart base delay is missing or invalid"
+        ),
+        restart_delay_seconds=restart_delay,
+    )
+
+    max_delay_ok = (
+        restart_max_delay is not None
+        and restart_max_delay >= 0
+        and (restart_delay is None or restart_max_delay >= restart_delay)
+        and restart_max_delay <= QWEN_CAPTION_SET_AND_FORGET_MAX_BACKEND_RESTART_DELAY_SECONDS
+    )
+    add(
+        "restart_backoff_ceiling",
+        max_delay_ok,
+        (
+            "backend restart backoff ceiling is valid"
+            if max_delay_ok
+            else "backend restart backoff ceiling is missing, below the base delay, or too large for unattended recovery"
+        ),
+        restart_max_delay_seconds=restart_max_delay,
+        max_restart_delay_seconds=QWEN_CAPTION_SET_AND_FORGET_MAX_BACKEND_RESTART_DELAY_SECONDS,
+    )
+
+    ready = bool(restart_capable) and all(str(check.get("status") or "") == "ok" for check in checks)
+    return {
+        "status": "ok" if ready else "error",
+        "ready": ready,
+        "checks": checks,
+        "restart_max": restart_max,
+        "restart_delay_seconds": restart_delay,
+        "restart_max_delay_seconds": restart_max_delay,
+        "min_restart_attempts": QWEN_CAPTION_SET_AND_FORGET_MIN_BACKEND_RESTARTS,
+        "max_restart_delay_seconds": QWEN_CAPTION_SET_AND_FORGET_MAX_BACKEND_RESTART_DELAY_SECONDS,
+    }
+
+
+def _qwen_backend_supervision_status() -> Dict[str, Any]:
+    launcher = str(os.environ.get("TATOR_BACKEND_LAUNCHER") or "").strip()
+    restarts_raw = str(os.environ.get("TATOR_BACKEND_LAUNCHER_RESTARTS_CRASHES") or "").strip()
+    restart_max_raw = str(os.environ.get("TATOR_BACKEND_LAUNCHER_RESTART_MAX") or "").strip()
+    restart_delay_raw = str(os.environ.get("TATOR_BACKEND_LAUNCHER_RESTART_DELAY") or "").strip()
+    restart_max_delay_raw = str(os.environ.get("TATOR_BACKEND_LAUNCHER_RESTART_MAX_DELAY") or "").strip()
+    restart_capable = bool(launcher) and _env_flag_enabled(restarts_raw)
+    policy = _qwen_backend_restart_policy_status(
+        restart_capable=restart_capable,
+        restart_max_raw=restart_max_raw,
+        restart_delay_raw=restart_delay_raw,
+        restart_max_delay_raw=restart_max_delay_raw,
+    )
+    return {
+        "launcher": launcher or None,
+        "restart_capable": restart_capable,
+        "restart_on_crash": _env_flag_enabled(restarts_raw),
+        "restart_max": restart_max_raw or None,
+        "restart_delay": restart_delay_raw or None,
+        "restart_max_delay": restart_max_delay_raw or None,
+        "restart_policy": policy,
+        "set_and_forget_ready": bool(policy.get("ready")),
+        "message": (
+            "Backend is running under a crash-restarting launcher with a set-and-forget restart policy."
+            if policy.get("ready")
+            else "Backend process is advertising crash-restart supervision, but its restart policy is not large-run ready."
+            if restart_capable
+            else "Backend process is not advertising crash-restart supervision."
+        ),
+    }
+
+
 def qwen_progress() -> Dict[str, Any]:
     with qwen_progress_lock:
         _qwen_progress_expire_stale_locked()
@@ -3132,6 +3707,7 @@ def qwen_progress() -> Dict[str, Any]:
     snapshot["memory"] = _qwen_memory_snapshot()
     snapshot["vram"] = snapshot["memory"]
     snapshot["loaded"] = qwen_model is not None or bool(qwen_caption_cache)
+    snapshot["supervision"] = _qwen_backend_supervision_status()
     return snapshot
 
 
@@ -7067,6 +7643,119 @@ def _qwen_model_id_is_thinking(model_id: Optional[str]) -> bool:
     return "thinking" in str(model_id or "").lower()
 
 
+def _resolve_qwen_caption_max_new_tokens(
+    requested: Optional[Any],
+    *,
+    model_id: Optional[str],
+    variant: Optional[str],
+    caption_mode: Optional[str],
+    final_caption_max_sentences: Optional[int],
+    many_windowed_steps: bool = False,
+    label_hint_count: int = 0,
+) -> int:
+    """Resolve a caption output-token budget.
+
+    A numeric request is an explicit user cap. None means Auto, where Thinking
+    models and large/windowed prompt stacks get a larger default budget.
+    """
+
+    if requested is not None:
+        try:
+            parsed = int(requested)
+        except (TypeError, ValueError, OverflowError):
+            parsed = 0
+        if parsed > 0:
+            return max(32, min(parsed, QWEN_CAPTION_MAX_NEW_TOKENS))
+
+    try:
+        sentence_count = int(final_caption_max_sentences or 10)
+    except (TypeError, ValueError, OverflowError):
+        sentence_count = 10
+    sentence_budget = max(1000, min(QWEN_CAPTION_MAX_NEW_TOKENS, max(1, sentence_count) * 100))
+    is_thinking = _qwen_model_id_is_thinking(model_id) or str(variant or "").lower() == "thinking"
+    mode = str(caption_mode or "full").strip().lower()
+    if is_thinking:
+        return QWEN_CAPTION_MAX_NEW_TOKENS
+    if mode == "windowed" or many_windowed_steps:
+        try:
+            window_budget = int(QWEN_CAPTION_INSTRUCT_WINDOW_AUTO_MAX_NEW_TOKENS or 0)
+        except (TypeError, ValueError, OverflowError):
+            window_budget = 0
+        return min(QWEN_CAPTION_MAX_NEW_TOKENS, max(sentence_budget, window_budget))
+    return sentence_budget
+
+
+def _estimate_qwen_prompt_tokens(
+    rendered_prompt: str,
+    *,
+    tokenizer: Optional[Any] = None,
+) -> int:
+    if tokenizer is not None:
+        try:
+            encoded = tokenizer(
+                rendered_prompt,
+                add_special_tokens=False,
+                return_attention_mask=False,
+            )
+            input_ids = encoded.get("input_ids") if hasattr(encoded, "get") else encoded
+            if isinstance(input_ids, list):
+                if input_ids and isinstance(input_ids[0], list):
+                    return max(1, len(input_ids[0]))
+                return max(1, len(input_ids))
+        except Exception:
+            pass
+    return max(1, int(math.ceil(len(str(rendered_prompt or "")) / 4.0)))
+
+
+def _caption_explicit_token_budget_active() -> bool:
+    if not _qwen_caption_generation_active():
+        return False
+    with qwen_progress_lock:
+        return bool(qwen_progress_state.get("caption_explicit_max_new_tokens"))
+
+
+def _qwen_caption_prompt_aware_max_new_tokens(
+    requested: Optional[Any],
+    *,
+    prompt_tokens: int,
+    model_id: Optional[str],
+    explicit: Optional[bool] = None,
+) -> int:
+    try:
+        requested_max = int(requested) if requested is not None else QWEN_MAX_NEW_TOKENS
+    except (TypeError, ValueError, OverflowError):
+        requested_max = QWEN_MAX_NEW_TOKENS
+    requested_max = max(1, min(requested_max, QWEN_CAPTION_MAX_NEW_TOKENS))
+    explicit_budget = (
+        _caption_explicit_token_budget_active() if explicit is None else bool(explicit)
+    )
+    if explicit_budget:
+        return requested_max
+    try:
+        prompt_count = max(0, int(prompt_tokens or 0))
+    except (TypeError, ValueError, OverflowError):
+        prompt_count = 0
+    is_thinking = _qwen_model_id_is_thinking(model_id)
+    target = (
+        QWEN_CAPTION_THINKING_PROMPT_OUTPUT_TOKEN_TARGET
+        if is_thinking
+        else QWEN_CAPTION_PROMPT_OUTPUT_TOKEN_TARGET
+    )
+    try:
+        target = max(1, int(target or 0))
+    except (TypeError, ValueError, OverflowError):
+        target = 1
+    min_new = (
+        max(1024, int(QWEN_CAPTION_PROMPT_AWARE_MIN_NEW_TOKENS or 0))
+        if is_thinking
+        else max(256, int(QWEN_CAPTION_PROMPT_AWARE_MIN_NEW_TOKENS or 0))
+    )
+    if prompt_count + requested_max <= target:
+        return requested_max
+    adapted = target - prompt_count
+    return min(requested_max, max(min_new, adapted))
+
+
 def _qwen_disable_thinking_requested(chat_template_kwargs: Optional[Dict[str, Any]]) -> bool:
     if not isinstance(chat_template_kwargs, dict):
         return False
@@ -7285,6 +7974,38 @@ def _mlx_generation_kwargs(
     return kwargs
 
 
+def _qwen_caption_mlx_image_for_generation(pil_img: Image.Image) -> Image.Image:
+    if not _qwen_caption_generation_active():
+        return pil_img
+    try:
+        max_side = int(QWEN_CAPTION_MLX_MAX_IMAGE_SIDE or 0)
+    except (TypeError, ValueError, OverflowError):
+        max_side = 0
+    if max_side <= 0:
+        return pil_img
+    width = max(1, int(getattr(pil_img, "width", 1) or 1))
+    height = max(1, int(getattr(pil_img, "height", 1) or 1))
+    largest = max(width, height)
+    if largest <= max_side:
+        return pil_img
+    scale = float(max_side) / float(largest)
+    resized = pil_img.convert("RGB").resize(
+        (
+            max(1, int(round(width * scale))),
+            max(1, int(round(height * scale))),
+        ),
+        Image.Resampling.LANCZOS,
+    )
+    logger.info(
+        "[qwen-caption] resized MLX caption image %sx%s -> %sx%s",
+        width,
+        height,
+        resized.width,
+        resized.height,
+    )
+    return resized
+
+
 def _run_qwen_chat_mlx(
     runtime: QwenRuntime,
     messages: List[Dict[str, Any]],
@@ -7331,13 +8052,53 @@ def _run_qwen_chat_mlx(
                 "rendered_prompt": prompt,
             }
         )
-    gen_kwargs = _mlx_generation_kwargs(max_new_tokens, decode_override)
+    tokenizer = getattr(runtime.processor, "tokenizer", None)
+    prompt_tokens = _estimate_qwen_prompt_tokens(prompt, tokenizer=tokenizer)
+    explicit_budget = _caption_explicit_token_budget_active()
+    effective_max_new_tokens = _qwen_caption_prompt_aware_max_new_tokens(
+        max_new_tokens,
+        prompt_tokens=prompt_tokens,
+        model_id=runtime.model_id,
+        explicit=explicit_budget,
+    )
+    if (
+        _qwen_caption_generation_active()
+        and not explicit_budget
+        and int(effective_max_new_tokens) != int(max_new_tokens or QWEN_MAX_NEW_TOKENS)
+    ):
+        logger.info(
+            "[qwen-caption] prompt-aware MLX output budget %s -> %s for %s prompt tokens",
+            max_new_tokens or QWEN_MAX_NEW_TOKENS,
+            effective_max_new_tokens,
+            prompt_tokens,
+        )
+    if call_id:
+        _qwen_caption_io_prompt_budget(
+            call_id=call_id,
+            source="qwen_chat_mlx",
+            runtime_platform=QWEN_PLATFORM_MLX,
+            model_id=runtime.model_id,
+            prompt_tokens=prompt_tokens,
+            requested_max_new_tokens=(
+                int(max_new_tokens) if max_new_tokens is not None else QWEN_MAX_NEW_TOKENS
+            ),
+            effective_max_new_tokens=effective_max_new_tokens,
+            explicit_max_new_tokens=explicit_budget,
+        )
+    _qwen_progress_update(
+        phase="prompt",
+        phase_label="Preparing Prompt",
+        progress=0.50,
+        message="Rendered caption prompt",
+        input_tokens=prompt_tokens,
+        max_new_tokens=effective_max_new_tokens,
+    )
+    gen_kwargs = _mlx_generation_kwargs(effective_max_new_tokens, decode_override)
     with qwen_mlx_generation_lock:
         _bind_mlx_generation_stream_for_current_thread()
         if MLX_VLM_STREAM_GENERATE is not None:
             try:
-                pieces: List[str] = []
-                loop_guard_triggered = False
+                loop_guard = _QwenCaptionStreamLoopGuard()
                 stream_iter = MLX_VLM_STREAM_GENERATE(
                     runtime.model,
                     runtime.processor,
@@ -7350,17 +8111,21 @@ def _run_qwen_chat_mlx(
                     piece = str(getattr(result, "text", result) or "")
                     if not piece:
                         continue
-                    pieces.append(piece)
                     generation_tokens = getattr(result, "generation_tokens", None)
                     _qwen_progress_token(
                         piece,
                         generated_tokens=(
                             int(generation_tokens) if generation_tokens is not None else None
                         ),
-                        max_new_tokens=max_new_tokens,
+                        max_new_tokens=effective_max_new_tokens,
                     )
-                    if _caption_repetition_loop_detected_impl("".join(pieces)):
-                        loop_guard_triggered = True
+                    if loop_guard.append(piece):
+                        _qwen_caption_stream_loop_detected_event(
+                            source="qwen_chat_mlx",
+                            runtime_platform=QWEN_PLATFORM_MLX,
+                            model_id=runtime.model_id,
+                            guard=loop_guard,
+                        )
                         close_stream = getattr(stream_iter, "close", None)
                         if callable(close_stream):
                             try:
@@ -7368,34 +8133,51 @@ def _run_qwen_chat_mlx(
                             except Exception:
                                 pass
                         break
-                output_text = "".join(pieces)
+                output_text = loop_guard.text()
                 if output_text:
                     _raise_if_qwen_cancelled()
                     output_text = _qwen_maybe_trim_repetition_loop_output(
                         output_text,
-                        triggered=loop_guard_triggered,
+                        triggered=loop_guard.triggered,
                         replace_live_output=True,
                     )
+                    if loop_guard.triggered and _qwen_caption_generation_active():
+                        raise QwenCaptionLoopDetected("qwen_caption_repetition_loop")
                     return output_text
             except Exception as exc:  # noqa: BLE001
-                if isinstance(exc, QwenCancellationRequested):
+                if isinstance(exc, (QwenCancellationRequested, QwenCaptionLoopDetected)):
                     raise
+                if isinstance(exc, UnicodeDecodeError) and _qwen_caption_generation_active():
+                    raise QwenCaptionRecoverableGenerationError(
+                        f"qwen_caption_decode_failed:{exc}"
+                    ) from exc
                 logger.warning("[qwen] mlx streaming failed; falling back to blocking generate: %s", exc)
                 _bind_mlx_generation_stream_for_current_thread()
         _raise_if_qwen_cancelled()
-        result = MLX_VLM_GENERATE(
-            runtime.model,
-            runtime.processor,
-            prompt,
-            image=image_inputs or None,
-            **gen_kwargs,
-        )
+        try:
+            result = MLX_VLM_GENERATE(
+                runtime.model,
+                runtime.processor,
+                prompt,
+                image=image_inputs or None,
+                **gen_kwargs,
+            )
+        except UnicodeDecodeError as exc:
+            if _qwen_caption_generation_active():
+                raise QwenCaptionRecoverableGenerationError(
+                    f"qwen_caption_decode_failed:{exc}"
+                ) from exc
+            raise
     output_text = str(getattr(result, "text", result) or "")
     _raise_if_qwen_cancelled()
+    blocking_loop_detected = _caption_repetition_loop_detected_impl(output_text)
     output_text = _qwen_maybe_trim_repetition_loop_output(
         output_text,
+        triggered=blocking_loop_detected,
         replace_live_output=False,
     )
+    if blocking_loop_detected and _qwen_caption_generation_active():
+        raise QwenCaptionLoopDetected("qwen_caption_repetition_loop")
     _qwen_progress_update(
         phase="generate",
         phase_label="Generated",
@@ -7417,6 +8199,7 @@ def _run_qwen_inference_mlx(
     decode_override: Optional[Dict[str, Any]] = None,
     chat_template_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, int, int]:
+    model_img = _qwen_caption_mlx_image_for_generation(pil_img)
     messages: List[Dict[str, Any]] = []
     sys_prompt = (
         system_prompt_override
@@ -7429,7 +8212,7 @@ def _run_qwen_inference_mlx(
         {
             "role": "user",
             "content": [
-                {"type": "image", "image": pil_img},
+                {"type": "image", "image": model_img},
                 {"type": "text", "text": prompt},
             ],
         }
@@ -7445,8 +8228,8 @@ def _run_qwen_inference_mlx(
         prompt_text=prompt,
         system_prompt=str(sys_prompt or ""),
         user_prompt=prompt,
-        image_width=int(pil_img.width),
-        image_height=int(pil_img.height),
+        image_width=int(model_img.width),
+        image_height=int(model_img.height),
         max_new_tokens=max_new_tokens,
         decode_override=decode_override,
         chat_template_kwargs=chat_template_kwargs,
@@ -7684,6 +8467,7 @@ def _run_qwen_inference(
     if max_seq_len:
         if requested_max >= max_seq_len:
             requested_max = max(1, max_seq_len - 1)
+    original_requested_max = requested_max
     preview_inputs = processor(
         text=[text],
         images=image_inputs,
@@ -7695,6 +8479,35 @@ def _run_qwen_inference(
     input_len = int(preview_inputs.input_ids.shape[1])
     num_images = len(image_inputs) if image_inputs is not None else 0
     effective_len, vision_tokens = _qwen_effective_input_len(preview_inputs, input_len, num_images)
+    explicit_budget = _caption_explicit_token_budget_active()
+    adapted_requested_max = _qwen_caption_prompt_aware_max_new_tokens(
+        requested_max,
+        prompt_tokens=int(effective_len),
+        model_id=resolved_model_id,
+        explicit=explicit_budget,
+    )
+    if (
+        _qwen_caption_generation_active()
+        and not explicit_budget
+        and adapted_requested_max != requested_max
+    ):
+        logger.info(
+            "[qwen-caption] prompt-aware Transformers output budget %s -> %s for %s prompt tokens",
+            requested_max,
+            adapted_requested_max,
+            effective_len,
+        )
+        requested_max = adapted_requested_max
+    _qwen_caption_io_prompt_budget(
+        call_id=llm_call_id,
+        source="qwen_inference",
+        runtime_platform=QWEN_PLATFORM_TRANSFORMERS,
+        model_id=resolved_model_id,
+        prompt_tokens=int(effective_len),
+        requested_max_new_tokens=original_requested_max,
+        effective_max_new_tokens=requested_max,
+        explicit_max_new_tokens=explicit_budget,
+    )
     _qwen_progress_update(
         phase="prompt",
         phase_label="Preparing Prompt",
@@ -7837,12 +8650,13 @@ def _run_qwen_inference(
         except Exception:
             input_prompt_len = 0
     loop_guard_state: Dict[str, Any] = {"triggered": False}
+    loop_guard_stop = threading.Event()
     try:
         from transformers import StoppingCriteria, StoppingCriteriaList
 
         class _QwenCancelStoppingCriteria(StoppingCriteria):
             def __call__(self, input_ids, scores, **kwargs):  # type: ignore[no-untyped-def]
-                return _qwen_cancel_requested()
+                return _qwen_cancel_requested() or loop_guard_stop.is_set()
 
         class _QwenRepetitionStoppingCriteria(StoppingCriteria):
             def __init__(self) -> None:
@@ -7866,6 +8680,13 @@ def _run_qwen_inference(
                     )
                     if _caption_repetition_loop_detected_impl(str(text or "")):
                         loop_guard_state["triggered"] = True
+                        loop_guard_state["reason"] = (
+                            _caption_degenerate_reason_impl(
+                                str(text or ""),
+                                allow_short_caption=True,
+                            )
+                            or "repetition_loop"
+                        )
                         return True
                 except Exception:
                     return False
@@ -7907,6 +8728,9 @@ def _run_qwen_inference(
             stream_kwargs["streamer"] = streamer
             generated_parts: List[str] = []
             generation_errors: List[BaseException] = []
+            stream_loop_guard = (
+                _QwenCaptionStreamLoopGuard() if _qwen_caption_generation_active() else None
+            )
 
             def _generate_stream() -> None:
                 try:
@@ -7964,6 +8788,17 @@ def _run_qwen_inference(
                     if max_new_tokens is not None
                     else QWEN_MAX_NEW_TOKENS,
                 )
+                if stream_loop_guard is not None and stream_loop_guard.append(new_text):
+                    loop_guard_state["triggered"] = True
+                    loop_guard_state["reason"] = stream_loop_guard.reason
+                    loop_guard_stop.set()
+                    _qwen_caption_stream_loop_detected_event(
+                        source="qwen_inference",
+                        runtime_platform=QWEN_PLATFORM_TRANSFORMERS,
+                        model_id=resolved_model_id,
+                        guard=stream_loop_guard,
+                    )
+                    break
             thread.join()
             if generation_errors:
                 raise generation_errors[0]
@@ -8003,6 +8838,8 @@ def _run_qwen_inference(
             triggered=bool(loop_guard_state.get("triggered")),
             replace_live_output=False,
         )
+        if bool(loop_guard_state.get("triggered")) and _qwen_caption_generation_active():
+            raise QwenCaptionLoopDetected("qwen_caption_repetition_loop")
         _qwen_progress_update(
             phase="generate",
             phase_label="Generated",
@@ -8017,6 +8854,8 @@ def _run_qwen_inference(
             triggered=bool(loop_guard_state.get("triggered")),
             replace_live_output=True,
         )
+        if bool(loop_guard_state.get("triggered")) and _qwen_caption_generation_active():
+            raise QwenCaptionLoopDetected("qwen_caption_repetition_loop")
         _qwen_progress_update(
             phase="generate",
             phase_label="Generated",
@@ -8124,12 +8963,15 @@ def _run_qwen_chat(
     )
     if assistant_prefix:
         text = f"{text}{assistant_prefix}"
+    resolved_model_id = (
+        model_id_override
+        or (active_qwen_metadata or {}).get("model_id")
+        or QWEN_MODEL_NAME
+    )
     _agent_full_trace_write(
         {
             "type": "llm_input",
-            "model_id": model_id_override
-            or (active_qwen_metadata or {}).get("model_id")
-            or QWEN_MODEL_NAME,
+            "model_id": resolved_model_id,
             "messages": messages,
             "prompt_text": text,
             "max_new_tokens": int(max_new_tokens) if max_new_tokens is not None else None,
@@ -8152,6 +8994,7 @@ def _run_qwen_chat(
     if max_seq_len:
         if requested_max >= max_seq_len:
             requested_max = max(1, max_seq_len - 1)
+    original_requested_max = requested_max
     preview_inputs = processor(
         text=[text],
         images=image_inputs,
@@ -8163,6 +9006,35 @@ def _run_qwen_chat(
     input_len = int(preview_inputs.input_ids.shape[1])
     num_images = len(image_inputs) if image_inputs is not None else 0
     effective_len, vision_tokens = _qwen_effective_input_len(preview_inputs, input_len, num_images)
+    explicit_budget = _caption_explicit_token_budget_active()
+    adapted_requested_max = _qwen_caption_prompt_aware_max_new_tokens(
+        requested_max,
+        prompt_tokens=int(effective_len),
+        model_id=resolved_model_id,
+        explicit=explicit_budget,
+    )
+    if (
+        _qwen_caption_generation_active()
+        and not explicit_budget
+        and adapted_requested_max != requested_max
+    ):
+        logger.info(
+            "[qwen-caption] prompt-aware Transformers chat output budget %s -> %s for %s prompt tokens",
+            requested_max,
+            adapted_requested_max,
+            effective_len,
+        )
+        requested_max = adapted_requested_max
+    _qwen_caption_io_prompt_budget(
+        call_id=qwen_llm_call_id_var.get(),
+        source="qwen_chat",
+        runtime_platform=QWEN_PLATFORM_TRANSFORMERS,
+        model_id=resolved_model_id,
+        prompt_tokens=int(effective_len),
+        requested_max_new_tokens=original_requested_max,
+        effective_max_new_tokens=requested_max,
+        explicit_max_new_tokens=explicit_budget,
+    )
     _qwen_progress_update(
         phase="prompt",
         phase_label="Preparing Prompt",
@@ -14723,6 +15595,24 @@ class QwenTrainingJob:
 
 
 @dataclass
+class QwenCaptionDatasetJob:
+    job_id: str
+    status: str = "queued"
+    progress: float = 0.0
+    message: str = "Queued"
+    request: Dict[str, Any] = field(default_factory=dict)
+    logs: List[Dict[str, Any]] = field(default_factory=list)
+    result: Optional[Dict[str, Any]] = None
+    output_dir: Optional[str] = None
+    error: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+    process: Optional[subprocess.Popen] = None
+    log_seq: int = 0
+
+
+@dataclass
 class QwenDatasetUploadJob:
     job_id: str
     root_dir: Path
@@ -14999,6 +15889,8 @@ class DataIngestionJob:
 
 QWEN_TRAINING_JOBS: Dict[str, QwenTrainingJob] = {}
 QWEN_TRAINING_JOBS_LOCK = threading.Lock()
+QWEN_CAPTION_DATASET_JOBS: Dict[str, QwenCaptionDatasetJob] = {}
+QWEN_CAPTION_DATASET_JOBS_LOCK = threading.Lock()
 SAM3_TRAINING_JOBS: Dict[str, Sam3TrainingJob] = {}
 SAM3_TRAINING_JOBS_LOCK = threading.Lock()
 YOLO_TRAINING_JOBS: Dict[str, YoloTrainingJob] = {}
@@ -15131,9 +16023,47 @@ CLIP_NEGATIVE_REPLAY_ROOT = UPLOAD_ROOT / "clip_negative_replay"
 _init_storage_root(CLIP_NEGATIVE_REPLAY_ROOT)
 QWEN_PREPASS_TRACE_ROOT = UPLOAD_ROOT / "qwen_prepass_traces"
 _init_storage_root(QWEN_PREPASS_TRACE_ROOT)
+QWEN_CAPTION_DATASET_JOB_ROOT = UPLOAD_ROOT / "qwen_caption_jobs"
+_init_storage_root(QWEN_CAPTION_DATASET_JOB_ROOT)
 QWEN_PREPASS_FULL_TRACE_ROOT = UPLOAD_ROOT / "qwen_prepass_traces_full"
 _init_storage_root(QWEN_PREPASS_FULL_TRACE_ROOT)
 QWEN_PREPASS_FULL_TRACE_LATEST = QWEN_PREPASS_FULL_TRACE_ROOT / "latest.jsonl"
+QWEN_CAPTION_SET_AND_FORGET_AUTO_RESUME = _env_bool("QWEN_CAPTION_SET_AND_FORGET_AUTO_RESUME", True)
+QWEN_CAPTION_SET_AND_FORGET_MAX_AUTO_RESUMES = max(
+    0,
+    _env_int("QWEN_CAPTION_SET_AND_FORGET_MAX_AUTO_RESUMES", 25),
+)
+QWEN_CAPTION_SET_AND_FORGET_SWEEP_INTERVAL_SECONDS = max(
+    0.0,
+    _env_float("QWEN_CAPTION_SET_AND_FORGET_SWEEP_INTERVAL_SECONDS", 300.0),
+)
+QWEN_CAPTION_SET_AND_FORGET_ADOPTION_POLL_SECONDS = max(
+    0.5,
+    _env_float("QWEN_CAPTION_SET_AND_FORGET_ADOPTION_POLL_SECONDS", 5.0),
+)
+QWEN_CAPTION_SET_AND_FORGET_REQUIRE_PILOT_CASES = max(
+    0,
+    _env_int("QWEN_CAPTION_SET_AND_FORGET_REQUIRE_PILOT_CASES", 10_000),
+)
+QWEN_CAPTION_SET_AND_FORGET_REQUIRE_BACKEND_SUPERVISION = _env_bool(
+    "QWEN_CAPTION_SET_AND_FORGET_REQUIRE_BACKEND_SUPERVISION",
+    True,
+)
+QWEN_CAPTION_DEFAULT_PILOT_MIN_CASES = max(
+    1,
+    _env_int("QWEN_CAPTION_DEFAULT_PILOT_MIN_CASES", 300),
+)
+QWEN_CAPTION_DEFAULT_PILOT_DETERMINISTIC_RECOVERY_CONFIDENCE = max(
+    0.0,
+    min(
+        _env_float("QWEN_CAPTION_DEFAULT_PILOT_DETERMINISTIC_RECOVERY_CONFIDENCE", 0.95),
+        0.999999,
+    ),
+)
+_QWEN_CAPTION_SET_AND_FORGET_AUTO_RESUME_LOCK = threading.Lock()
+_QWEN_CAPTION_SET_AND_FORGET_STARTUP_LOCK = threading.Lock()
+_QWEN_CAPTION_SET_AND_FORGET_STARTUP_DONE = False
+_QWEN_CAPTION_SET_AND_FORGET_SWEEPER_STOP = threading.Event()
 LOG_ROOT = Path("logs")
 _init_storage_root(LOG_ROOT)
 QWEN_PREPASS_READABLE_TRACE_ROOT = LOG_ROOT / "prepass_readable"
@@ -18969,15 +19899,7 @@ def get_text_labels(dataset_id: str, image_names: Sequence[str]):
 def set_text_label(dataset_id: str, image_name: str, payload: Dict[str, Any]):
     payload = payload or {}
     entry = _resolve_dataset_entry(dataset_id)
-    try:
-        meta_path = _dataset_meta_path_for_entry(entry)
-    except Exception:
-        meta_path = None
-    meta = _load_json_metadata(meta_path) if meta_path is not None else None
-    meta = meta if isinstance(meta, dict) else {}
-    lock = meta.get("annotation_lock") if isinstance(meta.get("annotation_lock"), dict) else {}
-    if _annotation_lock_is_active(lock):
-        _require_annotation_lock_owner(meta, payload)
+    _require_dataset_annotation_lock_owner_if_active(entry, payload)
     split, image_relpath = _annotation_text_split_rel_from_name(
         entry,
         image_name,
@@ -18988,6 +19910,4013 @@ def set_text_label(dataset_id: str, image_name: str, payload: Dict[str, Any]):
     overlay_root = _dataset_overlay_root_from_entry(entry, ensure=True)
     _annotation_write_text_within_root(text_path, overlay_root, caption)
     return {"status": "saved", "caption": caption}
+
+
+def _require_dataset_annotation_lock_owner_if_active(
+    entry: Dict[str, Any],
+    payload: Mapping[str, Any],
+) -> None:
+    try:
+        meta_path = _dataset_meta_path_for_entry(entry)
+    except Exception:
+        meta_path = None
+    meta = _load_json_metadata(meta_path) if meta_path is not None else None
+    meta = meta if isinstance(meta, dict) else {}
+    lock = meta.get("annotation_lock") if isinstance(meta.get("annotation_lock"), dict) else {}
+    if _annotation_lock_is_active(lock):
+        _require_annotation_lock_owner(meta, dict(payload or {}))
+
+
+def _dataset_caption_image_key(split: Optional[str], image_relpath: Path) -> str:
+    rel = image_relpath.as_posix().strip("/")
+    split_name = _annotation_normalise_split(split) if split else None
+    return f"{split_name}/{rel}" if split_name else rel
+
+
+def _dataset_caption_records_path(
+    entry: Dict[str, Any],
+    *,
+    ensure: bool = False,
+) -> Tuple[Path, Path]:
+    overlay_root = _dataset_overlay_root_from_entry(entry, ensure=ensure)
+    return overlay_root, overlay_root / "captions" / "captions.jsonl"
+
+
+def _dataset_caption_record_public(record: Mapping[str, Any]) -> Dict[str, Any]:
+    out = dict(record)
+    out["id"] = str(out.get("id") or "").strip()
+    out["image_name"] = str(out.get("image_name") or out.get("image") or "").strip()
+    out["image"] = out["image_name"]
+    out["image_key"] = str(out.get("image_key") or out["image_name"]).strip()
+    out["caption"] = str(out.get("caption") or "").strip()
+    out["source"] = str(out.get("source") or "manual").strip() or "manual"
+    out["title"] = str(out.get("title") or "").strip()
+    out["split"] = str(out.get("split") or "").strip() or None
+    out["is_primary"] = bool(out.get("is_primary"))
+    out["created_at"] = str(out.get("created_at") or "").strip()
+    out["updated_at"] = str(out.get("updated_at") or out.get("created_at") or "").strip()
+    metadata = out.get("metadata")
+    out["metadata"] = dict(metadata) if isinstance(metadata, Mapping) else {}
+    return out
+
+
+def _load_dataset_caption_records(entry: Dict[str, Any]) -> List[Dict[str, Any]]:
+    overlay_root, records_path = _dataset_caption_records_path(entry, ensure=False)
+    raw = _annotation_read_text_within_root(records_path, overlay_root)
+    if raw is None:
+        return []
+    records: List[Dict[str, Any]] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(record, Mapping):
+            continue
+        public = _dataset_caption_record_public(record)
+        if public.get("id") and public.get("image_key") and public.get("caption"):
+            records.append(public)
+    return records
+
+
+def _write_dataset_caption_records(
+    entry: Dict[str, Any],
+    records: Sequence[Mapping[str, Any]],
+) -> None:
+    overlay_root, records_path = _dataset_caption_records_path(entry, ensure=True)
+    lines = [
+        json.dumps(_dataset_caption_record_public(record), ensure_ascii=False, sort_keys=True)
+        for record in records
+        if isinstance(record, Mapping)
+    ]
+    _annotation_write_text_within_root(records_path, overlay_root, "\n".join(lines) + ("\n" if lines else ""))
+
+
+def _dataset_caption_context(
+    entry: Dict[str, Any],
+    image_name: str,
+    payload: Optional[Mapping[str, Any]] = None,
+) -> Tuple[Optional[str], Path, str]:
+    payload = payload or {}
+    split, image_relpath = _annotation_text_split_rel_from_name(
+        entry,
+        image_name,
+        split=payload.get("split") if "split" in payload else None,
+    )
+    return split, image_relpath, _dataset_caption_image_key(split, image_relpath)
+
+
+def _dataset_caption_records_for_key(
+    records: Sequence[Mapping[str, Any]],
+    image_key: str,
+) -> List[Dict[str, Any]]:
+    matched = [
+        _dataset_caption_record_public(record)
+        for record in records
+        if str(record.get("image_key") or "").strip() == image_key
+    ]
+    matched.sort(key=lambda item: (
+        0 if bool(item.get("is_primary")) else 1,
+        item.get("created_at") or "",
+        item.get("id") or "",
+    ))
+    return matched
+
+
+def _dataset_caption_synthetic_primary(
+    *,
+    dataset_id: str,
+    image_name: str,
+    image_key: str,
+    split: Optional[str],
+    caption: str,
+) -> Optional[Dict[str, Any]]:
+    caption = str(caption or "").strip()
+    if not caption:
+        return None
+    digest = hashlib.sha1(f"{dataset_id}|{image_key}|{caption}".encode("utf-8")).hexdigest()[:16]
+    return {
+        "id": f"primary_{digest}",
+        "image_name": image_name,
+        "image": image_name,
+        "image_key": image_key,
+        "split": split,
+        "caption": caption,
+        "title": "Primary text label",
+        "source": "text_label",
+        "is_primary": True,
+        "created_at": "",
+        "updated_at": "",
+        "metadata": {"synthetic": True},
+    }
+
+
+def _dataset_caption_bundle_for_image(
+    dataset_id: str,
+    entry: Dict[str, Any],
+    image_name: str,
+) -> Dict[str, Any]:
+    split, image_relpath, image_key = _dataset_caption_context(entry, image_name)
+    primary_caption = _annotation_effective_text_label(entry, image_relpath, split)
+    records = _dataset_caption_records_for_key(_load_dataset_caption_records(entry), image_key)
+    return {
+        "dataset_id": dataset_id,
+        "image_name": image_name,
+        "image_key": image_key,
+        "split": split,
+        "primary_caption": primary_caption,
+        "captions": records,
+    }
+
+
+def get_captions(dataset_id: str, image_name: str):
+    entry = _resolve_dataset_entry(dataset_id)
+    return _dataset_caption_bundle_for_image(dataset_id, entry, image_name)
+
+
+def get_captions_batch(dataset_id: str, image_names: Sequence[str]):
+    entry = _resolve_dataset_entry(dataset_id)
+    bundles: Dict[str, Any] = {}
+    for raw_name in image_names or []:
+        image_name = str(raw_name or "").strip()
+        if not image_name:
+            continue
+        try:
+            bundles[image_name] = _dataset_caption_bundle_for_image(dataset_id, entry, image_name)
+        except HTTPException:
+            bundles[image_name] = {
+                "dataset_id": dataset_id,
+                "image_name": image_name,
+                "primary_caption": "",
+                "captions": [],
+            }
+    return {"dataset_id": dataset_id, "images": bundles}
+
+
+def add_caption(dataset_id: str, image_name: str, payload: Dict[str, Any]):
+    payload = payload or {}
+    entry = _resolve_dataset_entry(dataset_id)
+    _require_dataset_annotation_lock_owner_if_active(entry, payload)
+    split, image_relpath, image_key = _dataset_caption_context(entry, image_name, payload)
+    caption = str(payload.get("caption") or "").strip()
+    if not caption:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="caption_required")
+    records = _load_dataset_caption_records(entry)
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    make_primary = bool(payload.get("make_primary"))
+    existing_primary = _annotation_effective_text_label(entry, image_relpath, split)
+    if not existing_primary:
+        make_primary = True
+    record = {
+        "id": f"cap_{uuid.uuid4().hex}",
+        "image_name": image_name,
+        "image": image_name,
+        "image_key": image_key,
+        "split": split,
+        "caption": caption,
+        "title": str(payload.get("title") or "").strip(),
+        "source": str(payload.get("source") or "manual").strip() or "manual",
+        "is_primary": make_primary,
+        "created_at": now,
+        "updated_at": now,
+        "metadata": dict(payload.get("metadata")) if isinstance(payload.get("metadata"), Mapping) else {},
+    }
+    if make_primary:
+        for existing in records:
+            if str(existing.get("image_key") or "") == image_key:
+                existing["is_primary"] = False
+        text_payload = {"caption": caption, "split": split}
+        session_id = str(payload.get("session_id") or "").strip()
+        if session_id:
+            text_payload["session_id"] = session_id
+        set_text_label(dataset_id, image_name, text_payload)
+    records.append(record)
+    _write_dataset_caption_records(entry, records)
+    return {
+        "status": "saved",
+        "caption": _dataset_caption_record_public(record),
+        "primary_caption": caption if make_primary else existing_primary,
+    }
+
+
+def update_caption(dataset_id: str, caption_id: str, payload: Dict[str, Any]):
+    payload = payload or {}
+    entry = _resolve_dataset_entry(dataset_id)
+    _require_dataset_annotation_lock_owner_if_active(entry, payload)
+    records = _load_dataset_caption_records(entry)
+    caption_id = str(caption_id or "").strip()
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    updated: Optional[Dict[str, Any]] = None
+    for record in records:
+        if str(record.get("id") or "").strip() != caption_id:
+            continue
+        caption_changed = False
+        if "caption" in payload:
+            caption = str(payload.get("caption") or "").strip()
+            if not caption:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="caption_required")
+            record["caption"] = caption
+            caption_changed = True
+        if "title" in payload:
+            record["title"] = str(payload.get("title") or "").strip()
+        if "source" in payload:
+            record["source"] = str(payload.get("source") or "manual").strip() or "manual"
+        if isinstance(payload.get("metadata"), Mapping):
+            record["metadata"] = dict(payload.get("metadata") or {})
+        make_primary = bool(payload.get("make_primary"))
+        if make_primary:
+            for existing in records:
+                if str(existing.get("image_key") or "") == str(record.get("image_key") or ""):
+                    existing["is_primary"] = False
+            record["is_primary"] = True
+        if make_primary or (caption_changed and bool(record.get("is_primary"))):
+            text_payload = {"caption": str(record.get("caption") or ""), "split": record.get("split")}
+            session_id = str(payload.get("session_id") or "").strip()
+            if session_id:
+                text_payload["session_id"] = session_id
+            set_text_label(dataset_id, str(record.get("image_name") or ""), text_payload)
+        record["updated_at"] = now
+        updated = _dataset_caption_record_public(record)
+        break
+    if not updated:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="caption_not_found")
+    _write_dataset_caption_records(entry, records)
+    return {"status": "saved", "caption": updated}
+
+
+def delete_caption(dataset_id: str, caption_id: str, payload: Optional[Dict[str, Any]] = None):
+    payload = payload or {}
+    entry = _resolve_dataset_entry(dataset_id)
+    _require_dataset_annotation_lock_owner_if_active(entry, payload)
+    records = _load_dataset_caption_records(entry)
+    caption_id = str(caption_id or "").strip()
+    kept = [record for record in records if str(record.get("id") or "").strip() != caption_id]
+    if len(kept) == len(records):
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="caption_not_found")
+    _write_dataset_caption_records(entry, kept)
+    return {"status": "deleted", "caption_id": caption_id}
+
+
+CAPTION_INSTRUCTION_ARCHIVE_FORMAT = "tator_caption_instruction_archive_v1"
+CAPTION_INSTRUCTION_SOURCE_ANNOTATIONS_FORMAT = "tator_source_annotations_v1"
+CAPTION_INSTRUCTION_TRAINING_ROWS_FORMAT = "tator_caption_instruction_rows_v1"
+
+
+def _dataset_caption_instruction_records_path(
+    entry: Dict[str, Any],
+    *,
+    ensure: bool = False,
+) -> Tuple[Path, Path]:
+    overlay_root = _dataset_overlay_root_from_entry(entry, ensure=ensure)
+    return overlay_root, overlay_root / "captions" / "instruction_records.jsonl"
+
+
+def _dataset_caption_instruction_record_public(record: Mapping[str, Any]) -> Dict[str, Any]:
+    out = dict(record)
+    out["id"] = str(out.get("id") or "").strip()
+    out["image_name"] = str(out.get("image_name") or out.get("image") or "").strip()
+    out["image"] = out["image_name"]
+    out["image_key"] = str(out.get("image_key") or out["image_name"]).strip()
+    out["split"] = str(out.get("split") or "").strip() or None
+    out["question"] = str(out.get("question") or "").strip()
+    out["answer"] = str(out.get("answer") or "").strip()
+    out["row_type"] = str(out.get("row_type") or "generated_qa").strip() or "generated_qa"
+    out["answer_source"] = str(out.get("answer_source") or "vlm_generated").strip() or "vlm_generated"
+    out["caption_id"] = str(out.get("caption_id") or "").strip()
+    out["caption"] = str(out.get("caption") or "").strip()
+    out["created_at"] = str(out.get("created_at") or "").strip()
+    out["updated_at"] = str(out.get("updated_at") or out.get("created_at") or "").strip()
+    metadata = out.get("metadata")
+    out["metadata"] = dict(metadata) if isinstance(metadata, Mapping) else {}
+    validation = out.get("validation")
+    out["validation"] = dict(validation) if isinstance(validation, Mapping) else {}
+    return out
+
+
+def _dataset_caption_instruction_record_key(record: Mapping[str, Any]) -> Tuple[str, str, str, str]:
+    public = _dataset_caption_instruction_record_public(record)
+    return (
+        str(public.get("image_key") or public.get("image_name") or "").strip(),
+        str(public.get("row_type") or "").strip(),
+        re.sub(r"\s+", " ", str(public.get("question") or "").strip().lower()),
+        re.sub(r"\s+", " ", str(public.get("answer") or "").strip().lower()),
+    )
+
+
+def _load_dataset_caption_instruction_records(entry: Dict[str, Any]) -> List[Dict[str, Any]]:
+    overlay_root, records_path = _dataset_caption_instruction_records_path(entry, ensure=False)
+    raw = _annotation_read_text_within_root(records_path, overlay_root)
+    if raw is None:
+        return []
+    records: List[Dict[str, Any]] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(record, Mapping):
+            continue
+        public = _dataset_caption_instruction_record_public(record)
+        if public.get("id") and public.get("image_key") and public.get("question") and public.get("answer"):
+            records.append(public)
+    return records
+
+
+def _write_dataset_caption_instruction_records(
+    entry: Dict[str, Any],
+    records: Sequence[Mapping[str, Any]],
+) -> None:
+    overlay_root, records_path = _dataset_caption_instruction_records_path(entry, ensure=True)
+    lines = [
+        json.dumps(_dataset_caption_instruction_record_public(record), ensure_ascii=False, sort_keys=True)
+        for record in records
+        if isinstance(record, Mapping)
+    ]
+    _annotation_write_text_within_root(records_path, overlay_root, "\n".join(lines) + ("\n" if lines else ""))
+
+
+def _dataset_caption_add_instruction_records(
+    dataset_id: str,
+    image_name: str,
+    records: Sequence[Mapping[str, Any]],
+    *,
+    split: Optional[str] = None,
+) -> int:
+    if not records:
+        return 0
+    entry = _resolve_dataset_entry(dataset_id)
+    split_name, image_relpath, image_key = _dataset_caption_context(
+        entry,
+        image_name,
+        {"split": split} if split else None,
+    )
+    existing = _load_dataset_caption_instruction_records(entry)
+    seen = {_dataset_caption_instruction_record_key(record) for record in existing}
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    added = 0
+    for raw_record in records:
+        if not isinstance(raw_record, Mapping):
+            continue
+        question = str(raw_record.get("question") or "").strip()
+        answer = str(raw_record.get("answer") or "").strip()
+        if not question or not answer:
+            continue
+        record = {
+            "id": str(raw_record.get("id") or f"inst_{uuid.uuid4().hex}").strip(),
+            "image_name": image_name,
+            "image": image_name,
+            "image_key": image_key,
+            "split": split_name,
+            "question": question,
+            "answer": answer,
+            "row_type": str(raw_record.get("row_type") or "generated_qa").strip() or "generated_qa",
+            "answer_source": str(raw_record.get("answer_source") or "vlm_generated").strip() or "vlm_generated",
+            "caption_id": str(raw_record.get("caption_id") or "").strip(),
+            "caption": str(raw_record.get("caption") or "").strip(),
+            "created_at": str(raw_record.get("created_at") or now).strip(),
+            "updated_at": now,
+            "metadata": dict(raw_record.get("metadata")) if isinstance(raw_record.get("metadata"), Mapping) else {},
+            "validation": dict(raw_record.get("validation")) if isinstance(raw_record.get("validation"), Mapping) else {},
+        }
+        key = _dataset_caption_instruction_record_key(record)
+        if key in seen:
+            continue
+        existing.append(record)
+        seen.add(key)
+        added += 1
+    if added:
+        _write_dataset_caption_instruction_records(entry, existing)
+    return added
+
+
+def _caption_instruction_label_name(class_idx: int, labelmap: Sequence[str]) -> str:
+    if 0 <= class_idx < len(labelmap):
+        raw = str(labelmap[class_idx] or "").strip()
+    else:
+        raw = f"class_{class_idx}"
+    return {
+        "LightVehicle": "Light Vehicle",
+        "UPole": "U Pole",
+        "Solarpanels": "Solar Panels",
+        "Gastank": "Gas Tank",
+    }.get(raw, raw)
+
+
+def _caption_instruction_source_annotations_from_row(
+    row: Mapping[str, Any],
+    labelmap: Sequence[str],
+) -> Dict[str, Any]:
+    raw_lines = [str(line or "").strip() for line in (row.get("label_lines") or []) if str(line or "").strip()]
+    annotations: List[Dict[str, Any]] = []
+    for index, line in enumerate(raw_lines, start=1):
+        parts = line.split()
+        if len(parts) < 5:
+            continue
+        try:
+            class_idx = int(float(parts[0]))
+            bbox = [float(value) for value in parts[1:5]]
+        except (TypeError, ValueError, OverflowError):
+            continue
+        annotations.append(
+            {
+                "annotation_id": f"label_{index:04d}",
+                "class_index": class_idx,
+                "class_name": _caption_instruction_label_name(class_idx, labelmap),
+                "bbox_xywhn": bbox,
+                "source": "label_file",
+            }
+        )
+    counts = _qwen_caption_label_counts_from_lines(raw_lines, labelmap)
+    return {
+        "format": CAPTION_INSTRUCTION_SOURCE_ANNOTATIONS_FORMAT,
+        "status": "labeled_with_boxes" if annotations else "no_labeled_boxes",
+        "object_counts": counts,
+        "annotations": annotations,
+        "provenance": {
+            "source": "dataset_manifest_label_lines",
+            "note": "Generated language rows are not source annotations.",
+        },
+    }
+
+
+def _caption_instruction_deterministic_qa_pairs(
+    image_name: str,
+    source_annotations: Mapping[str, Any],
+) -> List[Dict[str, Any]]:
+    counts = source_annotations.get("object_counts") if isinstance(source_annotations, Mapping) else {}
+    if not isinstance(counts, Mapping):
+        return []
+    rows: List[Dict[str, Any]] = []
+    positive_counts = []
+    for label, count in counts.items():
+        label_name = str(label or "").strip()
+        if not label_name:
+            continue
+        try:
+            count_value = int(count or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        positive_counts.append((label_name, count_value))
+    positive_counts = [(label, count) for label, count in positive_counts if count > 0]
+    if not positive_counts:
+        return rows
+    labels = ", ".join(label for label, _count in sorted(positive_counts, key=lambda item: item[0].lower()))
+    rows.append(
+        {
+            "qa_id": f"{image_name}__metadata_classes",
+            "question": "Which labeled object classes are present in this image?",
+            "answer": labels,
+            "row_type": "deterministic_metadata_qa",
+            "answer_source": "source_annotations",
+        }
+    )
+    count_answer = "; ".join(
+        f"{label}: {count}" for label, count in sorted(positive_counts, key=lambda item: item[0].lower())
+    )
+    rows.append(
+        {
+            "qa_id": f"{image_name}__metadata_counts",
+            "question": "How many labeled objects are present for each class in this image?",
+            "answer": count_answer,
+            "row_type": "deterministic_metadata_qa",
+            "answer_source": "source_annotations",
+        }
+    )
+    return rows
+
+
+def _caption_instruction_export_settings(options: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    options = options or {}
+
+    def _as_bool(name: str, default: bool) -> bool:
+        value = options.get(name)
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        raw = str(value).strip().lower()
+        if raw in {"1", "true", "yes", "on"}:
+            return True
+        if raw in {"0", "false", "no", "off"}:
+            return False
+        return default
+
+    return {
+        "include_caption0_in_training": _as_bool("include_caption0_in_training", True),
+        "include_generated_qa_in_training": _as_bool("include_generated_qa_in_training", True),
+        "include_deterministic_metadata_qa": _as_bool("include_deterministic_metadata_qa", False),
+    }
+
+
+def _caption_instruction_training_row(
+    *,
+    image_name: str,
+    question: str,
+    answer: str,
+    row_type: str,
+    answer_source: str,
+    qa_id: str,
+    metadata: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    return {
+        "image_path": image_name,
+        "question": question,
+        "answer": answer,
+        "metadata": {
+            "qa_id": qa_id,
+            "row_type": row_type,
+            "answer_source": answer_source,
+            **(dict(metadata) if isinstance(metadata, Mapping) else {}),
+        },
+    }
+
+
+def _dataset_caption_instruction_archive(
+    indexed_records: Sequence[Mapping[str, Any]],
+    instruction_records: Sequence[Mapping[str, Any]],
+    *,
+    dataset_id: str,
+    entry: Dict[str, Any],
+    settings: Mapping[str, Any],
+    exported_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    exported_at = exported_at or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    manifest = _annotation_manifest_for_entry(entry)
+    labelmap = [str(label or "").strip() for label in (manifest.get("labelmap") or []) if str(label or "").strip()]
+    rows_by_key: Dict[str, Dict[str, Any]] = {}
+    for row in manifest.get("images") or []:
+        if not isinstance(row, Mapping):
+            continue
+        split = _annotation_normalise_split(row.get("split"))
+        rel = _annotation_normalise_image_relpath(row.get("image_relpath") or row.get("image_name"))
+        image_name = str(row.get("image_name") or rel.as_posix()).strip()
+        image_key = _dataset_caption_image_key(split, rel)
+        rows_by_key[image_key] = {
+            "image_name": image_name,
+            "image_key": image_key,
+            "split": split,
+            "source_annotations": _caption_instruction_source_annotations_from_row(row, labelmap),
+        }
+    for record in indexed_records:
+        public = _dataset_caption_record_public(record)
+        image_key = str(public.get("image_key") or public.get("image_name") or "").strip()
+        if image_key and image_key not in rows_by_key:
+            rows_by_key[image_key] = {
+                "image_name": str(public.get("image_name") or image_key).strip(),
+                "image_key": image_key,
+                "split": public.get("split"),
+                "source_annotations": {
+                    "format": CAPTION_INSTRUCTION_SOURCE_ANNOTATIONS_FORMAT,
+                    "status": "source_manifest_row_missing",
+                    "object_counts": {},
+                    "annotations": [],
+                    "provenance": {"source": "caption_record_only"},
+                },
+            }
+    records_by_key: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for record in indexed_records:
+        public = _dataset_caption_record_public(record)
+        image_key = str(public.get("image_key") or public.get("image_name") or "").strip()
+        if image_key and public.get("caption"):
+            records_by_key[image_key].append(public)
+    instruction_by_key: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for record in instruction_records:
+        public = _dataset_caption_instruction_record_public(record)
+        image_key = str(public.get("image_key") or public.get("image_name") or "").strip()
+        if image_key and public.get("question") and public.get("answer"):
+            instruction_by_key[image_key].append(public)
+            if image_key not in rows_by_key:
+                rows_by_key[image_key] = {
+                    "image_name": str(public.get("image_name") or image_key).strip(),
+                    "image_key": image_key,
+                    "split": public.get("split"),
+                    "source_annotations": {
+                        "format": CAPTION_INSTRUCTION_SOURCE_ANNOTATIONS_FORMAT,
+                        "status": "source_manifest_row_missing",
+                        "object_counts": {},
+                        "annotations": [],
+                        "provenance": {"source": "instruction_record_only"},
+                    },
+                }
+    images: List[Dict[str, Any]] = []
+    training_rows: List[Dict[str, Any]] = []
+    rejections: List[Dict[str, Any]] = []
+    seen_image_question: Set[Tuple[str, str]] = set()
+
+    def _append_training_row(row: Dict[str, Any]) -> None:
+        image_path = str(row.get("image_path") or "").strip()
+        question = str(row.get("question") or "").strip()
+        answer = str(row.get("answer") or "").strip()
+        if not image_path or not question or not answer:
+            rejections.append({"reason": "missing_required_field", "row": row})
+            return
+        key = (image_path, question)
+        if key in seen_image_question:
+            rejections.append({"reason": "duplicate_image_question", "image_path": image_path, "question": question})
+            return
+        seen_image_question.add(key)
+        training_rows.append(row)
+
+    for image_key in sorted(rows_by_key):
+        row_data = rows_by_key[image_key]
+        image_name = str(row_data.get("image_name") or image_key).strip()
+        captions = records_by_key.get(image_key, [])
+        def _caption_sort_index(item: Mapping[str, Any]) -> int:
+            try:
+                return max(0, int(item.get("caption_index") or 0))
+            except (TypeError, ValueError, OverflowError):
+                return 0
+
+        captions.sort(
+            key=lambda item: (
+                0 if bool(item.get("is_primary")) else 1,
+                _caption_sort_index(item),
+                item.get("created_at") or "",
+            )
+        )
+        caption0 = captions[0] if captions else None
+        generated_pairs = instruction_by_key.get(image_key, [])
+        deterministic_pairs = (
+            _caption_instruction_deterministic_qa_pairs(
+                image_name,
+                row_data.get("source_annotations") if isinstance(row_data.get("source_annotations"), Mapping) else {},
+            )
+            if bool(settings.get("include_deterministic_metadata_qa"))
+            else []
+        )
+        image_entry = {
+            "image": image_name,
+            "image_name": image_name,
+            "image_key": image_key,
+            "split": row_data.get("split"),
+            "source_annotations": row_data.get("source_annotations"),
+            "language_annotations": {
+                "caption0": {
+                    "caption_id": str(caption0.get("id") or "").strip(),
+                    "caption": str(caption0.get("caption") or "").strip(),
+                    "source": str(caption0.get("source") or "").strip(),
+                    "metadata": dict(caption0.get("metadata") or {}),
+                }
+                if caption0
+                else None,
+                "generated_qa_pairs": generated_pairs,
+            },
+            "deterministic_metadata_qa_pairs": deterministic_pairs,
+        }
+        if caption0 and bool(settings.get("include_caption0_in_training")):
+            _append_training_row(
+                _caption_instruction_training_row(
+                    image_name=image_name,
+                    question="Describe this image in detail.",
+                    answer=str(caption0.get("caption") or "").strip(),
+                    row_type="caption0",
+                    answer_source=str(caption0.get("source") or "caption_record").strip() or "caption_record",
+                    qa_id=str(caption0.get("id") or f"{image_name}__caption0").strip(),
+                    metadata={
+                        "caption_id": str(caption0.get("id") or "").strip(),
+                        "source_archive": CAPTION_INSTRUCTION_ARCHIVE_FORMAT,
+                    },
+                )
+            )
+        if bool(settings.get("include_generated_qa_in_training")):
+            for pair in generated_pairs:
+                _append_training_row(
+                    _caption_instruction_training_row(
+                        image_name=image_name,
+                        question=str(pair.get("question") or "").strip(),
+                        answer=str(pair.get("answer") or "").strip(),
+                        row_type=str(pair.get("row_type") or "generated_qa").strip() or "generated_qa",
+                        answer_source=str(pair.get("answer_source") or "vlm_generated").strip() or "vlm_generated",
+                        qa_id=str(pair.get("id") or f"{image_name}__generated_qa").strip(),
+                        metadata={
+                            "caption_id": str(pair.get("caption_id") or "").strip(),
+                            "source_archive": CAPTION_INSTRUCTION_ARCHIVE_FORMAT,
+                            **(dict(pair.get("metadata")) if isinstance(pair.get("metadata"), Mapping) else {}),
+                        },
+                    )
+                )
+        for pair in deterministic_pairs:
+            _append_training_row(
+                _caption_instruction_training_row(
+                    image_name=image_name,
+                    question=str(pair.get("question") or "").strip(),
+                    answer=str(pair.get("answer") or "").strip(),
+                    row_type="deterministic_metadata_qa",
+                    answer_source="source_annotations",
+                    qa_id=str(pair.get("qa_id") or f"{image_name}__metadata_qa").strip(),
+                    metadata={"source_archive": CAPTION_INSTRUCTION_ARCHIVE_FORMAT},
+                )
+            )
+        if caption0 or generated_pairs or deterministic_pairs:
+            images.append(image_entry)
+    return {
+        "format": CAPTION_INSTRUCTION_ARCHIVE_FORMAT,
+        "dataset_id": str(dataset_id or "").strip() or None,
+        "exported_at": exported_at,
+        "settings": dict(settings),
+        "image_count": len(images),
+        "caption0_count": sum(1 for image in images if (image.get("language_annotations") or {}).get("caption0")),
+        "generated_qa_pair_count": sum(
+            len((image.get("language_annotations") or {}).get("generated_qa_pairs") or [])
+            for image in images
+        ),
+        "deterministic_metadata_qa_pair_count": sum(
+            len(image.get("deterministic_metadata_qa_pairs") or [])
+            for image in images
+        ),
+        "training_row_count": len(training_rows),
+        "rejected_training_row_count": len(rejections),
+        "rejections": rejections,
+        "images": images,
+        "training_rows": training_rows,
+    }
+
+
+def _qwen_caption_dataset_generated_qa_pairs_from_row(row: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    artifact_dir = str(row.get("artifact_dir") or "").strip()
+    if not artifact_dir:
+        return []
+    result_path = Path(artifact_dir) / "result.json"
+    if not result_path.exists():
+        return []
+    try:
+        result = json.loads(result_path.read_text())
+    except Exception:
+        return []
+    response = result.get("response") if isinstance(result.get("response"), Mapping) else {}
+    instruction_qa = result.get("instruction_qa") if isinstance(result.get("instruction_qa"), Mapping) else {}
+    raw_pairs = response.get("generated_qa_pairs") if isinstance(response, Mapping) else None
+    if not isinstance(raw_pairs, list):
+        raw_pairs = instruction_qa.get("pairs") if isinstance(instruction_qa.get("pairs"), list) else []
+    pairs: List[Dict[str, Any]] = []
+    for index, raw_pair in enumerate(raw_pairs, start=1):
+        if not isinstance(raw_pair, Mapping):
+            continue
+        question = str(raw_pair.get("question") or "").strip()
+        answer = str(raw_pair.get("answer") or "").strip()
+        if not question or not answer:
+            continue
+        pair = {
+            "id": str(raw_pair.get("id") or raw_pair.get("qa_id") or f"generated_qa_{index:04d}").strip(),
+            "question": question,
+            "answer": answer,
+            "row_type": "generated_qa",
+            "answer_source": str(raw_pair.get("answer_source") or "vlm_generated").strip() or "vlm_generated",
+            "metadata": dict(raw_pair.get("metadata")) if isinstance(raw_pair.get("metadata"), Mapping) else {},
+            "validation": dict(raw_pair.get("validation")) if isinstance(raw_pair.get("validation"), Mapping) else {},
+        }
+        pairs.append(pair)
+    return pairs
+
+
+def _qwen_caption_dataset_save_instruction_records_from_row(
+    *,
+    dataset_id: str,
+    row: Mapping[str, Any],
+    job: QwenCaptionDatasetJob,
+) -> int:
+    caption_record = _qwen_caption_dataset_caption_record_from_row(row)
+    if not caption_record:
+        return 0
+    image_name = str(caption_record.get("image_name") or "").strip()
+    if not image_name:
+        return 0
+    pairs = _qwen_caption_dataset_generated_qa_pairs_from_row(row)
+    if not pairs:
+        return 0
+    caption = str(caption_record.get("caption") or "").strip()
+    caption_id = str(caption_record.get("case_id") or "").strip()
+    enriched = []
+    for pair in pairs:
+        metadata = dict(pair.get("metadata") or {})
+        metadata.update(
+            {
+                "case_id": caption_record.get("case_id"),
+                "artifact_dir": caption_record.get("artifact_dir"),
+                "caption_quality": caption_record.get("caption_quality") or {},
+            }
+        )
+        enriched.append(
+            {
+                **pair,
+                "caption": caption,
+                "caption_id": caption_id,
+                "metadata": metadata,
+            }
+        )
+    added = _dataset_caption_add_instruction_records(
+        dataset_id,
+        image_name,
+        enriched,
+        split=str(caption_record.get("split") or "").strip() or None,
+    )
+    if added:
+        _qwen_caption_dataset_job_log(
+            job,
+            f"saved {added} generated QA rows {image_name}",
+            image_name=image_name,
+            generated_qa_rows=added,
+        )
+    return added
+
+
+CAPTION_VLM_TRAINING_QUESTIONS = (
+    'Describe the drone image. Return only valid JSON with exactly one key: "caption".',
+    'Write a grounded alternate caption for this drone image. Return only valid JSON with exactly one key: "caption".',
+    'Describe the scene, setting, visible objects, and spatial relationships in this drone image. Return only valid JSON with exactly one key: "caption".',
+    'Summarize the visible drone-image scene with concrete visual details. Return only valid JSON with exactly one key: "caption".',
+    'Provide a careful visual caption for this drone image. Return only valid JSON with exactly one key: "caption".',
+)
+
+
+def _caption_vlm_training_question(caption_index: int) -> str:
+    try:
+        index = max(int(caption_index), 1)
+    except (TypeError, ValueError):
+        index = 1
+    if index <= len(CAPTION_VLM_TRAINING_QUESTIONS):
+        return CAPTION_VLM_TRAINING_QUESTIONS[index - 1]
+    return (
+        f'Provide grounded visual caption variant {index} for this drone image. '
+        'Return only valid JSON with exactly one key: "caption".'
+    )
+
+
+def _dataset_caption_vlm_training_row(
+    public: Mapping[str, Any],
+    *,
+    dataset_id: str,
+    source_archive: str = "tator_caption_grouped_v1",
+) -> Dict[str, Any]:
+    image_name = str(public.get("image_name") or public.get("image_key") or "").strip()
+    caption = str(public.get("caption") or "").strip()
+    try:
+        caption_index = max(int(public.get("caption_index") or 1), 1)
+    except (TypeError, ValueError):
+        caption_index = 1
+    caption_id = str(public.get("id") or "").strip()
+    is_primary = bool(public.get("is_primary"))
+    row_type = "caption0" if is_primary and caption_index == 1 else "alternate_caption"
+    return {
+        "image_path": image_name,
+        "question": _caption_vlm_training_question(caption_index),
+        "answer": json.dumps({"caption": caption}, ensure_ascii=False),
+        "metadata": {
+            "qa_id": caption_id or f"{image_name}__caption_{caption_index:04d}",
+            "row_type": row_type,
+            "answer_source": str(public.get("source") or "tator_caption_record").strip() or "tator_caption_record",
+            "caption_id": caption_id,
+            "caption_index": caption_index,
+            "is_primary": is_primary,
+            "dataset_id": str(dataset_id or "").strip(),
+            "source_archive": source_archive,
+        },
+    }
+
+
+def _dataset_caption_grouped_archive(
+    indexed_records: Sequence[Mapping[str, Any]],
+    *,
+    dataset_id: str,
+    summary: Mapping[str, Any],
+    exported_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    exported_at = exported_at or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    images_by_name: Dict[str, Dict[str, Any]] = {}
+    for record in indexed_records:
+        public = _dataset_caption_record_public(record)
+        image_name = str(public.get("image_name") or public.get("image_key") or "").strip()
+        caption = str(public.get("caption") or "").strip()
+        if not image_name or not caption:
+            continue
+        group = images_by_name.setdefault(
+            image_name,
+            {
+                "image": image_name,
+                "image_name": image_name,
+                "image_key": str(public.get("image_key") or image_name).strip(),
+                "split": public.get("split"),
+                "caption_count": 0,
+                "primary_caption": "",
+                "captions": [],
+            },
+        )
+        caption_index = len(group["captions"]) + 1
+        try:
+            caption_index = max(int(public.get("caption_index") or caption_index), 1)
+        except (TypeError, ValueError):
+            pass
+        caption_out = {
+            "caption_id": str(public.get("id") or "").strip(),
+            "caption_index": caption_index,
+            "caption": caption,
+            "is_primary": bool(public.get("is_primary")),
+            "caption_source": str(public.get("source") or "").strip(),
+            "title": str(public.get("title") or "").strip(),
+            "created_at": str(public.get("created_at") or "").strip(),
+            "updated_at": str(public.get("updated_at") or "").strip(),
+            "metadata": dict(public.get("metadata") or {}),
+        }
+        group["captions"].append(caption_out)
+        group["caption_count"] = len(group["captions"])
+        if caption_out["is_primary"] or not group["primary_caption"]:
+            group["primary_caption"] = caption
+    images = list(images_by_name.values())
+    return {
+        "format": "tator_caption_grouped_v1",
+        "dataset_id": str(dataset_id or "").strip() or None,
+        "exported_at": exported_at,
+        "image_count": len(images),
+        "caption_count": sum(int(image.get("caption_count") or 0) for image in images),
+        "summary": dict(summary),
+        "images": images,
+    }
+
+
+def export_captions(dataset_id: str, options: Optional[Mapping[str, Any]] = None):
+    entry = _resolve_dataset_entry(dataset_id)
+    records = [_dataset_caption_record_public(record) for record in _load_dataset_caption_records(entry)]
+    existing = {
+        (
+            str(record.get("image_key") or ""),
+            str(record.get("caption") or "").strip(),
+        )
+        for record in records
+    }
+    for image in _annotation_collect_images(entry):
+        image_name = str(image.get("image_name") or "").strip()
+        split = str(image.get("split") or "").strip() or None
+        rel = Path(str(image.get("image_relpath") or image_name))
+        image_key = _dataset_caption_image_key(split, rel)
+        caption = _annotation_effective_text_label(entry, rel, split)
+        key = (image_key, caption)
+        if caption and key not in existing:
+            primary = _dataset_caption_synthetic_primary(
+                dataset_id=dataset_id,
+                image_name=image_name,
+                image_key=image_key,
+                split=split,
+                caption=caption,
+            )
+            if primary:
+                records.append(primary)
+                existing.add(key)
+    records = [
+        record for _index, record in sorted(
+            enumerate(records),
+            key=lambda item: (
+                str(item[1].get("image_key") or ""),
+                0 if bool(item[1].get("is_primary")) else 1,
+                item[0],
+            ),
+        )
+    ]
+    indexed_records: List[Dict[str, Any]] = []
+    grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    per_image_counts: Dict[str, int] = defaultdict(int)
+    for record in records:
+        public = _dataset_caption_record_public(record)
+        image_name = str(public.get("image_name") or public.get("image_key") or "").strip()
+        per_image_counts[image_name] += 1
+        public["caption_index"] = per_image_counts[image_name]
+        indexed_records.append(public)
+        grouped[image_name].append(public)
+    training_rows = [
+        _dataset_caption_vlm_training_row(public, dataset_id=dataset_id)
+        for public in indexed_records
+        if str(public.get("image_name") or public.get("image_key") or "").strip()
+        and str(public.get("caption") or "").strip()
+    ]
+    caption_counts = [len(items) for items in grouped.values()]
+    instruction_settings = _caption_instruction_export_settings(options)
+    instruction_records = _load_dataset_caption_instruction_records(entry)
+    instruction_archive = _dataset_caption_instruction_archive(
+        indexed_records,
+        instruction_records,
+        dataset_id=dataset_id,
+        entry=entry,
+        settings=instruction_settings,
+    )
+    instruction_training_rows = list(instruction_archive.get("training_rows") or [])
+    summary = {
+        "image_count": len(grouped),
+        "caption_count": len(indexed_records),
+        "training_row_count": len(training_rows),
+        "images_with_multiple_captions": sum(1 for count in caption_counts if count > 1),
+        "max_captions_per_image": max(caption_counts) if caption_counts else 0,
+    }
+    instruction_summary = {
+        "instruction_training_row_count": len(instruction_training_rows),
+        "generated_qa_pair_count": int(instruction_archive.get("generated_qa_pair_count") or 0),
+        "deterministic_metadata_qa_pair_count": int(
+            instruction_archive.get("deterministic_metadata_qa_pair_count") or 0
+        ),
+        "rejected_training_row_count": int(instruction_archive.get("rejected_training_row_count") or 0),
+    }
+    instruction_archive["summary"] = dict(instruction_summary)
+    return {
+        "dataset_id": dataset_id,
+        "captions": indexed_records,
+        "grouped": dict(grouped),
+        "training_rows": training_rows,
+        "instruction_training_rows": instruction_training_rows,
+        "instruction_archive": instruction_archive,
+        "archive": _dataset_caption_grouped_archive(indexed_records, dataset_id=dataset_id, summary=summary),
+        "summary": summary,
+        "instruction_summary": instruction_summary,
+    }
+
+
+def _qwen_caption_dataset_job_log(job: QwenCaptionDatasetJob, message: str, **extra: Any) -> None:
+    job.log_seq += 1
+    entry = {
+        "seq": job.log_seq,
+        "time": time.time(),
+        "message": str(message),
+    }
+    if extra:
+        entry.update(extra)
+    job.logs.append(entry)
+    if len(job.logs) > 300:
+        del job.logs[:-300]
+    job.updated_at = time.time()
+
+
+def _qwen_caption_label_counts_from_lines(
+    label_lines: Sequence[str],
+    labelmap: Sequence[str],
+) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for line in label_lines or []:
+        parts = str(line or "").split()
+        if len(parts) < 5:
+            continue
+        try:
+            class_idx = int(float(parts[0]))
+        except (TypeError, ValueError):
+            continue
+        if 0 <= class_idx < len(labelmap):
+            label = str(labelmap[class_idx] or "").strip()
+        else:
+            label = f"class_{class_idx}"
+        if not label:
+            continue
+        label = {
+            "LightVehicle": "Light Vehicle",
+            "UPole": "U Pole",
+            "Solarpanels": "Solar Panels",
+            "Gastank": "Gas Tank",
+        }.get(label, label)
+        counts[label] = counts.get(label, 0) + 1
+    return counts
+
+
+def _qwen_caption_dataset_cases(
+    payload: QwenCaptionDatasetJobRequest,
+    *,
+    output_dir: Path,
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    entry = _resolve_dataset_entry(payload.dataset_id)
+    manifest = _annotation_manifest_for_entry(entry)
+    dataset_root = _dataset_effective_root_from_entry(entry)
+    yolo_layout = str(manifest.get("yolo_layout") or entry.get("yolo_layout") or "flat")
+    labelmap = [str(label or "").strip() for label in (manifest.get("labelmap") or []) if str(label or "").strip()]
+    if not labelmap:
+        labelmap, _glossary = _agent_load_labelmap_meta(payload.dataset_id)
+    caption_request = dict(payload.caption_request or {})
+    caption_mode = str(caption_request.get("caption_mode") or "full").strip().lower()
+    if caption_mode not in {"full", "windowed"}:
+        caption_mode = "full"
+    split_filter = str(payload.split or "all").strip().lower()
+    wanted_names = {
+        str(name or "").strip()
+        for name in (payload.image_names or [])
+        if str(name or "").strip()
+    }
+    max_images = int(payload.max_images or 0)
+    label_root = output_dir / "case_labels"
+    cases: List[Dict[str, Any]] = []
+    for index, row in enumerate(manifest.get("images") or [], start=1):
+        split = _annotation_normalise_split(row.get("split"))
+        if split_filter in {"train", "val"} and split != split_filter:
+            continue
+        image_relpath = _annotation_normalise_image_relpath(
+            row.get("image_relpath") or row.get("image_name")
+        )
+        image_name = str(row.get("image_name") or image_relpath.name)
+        selectors = {
+            image_name,
+            image_relpath.as_posix(),
+            f"{split}/{image_relpath.as_posix()}",
+            Path(image_name).stem,
+        }
+        if wanted_names and not (selectors & wanted_names):
+            continue
+        if not bool(payload.overwrite) and str(row.get("text_label") or "").strip():
+            continue
+        image_path = _resolve_annotation_image_path(
+            dataset_root,
+            yolo_layout,
+            split,
+            image_relpath,
+        )
+        label_lines = [str(line or "").strip() for line in (row.get("label_lines") or []) if str(line or "").strip()]
+        label_path = label_root / split / image_relpath.with_suffix(".txt")
+        label_path.parent.mkdir(parents=True, exist_ok=True)
+        label_path.write_text("\n".join(label_lines) + ("\n" if label_lines else ""))
+        class_counts = _qwen_caption_label_counts_from_lines(label_lines, labelmap)
+        case_key = f"image:{split}/{image_relpath.as_posix()}:{caption_mode}"
+        cases.append(
+            {
+                "case_id": case_key,
+                "name": f"image_{len(cases) + 1:06d}",
+                "stem": image_path.stem,
+                "image_name": image_name,
+                "split": split,
+                "image_relpath": image_relpath.as_posix(),
+                "image_path": str(image_path),
+                "label_path": str(label_path),
+                "label_count": int(sum(class_counts.values())),
+                "class_counts": class_counts,
+                "caption_mode": caption_mode,
+            }
+        )
+        if max_images and len(cases) >= max_images:
+            break
+    return manifest, cases
+
+
+def _qwen_caption_dataset_job_dir(job_id: str, requested_output_dir: Optional[str] = None) -> Path:
+    if requested_output_dir:
+        requested = Path(str(requested_output_dir)).expanduser()
+        if not requested.is_absolute():
+            requested = (Path.cwd() / requested).resolve()
+        allowed_roots = [
+            Path.cwd().resolve(),
+            QWEN_CAPTION_DATASET_JOB_ROOT.resolve(),
+        ]
+        try:
+            resolved = requested.resolve(strict=False)
+        except Exception as exc:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="caption_job_output_dir_invalid") from exc
+        if not any(_path_is_within_root_impl(resolved, root) for root in allowed_roots):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="caption_job_output_dir_forbidden")
+        return resolved
+    safe_job_id = _sanitize_yolo_run_id_impl(job_id) or job_id
+    return QWEN_CAPTION_DATASET_JOB_ROOT / safe_job_id
+
+
+def _serialize_qwen_caption_dataset_job(job: QwenCaptionDatasetJob) -> Dict[str, Any]:
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "progress": job.progress,
+        "message": job.message,
+        "request": job.request,
+        "result": job.result or {},
+        "output_dir": job.output_dir,
+        "error": job.error,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+        "logs": list(job.logs[-100:]),
+    }
+
+
+def _persist_qwen_caption_dataset_job(job: QwenCaptionDatasetJob) -> None:
+    if not job.output_dir:
+        return
+    try:
+        output_dir = Path(job.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        payload = _serialize_qwen_caption_dataset_job(job)
+        tmp_path = output_dir / "job.json.tmp"
+        tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+        tmp_path.replace(output_dir / "job.json")
+    except Exception:
+        logger.debug("Failed to persist Qwen caption dataset job", exc_info=True)
+
+
+def _load_qwen_caption_dataset_job_payload(job_id: str) -> Optional[Dict[str, Any]]:
+    safe_job_id = _sanitize_yolo_run_id_impl(job_id) or job_id
+    job_path = QWEN_CAPTION_DATASET_JOB_ROOT / safe_job_id / "job.json"
+    if not job_path.exists():
+        return None
+    try:
+        payload = json.loads(job_path.read_text())
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if str(payload.get("status") or "") in {"queued", "running"}:
+        payload["status"] = "interrupted"
+        payload["message"] = "Interrupted while backend was not tracking the job"
+    return payload
+
+
+def _qwen_caption_dataset_caption_record_from_row(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    artifact_dir = str(row.get("artifact_dir") or "").strip()
+    if not artifact_dir:
+        return None
+    result_path = Path(artifact_dir) / "result.json"
+    if not result_path.exists():
+        return None
+    try:
+        result = json.loads(result_path.read_text())
+    except Exception:
+        return None
+    response = result.get("response") if isinstance(result.get("response"), dict) else {}
+    caption = str((response or {}).get("caption") or "").strip()
+    if not caption:
+        return None
+    case = result.get("case") if isinstance(result.get("case"), dict) else {}
+    image_name = str(case.get("image_name") or Path(str(case.get("image_path") or "")).name).strip()
+    split = str(case.get("split") or "").strip() or None
+    if not image_name:
+        return None
+    recovery_events = (response or {}).get("recovery_events")
+    record: Dict[str, Any] = {
+        "case_id": str(row.get("case_id") or case.get("case_id") or "").strip(),
+        "case": str(row.get("case") or case.get("name") or "").strip(),
+        "stem": str(row.get("stem") or case.get("stem") or "").strip(),
+        "image_name": image_name,
+        "image_path": str(case.get("image_path") or "").strip(),
+        "split": split,
+        "caption": caption,
+        "used_counts": (response or {}).get("used_counts") or {},
+        "used_boxes": (response or {}).get("used_boxes"),
+        "truncated": bool((response or {}).get("truncated")),
+        "recovery_events": recovery_events if isinstance(recovery_events, list) else [],
+        "generated_qa_pair_count": int((response or {}).get("generated_qa_pair_count") or 0),
+        "artifact_dir": artifact_dir,
+    }
+    quality = result.get("caption_quality")
+    if isinstance(quality, dict):
+        record["caption_quality"] = quality
+    return record
+
+
+def _qwen_caption_dataset_save_caption_from_row(
+    *,
+    dataset_id: str,
+    row: Mapping[str, Any],
+    job: QwenCaptionDatasetJob,
+    annotation_session_id: Optional[str] = None,
+    make_primary: bool = False,
+) -> Optional[str]:
+    record = _qwen_caption_dataset_caption_record_from_row(row)
+    if not record:
+        return None
+    image_name = str(record.get("image_name") or "").strip()
+    caption = str(record.get("caption") or "").strip()
+    split = str(record.get("split") or "").strip() or None
+    if not image_name or not caption:
+        return None
+    payload = {
+        "caption": caption,
+        "split": split,
+        "source": "qwen_caption_job",
+        "title": str(record.get("case") or record.get("stem") or "").strip(),
+        "make_primary": bool(make_primary),
+        "metadata": {
+            "case_id": record.get("case_id"),
+            "used_counts": record.get("used_counts") or {},
+            "used_boxes": record.get("used_boxes"),
+            "truncated": bool(record.get("truncated")),
+            "recovery_events": record.get("recovery_events") or [],
+            "caption_quality": record.get("caption_quality") or {},
+            "artifact_dir": record.get("artifact_dir"),
+        },
+    }
+    session_id = str(annotation_session_id or "").strip()
+    if session_id:
+        payload["session_id"] = session_id
+    add_caption(dataset_id, image_name, payload)
+    _qwen_caption_dataset_job_log(job, f"saved caption {image_name}", image_name=image_name)
+    return image_name
+
+
+def _qwen_caption_dataset_row_recovery_events(row: Mapping[str, Any]) -> List[Mapping[str, Any]]:
+    raw = row.get("recovery_events")
+    if not isinstance(raw, list):
+        return []
+    return [event for event in raw if isinstance(event, Mapping)]
+
+
+def _qwen_caption_dataset_row_has_loop_recovery(row: Mapping[str, Any]) -> bool:
+    for event in _qwen_caption_dataset_row_recovery_events(row):
+        action = str(event.get("action") or "").lower()
+        message = str(event.get("message") or "").lower()
+        detail = str(event.get("detail") or "").lower()
+        if "loop" in action or "loop" in message or "loop" in detail:
+            return True
+    return False
+
+
+def _qwen_caption_dataset_row_has_deterministic_recovery(row: Mapping[str, Any]) -> bool:
+    if bool(row.get("parent_deterministic_recovery")):
+        return True
+    for event in _qwen_caption_dataset_row_recovery_events(row):
+        action = str(event.get("action") or "").lower()
+        attempt = str(event.get("attempt") or "").lower()
+        call_kind = str(event.get("call_kind") or "").lower()
+        if (
+            action == "deterministic_recovery_succeeded"
+            or attempt in {"deterministic_recovery", "parent_deterministic_recovery"}
+            or call_kind == "deterministic"
+        ):
+            return True
+    return False
+
+
+def _qwen_caption_dataset_row_prompt_budget(row: Mapping[str, Any]) -> Mapping[str, Any]:
+    raw = row.get("preview_prompt_budget")
+    return raw if isinstance(raw, Mapping) else {}
+
+
+def _qwen_caption_dataset_row_has_adapted_prompt_budget(row: Mapping[str, Any]) -> bool:
+    budget = _qwen_caption_dataset_row_prompt_budget(row)
+    try:
+        return int(budget.get("adapted_sections") or 0) > 0
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _qwen_caption_dataset_row_max_prompt_tokens(row: Mapping[str, Any]) -> int:
+    budget = _qwen_caption_dataset_row_prompt_budget(row)
+    try:
+        return max(0, int(budget.get("max_prompt_tokens") or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _qwen_caption_dataset_row_io_event_count(row: Mapping[str, Any], event_name: str) -> int:
+    raw_io = row.get("qwen_caption_io")
+    if not isinstance(raw_io, Mapping):
+        return 0
+    event_counts = raw_io.get("event_counts")
+    if isinstance(event_counts, Mapping):
+        try:
+            return max(0, int(event_counts.get(event_name) or 0))
+        except (TypeError, ValueError, OverflowError):
+            return 0
+    direct_key = f"{event_name}_events"
+    try:
+        return max(0, int(raw_io.get(direct_key) or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _qwen_caption_dataset_degraded_rates(
+    *,
+    processed: int,
+    attempts_seen: int,
+    failed: int,
+    quality_failed: int,
+    failed_attempts: int,
+    recovery_event_cases: int,
+    recovery_events: int,
+    loop_recovery_cases: int,
+    deterministic_recovery_cases: int,
+    prompt_budget_adapted_cases: int,
+    max_prompt_tokens: int,
+    stream_loop_detected_cases: int = 0,
+    stream_loop_detected_events: int = 0,
+    loop_trim_cases: int = 0,
+    loop_trim_events: int = 0,
+    signal_exit_attempts: int = 0,
+) -> Dict[str, Any]:
+    processed = max(0, int(processed or 0))
+    attempts_seen = max(0, int(attempts_seen or 0))
+
+    def _rate(numerator: int, denominator: int) -> float:
+        return 0.0 if denominator <= 0 else float(max(0, int(numerator or 0))) / float(denominator)
+
+    return {
+        "processed_cases": processed,
+        "attempt_rows": attempts_seen,
+        "failed_cases": max(0, int(failed or 0)),
+        "quality_failed_cases": max(0, int(quality_failed or 0)),
+        "failed_attempt_rows": max(0, int(failed_attempts or 0)),
+        "signal_exit_attempt_rows": max(0, int(signal_exit_attempts or 0)),
+        "recovery_event_cases": max(0, int(recovery_event_cases or 0)),
+        "recovery_events": max(0, int(recovery_events or 0)),
+        "loop_recovery_cases": max(0, int(loop_recovery_cases or 0)),
+        "deterministic_recovery_cases": max(0, int(deterministic_recovery_cases or 0)),
+        "prompt_budget_adapted_cases": max(0, int(prompt_budget_adapted_cases or 0)),
+        "max_prompt_tokens": max(0, int(max_prompt_tokens or 0)),
+        "stream_loop_detected_cases": max(0, int(stream_loop_detected_cases or 0)),
+        "stream_loop_detected_events": max(0, int(stream_loop_detected_events or 0)),
+        "loop_trim_cases": max(0, int(loop_trim_cases or 0)),
+        "loop_trim_events": max(0, int(loop_trim_events or 0)),
+        "failed_case_rate": _rate(failed, processed),
+        "quality_failure_rate": _rate(quality_failed, processed),
+        "failed_attempt_row_rate": _rate(failed_attempts, attempts_seen),
+        "signal_exit_attempt_row_rate": _rate(signal_exit_attempts, attempts_seen),
+        "recovery_event_case_rate": _rate(recovery_event_cases, processed),
+        "loop_recovery_case_rate": _rate(loop_recovery_cases, processed),
+        "deterministic_recovery_case_rate": _rate(deterministic_recovery_cases, processed),
+        "stream_loop_detected_case_rate": _rate(stream_loop_detected_cases, processed),
+        "loop_trim_case_rate": _rate(loop_trim_cases, processed),
+    }
+
+
+def _qwen_caption_dataset_degraded_rates_from_rows(
+    rows: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    latest: Dict[str, Mapping[str, Any]] = {}
+    failed_attempts = 0
+    signal_exit_attempts = 0
+    for index, row in enumerate(rows):
+        final_status = str(row.get("final_status") or row.get("status") or "unknown")
+        status = str(row.get("status") or "").strip().lower()
+        if final_status == "failed_attempt" or status in {"timeout", "exception", "missing_result"}:
+            failed_attempts += 1
+        if row.get("return_signal") is not None or str(row.get("attempt_failure_kind") or "") == "signal_exit":
+            signal_exit_attempts += 1
+        key = str(row.get("case_id") or row.get("case") or row.get("stem") or f"row_{index}").strip()
+        latest[key] = row
+    ok_statuses = {"ok", "skipped_completed", "skipped_existing_caption", "preview_only"}
+    latest_rows = list(latest.values())
+    failed = sum(
+        1
+        for row in latest_rows
+        if str(row.get("final_status") or row.get("status") or "unknown") not in ok_statuses
+    )
+    quality_failed = sum(1 for row in latest_rows if row.get("quality_failures"))
+    recovery_event_cases = sum(1 for row in latest_rows if _qwen_caption_dataset_row_recovery_events(row))
+    recovery_events = sum(len(_qwen_caption_dataset_row_recovery_events(row)) for row in latest_rows)
+    loop_recovery_cases = sum(1 for row in latest_rows if _qwen_caption_dataset_row_has_loop_recovery(row))
+    deterministic_recovery_cases = sum(
+        1 for row in latest_rows if _qwen_caption_dataset_row_has_deterministic_recovery(row)
+    )
+    prompt_budget_adapted_cases = sum(
+        1 for row in latest_rows if _qwen_caption_dataset_row_has_adapted_prompt_budget(row)
+    )
+    max_prompt_tokens = max(
+        (_qwen_caption_dataset_row_max_prompt_tokens(row) for row in latest_rows),
+        default=0,
+    )
+    stream_loop_detected_cases = sum(
+        1
+        for row in latest_rows
+        if _qwen_caption_dataset_row_io_event_count(row, "stream_loop_detected") > 0
+    )
+    stream_loop_detected_events = sum(
+        _qwen_caption_dataset_row_io_event_count(row, "stream_loop_detected")
+        for row in latest_rows
+    )
+    loop_trim_cases = sum(
+        1 for row in latest_rows if _qwen_caption_dataset_row_io_event_count(row, "loop_trim") > 0
+    )
+    loop_trim_events = sum(
+        _qwen_caption_dataset_row_io_event_count(row, "loop_trim")
+        for row in latest_rows
+    )
+    return _qwen_caption_dataset_degraded_rates(
+        processed=len(latest_rows),
+        attempts_seen=len(rows),
+        failed=failed,
+        quality_failed=quality_failed,
+        failed_attempts=failed_attempts,
+        signal_exit_attempts=signal_exit_attempts,
+        recovery_event_cases=recovery_event_cases,
+        recovery_events=recovery_events,
+        loop_recovery_cases=loop_recovery_cases,
+        deterministic_recovery_cases=deterministic_recovery_cases,
+        prompt_budget_adapted_cases=prompt_budget_adapted_cases,
+        max_prompt_tokens=max_prompt_tokens,
+        stream_loop_detected_cases=stream_loop_detected_cases,
+        stream_loop_detected_events=stream_loop_detected_events,
+        loop_trim_cases=loop_trim_cases,
+        loop_trim_events=loop_trim_events,
+    )
+
+
+def _qwen_caption_dataset_rate_threshold(value: Any, *, default: float) -> float:
+    try:
+        threshold = float(value) if value is not None else float(default)
+    except (TypeError, ValueError, OverflowError):
+        threshold = float(default)
+    if not math.isfinite(threshold):
+        threshold = float(default)
+    return -1.0 if threshold < 0 else max(0.0, min(threshold, 1.0))
+
+
+def _qwen_caption_dataset_set_and_forget(request_data: Mapping[str, Any]) -> bool:
+    value = request_data.get("set_and_forget")
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _qwen_caption_dataset_degraded_thresholds_from_request(
+    request_data: Mapping[str, Any],
+) -> Dict[str, float]:
+    loop_default = (
+        QWEN_CAPTION_SET_AND_FORGET_MAX_LOOP_RECOVERY_RATE
+        if _qwen_caption_dataset_set_and_forget(request_data)
+        else 0.0
+    )
+    deterministic_default = (
+        QWEN_CAPTION_SET_AND_FORGET_MAX_DETERMINISTIC_RECOVERY_RATE
+        if _qwen_caption_dataset_set_and_forget(request_data)
+        else 0.0
+    )
+    signal_exit_default = (
+        QWEN_CAPTION_SET_AND_FORGET_MAX_SIGNAL_EXIT_ATTEMPT_RATE
+        if _qwen_caption_dataset_set_and_forget(request_data)
+        else 0.0
+    )
+    return {
+        "max_failed_case_rate": _qwen_caption_dataset_rate_threshold(
+            request_data.get("max_failed_case_rate"),
+            default=0.0,
+        ),
+        "max_quality_failure_rate": _qwen_caption_dataset_rate_threshold(
+            request_data.get("max_quality_failure_rate"),
+            default=0.0,
+        ),
+        "max_recovery_event_case_rate": _qwen_caption_dataset_rate_threshold(
+            request_data.get("max_recovery_event_case_rate"),
+            default=0.25,
+        ),
+        "max_loop_recovery_case_rate": _qwen_caption_dataset_rate_threshold(
+            request_data.get("max_loop_recovery_case_rate"),
+            default=loop_default,
+        ),
+        "max_deterministic_recovery_case_rate": _qwen_caption_dataset_rate_threshold(
+            request_data.get("max_deterministic_recovery_case_rate"),
+            default=deterministic_default,
+        ),
+        "max_failed_attempt_row_rate": _qwen_caption_dataset_rate_threshold(
+            request_data.get("max_failed_attempt_row_rate"),
+            default=0.25,
+        ),
+        "max_signal_exit_attempt_row_rate": _qwen_caption_dataset_rate_threshold(
+            request_data.get("max_signal_exit_attempt_row_rate"),
+            default=signal_exit_default,
+        ),
+    }
+
+
+def _qwen_caption_dataset_min_rate_cases(request_data: Mapping[str, Any]) -> int:
+    try:
+        min_rate_cases = int(request_data.get("min_rate_cases") or 20)
+    except (TypeError, ValueError, OverflowError):
+        min_rate_cases = 20
+    return max(1, min(min_rate_cases, 1_000_000))
+
+
+def _qwen_caption_dataset_min_loop_recovery_rate_cases(
+    *,
+    threshold: float,
+    min_rate_cases: int,
+) -> int:
+    base = max(1, int(min_rate_cases or 0))
+    if threshold <= 0 or threshold >= 0.1:
+        return base
+    min_events = max(1, int(QWEN_CAPTION_MIN_LOOP_RECOVERY_RATE_EVENTS or 0))
+    return max(base, int(math.ceil(min_events / threshold)))
+
+
+def _qwen_caption_dataset_min_deterministic_recovery_rate_cases(
+    *,
+    threshold: float,
+    min_rate_cases: int,
+) -> int:
+    base = max(1, int(min_rate_cases or 0))
+    if threshold <= 0 or threshold >= 0.1:
+        return base
+    min_events = max(1, int(QWEN_CAPTION_MIN_DETERMINISTIC_RECOVERY_RATE_EVENTS or 0))
+    return max(base, int(math.ceil(min_events / threshold)))
+
+
+def _qwen_caption_dataset_degraded_policy(
+    rates: Mapping[str, Any],
+    request_data: Mapping[str, Any],
+    *,
+    terminal: bool,
+) -> Dict[str, Any]:
+    thresholds = _qwen_caption_dataset_degraded_thresholds_from_request(request_data)
+    min_rate_cases = _qwen_caption_dataset_min_rate_cases(request_data)
+    min_loop_recovery_rate_cases = _qwen_caption_dataset_min_loop_recovery_rate_cases(
+        threshold=float(thresholds["max_loop_recovery_case_rate"]),
+        min_rate_cases=min_rate_cases,
+    )
+    min_deterministic_recovery_rate_cases = (
+        _qwen_caption_dataset_min_deterministic_recovery_rate_cases(
+            threshold=float(thresholds["max_deterministic_recovery_case_rate"]),
+            min_rate_cases=min_rate_cases,
+        )
+    )
+    try:
+        processed = int(rates.get("processed_cases") or 0)
+    except (TypeError, ValueError, OverflowError):
+        processed = 0
+    active = bool(terminal) or processed >= min_rate_cases
+    violations: List[Dict[str, Any]] = []
+    for threshold_key, rate_key in (
+        ("max_failed_case_rate", "failed_case_rate"),
+        ("max_quality_failure_rate", "quality_failure_rate"),
+        ("max_recovery_event_case_rate", "recovery_event_case_rate"),
+        ("max_loop_recovery_case_rate", "loop_recovery_case_rate"),
+        ("max_deterministic_recovery_case_rate", "deterministic_recovery_case_rate"),
+        ("max_failed_attempt_row_rate", "failed_attempt_row_rate"),
+        ("max_signal_exit_attempt_row_rate", "signal_exit_attempt_row_rate"),
+    ):
+        threshold = float(thresholds[threshold_key])
+        if threshold < 0:
+            continue
+        try:
+            actual = float(rates.get(rate_key) or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            actual = 0.0
+        if actual > threshold:
+            violation = {
+                "rate": rate_key,
+                "actual": actual,
+                "threshold": threshold,
+            }
+            if (
+                rate_key in {"loop_recovery_case_rate", "deterministic_recovery_case_rate"}
+                and not terminal
+                and threshold > 0
+                and processed
+                < (
+                    min_loop_recovery_rate_cases
+                    if rate_key == "loop_recovery_case_rate"
+                    else min_deterministic_recovery_rate_cases
+                )
+            ):
+                floor = (
+                    min_loop_recovery_rate_cases
+                    if rate_key == "loop_recovery_case_rate"
+                    else min_deterministic_recovery_rate_cases
+                )
+                violation["active"] = False
+                violation["deferred_by_sample_floor"] = True
+                violation["detail"] = (
+                    f"{rate_key} is above threshold, but the live sample is below "
+                    f"the rate activation floor of {floor} cases"
+                )
+            else:
+                violation["active"] = active
+            violations.append(violation)
+    active_violations = [violation for violation in violations if violation.get("active")]
+    return {
+        "active": active,
+        "min_rate_cases": min_rate_cases,
+        "min_loop_recovery_rate_cases": min_loop_recovery_rate_cases,
+        "min_deterministic_recovery_rate_cases": min_deterministic_recovery_rate_cases,
+        "thresholds": thresholds,
+        "violations": violations,
+        "active_violations": active_violations,
+    }
+
+
+def _qwen_caption_dataset_degraded_policy_from_payload(
+    payload: Mapping[str, Any],
+    *,
+    terminal: bool = True,
+) -> Dict[str, Any]:
+    request_data = payload.get("request") if isinstance(payload.get("request"), Mapping) else {}
+    result_data = payload.get("result") if isinstance(payload.get("result"), Mapping) else {}
+    rates = result_data.get("degraded_rates") if isinstance(result_data.get("degraded_rates"), Mapping) else {}
+    return _qwen_caption_dataset_degraded_policy(rates, request_data, terminal=terminal)
+
+
+def _qwen_caption_dataset_degraded_policy_reprocesses_recovery(policy: Mapping[str, Any]) -> bool:
+    for violation in policy.get("active_violations") or policy.get("violations") or []:
+        if not isinstance(violation, Mapping):
+            continue
+        if str(violation.get("rate") or "") in {
+            "recovery_event_case_rate",
+            "loop_recovery_case_rate",
+            "deterministic_recovery_case_rate",
+        }:
+            return True
+    return False
+
+
+def _qwen_caption_dataset_strict_audit(
+    output_dir: Path,
+    request_data: Mapping[str, Any],
+    *,
+    max_heartbeat_age_seconds: float,
+) -> Dict[str, Any]:
+    try:
+        from tools import audit_qwen_caption_soak as caption_audit
+
+        thresholds = _qwen_caption_dataset_degraded_thresholds_from_request(request_data)
+        return caption_audit.audit_soak(
+            output_dir,
+            max_heartbeat_age_seconds=max_heartbeat_age_seconds,
+            allow_running_incomplete=False,
+            max_failed_case_rate=thresholds["max_failed_case_rate"],
+            max_quality_failure_rate=thresholds["max_quality_failure_rate"],
+            max_recovery_event_case_rate=thresholds["max_recovery_event_case_rate"],
+            max_loop_recovery_case_rate=thresholds["max_loop_recovery_case_rate"],
+            max_deterministic_recovery_case_rate=thresholds["max_deterministic_recovery_case_rate"],
+            max_failed_attempt_row_rate=thresholds["max_failed_attempt_row_rate"],
+            max_signal_exit_attempt_row_rate=thresholds["max_signal_exit_attempt_row_rate"],
+            min_rate_cases=_qwen_caption_dataset_min_rate_cases(request_data),
+            set_and_forget=_qwen_caption_dataset_set_and_forget(request_data),
+            require_saved_text_labels=_qwen_caption_dataset_request_bool(
+                request_data.get("save_text_labels"),
+                default=False,
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "error",
+            "output_dir": str(output_dir),
+            "checks": [
+                {
+                    "name": "backend_strict_audit",
+                    "status": "error",
+                    "detail": str(exc),
+                    "error_type": type(exc).__name__,
+                }
+            ],
+        }
+
+
+def _qwen_caption_dataset_live_audit(
+    output_dir: Path,
+    request_data: Mapping[str, Any],
+    *,
+    max_heartbeat_age_seconds: float,
+) -> Dict[str, Any]:
+    try:
+        from tools import audit_qwen_caption_soak as caption_audit
+
+        thresholds = _qwen_caption_dataset_degraded_thresholds_from_request(request_data)
+        return caption_audit.audit_soak(
+            output_dir,
+            max_heartbeat_age_seconds=max_heartbeat_age_seconds,
+            allow_running_incomplete=True,
+            max_failed_case_rate=thresholds["max_failed_case_rate"],
+            max_quality_failure_rate=thresholds["max_quality_failure_rate"],
+            max_recovery_event_case_rate=thresholds["max_recovery_event_case_rate"],
+            max_loop_recovery_case_rate=thresholds["max_loop_recovery_case_rate"],
+            max_deterministic_recovery_case_rate=thresholds["max_deterministic_recovery_case_rate"],
+            max_failed_attempt_row_rate=thresholds["max_failed_attempt_row_rate"],
+            max_signal_exit_attempt_row_rate=thresholds["max_signal_exit_attempt_row_rate"],
+            min_rate_cases=_qwen_caption_dataset_min_rate_cases(request_data),
+            set_and_forget=_qwen_caption_dataset_set_and_forget(request_data),
+            require_saved_text_labels=_qwen_caption_dataset_request_bool(
+                request_data.get("save_text_labels"),
+                default=False,
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "error",
+            "output_dir": str(output_dir),
+            "checks": [
+                {
+                    "name": "backend_live_audit",
+                    "status": "error",
+                    "detail": str(exc),
+                    "error_type": type(exc).__name__,
+                }
+            ],
+        }
+
+
+def _qwen_caption_dataset_requested_runner_settings(
+    *,
+    request_path: Path,
+    caption_runner_model_fields: Mapping[str, Any],
+    runner_profile: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    from tools import run_qwen_caption_flow_benchmark as caption_runner
+
+    args_data = dict(caption_runner.RUN_SETTINGS_ARG_DEFAULTS)
+    request_template = caption_runner.load_request_template(request_path)
+    strategy = (
+        str(request_template.get("caption_windowed_full_image_strategy") or args_data["windowed_full_image_strategy"])
+        .strip()
+        .lower()
+        .replace("-", "_")
+    )
+    if strategy in {"text", "text_only", "window_text", "windowed_text", "observations", "skip_visual"}:
+        strategy = "text_only"
+    elif strategy not in {"visual", "text_only"}:
+        strategy = "visual"
+    args_data.update(
+        {
+            "request_json": request_path,
+            "windowed_full_image_strategy": strategy,
+            "model_id": str(caption_runner_model_fields.get("model_id") or args_data["model_id"]),
+            "refinement_model_id": str(
+                caption_runner_model_fields.get("refinement_model_id")
+                or args_data["refinement_model_id"]
+            ),
+            "fallback_model_id": str(
+                caption_runner_model_fields.get("fallback_model_id")
+                or args_data["fallback_model_id"]
+            ),
+            "loop_recovery": str(
+                caption_runner_model_fields.get("loop_recovery")
+                or args_data["loop_recovery"]
+            ),
+        }
+    )
+    if isinstance(runner_profile, Mapping):
+        for key in (
+            "mlx_max_image_side",
+            "retry_image_side_scale",
+            "min_retry_image_side",
+            "cooldown_after_success",
+        ):
+            if key in runner_profile:
+                args_data[key] = runner_profile[key]
+    return caption_runner.run_settings_payload(SimpleNamespace(**args_data))
+
+
+def _qwen_caption_dataset_runner_profile(payload: QwenCaptionDatasetJobRequest) -> Dict[str, Any]:
+    request = payload.caption_request if isinstance(payload.caption_request, Mapping) else {}
+
+    def _int_setting(*names: str, default: int) -> int:
+        for name in names:
+            raw = request.get(name)
+            if raw is None or str(raw).strip() == "":
+                continue
+            try:
+                parsed = int(float(raw))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if parsed > 0:
+                return max(1, min(parsed, 4096))
+        return max(1, min(int(default), 4096))
+
+    def _float_setting(*names: str, default: float) -> float:
+        for name in names:
+            raw = request.get(name)
+            if raw is None or str(raw).strip() == "":
+                continue
+            try:
+                parsed = float(raw)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if math.isfinite(parsed):
+                return max(0.0, min(parsed, 1.0))
+        return max(0.0, min(float(default), 1.0))
+
+    def _duration_setting(*names: str, default: float) -> float:
+        for name in names:
+            raw = request.get(name)
+            if raw is None or str(raw).strip() == "":
+                continue
+            try:
+                parsed = float(raw)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if math.isfinite(parsed):
+                return max(0.0, min(parsed, 300.0))
+        return max(0.0, min(float(default), 300.0))
+
+    default_max_side = (
+        QWEN_CAPTION_SET_AND_FORGET_MLX_MAX_IMAGE_SIDE
+        if bool(payload.set_and_forget)
+        else QWEN_CAPTION_MLX_MAX_IMAGE_SIDE
+    )
+    default_min_retry_side = (
+        QWEN_CAPTION_SET_AND_FORGET_MIN_RETRY_IMAGE_SIDE
+        if bool(payload.set_and_forget)
+        else QWEN_CAPTION_MIN_RETRY_IMAGE_SIDE
+    )
+    default_success_cooldown = (
+        QWEN_CAPTION_SET_AND_FORGET_COOLDOWN_AFTER_SUCCESS_SECONDS
+        if bool(payload.set_and_forget)
+        else 0.0
+    )
+    if payload.cooldown_after_success_seconds is not None:
+        try:
+            success_cooldown = float(payload.cooldown_after_success_seconds)
+        except (TypeError, ValueError, OverflowError):
+            success_cooldown = default_success_cooldown
+        if not math.isfinite(success_cooldown):
+            success_cooldown = default_success_cooldown
+        success_cooldown = max(0.0, min(success_cooldown, 300.0))
+    else:
+        success_cooldown = _duration_setting(
+            "runner_cooldown_after_success_seconds",
+            "cooldown_after_success_seconds",
+            "cooldown_after_success",
+            default=default_success_cooldown,
+        )
+    return {
+        "mlx_max_image_side": _int_setting(
+            "runner_mlx_max_image_side",
+            "mlx_max_image_side",
+            default=default_max_side,
+        ),
+        "retry_image_side_scale": _float_setting(
+            "runner_retry_image_side_scale",
+            "retry_image_side_scale",
+            default=QWEN_CAPTION_RETRY_IMAGE_SIDE_SCALE,
+        ),
+        "min_retry_image_side": _int_setting(
+            "runner_min_retry_image_side",
+            "min_retry_image_side",
+            default=default_min_retry_side,
+        ),
+        "cooldown_after_success": success_cooldown,
+    }
+
+
+def _qwen_caption_dataset_required_pilot_certification(
+    payload: QwenCaptionDatasetJobRequest,
+    *,
+    output_dir: Path,
+    request_data: Mapping[str, Any],
+    max_heartbeat_age_seconds: float,
+    expected_run_settings_fingerprint: str | None = None,
+) -> Optional[Dict[str, Any]]:
+    if not bool(payload.require_pilot_certification):
+        return None
+    report_path = output_dir / "required_pilot_certification.json"
+    try:
+        if not payload.pilot_output_dir:
+            report: Dict[str, Any] = {
+                "status": "error",
+                "checks": [
+                    {
+                        "name": "pilot_output_dir",
+                        "status": "error",
+                        "detail": "pilot_output_dir is required when require_pilot_certification is true",
+                    }
+                ],
+            }
+        else:
+            from tools import certify_qwen_caption_soak as caption_certify
+
+            pilot_output_dir = _qwen_caption_dataset_job_dir(
+                "pilot_certification",
+                payload.pilot_output_dir,
+            )
+            if _paths_match_resolved(pilot_output_dir, output_dir):
+                report = {
+                    "status": "error",
+                    "checks": [
+                        {
+                            "name": "pilot_output_dir_isolated",
+                            "status": "error",
+                            "detail": (
+                                "pilot_output_dir must be separate from the caption job output_dir "
+                                "for set-and-forget pilot certification"
+                            ),
+                            "pilot_output_dir": str(pilot_output_dir),
+                            "target_output_dir": str(output_dir),
+                        }
+                    ],
+                }
+            else:
+                thresholds = _qwen_caption_dataset_degraded_thresholds_from_request(request_data)
+                report = caption_certify.certify_soak(
+                    pilot_output_dir,
+                    target_cases=int(payload.pilot_target_cases or 10000),
+                    max_duration_hours=float(payload.pilot_max_duration_hours or 336.0),
+                    max_p95_duration_hours=(
+                        float(payload.pilot_max_p95_duration_hours)
+                        if payload.pilot_max_p95_duration_hours is not None
+                        else None
+                    ),
+                    min_pilot_cases=int(payload.pilot_min_cases or QWEN_CAPTION_DEFAULT_PILOT_MIN_CASES),
+                    duration_safety_factor=float(payload.pilot_duration_safety_factor or 1.25),
+                    max_heartbeat_age_seconds=max_heartbeat_age_seconds,
+                    max_failed_case_rate=thresholds["max_failed_case_rate"],
+                    max_quality_failure_rate=thresholds["max_quality_failure_rate"],
+                    max_recovery_event_case_rate=thresholds["max_recovery_event_case_rate"],
+                    max_loop_recovery_case_rate=thresholds["max_loop_recovery_case_rate"],
+                    max_deterministic_recovery_case_rate=thresholds["max_deterministic_recovery_case_rate"],
+                    max_failed_attempt_row_rate=thresholds["max_failed_attempt_row_rate"],
+                    max_signal_exit_attempt_row_rate=thresholds["max_signal_exit_attempt_row_rate"],
+                    min_rate_cases=_qwen_caption_dataset_min_rate_cases(request_data),
+                    set_and_forget=_qwen_caption_dataset_set_and_forget(request_data),
+                    expected_run_settings_fingerprint=expected_run_settings_fingerprint,
+                    require_prompt_budget_data=bool(payload.pilot_require_prompt_budget_data),
+                    max_prompt_tokens=int(payload.pilot_max_prompt_tokens or 0),
+                    max_prompt_budget_adapted_case_rate=float(
+                        payload.pilot_max_prompt_budget_adapted_case_rate
+                        if payload.pilot_max_prompt_budget_adapted_case_rate is not None
+                        else 1.0
+                    ),
+                    deterministic_recovery_confidence=float(
+                        payload.pilot_deterministic_recovery_confidence
+                        if payload.pilot_deterministic_recovery_confidence is not None
+                        else QWEN_CAPTION_DEFAULT_PILOT_DETERMINISTIC_RECOVERY_CONFIDENCE
+                    ),
+                )
+    except HTTPException as exc:
+        report = {
+            "status": "error",
+            "checks": [
+                {
+                    "name": "pilot_output_dir",
+                    "status": "error",
+                    "detail": str(exc.detail or exc),
+                }
+            ],
+        }
+    except Exception as exc:  # noqa: BLE001
+        report = {
+            "status": "error",
+            "checks": [
+                {
+                    "name": "pilot_certification",
+                    "status": "error",
+                    "detail": str(exc),
+                    "error_type": type(exc).__name__,
+                }
+            ],
+        }
+    report = _qwen_caption_dataset_enforce_pilot_generated_evidence(
+        report,
+        min_pilot_cases=int(payload.pilot_min_cases or QWEN_CAPTION_DEFAULT_PILOT_MIN_CASES),
+        set_and_forget=_qwen_caption_dataset_set_and_forget(request_data),
+    )
+    report = _qwen_caption_dataset_enforce_pilot_qwen_caption_io_source(
+        report,
+        require_prompt_budget_data=bool(payload.pilot_require_prompt_budget_data),
+        set_and_forget=_qwen_caption_dataset_set_and_forget(request_data),
+    )
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+    return report
+
+
+def _qwen_caption_dataset_enforce_pilot_generated_evidence(
+    report: Mapping[str, Any],
+    *,
+    min_pilot_cases: int,
+    set_and_forget: bool,
+) -> Dict[str, Any]:
+    checked_report = dict(report or {})
+    if not bool(set_and_forget) or str(checked_report.get("status") or "").lower() != "ok":
+        return checked_report
+    evidence = checked_report.get("generated_case_evidence")
+    evidence = evidence if isinstance(evidence, Mapping) else {}
+    generated_cases = _qwen_caption_dataset_request_int(
+        checked_report.get("generated_pilot_cases") or evidence.get("generated_cases"),
+        default=0,
+    )
+    required_cases = max(1, int(min_pilot_cases or QWEN_CAPTION_DEFAULT_PILOT_MIN_CASES))
+    if generated_cases >= required_cases:
+        return checked_report
+    checks = list(checked_report.get("checks") or [])
+    checks.append(
+        {
+            "name": "backend_generated_pilot_evidence_gate",
+            "status": "error",
+            "detail": (
+                "set-and-forget pilot certification is missing enough generated "
+                "model-success evidence"
+            ),
+            "generated_pilot_cases": generated_cases,
+            "min_pilot_cases": required_cases,
+            "has_generated_case_evidence": bool(evidence),
+        }
+    )
+    checked_report["checks"] = checks
+    checked_report["status"] = "error"
+    return checked_report
+
+
+def _qwen_caption_dataset_enforce_pilot_qwen_caption_io_source(
+    report: Mapping[str, Any],
+    *,
+    require_prompt_budget_data: bool,
+    set_and_forget: bool,
+) -> Dict[str, Any]:
+    checked_report = dict(report or {})
+    if (
+        not bool(set_and_forget)
+        or not bool(require_prompt_budget_data)
+        or str(checked_report.get("status") or "").lower() != "ok"
+    ):
+        return checked_report
+    source_report = checked_report.get("qwen_caption_io_sources")
+    source_report = source_report if isinstance(source_report, Mapping) else {}
+    source_counts_raw = source_report.get("source_counts")
+    source_counts = source_counts_raw if isinstance(source_counts_raw, Mapping) else {}
+    normalized_source_counts = {
+        str(source): _qwen_caption_dataset_request_int(count, default=0)
+        for source, count in source_counts.items()
+        if str(source)
+    }
+    accepted_sources = {"qwen_caption_io_per_run"}
+    accepted_observed_sources = [
+        source
+        for source, count in sorted(normalized_source_counts.items())
+        if source in accepted_sources and count > 0
+    ]
+    unsupported_sources = [
+        source
+        for source, count in sorted(normalized_source_counts.items())
+        if source not in accepted_sources and count > 0
+    ]
+    required_rows = _qwen_caption_dataset_request_int(source_report.get("required_rows"), default=0)
+    valid_rows = _qwen_caption_dataset_request_int(
+        source_report.get("valid_runtime_prompt_budget_rows"),
+        default=0,
+    )
+    invalid_rows = _qwen_caption_dataset_request_int(
+        source_report.get("invalid_runtime_rows_count"),
+        default=0,
+    )
+    missing_rows = _qwen_caption_dataset_request_int(
+        source_report.get("missing_runtime_rows_count"),
+        default=0,
+    )
+    if (
+        bool(source_report)
+        and required_rows > 0
+        and valid_rows >= required_rows
+        and invalid_rows == 0
+        and missing_rows == 0
+        and accepted_observed_sources
+        and not unsupported_sources
+    ):
+        return checked_report
+    checks = list(checked_report.get("checks") or [])
+    checks.append(
+        {
+            "name": "backend_qwen_caption_io_source_gate",
+            "status": "error",
+            "detail": (
+                "set-and-forget pilot certification is missing complete run-bound "
+                "qwen_caption_io prompt-budget evidence"
+            ),
+            "has_source_report": bool(source_report),
+            "required_rows": required_rows,
+            "valid_runtime_prompt_budget_rows": valid_rows,
+            "invalid_runtime_rows_count": invalid_rows,
+            "missing_runtime_rows_count": missing_rows,
+            "source_counts": normalized_source_counts,
+            "accepted_sources": sorted(accepted_sources),
+            "accepted_observed_sources": accepted_observed_sources,
+            "unsupported_sources": unsupported_sources,
+        }
+    )
+    checked_report["checks"] = checks
+    checked_report["status"] = "error"
+    return checked_report
+
+
+def _qwen_caption_dataset_large_set_and_forget_pilot_config_report(
+    payload: QwenCaptionDatasetJobRequest,
+    *,
+    output_dir: Path,
+    total_cases: int,
+) -> Optional[Dict[str, Any]]:
+    threshold_cases = int(QWEN_CAPTION_SET_AND_FORGET_REQUIRE_PILOT_CASES)
+    if (
+        not bool(payload.set_and_forget)
+        or bool(payload.preview_only)
+        or not bool(payload.require_pilot_certification)
+        or threshold_cases <= 0
+        or int(total_cases or 0) < threshold_cases
+    ):
+        return None
+    checks: List[Dict[str, Any]] = []
+
+    def add(name: str, ok: bool, detail: str, **fields: Any) -> None:
+        checks.append(
+            {
+                "name": name,
+                "status": "ok" if ok else "error",
+                "detail": detail,
+                **fields,
+            }
+        )
+
+    pilot_dir: Optional[Path] = None
+    if not payload.pilot_output_dir:
+        add(
+            "pilot_output_dir",
+            False,
+            "pilot_output_dir is required before starting a large set-and-forget caption job",
+        )
+    else:
+        try:
+            pilot_dir = _qwen_caption_dataset_job_dir(
+                "pilot_certification",
+                payload.pilot_output_dir,
+            )
+        except HTTPException as exc:
+            add(
+                "pilot_output_dir",
+                False,
+                str(exc.detail or exc),
+            )
+        else:
+            add(
+                "pilot_output_dir_isolated",
+                not _paths_match_resolved(pilot_dir, output_dir),
+                (
+                    "pilot artifacts are isolated from the caption job output directory"
+                    if not _paths_match_resolved(pilot_dir, output_dir)
+                    else "pilot_output_dir must be separate from the caption job output_dir "
+                    "for set-and-forget pilot certification"
+                ),
+                pilot_output_dir=str(pilot_dir),
+                target_output_dir=str(output_dir),
+            )
+
+    try:
+        pilot_min_cases = int(payload.pilot_min_cases or 0)
+    except (TypeError, ValueError, OverflowError):
+        pilot_min_cases = 0
+    add(
+        "pilot_min_cases",
+        pilot_min_cases >= QWEN_CAPTION_DEFAULT_PILOT_MIN_CASES,
+        (
+            f"pilot min cases is {pilot_min_cases}; large set-and-forget requires at least "
+            f"{QWEN_CAPTION_DEFAULT_PILOT_MIN_CASES}"
+        ),
+        pilot_min_cases=pilot_min_cases,
+        required_min_pilot_cases=QWEN_CAPTION_DEFAULT_PILOT_MIN_CASES,
+    )
+    add(
+        "pilot_prompt_budget_required",
+        bool(payload.pilot_require_prompt_budget_data),
+        "pilot prompt-budget telemetry is required before starting a large set-and-forget caption job",
+    )
+    try:
+        pilot_max_prompt_tokens = int(payload.pilot_max_prompt_tokens or 0)
+    except (TypeError, ValueError, OverflowError):
+        pilot_max_prompt_tokens = 0
+    add(
+        "pilot_prompt_size_ceiling",
+        pilot_max_prompt_tokens > 0,
+        "pilot max prompt tokens must be positive before starting a large set-and-forget caption job",
+        max_prompt_tokens=pilot_max_prompt_tokens,
+    )
+    p95_value = payload.pilot_max_p95_duration_hours
+    try:
+        pilot_max_p95_duration_hours = float(p95_value) if p95_value is not None else -1.0
+    except (TypeError, ValueError, OverflowError):
+        pilot_max_p95_duration_hours = -1.0
+    add(
+        "pilot_p95_duration_gate",
+        pilot_max_p95_duration_hours > 0,
+        "pilot p95 projected-duration gate must be positive before starting a large set-and-forget caption job",
+        max_p95_duration_hours=pilot_max_p95_duration_hours,
+    )
+    try:
+        adapted_case_rate = float(
+            payload.pilot_max_prompt_budget_adapted_case_rate
+            if payload.pilot_max_prompt_budget_adapted_case_rate is not None
+            else -1.0
+        )
+    except (TypeError, ValueError, OverflowError):
+        adapted_case_rate = -1.0
+    add(
+        "pilot_prompt_budget_adaptation_gate",
+        adapted_case_rate >= 0.0,
+        "pilot prompt-budget adaptation-rate gate must be enabled before starting a large set-and-forget caption job",
+        max_prompt_budget_adapted_case_rate=adapted_case_rate,
+    )
+    try:
+        deterministic_recovery_confidence = float(
+            payload.pilot_deterministic_recovery_confidence
+            if payload.pilot_deterministic_recovery_confidence is not None
+            else QWEN_CAPTION_DEFAULT_PILOT_DETERMINISTIC_RECOVERY_CONFIDENCE
+        )
+    except (TypeError, ValueError, OverflowError):
+        deterministic_recovery_confidence = 0.0
+    add(
+        "pilot_deterministic_recovery_confidence",
+        deterministic_recovery_confidence > 0.0,
+        "pilot deterministic-recovery confidence certification must be enabled before starting a large set-and-forget caption job",
+        deterministic_recovery_confidence=deterministic_recovery_confidence,
+        required_default_confidence=QWEN_CAPTION_DEFAULT_PILOT_DETERMINISTIC_RECOVERY_CONFIDENCE,
+    )
+    status = "ok" if all(str(check.get("status") or "") == "ok" for check in checks) else "error"
+    return {
+        "status": status,
+        "required": True,
+        "total_cases": int(total_cases or 0),
+        "threshold_cases": threshold_cases,
+        "output_dir": str(output_dir),
+        "pilot_output_dir": str(pilot_dir) if pilot_dir is not None else str(payload.pilot_output_dir or ""),
+        "checks": checks,
+    }
+
+
+def _qwen_caption_dataset_large_set_and_forget_supervision_report(
+    payload: QwenCaptionDatasetJobRequest,
+    *,
+    total_cases: int,
+) -> Optional[Dict[str, Any]]:
+    threshold_cases = int(QWEN_CAPTION_SET_AND_FORGET_REQUIRE_PILOT_CASES)
+    if (
+        not bool(payload.set_and_forget)
+        or bool(payload.preview_only)
+        or not bool(QWEN_CAPTION_SET_AND_FORGET_REQUIRE_BACKEND_SUPERVISION)
+        or threshold_cases <= 0
+        or int(total_cases or 0) < threshold_cases
+    ):
+        return None
+    supervision = _qwen_backend_supervision_status()
+    restart_capable = bool(supervision.get("restart_capable"))
+    set_and_forget_ready = bool(supervision.get("set_and_forget_ready"))
+    restart_policy = (
+        supervision.get("restart_policy")
+        if isinstance(supervision.get("restart_policy"), Mapping)
+        else {}
+    )
+    return {
+        "status": "ok" if set_and_forget_ready else "error",
+        "required": True,
+        "total_cases": int(total_cases or 0),
+        "threshold_cases": threshold_cases,
+        "supervision": supervision,
+        "checks": [
+            {
+                "name": "backend_crash_supervision",
+                "status": "ok" if restart_capable else "error",
+                "detail": (
+                    "backend is running under crash-restart supervision"
+                    if restart_capable
+                    else "large set-and-forget caption jobs require backend crash-restart supervision"
+                ),
+                "restart_capable": restart_capable,
+                "launcher": supervision.get("launcher"),
+                "restart_on_crash": supervision.get("restart_on_crash"),
+            },
+            {
+                "name": "backend_restart_policy",
+                "status": "ok" if set_and_forget_ready else "error",
+                "detail": (
+                    "backend crash-restart policy is large-run ready"
+                    if set_and_forget_ready
+                    else "large set-and-forget caption jobs require unlimited backend restarts or a sufficient bounded restart policy"
+                ),
+                "restart_policy_status": restart_policy.get("status"),
+                "restart_policy_ready": set_and_forget_ready,
+                "restart_max": supervision.get("restart_max"),
+                "restart_delay": supervision.get("restart_delay"),
+                "restart_max_delay": supervision.get("restart_max_delay"),
+                "min_restart_attempts": restart_policy.get("min_restart_attempts"),
+                "max_restart_delay_seconds": restart_policy.get("max_restart_delay_seconds"),
+                "policy_checks": restart_policy.get("checks") or [],
+            },
+        ],
+    }
+
+
+def _qwen_caption_dataset_result_summary_from_runner_summary(
+    summary: Mapping[str, Any],
+) -> Dict[str, Any]:
+    rows = summary.get("rows") if isinstance(summary.get("rows"), list) else []
+    ok_statuses = {"ok", "skipped_completed", "skipped_existing_caption", "preview_only"}
+    rows_are_complete = bool(rows) and not bool(summary.get("rows_truncated"))
+    if rows_are_complete:
+        final_statuses = [
+            str(row.get("final_status") or row.get("status") or "unknown")
+            for row in rows
+            if isinstance(row, Mapping)
+        ]
+        failed = sum(1 for status in final_statuses if status not in ok_statuses)
+        quality_failed = sum(
+            1
+            for row in rows
+            if isinstance(row, Mapping) and bool(row.get("quality_failures"))
+        )
+        return {
+            "processed": len(final_statuses),
+            "failed": failed,
+            "quality_failed": quality_failed,
+            "runner_totals": dict(Counter(final_statuses)),
+            "degraded_rates": _qwen_caption_dataset_degraded_rates_from_rows(
+                [row for row in rows if isinstance(row, Mapping)]
+            ),
+        }
+    totals = summary.get("totals")
+    if not isinstance(totals, Mapping):
+        return {}
+    runner_totals: Dict[str, int] = {}
+    for key, value in totals.items():
+        try:
+            runner_totals[str(key)] = max(0, int(value))
+        except (TypeError, ValueError, OverflowError):
+            continue
+    if not runner_totals:
+        return {}
+    try:
+        processed = max(0, int(summary.get("total_cases") or sum(runner_totals.values())))
+    except (TypeError, ValueError, OverflowError):
+        processed = sum(runner_totals.values())
+    failed = sum(
+        count
+        for status, count in runner_totals.items()
+        if status not in ok_statuses
+    )
+    try:
+        quality_failed = max(0, int(summary.get("quality_failed_cases") or 0))
+    except (TypeError, ValueError, OverflowError):
+        quality_failed = 0
+    result = {
+        "processed": processed,
+        "failed": failed,
+        "quality_failed": quality_failed,
+        "runner_totals": runner_totals,
+    }
+    degraded_rates = summary.get("degraded_rates")
+    if isinstance(degraded_rates, Mapping):
+        result["degraded_rates"] = dict(degraded_rates)
+    return result
+
+
+def _qwen_caption_dataset_effective_request_fields(
+    request_fields: Mapping[str, Any],
+    *,
+    set_and_forget: bool = False,
+) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    fields = dict(request_fields or {})
+    caption_mode = str(fields.get("caption_mode") or "full").strip().lower()
+    if caption_mode == "hybrid":
+        caption_mode = "windowed"
+    if caption_mode not in {"full", "windowed"}:
+        caption_mode = "full"
+    fields["caption_mode"] = caption_mode
+    has_explicit_windowed_strategy = (
+        "caption_windowed_full_image_strategy" in fields
+        and str(fields.get("caption_windowed_full_image_strategy") or "").strip() != ""
+    )
+    strategy = (
+        str(fields.get("caption_windowed_full_image_strategy") or "")
+        .strip()
+        .lower()
+        .replace("-", "_")
+    )
+    if strategy in {"text", "text_only", "window_text", "windowed_text", "observations", "skip_visual"}:
+        strategy = "text_only"
+    elif strategy not in {"visual", "text_only"}:
+        strategy = "text_only" if bool(set_and_forget) and caption_mode == "windowed" else "visual"
+    if bool(set_and_forget) and caption_mode == "windowed" and not has_explicit_windowed_strategy:
+        strategy = "text_only"
+    fields["caption_windowed_full_image_strategy"] = strategy
+    variant = str(fields.get("model_variant") or "auto").strip()
+    if variant not in {"auto", "Instruct", "Thinking"}:
+        variant = "auto"
+    fields["model_variant"] = variant
+    model_id = str(fields.get("model_id") or "").strip()
+    if model_id.lower() in {"", "active", "auto", "default"}:
+        model_id = _resolve_qwen_variant_model_id_impl(QWEN_MLX_CAPTION_MODEL_NAME, variant)
+    fields["model_id"] = model_id
+    refinement_model_id = str(fields.get("refinement_model_id") or "same").strip() or "same"
+    fields["refinement_model_id"] = refinement_model_id
+    fallback_model_id = str(fields.get("caption_fallback_model_id") or "auto").strip() or "auto"
+    fields["caption_fallback_model_id"] = fallback_model_id
+    loop_recovery = str(fields.get("caption_loop_recovery_mode") or "safe_retry_fallback").strip()
+    if loop_recovery not in {"off", "safe_retry", "safe_retry_fallback"}:
+        loop_recovery = "safe_retry_fallback"
+    fields["caption_loop_recovery_mode"] = loop_recovery
+    return fields, {
+        "model_id": model_id,
+        "model_variant": variant,
+        "refinement_model_id": refinement_model_id,
+        "fallback_model_id": fallback_model_id,
+        "loop_recovery": loop_recovery,
+    }
+
+
+def _qwen_caption_dataset_read_runner_heartbeat(
+    heartbeat_path: Path,
+    *,
+    last_mtime: float = 0.0,
+) -> Tuple[float, Optional[Dict[str, Any]]]:
+    try:
+        stat_result = heartbeat_path.stat()
+    except FileNotFoundError:
+        return last_mtime, None
+    except Exception:
+        return last_mtime, None
+    mtime = float(stat_result.st_mtime or 0.0)
+    if mtime <= last_mtime:
+        return last_mtime, None
+    try:
+        payload = json.loads(heartbeat_path.read_text())
+    except Exception:
+        return mtime, None
+    if not isinstance(payload, dict):
+        return mtime, None
+    return mtime, payload
+
+
+def _qwen_caption_dataset_runner_heartbeat_message(heartbeat: Mapping[str, Any]) -> str:
+    phase = str(heartbeat.get("phase") or "heartbeat").replace("_", " ")
+    processed = heartbeat.get("processed")
+    total = heartbeat.get("total_cases")
+    case_name = str(heartbeat.get("case") or heartbeat.get("stem") or "").strip()
+    attempt = heartbeat.get("attempt")
+    worker_progress = (
+        heartbeat.get("worker_progress")
+        if isinstance(heartbeat.get("worker_progress"), Mapping)
+        else {}
+    )
+    parts = [f"Caption runner {phase}"]
+    if case_name:
+        parts.append(case_name)
+    if attempt:
+        parts.append(f"attempt {attempt}")
+    if processed is not None and total:
+        parts.append(f"{processed}/{total} complete")
+    worker_step = str(
+        heartbeat.get("worker_step_label")
+        or worker_progress.get("step_label")
+        or worker_progress.get("phase_label")
+        or ""
+    ).strip()
+    worker_message = str(
+        heartbeat.get("worker_message")
+        or worker_progress.get("message")
+        or ""
+    ).strip()
+    if worker_step:
+        qwen_detail = f"Qwen: {worker_step}"
+        if worker_message and worker_message != worker_step:
+            qwen_detail = f"{qwen_detail}: {worker_message}"
+        generated = heartbeat.get("worker_generated_tokens", worker_progress.get("generated_tokens"))
+        max_tokens = heartbeat.get("worker_max_new_tokens", worker_progress.get("max_new_tokens"))
+        if generated is not None and max_tokens:
+            qwen_detail = f"{qwen_detail} ({generated}/{max_tokens} tokens)"
+        parts.append(qwen_detail)
+    return "; ".join(parts)
+
+
+def _qwen_caption_dataset_stop_process(process: subprocess.Popen[Any], *, kill_timeout: float = 10.0) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+    except Exception:
+        return
+    try:
+        process.wait(timeout=kill_timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _qwen_caption_dataset_live_auto_resume_after_failure(job: QwenCaptionDatasetJob) -> None:
+    if not _qwen_caption_dataset_job_should_live_auto_resume(job):
+        return
+    try:
+        resumed_job = _resume_qwen_caption_dataset_job(job.job_id, auto_resume=True)
+        result_data = dict(job.result or {})
+        result_data["auto_resumed_job_id"] = resumed_job.job_id
+        result_data["auto_resumed_at"] = time.time()
+        result_data["auto_resumed_from_error"] = job.error
+        job.result = result_data
+        job.message = f"Auto-resumed as {resumed_job.job_id}"
+        _qwen_caption_dataset_job_log(
+            job,
+            "scheduled set-and-forget auto-resume",
+            resumed_job_id=resumed_job.job_id,
+            failure_error=job.error,
+        )
+        _persist_qwen_caption_dataset_job(job)
+    except Exception:
+        logger.exception("Failed to live auto-resume Qwen caption dataset job %s", job.job_id)
+
+
+def _run_qwen_caption_dataset_job(job: QwenCaptionDatasetJob, payload: QwenCaptionDatasetJobRequest) -> None:
+    job.status = "running"
+    job.message = "Preparing caption dataset job"
+    job.request = model_dump_compat(payload)
+    job.updated_at = time.time()
+    _persist_qwen_caption_dataset_job(job)
+    process: Optional[subprocess.Popen[str]] = None
+    try:
+        job_output_dir = Path(job.output_dir or _qwen_caption_dataset_job_dir(job.job_id))
+        job_output_dir.mkdir(parents=True, exist_ok=True)
+        job.output_dir = str(job_output_dir)
+        runner_output_dir = (
+            _qwen_caption_dataset_job_dir(job.job_id, payload.output_dir)
+            if payload.output_dir
+            else job_output_dir
+        )
+        runner_output_dir.mkdir(parents=True, exist_ok=True)
+        dataset_entry = _resolve_dataset_entry(payload.dataset_id)
+        if bool(payload.save_text_labels) or bool(payload.instruction_dataset):
+            lock_payload = {}
+            session_id = str(payload.annotation_session_id or "").strip()
+            if session_id:
+                lock_payload["session_id"] = session_id
+            _require_dataset_annotation_lock_owner_if_active(dataset_entry, lock_payload)
+        manifest, cases = _qwen_caption_dataset_cases(payload, output_dir=runner_output_dir)
+        if not cases:
+            job.status = "completed"
+            job.progress = 1.0
+            job.message = "No target images needed captioning"
+            job.result = {
+                "dataset_id": payload.dataset_id,
+                "total_cases": 0,
+                "processed": 0,
+                "saved_text_labels": 0,
+                "output_dir": str(runner_output_dir),
+                "job_output_dir": str(job_output_dir),
+            }
+            _persist_qwen_caption_dataset_job(job)
+            return
+        caption_request_fields, caption_runner_model_fields = _qwen_caption_dataset_effective_request_fields(
+            payload.caption_request or {},
+            set_and_forget=bool(payload.set_and_forget),
+        )
+        effective_request = dict(job.request or {})
+        effective_request["caption_request"] = dict(caption_request_fields)
+        job.request = effective_request
+        _persist_qwen_caption_dataset_job(job)
+        cases_path = job_output_dir / "cases.json"
+        request_path = job_output_dir / "request_fields.json"
+        cases_path.write_text(json.dumps(cases, indent=2, sort_keys=True))
+        request_path.write_text(json.dumps(caption_request_fields, indent=2, sort_keys=True))
+        runner_profile = _qwen_caption_dataset_runner_profile(payload)
+        requested_runner_settings = _qwen_caption_dataset_requested_runner_settings(
+            request_path=request_path,
+            caption_runner_model_fields=caption_runner_model_fields,
+            runner_profile=runner_profile,
+        )
+        total = len(cases)
+        dataset_root = _dataset_effective_root_from_entry(dataset_entry)
+        result_summary: Dict[str, Any] = {
+            "dataset_id": payload.dataset_id,
+            "dataset_label": manifest.get("dataset_label") or payload.dataset_id,
+            "total_cases": total,
+            "processed": 0,
+            "attempts_seen": 0,
+            "failed_attempts": 0,
+            "failed": 0,
+            "quality_failed": 0,
+            "saved_text_labels": 0,
+            "output_dir": str(runner_output_dir),
+            "job_output_dir": str(job_output_dir),
+            "results_jsonl": str(runner_output_dir / "results.jsonl"),
+            "captions_jsonl": str(runner_output_dir / "captions.jsonl"),
+            "summary_json": str(runner_output_dir / "summary.json"),
+            "heartbeat_json": str(runner_output_dir / "heartbeat.json"),
+            "runner_artifact_log_bytes": payload.runner_artifact_log_bytes,
+            "runner_profile": dict(runner_profile),
+            "effective_model_fields": dict(caption_runner_model_fields),
+            "requested_run_settings": dict(requested_runner_settings),
+            "instruction_dataset": bool(payload.instruction_dataset),
+            "generated_qa_rows": 0,
+        }
+        job.result = dict(result_summary)
+        pilot_required_threshold = int(QWEN_CAPTION_SET_AND_FORGET_REQUIRE_PILOT_CASES)
+        if (
+            bool(payload.set_and_forget)
+            and not bool(payload.preview_only)
+            and not bool(payload.require_pilot_certification)
+            and pilot_required_threshold > 0
+            and total >= pilot_required_threshold
+        ):
+            pilot_requirement_report = {
+                "status": "error",
+                "required": True,
+                "total_cases": total,
+                "threshold_cases": pilot_required_threshold,
+                "checks": [
+                    {
+                        "name": "set_and_forget_pilot_required",
+                        "status": "error",
+                        "detail": (
+                            "certified pilot is required before starting a set-and-forget "
+                            f"caption job with {total} cases"
+                        ),
+                    }
+                ],
+            }
+            result_summary["required_pilot_certification"] = pilot_requirement_report
+            job.result = dict(result_summary)
+            job.status = "failed"
+            job.progress = 1.0
+            job.error = "caption_runner_pilot_required"
+            job.message = (
+                "Certified pilot required before starting this set-and-forget caption job "
+                f"({total} cases, threshold {pilot_required_threshold})."
+            )
+            job.updated_at = time.time()
+            _qwen_caption_dataset_job_log(
+                job,
+                "caption runner pilot certification required",
+                required_pilot_certification=pilot_requirement_report,
+            )
+            _persist_qwen_caption_dataset_job(job)
+            return
+        pilot_config_report = _qwen_caption_dataset_large_set_and_forget_pilot_config_report(
+            payload,
+            output_dir=runner_output_dir,
+            total_cases=total,
+        )
+        if pilot_config_report is not None and str(pilot_config_report.get("status") or "").lower() != "ok":
+            result_summary["required_pilot_certification"] = pilot_config_report
+            job.result = dict(result_summary)
+            failed_checks = [
+                check
+                for check in (pilot_config_report.get("checks") or [])
+                if isinstance(check, Mapping) and str(check.get("status") or "").lower() != "ok"
+            ]
+            first_detail = str(failed_checks[0].get("detail") if failed_checks else "pilot configuration failed")
+            job.status = "failed"
+            job.progress = 1.0
+            job.error = "caption_runner_pilot_certification_failed"
+            job.message = f"Pilot certification configuration failed: {first_detail}"
+            job.updated_at = time.time()
+            _qwen_caption_dataset_job_log(
+                job,
+                "caption runner pilot certification configuration failed",
+                required_pilot_certification=pilot_config_report,
+            )
+            _persist_qwen_caption_dataset_job(job)
+            return
+        supervision_report = _qwen_caption_dataset_large_set_and_forget_supervision_report(
+            payload,
+            total_cases=total,
+        )
+        if supervision_report is not None:
+            result_summary["backend_supervision"] = supervision_report
+            job.result = dict(result_summary)
+            if str(supervision_report.get("status") or "").lower() != "ok":
+                failed_checks = [
+                    check
+                    for check in (supervision_report.get("checks") or [])
+                    if isinstance(check, Mapping) and str(check.get("status") or "").lower() != "ok"
+                ]
+                first_detail = str(failed_checks[0].get("detail") if failed_checks else "backend supervision required")
+                job.status = "failed"
+                job.progress = 1.0
+                job.error = "caption_runner_backend_supervision_required"
+                job.message = f"Backend supervision required: {first_detail}"
+                job.updated_at = time.time()
+                _qwen_caption_dataset_job_log(
+                    job,
+                    "caption runner backend crash supervision required",
+                    backend_supervision=supervision_report,
+                )
+                _persist_qwen_caption_dataset_job(job)
+                return
+        try:
+            from tools import preflight_qwen_caption_soak as caption_preflight
+
+            preflight_report = caption_preflight.preflight_soak(
+                SimpleNamespace(
+                    dataset_root=Path(dataset_root),
+                    cases_json=cases_path,
+                    request_json=request_path,
+                    output_dir=runner_output_dir,
+                    all_images=False,
+                    caption_mode="full",
+                    sample_size=0,
+                    sample_seed=13,
+                    case=[],
+                    limit=0,
+                    resume=bool(payload.resume),
+                    save_dataset_text_labels=bool(payload.save_text_labels),
+                    attempts=payload.attempts,
+                    max_artifact_log_bytes=payload.runner_artifact_log_bytes,
+                    min_free_gb=payload.runner_min_free_gb,
+                    disk_safety_factor=payload.runner_disk_safety_factor,
+                    max_heartbeat_age=max(300.0, float(payload.runner_no_output_timeout_seconds or 0.0)),
+                    model_id=caption_runner_model_fields["model_id"],
+                    model_variant=caption_runner_model_fields["model_variant"],
+                    refinement_model_id=caption_runner_model_fields["refinement_model_id"],
+                    fallback_model_id=caption_runner_model_fields["fallback_model_id"],
+                    loop_recovery=caption_runner_model_fields["loop_recovery"],
+                    allow_model_download=bool(payload.allow_model_download),
+                    preview_only=bool(payload.preview_only),
+                    max_boxes=0,
+                    max_new_tokens=caption_request_fields.get("max_new_tokens"),
+                    final_sentences=caption_request_fields.get("final_caption_max_sentences") or 8,
+                    window_size=QWEN_WINDOW_DEFAULT_SIZE,
+                    window_overlap=QWEN_WINDOW_DEFAULT_OVERLAP,
+                    mlx_max_image_side=runner_profile["mlx_max_image_side"],
+                    retry_image_side_scale=runner_profile["retry_image_side_scale"],
+                    min_retry_image_side=runner_profile["min_retry_image_side"],
+                    cooldown_after_success=runner_profile["cooldown_after_success"],
+                    temperature=QWEN_TEMPERATURE,
+                    top_p=QWEN_TOP_P,
+                    top_k=20,
+                    use_sampling=QWEN_DO_SAMPLE,
+                    prompt=caption_request_fields.get("user_prompt") or "",
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            preflight_report = {
+                "status": "error",
+                "checks": [
+                    {
+                        "name": "backend_preflight",
+                        "status": "error",
+                        "detail": str(exc),
+                        "error_type": type(exc).__name__,
+                    }
+                ],
+            }
+        result_summary["preflight"] = preflight_report
+        job.result = dict(result_summary)
+        if str(preflight_report.get("status") or "").lower() == "error":
+            failed_checks = [
+                check
+                for check in (preflight_report.get("checks") or [])
+                if isinstance(check, Mapping) and str(check.get("status") or "").lower() == "error"
+            ]
+            first_detail = str(failed_checks[0].get("detail") if failed_checks else "preflight failed")
+            job.status = "failed"
+            job.progress = 1.0
+            job.error = "caption_runner_preflight_failed"
+            job.message = f"Caption runner preflight failed: {first_detail}"
+            job.updated_at = time.time()
+            _qwen_caption_dataset_job_log(
+                job,
+                "caption runner preflight failed",
+                preflight=preflight_report,
+            )
+            _persist_qwen_caption_dataset_job(job)
+            return
+        pilot_certification_report = _qwen_caption_dataset_required_pilot_certification(
+            payload,
+            output_dir=runner_output_dir,
+            request_data=job.request if isinstance(job.request, Mapping) else model_dump_compat(payload),
+            max_heartbeat_age_seconds=max(300.0, float(payload.runner_no_output_timeout_seconds or 0.0)),
+            expected_run_settings_fingerprint=str(requested_runner_settings.get("fingerprint") or ""),
+        )
+        if pilot_certification_report is not None:
+            result_summary["required_pilot_certification"] = pilot_certification_report
+            job.result = dict(result_summary)
+            certification_status = str(pilot_certification_report.get("status") or "error").lower()
+            if certification_status != "ok":
+                failed_checks = [
+                    check
+                    for check in (pilot_certification_report.get("checks") or [])
+                    if isinstance(check, Mapping) and str(check.get("status") or "").lower() != "ok"
+                ]
+                first_detail = str(failed_checks[0].get("detail") if failed_checks else certification_status)
+                job.status = "failed"
+                job.progress = 1.0
+                job.error = "caption_runner_pilot_certification_failed"
+                job.message = f"Pilot certification failed: {first_detail}"
+                job.updated_at = time.time()
+                _qwen_caption_dataset_job_log(
+                    job,
+                    "caption runner pilot certification failed",
+                    pilot_certification=pilot_certification_report,
+                )
+                _persist_qwen_caption_dataset_job(job)
+                return
+            _qwen_caption_dataset_job_log(
+                job,
+                "caption runner pilot certification passed",
+                pilot_certification=pilot_certification_report,
+            )
+            _persist_qwen_caption_dataset_job(job)
+        cmd = [
+            sys.executable,
+            str(Path(__file__).resolve().parent / "tools" / "run_qwen_caption_flow_benchmark.py"),
+            "--cases-json",
+            str(cases_path),
+            "--request-json",
+            str(request_path),
+            "--dataset-root",
+            str(dataset_root),
+            "--output-dir",
+            str(runner_output_dir),
+            "--attempts",
+            str(payload.attempts),
+            "--timeout",
+            str(payload.per_image_timeout_seconds),
+            "--cooldown-after-crash",
+            str(payload.cooldown_after_crash_seconds),
+            "--cooldown-after-success",
+            str(runner_profile["cooldown_after_success"]),
+            "--max-failures",
+            str(payload.max_failures),
+            "--heartbeat-interval",
+            str(payload.runner_heartbeat_interval_seconds),
+            "--max-artifact-log-bytes",
+            str(payload.runner_artifact_log_bytes),
+            "--model-id",
+            caption_runner_model_fields["model_id"],
+            "--refinement-model-id",
+            caption_runner_model_fields["refinement_model_id"],
+            "--fallback-model-id",
+            caption_runner_model_fields["fallback_model_id"],
+            "--loop-recovery",
+            caption_runner_model_fields["loop_recovery"],
+            "--windowed-full-image-strategy",
+            str(caption_request_fields.get("caption_windowed_full_image_strategy") or "visual"),
+            "--mlx-max-image-side",
+            str(runner_profile["mlx_max_image_side"]),
+            "--retry-image-side-scale",
+            str(runner_profile["retry_image_side_scale"]),
+            "--min-retry-image-side",
+            str(runner_profile["min_retry_image_side"]),
+        ]
+        if bool(payload.resume):
+            cmd.append("--resume")
+        if bool(payload.resume_reprocess_recovery_events):
+            cmd.append("--resume-reprocess-recovery-events")
+        if bool(payload.preview_only):
+            cmd.append("--preview-only")
+        if bool(payload.continue_on_quality_failures):
+            cmd.append("--continue-on-quality-failures")
+        if bool(payload.save_text_labels):
+            cmd.append("--save-dataset-text-labels")
+        if bool(payload.instruction_dataset):
+            cmd.append("--instruction-dataset")
+        if int(payload.subcaptions_per_image or 0) > 0:
+            cmd.extend(["--subcaptions-per-image", str(int(payload.subcaptions_per_image or 0))])
+        if not bool(payload.include_source_annotations_in_generator_context):
+            cmd.append("--no-source-annotations-in-generator-context")
+        if not bool(payload.strict_grounding):
+            cmd.append("--relaxed-instruction-grounding")
+        env = os.environ.copy()
+        env.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
+        _qwen_caption_dataset_job_log(job, "starting caption runner", command=" ".join(cmd))
+        process = subprocess.Popen(
+            cmd,
+            cwd=str(Path(__file__).resolve().parent),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env,
+        )
+        job.process = process
+        _persist_qwen_caption_dataset_job(job)
+        runner_stdout = process.stdout
+        if runner_stdout is None:
+            raise RuntimeError("caption_runner_stdout_unavailable")
+        case_statuses: Dict[str, str] = {}
+        quality_failed_cases: Set[str] = set()
+        recovery_event_cases: Set[str] = set()
+        loop_recovery_cases: Set[str] = set()
+        deterministic_recovery_cases: Set[str] = set()
+        prompt_budget_adapted_cases: Set[str] = set()
+        stream_loop_detected_cases: Set[str] = set()
+        loop_trim_cases: Set[str] = set()
+        recovery_events_seen = 0
+        signal_exit_attempts_seen = 0
+        stream_loop_detected_events_seen = 0
+        loop_trim_events_seen = 0
+        max_prompt_tokens = 0
+        stdout_queue: "queue.Queue[Optional[str]]" = queue.Queue()
+
+        def _read_runner_stdout() -> None:
+            try:
+                for stdout_line in runner_stdout:
+                    stdout_queue.put(stdout_line)
+            finally:
+                stdout_queue.put(None)
+
+        stdout_thread = threading.Thread(
+            target=_read_runner_stdout,
+            name=f"qwen-caption-runner-stdout-{job.job_id}",
+            daemon=True,
+        )
+        stdout_thread.start()
+        no_output_timeout = float(payload.runner_no_output_timeout_seconds or 0.0)
+        last_output_at = time.monotonic()
+        heartbeat_path = runner_output_dir / "heartbeat.json"
+        last_heartbeat_mtime = 0.0
+        last_heartbeat_seq: Any = None
+
+        def _apply_runner_heartbeat() -> None:
+            nonlocal last_heartbeat_mtime, last_heartbeat_seq, last_output_at, result_summary
+            last_heartbeat_mtime, heartbeat = _qwen_caption_dataset_read_runner_heartbeat(
+                heartbeat_path,
+                last_mtime=last_heartbeat_mtime,
+            )
+            if not heartbeat:
+                return
+            result_summary["runner_heartbeat"] = heartbeat
+            heartbeat_seq = heartbeat.get("seq")
+            new_phase = heartbeat_seq is None or heartbeat_seq != last_heartbeat_seq
+            if new_phase:
+                last_heartbeat_seq = heartbeat_seq
+                last_output_at = time.monotonic()
+                job.message = _qwen_caption_dataset_runner_heartbeat_message(heartbeat)
+                _qwen_caption_dataset_job_log(
+                    job,
+                    "runner heartbeat",
+                    heartbeat=heartbeat,
+                )
+            job.result = dict(result_summary)
+            job.updated_at = time.time()
+            _persist_qwen_caption_dataset_job(job)
+
+        def _handle_runner_row(row: Mapping[str, Any]) -> None:
+            nonlocal last_output_at, max_prompt_tokens, recovery_events_seen, result_summary
+            nonlocal signal_exit_attempts_seen
+            nonlocal stream_loop_detected_events_seen, loop_trim_events_seen
+            last_output_at = time.monotonic()
+            result_summary["attempts_seen"] = int(result_summary.get("attempts_seen") or 0) + 1
+            case_key = str(row.get("case_id") or row.get("case") or row.get("stem") or "").strip()
+            if not case_key:
+                case_key = f"unknown_{result_summary['attempts_seen']}"
+            final_status = str(row.get("final_status") or row.get("status") or "unknown")
+            if final_status == "failed_attempt":
+                result_summary["failed_attempts"] = int(result_summary.get("failed_attempts") or 0) + 1
+                processed = len(case_statuses)
+            else:
+                case_statuses[case_key] = final_status
+                processed = len(case_statuses)
+            if row.get("return_signal") is not None or str(row.get("attempt_failure_kind") or "") == "signal_exit":
+                signal_exit_attempts_seen += 1
+            result_summary["processed"] = processed
+            ok_statuses = {"ok", "skipped_completed", "skipped_existing_caption", "preview_only"}
+            result_summary["failed"] = sum(
+                1 for status in case_statuses.values() if status not in ok_statuses
+            )
+            result_summary["runner_totals"] = dict(Counter(case_statuses.values()))
+            if row.get("quality_failures"):
+                quality_failed_cases.add(case_key)
+            result_summary["quality_failed"] = len(quality_failed_cases)
+            recovery_events = _qwen_caption_dataset_row_recovery_events(row)
+            if recovery_events:
+                recovery_event_cases.add(case_key)
+                recovery_events_seen += len(recovery_events)
+            if _qwen_caption_dataset_row_has_loop_recovery(row):
+                loop_recovery_cases.add(case_key)
+            if _qwen_caption_dataset_row_has_deterministic_recovery(row):
+                deterministic_recovery_cases.add(case_key)
+            if _qwen_caption_dataset_row_has_adapted_prompt_budget(row):
+                prompt_budget_adapted_cases.add(case_key)
+            stream_loop_events = _qwen_caption_dataset_row_io_event_count(
+                row,
+                "stream_loop_detected",
+            )
+            if stream_loop_events > 0:
+                stream_loop_detected_cases.add(case_key)
+                stream_loop_detected_events_seen += stream_loop_events
+            loop_trim_events = _qwen_caption_dataset_row_io_event_count(row, "loop_trim")
+            if loop_trim_events > 0:
+                loop_trim_cases.add(case_key)
+                loop_trim_events_seen += loop_trim_events
+            max_prompt_tokens = max(max_prompt_tokens, _qwen_caption_dataset_row_max_prompt_tokens(row))
+            result_summary["degraded_rates"] = _qwen_caption_dataset_degraded_rates(
+                processed=processed,
+                attempts_seen=int(result_summary.get("attempts_seen") or 0),
+                failed=int(result_summary.get("failed") or 0),
+                quality_failed=len(quality_failed_cases),
+                failed_attempts=int(result_summary.get("failed_attempts") or 0),
+                signal_exit_attempts=signal_exit_attempts_seen,
+                recovery_event_cases=len(recovery_event_cases),
+                recovery_events=recovery_events_seen,
+                loop_recovery_cases=len(loop_recovery_cases),
+                deterministic_recovery_cases=len(deterministic_recovery_cases),
+                prompt_budget_adapted_cases=len(prompt_budget_adapted_cases),
+                max_prompt_tokens=max_prompt_tokens,
+                stream_loop_detected_cases=len(stream_loop_detected_cases),
+                stream_loop_detected_events=stream_loop_detected_events_seen,
+                loop_trim_cases=len(loop_trim_cases),
+                loop_trim_events=loop_trim_events_seen,
+            )
+            caption_bearing_statuses = {"ok", "skipped_completed"}
+            if final_status in caption_bearing_statuses:
+                caption_record = _qwen_caption_dataset_caption_record_from_row(row)
+                if caption_record:
+                    result_summary["latest_caption"] = caption_record
+                    captions = list(result_summary.get("captions") or [])
+                    if total <= 25 or len(captions) < 5:
+                        captions.append(caption_record)
+                    result_summary["captions"] = captions[-25:]
+            if bool(payload.save_text_labels) and final_status in caption_bearing_statuses:
+                saved = _qwen_caption_dataset_save_caption_from_row(
+                    dataset_id=payload.dataset_id,
+                    row=row,
+                    job=job,
+                    annotation_session_id=payload.annotation_session_id,
+                    make_primary=bool(payload.generated_make_primary),
+                )
+                if saved:
+                    result_summary["saved_text_labels"] = int(result_summary.get("saved_text_labels") or 0) + 1
+            if bool(payload.instruction_dataset) and final_status in caption_bearing_statuses:
+                added = _qwen_caption_dataset_save_instruction_records_from_row(
+                    dataset_id=payload.dataset_id,
+                    row=row,
+                    job=job,
+                )
+                if added:
+                    result_summary["generated_qa_rows"] = int(result_summary.get("generated_qa_rows") or 0) + added
+            job.progress = max(0.0, min(1.0, processed / float(max(1, total))))
+            if final_status == "failed_attempt":
+                job.message = f"Caption retry pending after failed attempt; {processed}/{total} complete"
+            else:
+                job.message = f"Captioned {processed}/{total}"
+            job.result = dict(result_summary)
+            job.updated_at = time.time()
+            _qwen_caption_dataset_job_log(
+                job,
+                f"{row.get('case') or row.get('stem')}: {row.get('final_status') or row.get('status')}",
+                row=row,
+            )
+            _persist_qwen_caption_dataset_job(job)
+
+        while True:
+            if job.cancel_event.is_set():
+                break
+            if process.poll() is not None and not stdout_thread.is_alive() and stdout_queue.empty():
+                break
+            _apply_runner_heartbeat()
+            wait_seconds = 1.0
+            if no_output_timeout > 0:
+                elapsed = time.monotonic() - last_output_at
+                remaining = no_output_timeout - elapsed
+                if remaining <= 0:
+                    result_summary["watchdog_timeout_seconds"] = no_output_timeout
+                    job.status = "failed"
+                    job.error = "caption_runner_no_output_timeout"
+                    job.message = (
+                        f"Caption runner made no heartbeat or result progress for "
+                        f"{no_output_timeout:.0f}s"
+                    )
+                    job.result = dict(result_summary)
+                    job.updated_at = time.time()
+                    _qwen_caption_dataset_job_log(
+                        job,
+                        job.message,
+                        timeout_seconds=no_output_timeout,
+                    )
+                    _qwen_caption_dataset_stop_process(process)
+                    _persist_qwen_caption_dataset_job(job)
+                    return
+                wait_seconds = max(0.05, min(1.0, remaining))
+            try:
+                raw_line = stdout_queue.get(timeout=wait_seconds)
+            except queue.Empty:
+                continue
+            if raw_line is None:
+                break
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                _qwen_caption_dataset_job_log(job, line)
+                continue
+            _handle_runner_row(row)
+        if job.cancel_event.is_set():
+            _qwen_caption_dataset_stop_process(process)
+            job.status = "cancelled"
+            job.message = "Cancelled"
+            _persist_qwen_caption_dataset_job(job)
+            return
+        return_code = process.wait()
+        if return_code == 0:
+            job.status = "completed"
+            job.progress = 1.0
+            failed_count = int(result_summary.get("failed") or 0)
+            job.message = (
+                f"Caption dataset job complete with {failed_count} failed"
+                if failed_count
+                else "Caption dataset job complete"
+            )
+        else:
+            job.status = "failed"
+            job.error = f"caption_runner_exit_{return_code}"
+            job.message = "Caption dataset job failed"
+        job.result = dict(result_summary)
+        summary_path = runner_output_dir / "summary.json"
+        if summary_path.exists():
+            try:
+                runner_summary = json.loads(summary_path.read_text())
+                job.result["runner_summary"] = runner_summary
+                final_counts = _qwen_caption_dataset_result_summary_from_runner_summary(runner_summary)
+                if final_counts:
+                    job.result.update(final_counts)
+            except Exception:
+                pass
+        strict_audit_report = _qwen_caption_dataset_strict_audit(
+            runner_output_dir,
+            job.request if isinstance(job.request, Mapping) else model_dump_compat(payload),
+            max_heartbeat_age_seconds=max(300.0, float(payload.runner_no_output_timeout_seconds or 0.0)),
+        )
+        job.result["strict_audit"] = strict_audit_report
+        if return_code == 0 and bool(payload.set_and_forget):
+            degraded_rates = (
+                job.result.get("degraded_rates")
+                if isinstance(job.result.get("degraded_rates"), Mapping)
+                else result_summary.get("degraded_rates")
+            )
+            degraded_policy = _qwen_caption_dataset_degraded_policy(
+                degraded_rates if isinstance(degraded_rates, Mapping) else {},
+                job.request if isinstance(job.request, Mapping) else model_dump_compat(payload),
+                terminal=True,
+            )
+            job.result["degraded_policy"] = degraded_policy
+            if degraded_policy.get("active_violations"):
+                details = ", ".join(
+                    f"{item['rate']}={float(item['actual']):.3f}>{float(item['threshold']):.3f}"
+                    for item in degraded_policy["active_violations"]
+                    if isinstance(item, Mapping)
+                    and item.get("rate") is not None
+                    and item.get("actual") is not None
+                    and item.get("threshold") is not None
+                )
+                job.status = "failed"
+                job.error = "caption_runner_degraded_rates"
+                job.message = f"Caption dataset job exceeded health gates: {details}"
+                job.result["degraded_rate_violations"] = degraded_policy["active_violations"]
+            strict_audit_status = str(strict_audit_report.get("status") or "error").lower()
+            if job.status != "failed" and strict_audit_status != "ok":
+                failed_checks = [
+                    check
+                    for check in (strict_audit_report.get("checks") or [])
+                    if isinstance(check, Mapping) and str(check.get("status") or "").lower() != "ok"
+                ]
+                first_detail = str(failed_checks[0].get("detail") if failed_checks else strict_audit_status)
+                job.status = "failed"
+                job.error = "caption_runner_strict_audit_failed"
+                job.message = f"Caption dataset job failed strict artifact audit: {first_detail}"
+    except HTTPException as exc:
+        job.status = "failed"
+        job.error = str(exc.detail or exc)
+        job.message = "Failed"
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Qwen caption dataset job %s failed", job.job_id)
+        job.status = "failed"
+        job.error = str(exc)
+        job.message = "Failed"
+    finally:
+        if process is not None and process.poll() is None:
+            try:
+                process.terminate()
+            except Exception:
+                pass
+        job.process = None
+        job.updated_at = time.time()
+        _persist_qwen_caption_dataset_job(job)
+        _qwen_caption_dataset_live_auto_resume_after_failure(job)
+
+
+def _start_qwen_caption_dataset_job(
+    payload: QwenCaptionDatasetJobRequest,
+    *,
+    force_default_output_dir: bool = False,
+) -> QwenCaptionDatasetJob:
+    job_id = f"qcap_{uuid.uuid4().hex[:8]}"
+    output_dir = _qwen_caption_dataset_job_dir(
+        job_id,
+        None if force_default_output_dir else payload.output_dir,
+    )
+    job = QwenCaptionDatasetJob(job_id=job_id, output_dir=str(output_dir))
+    _register_job_and_start_thread(
+        job=job,
+        registry=QWEN_CAPTION_DATASET_JOBS,
+        lock=QWEN_CAPTION_DATASET_JOBS_LOCK,
+        target=_run_qwen_caption_dataset_job,
+        args=(job, payload),
+        name=f"qwen-caption-dataset-{job_id}",
+    )
+    return job
+
+
+def _qwen_caption_dataset_serialized_job(job_id: str) -> Dict[str, Any]:
+    with QWEN_CAPTION_DATASET_JOBS_LOCK:
+        live_job = QWEN_CAPTION_DATASET_JOBS.get(job_id)
+    if live_job:
+        return _serialize_qwen_caption_dataset_job(live_job)
+    persisted = _load_qwen_caption_dataset_job_payload(job_id)
+    if persisted:
+        return persisted
+    raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_caption_dataset_job_not_found")
+
+
+def _qwen_caption_dataset_request_bool(value: Any, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    raw = str(value).strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _qwen_caption_dataset_request_int(value: Any, *, default: int = 0) -> int:
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _qwen_caption_dataset_request_float(value: Any, *, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _qwen_caption_dataset_normalize_path_key(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        return str(Path(raw).expanduser().resolve(strict=False))
+    except Exception:
+        return raw
+
+
+def _qwen_caption_dataset_job_artifact_key(payload: Mapping[str, Any]) -> str:
+    request_data = payload.get("request") if isinstance(payload.get("request"), Mapping) else {}
+    result_data = payload.get("result") if isinstance(payload.get("result"), Mapping) else {}
+    for candidate in (
+        request_data.get("output_dir"),
+        result_data.get("output_dir"),
+        payload.get("output_dir"),
+    ):
+        key = _qwen_caption_dataset_normalize_path_key(candidate)
+        if key:
+            return key
+    return ""
+
+
+def _qwen_caption_dataset_job_is_active_artifact_owner(payload: Mapping[str, Any]) -> bool:
+    status = str(payload.get("status") or "").strip().lower()
+    return status in {"queued", "running", "cancelling"}
+
+
+def _qwen_caption_dataset_pid_is_alive(pid: Any) -> bool:
+    try:
+        pid_int = int(pid)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if pid_int <= 0:
+        return False
+    try:
+        os.kill(pid_int, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _qwen_caption_dataset_artifact_runner_lock(artifact_key: str) -> Dict[str, Any]:
+    if not artifact_key:
+        return {}
+    lock_path = Path(artifact_key) / ".runner.lock"
+    try:
+        lock = json.loads(lock_path.read_text())
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return {}
+    if not isinstance(lock, Mapping):
+        return {}
+    result = dict(lock)
+    result["lock_path"] = str(lock_path)
+    result["pid_alive"] = _qwen_caption_dataset_pid_is_alive(result.get("pid"))
+    return result
+
+
+def _qwen_caption_dataset_artifact_has_live_runner_lock(artifact_key: str) -> bool:
+    lock = _qwen_caption_dataset_artifact_runner_lock(artifact_key)
+    return bool(lock.get("pid_alive"))
+
+
+def _qwen_caption_dataset_job_sort_value(payload: Mapping[str, Any]) -> float:
+    for key in ("updated_at", "created_at"):
+        if payload.get(key) is None:
+            continue
+        try:
+            return float(payload.get(key))
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return 0.0
+
+
+def _qwen_caption_dataset_job_auto_resume_limit(request_data: Mapping[str, Any]) -> int:
+    explicit = request_data.get("max_auto_resumes")
+    if explicit is None:
+        return int(QWEN_CAPTION_SET_AND_FORGET_MAX_AUTO_RESUMES)
+    return max(0, _qwen_caption_dataset_request_int(explicit, default=0))
+
+
+def _qwen_caption_dataset_job_has_jsonl_corruption(payload: Mapping[str, Any]) -> bool:
+    result_data = payload.get("result") if isinstance(payload.get("result"), Mapping) else {}
+    strict_audit = (
+        result_data.get("strict_audit")
+        if isinstance(result_data.get("strict_audit"), Mapping)
+        else {}
+    )
+    for check in strict_audit.get("checks") or []:
+        if not isinstance(check, Mapping):
+            continue
+        name = str(check.get("name") or "").strip()
+        status = str(check.get("status") or "").strip().lower()
+        if name in {"results_jsonl", "captions_jsonl"} and status == "error" and check.get("invalid_rows"):
+            return True
+    return False
+
+
+def _qwen_caption_dataset_reconcile_completed_artifact(
+    payload: Mapping[str, Any],
+    *,
+    artifact_key: str,
+) -> Optional[Dict[str, Any]]:
+    if not artifact_key:
+        return None
+    job_id = str(payload.get("job_id") or "").strip()
+    metadata_output_dir = str(payload.get("output_dir") or "").strip()
+    request_data = payload.get("request") if isinstance(payload.get("request"), Mapping) else {}
+    if not job_id or not metadata_output_dir or not request_data:
+        return None
+    max_heartbeat_age = max(
+        300.0,
+        _qwen_caption_dataset_request_float(request_data.get("runner_no_output_timeout_seconds"), default=0.0),
+    )
+    artifact_dir = Path(artifact_key)
+    strict_audit_report = _qwen_caption_dataset_strict_audit(
+        artifact_dir,
+        request_data,
+        max_heartbeat_age_seconds=max_heartbeat_age,
+    )
+    if str(strict_audit_report.get("status") or "").strip().lower() != "ok":
+        return None
+    result_data = dict(payload.get("result") if isinstance(payload.get("result"), Mapping) else {})
+    result_data.update(
+        {
+            "output_dir": artifact_key,
+            "processed": strict_audit_report.get("processed_cases"),
+            "total_cases": strict_audit_report.get("expected_cases"),
+            "failed": strict_audit_report.get("failed_cases"),
+            "quality_failed": strict_audit_report.get("quality_failed_cases"),
+            "degraded_rates": strict_audit_report.get("degraded_rates"),
+            "strict_audit": strict_audit_report,
+        }
+    )
+    summary_path = artifact_dir / "summary.json"
+    if summary_path.exists():
+        try:
+            runner_summary = json.loads(summary_path.read_text())
+            if isinstance(runner_summary, Mapping):
+                result_data["runner_summary"] = dict(runner_summary)
+                final_counts = _qwen_caption_dataset_result_summary_from_runner_summary(runner_summary)
+                if final_counts:
+                    result_data.update(final_counts)
+        except Exception:
+            pass
+    job = QwenCaptionDatasetJob(job_id=job_id, output_dir=metadata_output_dir)
+    job.status = "completed"
+    job.progress = 1.0
+    job.message = "Caption dataset job complete from existing artifacts"
+    job.request = dict(request_data)
+    job.result = result_data
+    job.error = None
+    job.created_at = _qwen_caption_dataset_request_float(payload.get("created_at"), default=time.time())
+    job.logs = list(payload.get("logs") if isinstance(payload.get("logs"), list) else [])
+    job.log_seq = max(
+        [
+            _qwen_caption_dataset_request_int(log.get("seq"), default=0)
+            for log in job.logs
+            if isinstance(log, Mapping)
+        ]
+        or [0]
+    )
+    _qwen_caption_dataset_job_log(
+        job,
+        "set-and-forget artifacts already completed; no auto-resume needed",
+        artifact_dir=artifact_key,
+        strict_audit_status="ok",
+    )
+    _persist_qwen_caption_dataset_job(job)
+    return _serialize_qwen_caption_dataset_job(job)
+
+
+def _qwen_caption_dataset_job_should_auto_resume(payload: Mapping[str, Any]) -> bool:
+    if not bool(QWEN_CAPTION_SET_AND_FORGET_AUTO_RESUME):
+        return False
+    request_data = payload.get("request") if isinstance(payload.get("request"), Mapping) else {}
+    if not request_data:
+        return False
+    if not _qwen_caption_dataset_request_bool(request_data.get("set_and_forget"), default=False):
+        return False
+    status = str(payload.get("status") or "").strip().lower()
+    if status not in {"queued", "running", "interrupted", "failed"}:
+        return False
+    error = str(payload.get("error") or "").strip()
+    if status == "failed":
+        if error in {
+            "caption_runner_preflight_failed",
+            "caption_runner_pilot_required",
+            "caption_runner_pilot_certification_failed",
+            "caption_runner_backend_supervision_required",
+        }:
+            return False
+        if (
+            error != "caption_runner_no_output_timeout"
+            and error != "caption_runner_degraded_rates"
+            and error != "caption_runner_strict_audit_failed"
+            and not error.startswith("caption_runner_exit_")
+        ):
+            return False
+        if error == "caption_runner_strict_audit_failed" and _qwen_caption_dataset_job_has_jsonl_corruption(payload):
+            return False
+    output_dir = str(payload.get("output_dir") or "").strip()
+    if not output_dir:
+        return False
+    auto_resume_count = _qwen_caption_dataset_request_int(request_data.get("auto_resume_count"), default=0)
+    max_auto_resumes = _qwen_caption_dataset_job_auto_resume_limit(request_data)
+    return max_auto_resumes > 0 and auto_resume_count < max_auto_resumes
+
+
+def _qwen_caption_dataset_job_should_live_auto_resume(job: QwenCaptionDatasetJob) -> bool:
+    status = str(job.status or "").strip().lower()
+    if status != "failed":
+        return False
+    error = str(job.error or "").strip()
+    if (
+        error != "caption_runner_no_output_timeout"
+        and error != "caption_runner_degraded_rates"
+        and error != "caption_runner_strict_audit_failed"
+        and not error.startswith("caption_runner_exit_")
+    ):
+        return False
+    return _qwen_caption_dataset_job_should_auto_resume(_serialize_qwen_caption_dataset_job(job))
+
+
+def _resume_qwen_caption_dataset_job(
+    job_id: str,
+    *,
+    auto_resume: bool = False,
+) -> QwenCaptionDatasetJob:
+    existing = _qwen_caption_dataset_serialized_job(job_id)
+    status = str(existing.get("status") or "").strip().lower()
+    if status in {"queued", "running"}:
+        raise HTTPException(status_code=HTTP_409_CONFLICT, detail="qwen_caption_dataset_job_still_running")
+    request_data = existing.get("request") if isinstance(existing.get("request"), Mapping) else {}
+    if not request_data:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_caption_dataset_job_missing_request")
+    output_dir = str(request_data.get("output_dir") or existing.get("output_dir") or "").strip()
+    if not output_dir:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_caption_dataset_job_missing_output_dir")
+    resume_request = dict(request_data)
+    resume_request["resume"] = True
+    resume_request["output_dir"] = output_dir
+    if auto_resume:
+        resume_request["auto_resume_count"] = (
+            _qwen_caption_dataset_request_int(request_data.get("auto_resume_count"), default=0) + 1
+        )
+        policy = _qwen_caption_dataset_degraded_policy_from_payload(existing, terminal=True)
+        if _qwen_caption_dataset_degraded_policy_reprocesses_recovery(policy):
+            resume_request["resume_reprocess_recovery_events"] = True
+    payload = QwenCaptionDatasetJobRequest(**resume_request)
+    job = _start_qwen_caption_dataset_job(payload, force_default_output_dir=True)
+    _qwen_caption_dataset_job_log(
+        job,
+        "auto-resumed caption dataset job" if auto_resume else "resumed caption dataset job",
+        resumed_from_job_id=job_id,
+        resumed_from_status=status or None,
+        output_dir=output_dir,
+        auto_resume=bool(auto_resume),
+        auto_resume_count=payload.auto_resume_count,
+    )
+    _persist_qwen_caption_dataset_job(job)
+    return job
+
+
+def _qwen_caption_dataset_job_should_adopt_live_runner(
+    payload: Mapping[str, Any],
+    *,
+    artifact_key: str,
+    runner_lock: Mapping[str, Any],
+) -> bool:
+    if not bool(QWEN_CAPTION_SET_AND_FORGET_AUTO_RESUME):
+        return False
+    if not artifact_key or not bool(runner_lock.get("pid_alive")):
+        return False
+    request_data = payload.get("request") if isinstance(payload.get("request"), Mapping) else {}
+    if not request_data:
+        return False
+    if not _qwen_caption_dataset_request_bool(request_data.get("set_and_forget"), default=False):
+        return False
+    if not str(payload.get("job_id") or "").strip() or not str(payload.get("output_dir") or "").strip():
+        return False
+    status = str(payload.get("status") or "").strip().lower()
+    if status in {"queued", "running", "interrupted"}:
+        return True
+    if status == "failed":
+        return _qwen_caption_dataset_job_should_auto_resume(payload)
+    return False
+
+
+def _qwen_caption_dataset_adopted_audit_message(
+    audit: Mapping[str, Any],
+    *,
+    runner_lock: Mapping[str, Any],
+) -> str:
+    expected = _qwen_caption_dataset_request_int(audit.get("expected_cases"), default=0)
+    processed = _qwen_caption_dataset_request_int(audit.get("processed_cases"), default=0)
+    heartbeat = audit.get("heartbeat") if isinstance(audit.get("heartbeat"), Mapping) else {}
+    heartbeat_status = str(heartbeat.get("status") or "").strip() or "unknown"
+    phase = str(heartbeat.get("phase") or "").strip().replace("_", " ")
+    pid = runner_lock.get("pid") or heartbeat.get("pid")
+    if expected > 0:
+        base = f"Adopted running caption worker; {processed}/{expected} complete"
+    else:
+        base = "Adopted running caption worker"
+    details = []
+    if pid:
+        details.append(f"pid {pid}")
+    if heartbeat_status:
+        details.append(f"status {heartbeat_status}")
+    if phase:
+        details.append(f"phase {phase}")
+    return f"{base} ({', '.join(details)})" if details else base
+
+
+def _qwen_caption_dataset_apply_adopted_live_audit(
+    job: QwenCaptionDatasetJob,
+    *,
+    artifact_key: str,
+    audit: Mapping[str, Any],
+    runner_lock: Mapping[str, Any],
+) -> None:
+    result_data = dict(job.result or {})
+    expected = _qwen_caption_dataset_request_int(audit.get("expected_cases"), default=0)
+    processed = _qwen_caption_dataset_request_int(audit.get("processed_cases"), default=0)
+    failed = _qwen_caption_dataset_request_int(audit.get("failed_cases"), default=0)
+    quality_failed = _qwen_caption_dataset_request_int(audit.get("quality_failed_cases"), default=0)
+    heartbeat = audit.get("heartbeat") if isinstance(audit.get("heartbeat"), Mapping) else {}
+    result_data.update(
+        {
+            "adopted_live_runner": True,
+            "adopted_live_runner_at": result_data.get("adopted_live_runner_at") or time.time(),
+            "adopted_runner_lock": dict(runner_lock),
+            "live_audit": dict(audit),
+            "output_dir": artifact_key,
+            "processed": processed,
+            "total_cases": expected or result_data.get("total_cases") or 0,
+            "failed": failed,
+            "quality_failed": quality_failed,
+            "degraded_rates": audit.get("degraded_rates") or result_data.get("degraded_rates") or {},
+        }
+    )
+    if heartbeat:
+        result_data["runner_heartbeat"] = dict(heartbeat)
+    job.status = "running"
+    if expected > 0:
+        job.progress = max(0.0, min(0.999, processed / float(max(1, expected))))
+    job.message = _qwen_caption_dataset_adopted_audit_message(
+        audit,
+        runner_lock=runner_lock,
+    )
+    job.result = result_data
+    job.updated_at = time.time()
+
+
+def _qwen_caption_dataset_finalize_adopted_live_runner(
+    job: QwenCaptionDatasetJob,
+    *,
+    artifact_key: str,
+    request_data: Mapping[str, Any],
+    max_heartbeat_age_seconds: float,
+) -> None:
+    artifact_dir = Path(artifact_key)
+    strict_audit_report = _qwen_caption_dataset_strict_audit(
+        artifact_dir,
+        request_data,
+        max_heartbeat_age_seconds=max_heartbeat_age_seconds,
+    )
+    result_data = dict(job.result or {})
+    result_data["strict_audit"] = strict_audit_report
+    result_data["output_dir"] = artifact_key
+    summary_path = artifact_dir / "summary.json"
+    if summary_path.exists():
+        try:
+            runner_summary = json.loads(summary_path.read_text())
+            if isinstance(runner_summary, Mapping):
+                result_data["runner_summary"] = dict(runner_summary)
+                final_counts = _qwen_caption_dataset_result_summary_from_runner_summary(runner_summary)
+                if final_counts:
+                    result_data.update(final_counts)
+        except Exception:
+            pass
+    if str(strict_audit_report.get("status") or "").strip().lower() == "ok":
+        result_data.update(
+            {
+                "processed": strict_audit_report.get("processed_cases"),
+                "total_cases": strict_audit_report.get("expected_cases"),
+                "failed": strict_audit_report.get("failed_cases"),
+                "quality_failed": strict_audit_report.get("quality_failed_cases"),
+                "degraded_rates": strict_audit_report.get("degraded_rates"),
+            }
+        )
+        job.status = "completed"
+        job.progress = 1.0
+        job.error = None
+        job.message = "Caption dataset job complete from adopted runner"
+    else:
+        failed_checks = [
+            check
+            for check in (strict_audit_report.get("checks") or [])
+            if isinstance(check, Mapping) and str(check.get("status") or "").lower() != "ok"
+        ]
+        first_detail = str(failed_checks[0].get("detail") if failed_checks else "strict artifact audit failed")
+        job.status = "failed"
+        job.error = "caption_runner_strict_audit_failed"
+        job.message = f"Adopted caption runner stopped before a valid terminal artifact: {first_detail}"
+    job.result = result_data
+    job.updated_at = time.time()
+    _persist_qwen_caption_dataset_job(job)
+
+
+def _monitor_adopted_qwen_caption_dataset_runner(
+    job: QwenCaptionDatasetJob,
+    request_data: Mapping[str, Any],
+    artifact_key: str,
+) -> None:
+    request_data = dict(request_data or {})
+    max_heartbeat_age = max(
+        300.0,
+        _qwen_caption_dataset_request_float(
+            request_data.get("runner_no_output_timeout_seconds"),
+            default=0.0,
+        ),
+    )
+    poll_seconds = max(0.5, float(QWEN_CAPTION_SET_AND_FORGET_ADOPTION_POLL_SECONDS or 0.0))
+    artifact_dir = Path(artifact_key)
+    try:
+        _qwen_caption_dataset_job_log(
+            job,
+            "adopted live set-and-forget caption runner",
+            artifact_dir=artifact_key,
+        )
+        while not job.cancel_event.is_set():
+            runner_lock = _qwen_caption_dataset_artifact_runner_lock(artifact_key)
+            audit = _qwen_caption_dataset_live_audit(
+                artifact_dir,
+                request_data,
+                max_heartbeat_age_seconds=max_heartbeat_age,
+            )
+            _qwen_caption_dataset_apply_adopted_live_audit(
+                job,
+                artifact_key=artifact_key,
+                audit=audit,
+                runner_lock=runner_lock,
+            )
+            _persist_qwen_caption_dataset_job(job)
+            heartbeat = audit.get("heartbeat") if isinstance(audit.get("heartbeat"), Mapping) else {}
+            heartbeat_status = str(heartbeat.get("status") or "").strip().lower()
+            lock_alive = bool(runner_lock.get("pid_alive"))
+            if heartbeat_status in {"completed", "failed"} or not lock_alive:
+                _qwen_caption_dataset_finalize_adopted_live_runner(
+                    job,
+                    artifact_key=artifact_key,
+                    request_data=request_data,
+                    max_heartbeat_age_seconds=max_heartbeat_age,
+                )
+                return
+            job.cancel_event.wait(poll_seconds)
+        job.status = "cancelled"
+        job.message = "Cancelled"
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Adopted Qwen caption dataset runner monitor %s failed", job.job_id)
+        job.status = "failed"
+        job.error = str(exc)
+        job.message = "Adopted caption runner monitor failed"
+    finally:
+        job.process = None
+        job.updated_at = time.time()
+        _persist_qwen_caption_dataset_job(job)
+        _qwen_caption_dataset_live_auto_resume_after_failure(job)
+
+
+def _adopt_live_qwen_caption_dataset_job(
+    payload: Mapping[str, Any],
+    *,
+    artifact_key: str,
+    runner_lock: Mapping[str, Any],
+) -> Optional[QwenCaptionDatasetJob]:
+    if not _qwen_caption_dataset_job_should_adopt_live_runner(
+        payload,
+        artifact_key=artifact_key,
+        runner_lock=runner_lock,
+    ):
+        return None
+    job_id = str(payload.get("job_id") or "").strip()
+    metadata_output_dir = str(payload.get("output_dir") or "").strip()
+    request_data = payload.get("request") if isinstance(payload.get("request"), Mapping) else {}
+    if not job_id or not metadata_output_dir or not request_data:
+        return None
+    with QWEN_CAPTION_DATASET_JOBS_LOCK:
+        existing = QWEN_CAPTION_DATASET_JOBS.get(job_id)
+    if existing is not None:
+        return existing
+    job = QwenCaptionDatasetJob(job_id=job_id, output_dir=metadata_output_dir)
+    job.status = "queued"
+    job.progress = _qwen_caption_dataset_request_float(payload.get("progress"), default=0.0)
+    job.message = "Adopting live set-and-forget caption runner"
+    job.request = dict(request_data)
+    job.result = dict(payload.get("result") if isinstance(payload.get("result"), Mapping) else {})
+    job.error = None
+    job.created_at = _qwen_caption_dataset_request_float(payload.get("created_at"), default=time.time())
+    job.logs = list(payload.get("logs") if isinstance(payload.get("logs"), list) else [])
+    job.log_seq = max(
+        [
+            _qwen_caption_dataset_request_int(log.get("seq"), default=0)
+            for log in job.logs
+            if isinstance(log, Mapping)
+        ]
+        or [0]
+    )
+    _register_job_and_start_thread(
+        job=job,
+        registry=QWEN_CAPTION_DATASET_JOBS,
+        lock=QWEN_CAPTION_DATASET_JOBS_LOCK,
+        target=_monitor_adopted_qwen_caption_dataset_runner,
+        args=(job, dict(request_data), artifact_key),
+        name=f"qwen-caption-adopt-{job_id}",
+    )
+    return job
+
+
+def _iter_persisted_qwen_caption_dataset_job_payloads() -> List[Dict[str, Any]]:
+    payloads: List[Dict[str, Any]] = []
+    try:
+        children = sorted(
+            [child for child in QWEN_CAPTION_DATASET_JOB_ROOT.iterdir() if child.is_dir()],
+            key=lambda child: child.stat().st_mtime,
+            reverse=True,
+        )
+    except Exception:
+        return payloads
+    for child in children:
+        payload = _load_qwen_caption_dataset_job_payload(child.name)
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    return payloads
+
+
+def _auto_resume_qwen_caption_dataset_jobs() -> List[Dict[str, Any]]:
+    if not _QWEN_CAPTION_SET_AND_FORGET_AUTO_RESUME_LOCK.acquire(blocking=False):
+        return []
+    try:
+        with QWEN_CAPTION_DATASET_JOBS_LOCK:
+            live_jobs = [_serialize_qwen_caption_dataset_job(job) for job in QWEN_CAPTION_DATASET_JOBS.values()]
+        live_artifacts = {
+            _qwen_caption_dataset_job_artifact_key(job)
+            for job in live_jobs
+            if _qwen_caption_dataset_job_is_active_artifact_owner(job)
+        }
+        live_artifacts.discard("")
+        latest_by_artifact: Dict[str, Dict[str, Any]] = {}
+        for payload in _iter_persisted_qwen_caption_dataset_job_payloads():
+            artifact_key = _qwen_caption_dataset_job_artifact_key(payload)
+            if not artifact_key or artifact_key in live_artifacts:
+                continue
+            current = latest_by_artifact.get(artifact_key)
+            if current is None or _qwen_caption_dataset_job_sort_value(payload) > _qwen_caption_dataset_job_sort_value(current):
+                latest_by_artifact[artifact_key] = payload
+
+        resumed: List[Dict[str, Any]] = []
+        for payload in sorted(
+            latest_by_artifact.values(),
+            key=_qwen_caption_dataset_job_sort_value,
+            reverse=True,
+        ):
+            artifact_key = _qwen_caption_dataset_job_artifact_key(payload)
+            runner_lock = _qwen_caption_dataset_artifact_runner_lock(artifact_key)
+            if runner_lock.get("pid_alive"):
+                adopted = _adopt_live_qwen_caption_dataset_job(
+                    payload,
+                    artifact_key=artifact_key,
+                    runner_lock=runner_lock,
+                )
+                if adopted is not None:
+                    resumed.append(_serialize_qwen_caption_dataset_job(adopted))
+                continue
+            reconciled = _qwen_caption_dataset_reconcile_completed_artifact(payload, artifact_key=artifact_key)
+            if reconciled is not None:
+                continue
+            if not _qwen_caption_dataset_job_should_auto_resume(payload):
+                continue
+            job_id = str(payload.get("job_id") or "").strip()
+            if not job_id:
+                continue
+            try:
+                job = _resume_qwen_caption_dataset_job(job_id, auto_resume=True)
+            except Exception:
+                logger.exception("Failed to auto-resume Qwen caption dataset job %s", job_id)
+                continue
+            resumed.append(_serialize_qwen_caption_dataset_job(job))
+        return resumed
+    finally:
+        _QWEN_CAPTION_SET_AND_FORGET_AUTO_RESUME_LOCK.release()
+
+
+def _qwen_caption_set_and_forget_auto_resume_sweep_once(reason: str) -> List[Dict[str, Any]]:
+    resumed = _auto_resume_qwen_caption_dataset_jobs()
+    if resumed:
+        logger.info(
+            "Auto-resumed %d set-and-forget Qwen caption dataset job(s) during %s sweep",
+            len(resumed),
+            reason,
+        )
+    return resumed
+
+
+def _startup_auto_resume_qwen_caption_dataset_jobs() -> None:
+    global _QWEN_CAPTION_SET_AND_FORGET_STARTUP_DONE
+    if not bool(QWEN_CAPTION_SET_AND_FORGET_AUTO_RESUME):
+        return
+    with _QWEN_CAPTION_SET_AND_FORGET_STARTUP_LOCK:
+        if _QWEN_CAPTION_SET_AND_FORGET_STARTUP_DONE:
+            return
+        _QWEN_CAPTION_SET_AND_FORGET_STARTUP_DONE = True
+
+    def _run() -> None:
+        _qwen_caption_set_and_forget_auto_resume_sweep_once("startup")
+        interval = max(0.0, float(QWEN_CAPTION_SET_AND_FORGET_SWEEP_INTERVAL_SECONDS or 0.0))
+        while interval > 0 and not _QWEN_CAPTION_SET_AND_FORGET_SWEEPER_STOP.wait(interval):
+            _qwen_caption_set_and_forget_auto_resume_sweep_once("periodic")
+
+    threading.Thread(
+        target=_run,
+        name="qwen-caption-set-and-forget-auto-resume",
+        daemon=True,
+    ).start()
+
+
+def startup_qwen_caption_set_and_forget_jobs() -> None:
+    _startup_auto_resume_qwen_caption_dataset_jobs()
+
+
+app.router.on_startup.append(startup_qwen_caption_set_and_forget_jobs)
+
+
+def _get_qwen_caption_dataset_job(job_id: str) -> QwenCaptionDatasetJob:
+    with QWEN_CAPTION_DATASET_JOBS_LOCK:
+        job = QWEN_CAPTION_DATASET_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_caption_dataset_job_not_found")
+    return job
 
 
 def register_dataset_path(
@@ -54192,6 +59121,7 @@ def qwen_status():
         "model_availability": model_availability,
         "memory": memory,
         "vram": memory,
+        "supervision": _qwen_backend_supervision_status(),
         "progress": qwen_progress(),
         "transformers_models": [*QWEN_TRANSFORMERS_MODEL_OPTIONS, *AGENT_MODEL_OPTIONS],
         "mlx_models": _dedupe_qwen_model_option_entries(
@@ -54552,6 +59482,89 @@ def _qwen_caption_prompt_preview_section(
     )
 
 
+def _qwen_caption_preview_section_prompt_text(section: QwenCaptionPromptPreviewSection) -> str:
+    parts = [
+        str(getattr(section, "system_prompt", "") or "").strip(),
+        str(getattr(section, "user_prompt", "") or "").strip(),
+    ]
+    return "\n".join(part for part in parts if part)
+
+
+def _qwen_caption_prompt_preview_budget(
+    sections: Sequence[QwenCaptionPromptPreviewSection],
+    *,
+    requested_max_new_tokens: Optional[Any],
+    variant: Optional[str],
+    caption_mode: Optional[str],
+    final_caption_max_sentences: Optional[int],
+    explicit_max_new_tokens: bool,
+) -> Dict[str, Any]:
+    section_budgets: List[Dict[str, Any]] = []
+    total_prompt_chars = 0
+    max_prompt_tokens = 0
+    max_prompt_title = ""
+    min_effective: Optional[int] = None
+    max_effective: Optional[int] = None
+    adapted_sections = 0
+    for section in sections:
+        prompt_text = _qwen_caption_preview_section_prompt_text(section)
+        prompt_chars = len(prompt_text)
+        prompt_tokens = _estimate_qwen_prompt_tokens(prompt_text)
+        model_id = str(getattr(section, "model_id", "") or "").strip()
+        section_requested = _resolve_qwen_caption_max_new_tokens(
+            requested_max_new_tokens,
+            model_id=model_id,
+            variant=variant,
+            caption_mode=caption_mode,
+            final_caption_max_sentences=final_caption_max_sentences,
+        )
+        section_effective = _qwen_caption_prompt_aware_max_new_tokens(
+            section_requested,
+            prompt_tokens=prompt_tokens,
+            model_id=model_id,
+            explicit=explicit_max_new_tokens,
+        )
+        if section_effective != section_requested:
+            adapted_sections += 1
+        total_prompt_chars += prompt_chars
+        if prompt_tokens > max_prompt_tokens:
+            max_prompt_tokens = prompt_tokens
+            max_prompt_title = section.title
+        min_effective = section_effective if min_effective is None else min(min_effective, section_effective)
+        max_effective = section_effective if max_effective is None else max(max_effective, section_effective)
+        section_budgets.append(
+            {
+                "title": section.title,
+                "kind": section.kind,
+                "model_id": model_id or None,
+                "prompt_chars": prompt_chars,
+                "estimated_prompt_tokens": prompt_tokens,
+                "requested_max_new_tokens": section_requested,
+                "effective_max_new_tokens": section_effective,
+                "adapted": section_effective != section_requested,
+            }
+        )
+    return {
+        "explicit_max_new_tokens": bool(explicit_max_new_tokens),
+        "requested_max_new_tokens": (
+            int(requested_max_new_tokens)
+            if isinstance(requested_max_new_tokens, int)
+            else requested_max_new_tokens
+        ),
+        "total_prompt_chars": total_prompt_chars,
+        "max_prompt_tokens": max_prompt_tokens,
+        "max_prompt_section": max_prompt_title,
+        "effective_max_new_tokens_min": min_effective,
+        "effective_max_new_tokens_max": max_effective,
+        "adapted_sections": adapted_sections,
+        "sections": section_budgets,
+        "estimate_note": (
+            "Preview uses an approximate text-token estimate. Runtime remeasures each rendered "
+            "chat prompt with the active processor/tokenizer when available."
+        ),
+    }
+
+
 def _format_qwen_caption_prompt_preview_text(
     sections: Sequence[QwenCaptionPromptPreviewSection],
     *,
@@ -54565,6 +59578,35 @@ def _format_qwen_caption_prompt_preview_text(
         f"Caption model: {meta.get('model_id') or '(active/default)'}",
         f"Refinement model: {meta.get('refinement_model_id') or '(same/default)'}",
     ]
+    prompt_budget = meta.get("prompt_budget")
+    if isinstance(prompt_budget, Mapping):
+        min_effective = prompt_budget.get("effective_max_new_tokens_min")
+        max_effective = prompt_budget.get("effective_max_new_tokens_max")
+        if min_effective == max_effective:
+            effective_text = str(min_effective)
+        else:
+            effective_text = f"{min_effective}-{max_effective}"
+        lines.extend(
+            [
+                (
+                    "Prompt size estimate: largest section "
+                    f"~{prompt_budget.get('max_prompt_tokens') or 0} tokens"
+                    + (
+                        f" ({prompt_budget.get('max_prompt_section')})"
+                        if prompt_budget.get("max_prompt_section")
+                        else ""
+                    )
+                    + f"; effective output budget {effective_text} tokens"
+                    + (
+                        " (explicit cap)"
+                        if prompt_budget.get("explicit_max_new_tokens")
+                        else " (Auto, prompt-aware)"
+                    )
+                    + "."
+                ),
+                str(prompt_budget.get("estimate_note") or "").strip(),
+            ]
+        )
     if warnings:
         lines.extend(["", "Warnings / generated-dependent stages:"])
         lines.extend([f"- {warning}" for warning in warnings if str(warning or "").strip()])
@@ -54603,6 +59645,18 @@ def _format_caption_window_sentence_instruction(payload: QwenCaptionRequest) -> 
         suffix = "" if min_sentences == 1 else "s"
         return f"Write {min_sentences} concrete sentence{suffix} about this region only. "
     return f"Write {min_sentences}-{max_sentences} concrete sentences about this region only. "
+
+
+def _caption_window_detection_context_prompt() -> str:
+    return (
+        "Window observation policy: this call describes only the supplied crop/window. "
+        "Use the user request as broad guidance, but do not follow full-image length instructions here. "
+        "Use the crop image as truth and use crop counts/boxes as priors for the crop only. "
+        "State crop counts as ordinary visual facts when they are useful, using digits. "
+        "Describe relative crop layout in natural words, but never mention coordinates. "
+        "Do not mention labels, hints, boxes, glossary text, prompts, or that counts were supplied. "
+        "Do not invent object categories outside the crop evidence."
+    )
 
 
 def qwen_caption_prompt_preview(payload: QwenCaptionRequest) -> QwenCaptionPromptPreviewResponse:
@@ -54660,7 +59714,7 @@ def qwen_caption_prompt_preview(payload: QwenCaptionRequest) -> QwenCaptionPromp
         context_prompt=payload.caption_detection_context_prompt,
     )
     glossary_line = ""
-    if payload.labelmap_glossary:
+    if glossary_map:
         glossary_line = (
             "Use the class meaning glossary above to interpret label hints semantically. "
             "Glossary terms describe what each class can mean; they are not exact words to force. "
@@ -54776,6 +59830,7 @@ def qwen_caption_prompt_preview(payload: QwenCaptionRequest) -> QwenCaptionPromp
         force_unload=False,
         caption_model_id=desired_model_id,
         refinement_model_id=caption_refinement_model_id,
+        windowed_full_image_strategy=payload.caption_windowed_full_image_strategy or "visual",
     )
 
     def _format_authoritative_counts_note(
@@ -54819,6 +59874,7 @@ def qwen_caption_prompt_preview(payload: QwenCaptionRequest) -> QwenCaptionPromp
     planned_windows: List[Tuple[int, int, int, str]] = []
     pending_window_merge_section: Optional[QwenCaptionPromptPreviewSection] = None
     skipped_windows = 0
+    windowed_text_only_compose_preview = False
     if caption_mode == "windowed" and window_size is not None:
         window_index = 0
         window_is_thinking = "Thinking" in desired_model_id
@@ -54854,7 +59910,7 @@ def qwen_caption_prompt_preview(payload: QwenCaptionRequest) -> QwenCaptionPromp
                     restrict_to_labels=restrict_to_labels,
                     labelmap_glossary=payload.labelmap_glossary,
                     max_sentences=final_caption_max_sentences,
-                    context_prompt=payload.caption_detection_context_prompt,
+                    context_prompt=_caption_window_detection_context_prompt(),
                 )
                 if payload.caption_window_prompt:
                     window_task_prompt = payload.caption_window_prompt.strip()
@@ -54916,9 +59972,17 @@ def qwen_caption_prompt_preview(payload: QwenCaptionRequest) -> QwenCaptionPromp
             warnings.append(
                 f"{skipped_windows} empty window(s) would be skipped because caption_all_windows is disabled."
             )
+        windowed_text_only_compose_preview = (
+            caption_mode == "windowed"
+            and bool(planned_windows)
+            and (payload.caption_windowed_full_image_strategy or "visual") == "text_only"
+            and not (two_stage and is_thinking)
+        )
         if planned_windows:
             warnings.append(
-                "Window merge and final composition prompts contain placeholders in this preview because their exact text depends on generated window captions."
+                "Text-only full-image composition prompts contain placeholders in this preview because their exact text depends on generated window captions."
+                if windowed_text_only_compose_preview
+                else "Window merge and final composition prompts contain placeholders in this preview because their exact text depends on generated window captions."
             )
             window_lines = _format_caption_window_observation_lines_impl(
                 planned_windows,
@@ -55020,15 +60084,16 @@ def qwen_caption_prompt_preview(payload: QwenCaptionRequest) -> QwenCaptionPromp
                 _collapse_whitespace_impl(editor_system_prompt or "")
                 or "You are a caption editor. Return only the revised caption in English."
             )
-            pending_window_merge_section = _qwen_caption_prompt_preview_section(
-                title="Window merge prompt template",
-                kind="template",
-                model_id=caption_refinement_model_id,
-                system_prompt=merge_system,
-                user_prompt=merge_prompt,
-                note="Runs only after window captions and a full-image caption exist; placeholders stand in for generated text.",
-                image_region=full_region,
-            )
+            if not windowed_text_only_compose_preview:
+                pending_window_merge_section = _qwen_caption_prompt_preview_section(
+                    title="Window merge prompt template",
+                    kind="template",
+                    model_id=caption_refinement_model_id,
+                    system_prompt=merge_system,
+                    user_prompt=merge_prompt,
+                    note="Runs only after window captions and a full-image caption exist; placeholders stand in for generated text.",
+                    image_region=full_region,
+                )
     if two_stage and is_thinking:
         if payload.caption_draft_refine_prompt:
             draft_prompt = (
@@ -55100,16 +60165,40 @@ def qwen_caption_prompt_preview(payload: QwenCaptionRequest) -> QwenCaptionPromp
         )
     else:
         full_prompt_note = "Exact full-image model prompt."
+        full_prompt_model_id = desired_model_id
+        full_prompt_system = system_prompt
+        full_prompt_title = "Full-image caption prompt"
+        if windowed_text_only_compose_preview:
+            prompt_text = (
+                f"{prompt_text}\n"
+                "Text-only full-image composition instruction: compose the final full-image caption "
+                "from the completed window observations, authoritative full-image counts, class inventory, "
+                "and user request above. Treat the observations as visual evidence for the full image, "
+                "deduplicate repeated crop-edge objects, and do not mention labels, hints, boxes, coordinates, "
+                "or prompts. Return only the final caption."
+            )
+            full_prompt_note = (
+                "Text-only full-image composition prompt; generated window observations are represented "
+                "as placeholders and no second full-image tensor is sent."
+            )
+            full_prompt_model_id = caption_refinement_model_id
+            full_prompt_system = editor_system_prompt
+            full_prompt_title = "Text-only full-image composition prompt"
         if planned_windows:
             full_prompt_note = (
                 "Exact full-image model prompt; generated window observations are "
                 "represented as placeholders in this preview."
             )
+            if windowed_text_only_compose_preview:
+                full_prompt_note = (
+                    "Text-only full-image composition prompt; generated window observations are represented "
+                    "as placeholders and no second full-image tensor is sent."
+                )
         sections.append(
             _qwen_caption_prompt_preview_section(
-                title="Full-image caption prompt",
-                model_id=desired_model_id,
-                system_prompt=system_prompt,
+                title=full_prompt_title,
+                model_id=full_prompt_model_id,
+                system_prompt=full_prompt_system,
                 user_prompt=prompt_text,
                 note=full_prompt_note,
                 image_region=full_region,
@@ -55168,7 +60257,7 @@ def qwen_caption_prompt_preview(payload: QwenCaptionRequest) -> QwenCaptionPromp
     )
     sections.append(
         _qwen_caption_prompt_preview_section(
-            title="Conditional coverage/count refinement prompt template",
+            title="Conditional coverage/count guard prompt template",
             kind="template",
             model_id=caption_refinement_model_id,
             system_prompt=editor_system_prompt,
@@ -55202,6 +60291,7 @@ def qwen_caption_prompt_preview(payload: QwenCaptionRequest) -> QwenCaptionPromp
         "image_width": image_width,
         "image_height": image_height,
         "caption_mode": caption_mode,
+        "caption_windowed_full_image_strategy": payload.caption_windowed_full_image_strategy or "visual",
         "model_id": desired_model_id,
         "refinement_model_id": caption_refinement_model_id,
         "two_stage_refine": two_stage,
@@ -55215,6 +60305,23 @@ def qwen_caption_prompt_preview(payload: QwenCaptionRequest) -> QwenCaptionPromp
         "caption_window_min_sentences": payload.caption_window_min_sentences,
         "caption_window_max_sentences": payload.caption_window_max_sentences,
     }
+    prompt_budget = _qwen_caption_prompt_preview_budget(
+        sections,
+        requested_max_new_tokens=payload.max_new_tokens,
+        variant=variant,
+        caption_mode=caption_mode,
+        final_caption_max_sentences=final_caption_max_sentences,
+        explicit_max_new_tokens=payload.max_new_tokens is not None,
+    )
+    meta["prompt_budget"] = prompt_budget
+    if truncated:
+        warnings.append(
+            f"Max boxes is Auto/representative for this image: {used_boxes} of {len(label_hints)} boxes are shown in prompt box lists; counts still cover all label hints."
+        )
+    if prompt_budget.get("adapted_sections") and payload.max_new_tokens is None:
+        warnings.append(
+            "Auto output tokens will be reduced for large rendered prompt sections. Enter Max output tokens only when you want a hard override."
+        )
     full_text = _format_qwen_caption_prompt_preview_text(sections, warnings=warnings, meta=meta)
     return QwenCaptionPromptPreviewResponse(
         sections=sections,
@@ -55251,12 +60358,19 @@ def qwen_caption(payload: QwenCaptionRequest):
         or _resolve_qwen_caption_default_model_id(base_model_hint, requested_variant_hint)
     )
     caption_platform_hint = _resolve_qwen_runtime_platform(str(caption_model_hint), metadata=active_qwen_metadata)
+    initial_max_new_tokens = _resolve_qwen_caption_max_new_tokens(
+        payload.max_new_tokens,
+        model_id=caption_model_hint,
+        variant=requested_variant_hint,
+        caption_mode=payload.caption_mode,
+        final_caption_max_sentences=payload.final_caption_max_sentences,
+    )
     _qwen_progress_start(
         kind="caption",
         model_id=str(caption_model_hint),
         platform=caption_platform_hint,
         message="Preparing Qwen caption request",
-        max_new_tokens=payload.max_new_tokens if payload.max_new_tokens is not None else 1000,
+        max_new_tokens=initial_max_new_tokens,
     )
 
     def get_runtime(model_id: Optional[str]) -> Tuple[Any, Any]:
@@ -55328,7 +60442,10 @@ def qwen_caption(payload: QwenCaptionRequest):
         include_counts = bool(payload.include_counts)
         include_coords = bool(payload.include_coords)
         max_boxes = payload.max_boxes if payload.max_boxes is not None else 0
-        max_new_tokens = payload.max_new_tokens if payload.max_new_tokens is not None else 1000
+        explicit_max_new_tokens = payload.max_new_tokens is not None
+        with qwen_progress_lock:
+            qwen_progress_state["caption_explicit_max_new_tokens"] = explicit_max_new_tokens
+        max_new_tokens = payload.max_new_tokens
         source_image_width = payload.image_width
         source_image_height = payload.image_height
         image_width = pil_img.width
@@ -55342,6 +60459,7 @@ def qwen_caption(payload: QwenCaptionRequest):
         )
         allowed_labels = _allowed_caption_labels_impl(label_hints)
         caption_mode = payload.caption_mode or "full"
+        windowed_full_image_strategy = payload.caption_windowed_full_image_strategy or "visual"
         restrict_to_labels = (
             payload.restrict_to_labels if payload.restrict_to_labels is not None else True
         )
@@ -55377,7 +60495,7 @@ def qwen_caption(payload: QwenCaptionRequest):
             context_prompt=payload.caption_detection_context_prompt,
         )
         glossary_line = ""
-        if payload.labelmap_glossary:
+        if glossary_map:
             glossary_line = (
                 "Use the class meaning glossary above to interpret label hints semantically. "
                 "Glossary terms describe what each class can mean; they are not exact words to force. "
@@ -55407,6 +60525,18 @@ def qwen_caption(payload: QwenCaptionRequest):
             desired_model_id=desired_model_id,
             active_model_id=base_model_id,
         )
+        caption_loop_recovery_mode = _normalize_qwen_caption_loop_recovery_mode(
+            payload.caption_loop_recovery_mode
+        )
+        caption_recovery_events: List[Dict[str, Any]] = []
+        caption_loop_cooldown = bool(payload.caption_loop_cooldown)
+        caption_fallback_model_id = str(payload.caption_fallback_model_id or "").strip()
+        if caption_fallback_model_id.lower() in {"", "auto", "none", "active"}:
+            caption_fallback_model_id = ""
+        if not caption_fallback_model_id and caption_loop_recovery_mode == "safe_retry_fallback":
+            caption_fallback_model_id = _qwen_caption_default_refinement_model_id(desired_model_id)
+        if caption_fallback_model_id == desired_model_id:
+            caption_fallback_model_id = ""
         final_only = bool(payload.final_answer_only)
         final_caption_length_instruction = _caption_length_instruction_impl(final_caption_max_sentences)
         caption_user_request_note = _caption_user_request_instruction_impl(user_prompt)
@@ -55416,7 +60546,18 @@ def qwen_caption(payload: QwenCaptionRequest):
             final_caption_max_sentences,
         )
         two_stage = bool(payload.two_stage_refine)
-        is_thinking = "Thinking" in desired_model_id or variant == "Thinking"
+        is_thinking = (
+            _qwen_model_id_is_thinking(desired_model_id)
+            or str(variant or "").lower() == "thinking"
+        )
+        max_new_tokens = _resolve_qwen_caption_max_new_tokens(
+            max_new_tokens,
+            model_id=desired_model_id,
+            variant=variant,
+            caption_mode=caption_mode,
+            final_caption_max_sentences=final_caption_max_sentences,
+            label_hint_count=len(label_hints),
+        )
         caption_chat_template_kwargs = (
             {"enable_thinking": False} if final_only and is_thinking else None
         )
@@ -55437,13 +60578,14 @@ def qwen_caption(payload: QwenCaptionRequest):
             prompt_text = _adjust_prompt_for_thinking_impl(prompt_text)
         if final_caption_length_instruction and "final caption length:" not in prompt_text.lower():
             prompt_text = f"{prompt_text}\nFinal caption length: {final_caption_length_instruction}"
-            max_new_tokens = max(
-                max_new_tokens,
-                min(QWEN_CAPTION_MAX_NEW_TOKENS, max(1000, int(final_caption_max_sentences or 10) * 100)),
-            )
+            if not explicit_max_new_tokens:
+                max_new_tokens = max(
+                    max_new_tokens,
+                    min(QWEN_CAPTION_MAX_NEW_TOKENS, max(1000, int(final_caption_max_sentences or 10) * 100)),
+                )
         # Keep caption max_new_tokens consistent across full/windowed/refine paths.
         # Avoid per-path caps here (we previously caused repeated CUDA asserts by diverging).
-        if is_thinking:
+        if is_thinking and not explicit_max_new_tokens:
             max_new_tokens = max(max_new_tokens, 1000)
         max_new_tokens = min(max_new_tokens, QWEN_CAPTION_MAX_NEW_TOKENS)
         refine_max_tokens = max_new_tokens
@@ -55545,9 +60687,14 @@ def qwen_caption(payload: QwenCaptionRequest):
                 image_width,
                 image_height,
             )
-            if total_windows > 1 or len(label_hints) > 40:
+            if (
+                is_thinking
+                and (total_windows > 1 or len(label_hints) > 40)
+                and not explicit_max_new_tokens
+            ):
                 max_new_tokens = min(QWEN_CAPTION_MAX_NEW_TOKENS, max(max_new_tokens, 3000))
                 refine_max_tokens = max_new_tokens
+        _qwen_progress_update(max_new_tokens=max_new_tokens)
         caption_step_plan = _build_qwen_caption_step_plan(
             caption_mode=caption_mode,
             total_windows=total_windows,
@@ -55556,6 +60703,7 @@ def qwen_caption(payload: QwenCaptionRequest):
             force_unload=bool(force_unload),
             caption_model_id=desired_model_id,
             refinement_model_id=caption_refinement_model_id,
+            windowed_full_image_strategy=payload.caption_windowed_full_image_strategy or "visual",
         )
         full_step_region = {
             "x": 0,
@@ -55624,7 +60772,8 @@ def qwen_caption(payload: QwenCaptionRequest):
                 cleanup_prompt_override=payload.caption_cleanup_prompt,
                 cleanup_system_prompt_override=editor_system_prompt,
                 chat_template_kwargs=postprocess_chat_template_kwargs,
-                run_qwen_inference_fn=_run_qwen_inference,
+                run_qwen_inference_fn=_caption_visual_inference,
+                run_qwen_text_inference_fn=_caption_text_inference,
                 resolve_variant_fn=_resolve_qwen_variant_model_id_impl,
                 extract_caption_fn=_extract_caption_from_text_impl,
                 sanitize_caption_fn=_sanitize_qwen_caption_impl,
@@ -55667,8 +60816,8 @@ def qwen_caption(payload: QwenCaptionRequest):
                 merge_prompt_override=payload.caption_merge_prompt,
                 merge_system_prompt_override=editor_system_prompt,
                 chat_template_kwargs=postprocess_chat_template_kwargs,
-                run_qwen_inference_fn=_run_qwen_inference,
-                run_qwen_text_inference_fn=_run_qwen_text_inference,
+                run_qwen_inference_fn=_caption_visual_inference,
+                run_qwen_text_inference_fn=_caption_text_inference,
                 resolve_variant_fn=_resolve_qwen_variant_model_id_impl,
                 extract_caption_fn=_extract_caption_from_text_impl,
                 sanitize_caption_fn=_sanitize_qwen_caption_impl,
@@ -55708,6 +60857,628 @@ def qwen_caption(payload: QwenCaptionRequest):
             if str(caption_refinement_model_id or "") != str(desired_model_id or ""):
                 return get_runtime(caption_refinement_model_id)
             return resolve_main_runtime()
+
+        def _caption_current_stage() -> Tuple[str, str]:
+            with qwen_progress_lock:
+                step_id = str(qwen_progress_state.get("step_id") or "caption_stage")
+                step_label = str(qwen_progress_state.get("step_label") or step_id)
+            return step_id, step_label
+
+        def _caption_mark_loop_cooldown(key: str) -> None:
+            if not key or not caption_loop_cooldown:
+                return
+            qwen_caption_loop_cooldowns[key] = time.time() + max(
+                1,
+                int(QWEN_CAPTION_LOOP_COOLDOWN_SECONDS or 0),
+            )
+
+        def _caption_unload_after_loop() -> None:
+            nonlocal active_runtime, active_model_id
+            request_model_cache.clear()
+            _unload_qwen_runtime()
+            active_runtime = None
+            active_model_id = None
+
+        def _caption_record_recovery_event(
+            *,
+            stage_id: str,
+            stage_label: str,
+            action: str,
+            model_id: str,
+            call_kind: str,
+            message: str,
+            attempt: str,
+            detail: Optional[str] = None,
+        ) -> None:
+            event = {
+                "stage_id": stage_id,
+                "stage_label": stage_label,
+                "action": action,
+                "attempt": attempt,
+                "model_id": model_id,
+                "call_kind": call_kind,
+                "message": message,
+                "detail": detail,
+                "created_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            }
+            caption_recovery_events.append(event)
+            _qwen_caption_io_record({"event": "recovery", **event})
+            _qwen_progress_update(
+                phase="recovery",
+                phase_label="Recovering",
+                message=message,
+                model_id=model_id,
+                step_id=stage_id,
+                step_detail=detail or message,
+                live_output_piece=f"\n[recovery] {message}\n",
+            )
+
+        def _caption_effective_model_id(
+            *,
+            model_id_override: Optional[str],
+            runtime_override: Optional[Tuple[Any, Any]],
+            call_kind: str,
+        ) -> str:
+            return (
+                str(model_id_override or "").strip()
+                or str(_qwen_runtime_model_id(runtime_override) or "").strip()
+                or (caption_refinement_model_id if call_kind == "text" else desired_model_id)
+            )
+
+        def _caption_run_call(
+            *,
+            call_kind: str,
+            prompt: str,
+            img: Optional[Image.Image],
+            max_new_tokens: Optional[int],
+            system_prompt_override: Optional[str],
+            model_id_override: Optional[str],
+            runtime_override: Optional[Tuple[Any, Any]],
+            decode_override: Optional[Dict[str, Any]],
+            chat_template_kwargs: Optional[Dict[str, Any]],
+        ) -> Tuple[str, int, int]:
+            if call_kind == "visual":
+                if img is None:
+                    raise RuntimeError("qwen_caption_visual_image_missing")
+                return _run_qwen_inference(
+                    prompt,
+                    img,
+                    max_new_tokens=max_new_tokens,
+                    system_prompt_override=system_prompt_override,
+                    model_id_override=model_id_override,
+                    runtime_override=runtime_override,
+                    decode_override=decode_override,
+                    chat_template_kwargs=chat_template_kwargs,
+                )
+            return _run_qwen_text_inference(
+                prompt,
+                max_new_tokens=max_new_tokens,
+                system_prompt_override=system_prompt_override,
+                model_id_override=model_id_override,
+                runtime_override=runtime_override,
+                decode_override=decode_override,
+                chat_template_kwargs=chat_template_kwargs,
+            )
+
+        def _caption_run_with_loop_recovery(
+            *,
+            call_kind: str,
+            prompt: str,
+            img: Optional[Image.Image] = None,
+            max_new_tokens: Optional[int] = None,
+            system_prompt_override: Optional[str] = None,
+            model_id_override: Optional[str] = None,
+            runtime_override: Optional[Tuple[Any, Any]] = None,
+            decode_override: Optional[Dict[str, Any]] = None,
+            chat_template_kwargs: Optional[Dict[str, Any]] = None,
+            text_recovery_prompt: Optional[str] = None,
+            text_recovery_system_prompt: Optional[str] = None,
+            text_recovery_model_id: Optional[str] = None,
+            text_recovery_runtime_resolver: Optional[Callable[[], Tuple[Any, Any]]] = None,
+            text_recovery_decode_override: Optional[Dict[str, Any]] = None,
+            text_recovery_chat_template_kwargs: Optional[Dict[str, Any]] = None,
+            text_recovery_max_new_tokens: Optional[int] = None,
+            text_recovery_detail: Optional[str] = None,
+            text_recovery_after_safe_retry: bool = False,
+            deterministic_recovery_text: Optional[str] = None,
+            deterministic_recovery_detail: Optional[str] = None,
+        ) -> Tuple[str, int, int]:
+            stage_id, stage_label = _caption_current_stage()
+            primary_model_id = _caption_effective_model_id(
+                model_id_override=model_id_override,
+                runtime_override=runtime_override,
+                call_kind=call_kind,
+            )
+            primary_key = _qwen_caption_recovery_key(
+                stage_id=stage_id,
+                stage_label=stage_label,
+                call_kind=call_kind,
+                model_id=primary_model_id,
+                prompt=prompt,
+                system_prompt=system_prompt_override,
+                decode_override=decode_override,
+            )
+            safe_decode = _qwen_caption_safe_retry_decode(
+                decode_override,
+                is_thinking=_qwen_model_id_is_thinking(primary_model_id),
+            )
+            safe_tokens = _qwen_caption_safe_retry_tokens(max_new_tokens)
+            safe_key = _qwen_caption_recovery_key(
+                stage_id=stage_id,
+                stage_label=stage_label,
+                call_kind=call_kind,
+                model_id=primary_model_id,
+                prompt=prompt,
+                system_prompt=system_prompt_override,
+                decode_override=safe_decode,
+            )
+            allow_safe_retry = caption_loop_recovery_mode in {
+                "safe_retry",
+                "safe_retry_fallback",
+            }
+            allow_fallback = caption_loop_recovery_mode == "safe_retry_fallback"
+            text_recovery_prompt_clean = str(text_recovery_prompt or "").strip()
+            text_recovery_available = (
+                call_kind == "visual"
+                and allow_fallback
+                and bool(text_recovery_prompt_clean)
+            )
+            last_recovery_exc: Optional[BaseException] = None
+
+            def _try_text_recovery() -> Optional[Tuple[str, int, int]]:
+                nonlocal last_recovery_exc
+                if not text_recovery_available:
+                    return None
+                recovery_model_id = str(
+                    text_recovery_model_id or caption_refinement_model_id or primary_model_id
+                ).strip()
+                recovery_decode = _qwen_caption_safe_retry_decode(
+                    text_recovery_decode_override,
+                    is_thinking=_qwen_model_id_is_thinking(recovery_model_id),
+                )
+                recovery_key = _qwen_caption_recovery_key(
+                    stage_id=stage_id,
+                    stage_label=stage_label,
+                    call_kind="text",
+                    model_id=recovery_model_id,
+                    prompt=text_recovery_prompt_clean,
+                    system_prompt=text_recovery_system_prompt,
+                    decode_override=recovery_decode,
+                )
+                recovery_cooldown_remaining = (
+                    _qwen_caption_loop_cooldown_remaining(recovery_key)
+                    if caption_loop_cooldown
+                    else 0.0
+                )
+                if recovery_cooldown_remaining > 0:
+                    _caption_record_recovery_event(
+                        stage_id=stage_id,
+                        stage_label=stage_label,
+                        action="cooldown_skip",
+                        attempt="text_recovery",
+                        model_id=recovery_model_id,
+                        call_kind="text",
+                        message=(
+                            f"Skipping text-only recovery for {stage_label}; cooldown has "
+                            f"{int(recovery_cooldown_remaining)}s left."
+                        ),
+                        detail="Text-only recovery looped recently for this exact stage.",
+                    )
+                    return None
+                recovery_source_label = (
+                    "text-only prompt context"
+                    if text_recovery_after_safe_retry
+                    else "text-only window evidence"
+                )
+                _caption_record_recovery_event(
+                    stage_id=stage_id,
+                    stage_label=stage_label,
+                    action="text_recovery_start",
+                    attempt="text_recovery",
+                    model_id=recovery_model_id,
+                    call_kind="text",
+                    message=(
+                        f"Recovering {stage_label} with {recovery_source_label} after "
+                        "the visual stage could not complete safely."
+                    ),
+                    detail=(
+                        text_recovery_detail
+                        or "Uses completed window observations and authoritative counts without resending the full image."
+                    ),
+                )
+                try:
+                    runtime = (
+                        text_recovery_runtime_resolver()
+                        if text_recovery_runtime_resolver is not None
+                        else get_runtime(recovery_model_id)
+                    )
+                    result = _caption_run_call(
+                        call_kind="text",
+                        prompt=text_recovery_prompt_clean,
+                        img=None,
+                        max_new_tokens=text_recovery_max_new_tokens or safe_tokens,
+                        system_prompt_override=(
+                            text_recovery_system_prompt or editor_system_prompt
+                        ),
+                        model_id_override=recovery_model_id,
+                        runtime_override=runtime,
+                        decode_override=recovery_decode,
+                        chat_template_kwargs=(
+                            text_recovery_chat_template_kwargs
+                            or postprocess_chat_template_kwargs
+                        ),
+                    )
+                    if _caption_repetition_loop_detected_impl(result[0]):
+                        raise QwenCaptionLoopDetected("qwen_caption_repetition_loop")
+                    _caption_record_recovery_event(
+                        stage_id=stage_id,
+                        stage_label=stage_label,
+                        action="text_recovery_succeeded",
+                        attempt="text_recovery",
+                        model_id=recovery_model_id,
+                        call_kind="text",
+                        message=f"Recovered {stage_label} with {recovery_source_label}.",
+                        detail=(
+                            "The visual stage could not complete safely, so the caption was composed "
+                            "from completed window observations, authoritative prompt context, "
+                            "and full-frame counts."
+                        ),
+                    )
+                    return result
+                except (QwenCaptionLoopDetected, QwenCaptionRecoverableGenerationError) as exc:
+                    last_recovery_exc = exc
+                    _caption_mark_loop_cooldown(recovery_key)
+                    is_loop = isinstance(exc, QwenCaptionLoopDetected)
+                    _caption_record_recovery_event(
+                        stage_id=stage_id,
+                        stage_label=stage_label,
+                        action="loop_detected" if is_loop else "recoverable_generation_error",
+                        attempt="text_recovery",
+                        model_id=recovery_model_id,
+                        call_kind="text",
+                        message=(
+                            f"Text-only recovery also looped in {stage_label}."
+                            if is_loop
+                            else f"Text-only recovery hit a recoverable generation error in {stage_label}."
+                        ),
+                        detail=(
+                            "The runtime was unloaded before trying the remaining recovery path."
+                            if is_loop
+                            else str(exc)
+                        ),
+                    )
+                    _caption_unload_after_loop()
+                    return None
+
+            primary_cooldown_remaining = (
+                _qwen_caption_loop_cooldown_remaining(primary_key)
+                if caption_loop_cooldown and caption_loop_recovery_mode != "off"
+                else 0.0
+            )
+            if primary_cooldown_remaining > 0:
+                _caption_record_recovery_event(
+                    stage_id=stage_id,
+                    stage_label=stage_label,
+                    action="cooldown_skip",
+                    attempt="primary",
+                    model_id=primary_model_id,
+                    call_kind=call_kind,
+                    message=(
+                        f"Skipping loop-prone caption stage on {primary_model_id}; "
+                        f"cooldown has {int(primary_cooldown_remaining)}s left."
+                    ),
+                    detail="Exact stage/model/prompt/decode combination looped recently.",
+                )
+            else:
+                try:
+                    result = _caption_run_call(
+                        call_kind=call_kind,
+                        prompt=prompt,
+                        img=img,
+                        max_new_tokens=max_new_tokens,
+                        system_prompt_override=system_prompt_override,
+                        model_id_override=model_id_override,
+                        runtime_override=runtime_override,
+                        decode_override=decode_override,
+                        chat_template_kwargs=chat_template_kwargs,
+                    )
+                    if _caption_repetition_loop_detected_impl(result[0]):
+                        raise QwenCaptionLoopDetected("qwen_caption_repetition_loop")
+                    return result
+                except (QwenCaptionLoopDetected, QwenCaptionRecoverableGenerationError) as exc:
+                    last_recovery_exc = exc
+                    is_loop = isinstance(exc, QwenCaptionLoopDetected)
+                    _caption_mark_loop_cooldown(primary_key)
+                    _caption_record_recovery_event(
+                        stage_id=stage_id,
+                        stage_label=stage_label,
+                        action="loop_detected" if is_loop else "recoverable_generation_error",
+                        attempt="primary",
+                        model_id=primary_model_id,
+                        call_kind=call_kind,
+                        message=(
+                            f"Caption loop detected in {stage_label}; unloading Qwen and recovering from window evidence."
+                            if is_loop and text_recovery_available and not text_recovery_after_safe_retry
+                            else f"Caption loop detected in {stage_label}; unloading Qwen and retrying safely."
+                            if is_loop and allow_safe_retry
+                            else f"Caption loop detected in {stage_label}; unloading Qwen and recovering from prompt context."
+                            if is_loop and text_recovery_available
+                            else f"Recoverable generation error in {stage_label}; unloading Qwen and recovering from prompt context."
+                            if text_recovery_available and not text_recovery_after_safe_retry
+                            else f"Recoverable generation error in {stage_label}; unloading Qwen and retrying safely."
+                            if allow_safe_retry
+                            else f"Caption loop detected in {stage_label}; recovery is disabled."
+                            if is_loop
+                            else f"Recoverable generation error in {stage_label}; recovery is disabled."
+                        ),
+                        detail=(
+                            "Primary generation tripped the repetition loop guard."
+                            if is_loop
+                            else str(exc)
+                        ),
+                    )
+                    _caption_unload_after_loop()
+                    if not allow_safe_retry:
+                        raise
+
+            if not text_recovery_after_safe_retry:
+                recovered_text = _try_text_recovery()
+                if recovered_text is not None:
+                    return recovered_text
+
+            if allow_safe_retry:
+                safe_cooldown_remaining = (
+                    _qwen_caption_loop_cooldown_remaining(safe_key)
+                    if caption_loop_cooldown
+                    else 0.0
+                )
+                if safe_cooldown_remaining > 0:
+                    _caption_record_recovery_event(
+                        stage_id=stage_id,
+                        stage_label=stage_label,
+                        action="cooldown_skip",
+                        attempt="safe_retry",
+                        model_id=primary_model_id,
+                        call_kind=call_kind,
+                        message=(
+                            f"Skipping safe retry for {stage_label}; cooldown has "
+                            f"{int(safe_cooldown_remaining)}s left."
+                        ),
+                        detail="Safe decode already looped for this exact stage.",
+                    )
+                else:
+                    try:
+                        runtime = get_runtime(primary_model_id)
+                        result = _caption_run_call(
+                            call_kind=call_kind,
+                            prompt=prompt,
+                            img=img,
+                            max_new_tokens=safe_tokens,
+                            system_prompt_override=system_prompt_override,
+                            model_id_override=primary_model_id,
+                            runtime_override=runtime,
+                            decode_override=safe_decode,
+                            chat_template_kwargs=chat_template_kwargs,
+                        )
+                        if _caption_repetition_loop_detected_impl(result[0]):
+                            raise QwenCaptionLoopDetected("qwen_caption_repetition_loop")
+                        _caption_record_recovery_event(
+                            stage_id=stage_id,
+                            stage_label=stage_label,
+                            action="safe_retry_succeeded",
+                            attempt="safe_retry",
+                            model_id=primary_model_id,
+                            call_kind=call_kind,
+                            message=f"Recovered {stage_label} with safe decode on {primary_model_id}.",
+                            detail="Sampling and repetition controls were tightened for this retry.",
+                        )
+                        return result
+                    except (QwenCaptionLoopDetected, QwenCaptionRecoverableGenerationError) as exc:
+                        last_recovery_exc = exc
+                        is_loop = isinstance(exc, QwenCaptionLoopDetected)
+                        _caption_mark_loop_cooldown(safe_key)
+                        _caption_record_recovery_event(
+                            stage_id=stage_id,
+                            stage_label=stage_label,
+                            action="loop_detected" if is_loop else "recoverable_generation_error",
+                            attempt="safe_retry",
+                            model_id=primary_model_id,
+                            call_kind=call_kind,
+                            message=(
+                                f"Safe retry also looped in {stage_label}."
+                                if is_loop
+                                else f"Safe retry hit a recoverable generation error in {stage_label}."
+                            ),
+                            detail=(
+                                "The failed runtime was unloaded before trying any "
+                                "fallback model or text-only recovery path."
+                                if is_loop
+                                else str(exc)
+                            ),
+                        )
+                        _caption_unload_after_loop()
+
+            fallback_model_id = caption_fallback_model_id if allow_fallback else ""
+            if fallback_model_id and fallback_model_id != primary_model_id:
+                fallback_decode = _qwen_caption_safe_retry_decode(
+                    decode_override,
+                    is_thinking=_qwen_model_id_is_thinking(fallback_model_id),
+                )
+                fallback_key = _qwen_caption_recovery_key(
+                    stage_id=stage_id,
+                    stage_label=stage_label,
+                    call_kind=call_kind,
+                    model_id=fallback_model_id,
+                    prompt=prompt,
+                    system_prompt=system_prompt_override,
+                    decode_override=fallback_decode,
+                )
+                fallback_cooldown_remaining = (
+                    _qwen_caption_loop_cooldown_remaining(fallback_key)
+                    if caption_loop_cooldown
+                    else 0.0
+                )
+                if fallback_cooldown_remaining > 0:
+                    _caption_record_recovery_event(
+                        stage_id=stage_id,
+                        stage_label=stage_label,
+                        action="cooldown_skip",
+                        attempt="fallback",
+                        model_id=fallback_model_id,
+                        call_kind=call_kind,
+                        message=(
+                            f"Skipping fallback model {fallback_model_id}; cooldown has "
+                            f"{int(fallback_cooldown_remaining)}s left."
+                        ),
+                        detail="Fallback model looped recently for this exact stage.",
+                    )
+                else:
+                    try:
+                        runtime = get_runtime(fallback_model_id)
+                        result = _caption_run_call(
+                            call_kind=call_kind,
+                            prompt=prompt,
+                            img=img,
+                            max_new_tokens=safe_tokens,
+                            system_prompt_override=system_prompt_override,
+                            model_id_override=fallback_model_id,
+                            runtime_override=runtime,
+                            decode_override=fallback_decode,
+                            chat_template_kwargs=chat_template_kwargs,
+                        )
+                        if _caption_repetition_loop_detected_impl(result[0]):
+                            raise QwenCaptionLoopDetected("qwen_caption_repetition_loop")
+                        _caption_record_recovery_event(
+                            stage_id=stage_id,
+                            stage_label=stage_label,
+                            action="fallback_succeeded",
+                            attempt="fallback",
+                            model_id=fallback_model_id,
+                            call_kind=call_kind,
+                            message=f"Recovered {stage_label} with fallback model {fallback_model_id}.",
+                            detail="Fallback used safe decode after the primary model looped.",
+                        )
+                        return result
+                    except (QwenCaptionLoopDetected, QwenCaptionRecoverableGenerationError) as exc:
+                        last_recovery_exc = exc
+                        is_loop = isinstance(exc, QwenCaptionLoopDetected)
+                        _caption_mark_loop_cooldown(fallback_key)
+                        _caption_record_recovery_event(
+                            stage_id=stage_id,
+                            stage_label=stage_label,
+                            action="loop_detected" if is_loop else "recoverable_generation_error",
+                            attempt="fallback",
+                            model_id=fallback_model_id,
+                            call_kind=call_kind,
+                            message=(
+                                f"Fallback model also looped in {stage_label}."
+                                if is_loop
+                                else f"Fallback model hit a recoverable generation error in {stage_label}."
+                            ),
+                            detail=(
+                                "The failed runtime was unloaded before trying any "
+                                "text-only or deterministic recovery path."
+                                if is_loop
+                                else str(exc)
+                            ),
+                        )
+                        _caption_unload_after_loop()
+
+            if text_recovery_after_safe_retry:
+                recovered_text = _try_text_recovery()
+                if recovered_text is not None:
+                    return recovered_text
+
+            fallback_text = _sanitize_qwen_caption_impl(deterministic_recovery_text or "")
+            if allow_fallback and fallback_text:
+                _caption_record_recovery_event(
+                    stage_id=stage_id,
+                    stage_label=stage_label,
+                    action="deterministic_recovery_succeeded",
+                    attempt="deterministic_recovery",
+                    model_id=primary_model_id,
+                    call_kind="deterministic",
+                    message=f"Recovered {stage_label} with deterministic count/layout fallback.",
+                    detail=(
+                        deterministic_recovery_detail
+                        or "All model-based recovery paths looped, failed, or were unavailable; "
+                        "the fallback used authoritative counts and spatial hints."
+                    ),
+                )
+                return fallback_text, 0, 0
+
+            if last_recovery_exc is not None:
+                raise last_recovery_exc
+            raise QwenCaptionLoopDetected("qwen_caption_repetition_loop")
+
+        def _caption_visual_inference(
+            prompt: str,
+            img: Image.Image,
+            max_new_tokens: Optional[int] = None,
+            system_prompt_override: Optional[str] = None,
+            model_id_override: Optional[str] = None,
+            runtime_override: Optional[Tuple[Any, Any]] = None,
+            decode_override: Optional[Dict[str, Any]] = None,
+            chat_template_kwargs: Optional[Dict[str, Any]] = None,
+            text_recovery_prompt: Optional[str] = None,
+            text_recovery_system_prompt: Optional[str] = None,
+            text_recovery_model_id: Optional[str] = None,
+            text_recovery_runtime_resolver: Optional[Callable[[], Tuple[Any, Any]]] = None,
+            text_recovery_decode_override: Optional[Dict[str, Any]] = None,
+            text_recovery_chat_template_kwargs: Optional[Dict[str, Any]] = None,
+            text_recovery_max_new_tokens: Optional[int] = None,
+            text_recovery_detail: Optional[str] = None,
+            text_recovery_after_safe_retry: bool = False,
+            deterministic_recovery_text: Optional[str] = None,
+            deterministic_recovery_detail: Optional[str] = None,
+        ) -> Tuple[str, int, int]:
+            return _caption_run_with_loop_recovery(
+                call_kind="visual",
+                prompt=prompt,
+                img=img,
+                max_new_tokens=max_new_tokens,
+                system_prompt_override=system_prompt_override,
+                model_id_override=model_id_override,
+                runtime_override=runtime_override,
+                decode_override=decode_override,
+                chat_template_kwargs=chat_template_kwargs,
+                text_recovery_prompt=text_recovery_prompt,
+                text_recovery_system_prompt=text_recovery_system_prompt,
+                text_recovery_model_id=text_recovery_model_id,
+                text_recovery_runtime_resolver=text_recovery_runtime_resolver,
+                text_recovery_decode_override=text_recovery_decode_override,
+                text_recovery_chat_template_kwargs=text_recovery_chat_template_kwargs,
+                text_recovery_max_new_tokens=text_recovery_max_new_tokens,
+                text_recovery_detail=text_recovery_detail,
+                text_recovery_after_safe_retry=text_recovery_after_safe_retry,
+                deterministic_recovery_text=deterministic_recovery_text,
+                deterministic_recovery_detail=deterministic_recovery_detail,
+            )
+
+        def _caption_text_inference(
+            prompt: str,
+            *,
+            max_new_tokens: Optional[int] = None,
+            system_prompt_override: Optional[str] = None,
+            model_id_override: Optional[str] = None,
+            runtime_override: Optional[Tuple[Any, Any]] = None,
+            decode_override: Optional[Dict[str, Any]] = None,
+            chat_template_kwargs: Optional[Dict[str, Any]] = None,
+            deterministic_recovery_text: Optional[str] = None,
+            deterministic_recovery_detail: Optional[str] = None,
+        ) -> Tuple[str, int, int]:
+            return _caption_run_with_loop_recovery(
+                call_kind="text",
+                prompt=prompt,
+                max_new_tokens=max_new_tokens,
+                system_prompt_override=system_prompt_override,
+                model_id_override=model_id_override,
+                runtime_override=runtime_override,
+                decode_override=decode_override,
+                chat_template_kwargs=chat_template_kwargs,
+                deterministic_recovery_text=deterministic_recovery_text,
+                deterministic_recovery_detail=deterministic_recovery_detail,
+            )
 
         windowed_captions: List[Tuple[int, int, int, str]] = []
         first_stage_output_sections: List[Tuple[str, str]] = []
@@ -55784,6 +61555,132 @@ def qwen_caption(payload: QwenCaptionRequest):
             )
 
         authoritative_counts_note = _format_authoritative_counts_note(counts, glossary_map)
+
+        def _caption_recovery_noun(label: str, count: int) -> str:
+            preferred = _caption_preferred_label_impl(label, glossary_map).strip() or label
+            noun = re.sub(r"\s+", " ", preferred.replace("_", " ")).strip().lower()
+            if count == 1:
+                return noun
+            if noun == "person":
+                return "people"
+            if noun.endswith("s"):
+                return noun
+            if noun.endswith("y") and len(noun) > 1 and noun[-2] not in "aeiou":
+                return f"{noun[:-1]}ies"
+            return f"{noun}s"
+
+        def _caption_recovery_join(parts: Sequence[str]) -> str:
+            cleaned = [str(part or "").strip() for part in parts if str(part or "").strip()]
+            if not cleaned:
+                return ""
+            if len(cleaned) == 1:
+                return cleaned[0]
+            if len(cleaned) == 2:
+                return f"{cleaned[0]} and {cleaned[1]}"
+            return f"{', '.join(cleaned[:-1])}, and {cleaned[-1]}"
+
+        def _caption_recovery_hint_region(hint: QwenCaptionHint) -> str:
+            bbox = hint.bbox or []
+            if len(bbox) != 4:
+                return ""
+            try:
+                x1, y1, x2, y2 = [float(value) for value in bbox]
+            except (TypeError, ValueError):
+                return ""
+            if not all(math.isfinite(value) for value in (x1, y1, x2, y2)):
+                return ""
+            max_coord = max(abs(x1), abs(y1), abs(x2), abs(y2))
+            if max_coord <= 1.5:
+                x_den = y_den = 1.0
+            elif max_coord <= 1000.0 and max(image_width, image_height, 1) < 900:
+                x_den = y_den = 1000.0
+            else:
+                x_den = float(max(1, image_width))
+                y_den = float(max(1, image_height))
+            cx = max(0.0, min(1.0, ((x1 + x2) / 2.0) / x_den))
+            cy = max(0.0, min(1.0, ((y1 + y2) / 2.0) / y_den))
+            horizontal = "left" if cx < 1 / 3 else "right" if cx > 2 / 3 else "center"
+            vertical = "upper" if cy < 1 / 3 else "lower" if cy > 2 / 3 else "middle"
+            if horizontal == "center" and vertical == "middle":
+                return "center"
+            if horizontal == "center":
+                return f"{vertical} area"
+            if vertical == "middle":
+                return f"{horizontal} side"
+            return f"{vertical}-{horizontal}"
+
+        def _caption_deterministic_recovery_caption(
+            hint_counts: Mapping[str, int],
+            hints: Sequence[QwenCaptionHint],
+            *,
+            crop: bool = False,
+        ) -> str:
+            count_phrases: List[str] = []
+            for label, count in hint_counts.items():
+                try:
+                    count_int = int(count)
+                except (TypeError, ValueError):
+                    continue
+                if count_int <= 0:
+                    continue
+                noun = _caption_recovery_noun(label, count_int)
+                count_phrases.append(f"{count_int} {noun}")
+            if not count_phrases:
+                labels = sorted({str(hint.label or "").strip() for hint in hints if hint.label})
+                count_phrases = [
+                    _caption_recovery_noun(label, 2)
+                    for label in labels
+                    if str(label or "").strip()
+                ]
+            if not count_phrases:
+                return ""
+
+            regions_by_label: Dict[str, Dict[str, int]] = {}
+            for hint in hints:
+                label = str(hint.label or "").strip()
+                if not label:
+                    continue
+                region = _caption_recovery_hint_region(hint)
+                if not region:
+                    continue
+                regions = regions_by_label.setdefault(label, {})
+                regions[region] = regions.get(region, 0) + 1
+
+            layout_parts: List[str] = []
+            for label, region_counts in regions_by_label.items():
+                try:
+                    count_int = int(hint_counts.get(label, 0))
+                except (TypeError, ValueError):
+                    count_int = 0
+                noun = _caption_recovery_noun(label, max(2, count_int))
+                top_regions = sorted(
+                    region_counts.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )[:2]
+                region_text = _caption_recovery_join([region for region, _count in top_regions])
+                if not region_text:
+                    continue
+                if count_int == 1:
+                    singular = _caption_recovery_noun(label, 1)
+                    layout_parts.append(f"the single {singular} is positioned around the {region_text}")
+                elif top_regions and sum(region_counts.values()) and top_regions[0][1] / sum(region_counts.values()) >= 0.55:
+                    layout_parts.append(f"{noun} are concentrated around the {region_text}")
+                else:
+                    layout_parts.append(f"{noun} are spread across the {region_text}")
+
+            opening = "The crop contains" if crop else (
+                "From a high angle, the scene contains"
+                if re.search(r"\b(high[- ]angle|top[- ]down|drone|aerial|looking down)\b", user_prompt or "", re.I)
+                else "The scene contains"
+            )
+            sentences = [f"{opening} {_caption_recovery_join(count_phrases)}."]
+            if layout_parts:
+                sentences.append(f"{_caption_recovery_join(layout_parts).capitalize()}.")
+            if not crop:
+                sentences.append(
+                    "The arrangement is described from the object distribution and surrounding scene context."
+                )
+            return _sanitize_qwen_caption_impl(" ".join(sentences))
 
         def _caption_term_guard_sources() -> List[Tuple[str, str]]:
             sources = list(first_stage_output_sections)
@@ -55886,7 +61783,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                         restrict_to_labels=restrict_to_labels,
                         labelmap_glossary=payload.labelmap_glossary,
                         max_sentences=final_caption_max_sentences,
-                        context_prompt=payload.caption_detection_context_prompt,
+                        context_prompt=_caption_window_detection_context_prompt(),
                     )
                     if payload.caption_window_prompt:
                         window_task_prompt = payload.caption_window_prompt.strip()
@@ -55924,8 +61821,21 @@ def qwen_caption(payload: QwenCaptionRequest):
                         window_prompt = _adjust_prompt_for_thinking_impl(window_prompt)
                     window_img = pil_img.crop((x0, y0, x0 + window_size, y0 + window_size))
                     window_max_tokens = max_new_tokens
+                    window_text_recovery_prompt = (
+                        f"{window_prompt}\n"
+                        "Text-only recovery instruction: the visual crop generation could not complete safely. "
+                        "Write a concise crop observation from the authoritative crop counts, class inventory, "
+                        "representative box layout, and user request above. Treat the counts as truth, "
+                        "do not mention recovery, labels, hints, boxes, coordinates, or prompts, and return only "
+                        "1-3 concrete sentences about this crop."
+                    )
+                    window_deterministic_recovery_caption = _caption_deterministic_recovery_caption(
+                        window_counts,
+                        window_hints,
+                        crop=True,
+                    )
                     _qwen_progress_begin_output_section(f"Window {window_index}/{total_windows} output")
-                    qwen_text, _, _ = _run_qwen_inference(
+                    qwen_text, _, _ = _caption_visual_inference(
                         window_prompt,
                         window_img,
                         max_new_tokens=window_max_tokens,
@@ -55933,6 +61843,22 @@ def qwen_caption(payload: QwenCaptionRequest):
                         runtime_override=get_runtime(window_model_id),
                         decode_override=decode_params,
                         chat_template_kwargs=caption_chat_template_kwargs,
+                        text_recovery_prompt=window_text_recovery_prompt,
+                        text_recovery_system_prompt=editor_system_prompt,
+                        text_recovery_model_id=caption_refinement_model_id,
+                        text_recovery_runtime_resolver=resolve_refinement_runtime,
+                        text_recovery_decode_override=postprocess_decode_params,
+                        text_recovery_chat_template_kwargs=postprocess_chat_template_kwargs,
+                        text_recovery_max_new_tokens=min(window_max_tokens or 1000, 1000),
+                        text_recovery_detail=(
+                            "Primary visual crop generation could not complete safely; this recovery path uses "
+                            "the crop counts and representative layout text without sending another crop tensor."
+                        ),
+                        deterministic_recovery_text=window_deterministic_recovery_caption,
+                        deterministic_recovery_detail=(
+                            "All model-based crop recovery paths looped, failed, or were unavailable; "
+                            "the fallback used authoritative crop counts and relative object layout."
+                        ),
                     )
                     _raise_if_qwen_cancelled()
                     _record_first_stage_output(
@@ -56088,14 +62014,14 @@ def qwen_caption(payload: QwenCaptionRequest):
                             window_glossary_map,
                         )
                         _qwen_progress_update(
-                            phase="refine",
-                            phase_label="Refining Window",
+                            phase="guard",
+                            phase_label="Guarding Window",
                             progress=0.48 + (0.12 * window_index / total_windows),
-                            message=f"Refining window {window_index}/{total_windows} coverage",
+                            message=f"Applying window {window_index}/{total_windows} coverage/count guard",
                             model_id=refine_model,
                             step_id=f"window_{window_index}",
                             step_detail=(
-                                f"{window_detail}; ensuring "
+                                f"{window_detail}; coverage/count guard ensuring "
                                 f"{', '.join(missing_display) if missing_display else 'window class coverage'}"
                             ),
                             step_region=window_region,
@@ -56151,12 +62077,12 @@ def qwen_caption(payload: QwenCaptionRequest):
                                 "Return only a concise, complete caption (1-3 sentences) with no coordinates."
                             )
                         refine_system = editor_system_prompt
-                        _qwen_progress_begin_output_section(f"Window {window_index}/{total_windows} refine output")
-                        refine_text, _, _ = _run_qwen_inference(
+                        _qwen_progress_begin_output_section(f"Window {window_index}/{total_windows} guard output")
+                        refine_text, _, _ = _caption_text_inference(
                             refine_prompt,
-                            window_img,
                             max_new_tokens=refine_max_tokens,
                             system_prompt_override=refine_system,
+                            model_id_override=refine_model,
                             runtime_override=resolve_refinement_runtime(),
                             decode_override=postprocess_decode_params,
                             chat_template_kwargs=postprocess_chat_template_kwargs,
@@ -56169,7 +62095,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                         window_caption = _accept_guard_caption(
                             window_caption,
                             previous_window_caption,
-                            stage=f"window {window_index}/{total_windows} refine",
+                            stage=f"window {window_index}/{total_windows} coverage/count guard",
                         )
                         refine_count += 1
                     if window_caption:
@@ -56245,6 +62171,12 @@ def qwen_caption(payload: QwenCaptionRequest):
                 if broad_term_editor_note:
                     window_lines.append(broad_term_editor_note)
                 prompt_text = f"{prompt_text}\n" + "\n".join(window_lines)
+        windowed_text_only_full_compose = (
+            caption_mode == "windowed"
+            and bool(windowed_captions)
+            and windowed_full_image_strategy == "text_only"
+            and not (two_stage and is_thinking)
+        )
         if two_stage and is_thinking:
             _raise_if_qwen_cancelled()
             _qwen_progress_update(
@@ -56271,7 +62203,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 )
             draft_system = f"{system_prompt} Return only a line starting with 'DRAFT:'."
             _qwen_progress_begin_output_section("Full-image draft output")
-            draft_text, _, _ = _run_qwen_inference(
+            draft_text, _, _ = _caption_visual_inference(
                 draft_prompt,
                 pil_img,
                 max_new_tokens=max_new_tokens,
@@ -56328,11 +62260,11 @@ def qwen_caption(payload: QwenCaptionRequest):
                 ),
             )
             _qwen_progress_begin_output_section("Draft refinement output")
-            qwen_text, _, _ = _run_qwen_inference(
+            qwen_text, _, _ = _caption_text_inference(
                 refine_prompt,
-                pil_img,
                 max_new_tokens=refine_max_tokens,
                 system_prompt_override=refine_system,
+                model_id_override=refine_model,
                 runtime_override=resolve_refinement_runtime(),
                 decode_override=postprocess_decode_params,
                 chat_template_kwargs=postprocess_chat_template_kwargs,
@@ -56352,14 +62284,23 @@ def qwen_caption(payload: QwenCaptionRequest):
                 phase_label="Generating",
                 progress=0.50,
                 message=(
-                    "Composing full-image caption from image and window observations"
+                    "Composing full-image caption from window observations without resending the full image"
+                    if windowed_text_only_full_compose
+                    else "Composing full-image caption from image and window observations"
                     if caption_mode == "windowed" and windowed_captions
                     else "Generating caption"
                 ),
-                model_id=desired_model_id,
+                model_id=(
+                    caption_refinement_model_id
+                    if windowed_text_only_full_compose
+                    else desired_model_id
+                ),
                 step_id="generate_full",
                 step_region=full_step_region,
                 step_detail=(
+                    "Text-only full-image composition from completed window observations"
+                    if windowed_text_only_full_compose
+                    else
                     f"Full-image composition using {len(windowed_captions)} window observation"
                     f"{'s' if len(windowed_captions) != 1 else ''}"
                     if caption_mode == "windowed"
@@ -56367,15 +62308,79 @@ def qwen_caption(payload: QwenCaptionRequest):
                 ),
             )
             _qwen_progress_begin_output_section("Full-image caption output")
-            qwen_text, _, _ = _run_qwen_inference(
-                prompt_text,
-                pil_img,
-                max_new_tokens=max_new_tokens,
-                system_prompt_override=system_prompt,
-                runtime_override=resolve_main_runtime(),
-                decode_override=decode_params,
-                chat_template_kwargs=caption_chat_template_kwargs,
+            full_visual_text_recovery_prompt = None
+            full_visual_text_recovery_after_safe_retry = False
+            if caption_mode == "windowed" and windowed_captions:
+                full_visual_text_recovery_prompt = (
+                    f"{prompt_text}\n"
+                    "Text-only recovery instruction: compose the final full-image caption "
+                    "from the completed window observations, authoritative full-image counts, "
+                    "class inventory, and user request above. Treat the observations as visual "
+                    "evidence for the full image, deduplicate repeated crop-edge objects, and "
+                    "do not mention recovery, labels, hints, boxes, coordinates, or prompts. "
+                    "Return only the final caption."
+                )
+            elif counts or label_hints:
+                full_visual_text_recovery_after_safe_retry = True
+                full_visual_text_recovery_prompt = (
+                    f"{prompt_text}\n"
+                    "Text-only recovery instruction: the visual full-image caption could not complete safely after "
+                    "the image was inspected. Compose the final caption from the authoritative counts, "
+                    "class inventory, representative spatial layout, and user request above. Treat the "
+                    "counts as truth, do not mention recovery, labels, hints, boxes, coordinates, or prompts, "
+                    "and return only the final caption."
+                )
+            full_deterministic_recovery_caption = _caption_deterministic_recovery_caption(
+                counts,
+                label_hints,
+                crop=False,
             )
+            if windowed_text_only_full_compose and full_visual_text_recovery_prompt:
+                qwen_text, _, _ = _caption_text_inference(
+                    full_visual_text_recovery_prompt.replace(
+                        "Text-only recovery instruction:",
+                        "Text-only full-image composition instruction:",
+                        1,
+                    ),
+                    max_new_tokens=refine_max_tokens,
+                    system_prompt_override=editor_system_prompt,
+                    model_id_override=caption_refinement_model_id,
+                    runtime_override=resolve_refinement_runtime(),
+                    decode_override=postprocess_decode_params,
+                    chat_template_kwargs=postprocess_chat_template_kwargs,
+                    deterministic_recovery_text=full_deterministic_recovery_caption,
+                    deterministic_recovery_detail=(
+                        "Text-only full-image composition looped, failed, or was unavailable; "
+                        "the fallback used authoritative counts and relative object layout."
+                    ),
+                )
+            else:
+                qwen_text, _, _ = _caption_visual_inference(
+                    prompt_text,
+                    pil_img,
+                    max_new_tokens=max_new_tokens,
+                    system_prompt_override=system_prompt,
+                    runtime_override=resolve_main_runtime(),
+                    decode_override=decode_params,
+                    chat_template_kwargs=caption_chat_template_kwargs,
+                    text_recovery_prompt=full_visual_text_recovery_prompt,
+                    text_recovery_system_prompt=editor_system_prompt,
+                    text_recovery_model_id=caption_refinement_model_id,
+                    text_recovery_runtime_resolver=resolve_refinement_runtime,
+                    text_recovery_decode_override=postprocess_decode_params,
+                    text_recovery_chat_template_kwargs=postprocess_chat_template_kwargs,
+                    text_recovery_detail=(
+                        "Primary visual full-image composition could not complete safely; this recovery path uses "
+                        "the completed window observations or authoritative prompt context without "
+                        "sending another full-image tensor."
+                    ),
+                    text_recovery_after_safe_retry=full_visual_text_recovery_after_safe_retry,
+                    deterministic_recovery_text=full_deterministic_recovery_caption,
+                    deterministic_recovery_detail=(
+                        "All model-based full-image recovery paths looped, failed, or were unavailable; "
+                        "the fallback used authoritative counts and relative object layout."
+                    ),
+                )
             _raise_if_qwen_cancelled()
             _record_first_stage_output("Full-image caption raw output", qwen_text)
             caption_text, _ = _extract_caption_from_text_impl(qwen_text, marker=None)
@@ -56412,8 +62417,27 @@ def qwen_caption(payload: QwenCaptionRequest):
                     source_outputs=first_stage_output_sections,
                 )
                 cleanup_count += 1
-        if caption_mode == "windowed" and windowed_captions and caption_text:
-            merge_tokens = min(QWEN_CAPTION_MAX_NEW_TOKENS, max(refine_max_tokens, 3000))
+        if (
+            caption_mode == "windowed"
+            and windowed_captions
+            and caption_text
+            and not windowed_text_only_full_compose
+        ):
+            merge_tokens = (
+                refine_max_tokens
+                if explicit_max_new_tokens
+                else min(
+                    QWEN_CAPTION_MAX_NEW_TOKENS,
+                    max(
+                        refine_max_tokens,
+                        (
+                            QWEN_CAPTION_MAX_NEW_TOKENS
+                            if _qwen_model_id_is_thinking(caption_refinement_model_id)
+                            else QWEN_CAPTION_INSTRUCT_MERGE_AUTO_MAX_NEW_TOKENS
+                        ),
+                    ),
+                )
+            )
             _qwen_progress_update(
                 phase="merge",
                 phase_label="Merging",
@@ -56589,10 +62613,10 @@ def qwen_caption(payload: QwenCaptionRequest):
                 glossary_map,
             )
             _qwen_progress_update(
-                phase="refine",
-                phase_label="Refining",
+                phase="guard",
+                phase_label="Guarding",
                 progress=0.90,
-                message="Refining caption coverage",
+                message="Applying final coverage/count guard",
                 model_id=refine_model,
                 step_id="postprocess",
                 step_region=full_step_region,
@@ -56643,12 +62667,12 @@ def qwen_caption(payload: QwenCaptionRequest):
                     "Return only the final caption with no coordinates."
                 )
             refine_system = editor_system_prompt
-            _qwen_progress_begin_output_section("Coverage refinement output")
-            refine_text, _, _ = _run_qwen_inference(
+            _qwen_progress_begin_output_section("Coverage/count guard output")
+            refine_text, _, _ = _caption_text_inference(
                 refine_prompt,
-                pil_img,
                 max_new_tokens=refine_max_tokens,
                 system_prompt_override=refine_system,
+                model_id_override=refine_model,
                 runtime_override=resolve_refinement_runtime(),
                 decode_override=postprocess_decode_params,
                 chat_template_kwargs=postprocess_chat_template_kwargs,
@@ -56659,7 +62683,7 @@ def qwen_caption(payload: QwenCaptionRequest):
             caption_text = _accept_guard_caption(
                 caption_text,
                 previous_caption_text,
-                stage="coverage refinement",
+                stage="coverage/count guard",
             )
             refine_count += 1
         if caption_text and _caption_needs_english_rewrite_impl(caption_text):
@@ -56688,11 +62712,11 @@ def qwen_caption(payload: QwenCaptionRequest):
                     rewrite_prompt = f"{rewrite_prompt}\n\n{first_stage_context}"
             rewrite_system = editor_system_prompt
             _qwen_progress_begin_output_section("English rewrite output")
-            rewrite_text, _, _ = _run_qwen_inference(
+            rewrite_text, _, _ = _caption_text_inference(
                 rewrite_prompt,
-                pil_img,
                 max_new_tokens=refine_max_tokens,
                 system_prompt_override=rewrite_system,
+                model_id_override=rewrite_model,
                 runtime_override=resolve_refinement_runtime(),
                 decode_override=postprocess_decode_params,
                 chat_template_kwargs=postprocess_chat_template_kwargs,
@@ -56740,6 +62764,37 @@ def qwen_caption(payload: QwenCaptionRequest):
             if repaired_caption:
                 caption_text = _sanitize_qwen_caption_impl(repaired_caption)
             cleanup_count += 1
+        missing_exact_counts_before_repair = _caption_missing_exact_counts_impl(
+            caption_text,
+            counts,
+            glossary_map,
+        )
+        count_repaired_caption = _caption_repair_count_text_artifacts_impl(
+            caption_text,
+            counts,
+            glossary_map,
+        )
+        sanitized_before_count_repair = _sanitize_qwen_caption_impl(caption_text)
+        if count_repaired_caption != sanitized_before_count_repair:
+            _qwen_caption_io_record(
+                {
+                    "event": "count_text_repair",
+                    "missing_exact_counts": missing_exact_counts_before_repair,
+                    "previous_caption": caption_text,
+                    "repaired_caption": count_repaired_caption,
+                }
+            )
+            caption_text = count_repaired_caption
+            _qwen_progress_update(
+                phase="postprocess",
+                phase_label="Finalizing",
+                progress=0.943,
+                message="Repaired count wording in final caption",
+                token_preview=caption_text,
+                step_id="postprocess",
+                step_region=full_step_region,
+                step_detail="Final guard repaired authoritative count wording after editor output.",
+            )
         caption_text = _sanitize_qwen_caption_impl(_stabilize_glossary_subtypes(caption_text))
         caption_text, trimmed_incomplete_tail = _caption_trim_to_complete_sentences_impl(
             caption_text,
@@ -56756,11 +62811,42 @@ def qwen_caption(payload: QwenCaptionRequest):
                 step_region=full_step_region,
                 step_detail="Final guard trimmed a dangling partial sentence.",
             )
+        post_trim_count_repaired_caption = _caption_repair_count_text_artifacts_impl(
+            caption_text,
+            counts,
+            glossary_map,
+        )
+        sanitized_before_post_trim_count_repair = _sanitize_qwen_caption_impl(caption_text)
+        if post_trim_count_repaired_caption != sanitized_before_post_trim_count_repair:
+            _qwen_caption_io_record(
+                {
+                    "event": "count_text_repair",
+                    "phase": "after_sentence_trim",
+                    "previous_caption": caption_text,
+                    "repaired_caption": post_trim_count_repaired_caption,
+                }
+            )
+            caption_text = post_trim_count_repaired_caption
+            _qwen_progress_update(
+                phase="postprocess",
+                phase_label="Finalizing",
+                progress=0.946,
+                message="Repaired count wording after sentence trimming",
+                token_preview=caption_text,
+                step_id="postprocess",
+                step_region=full_step_region,
+                step_detail="Final guard restored authoritative count wording after sentence trimming.",
+            )
+            caption_text, _ = _caption_trim_to_complete_sentences_impl(
+                caption_text,
+                max_sentences=final_caption_max_sentences,
+            )
         response = QwenCaptionResponse(
             caption=caption_text,
             used_counts=counts,
             used_boxes=used_boxes,
             truncated=truncated,
+            recovery_events=caption_recovery_events,
         )
         _qwen_progress_begin_output_section("Final caption")
         _qwen_progress_update(
@@ -56798,6 +62884,20 @@ def qwen_caption(payload: QwenCaptionRequest):
             active_runtime = None
             active_model_id = None
         raise HTTPException(status_code=499, detail="qwen_caption_cancelled") from exc
+    except QwenCaptionLoopDetected as exc:
+        _qwen_progress_error(
+            "Qwen caption stopped because the model entered a repeated output loop. "
+            "The Qwen runtime was unloaded to avoid a follow-up Metal crash."
+        )
+        logger.warning("[qwen-caption] repeated output loop -> forcing Qwen runtime unload")
+        request_model_cache.clear()
+        _unload_qwen_runtime()
+        active_runtime = None
+        active_model_id = None
+        raise HTTPException(
+            status_code=HTTP_503_SERVICE_UNAVAILABLE,
+            detail="qwen_caption_repetition_loop",
+        ) from exc
     except HTTPException as exc:
         detail = _http_exception_detail_text(exc)
         _qwen_progress_error(
@@ -56867,6 +62967,64 @@ app.include_router(
         preview_response_cls=QwenCaptionPromptPreviewResponse,
     )
 )
+
+
+@app.post("/qwen/caption/jobs")
+def start_qwen_caption_dataset_job(payload: QwenCaptionDatasetJobRequest = Body(...)):
+    job = _start_qwen_caption_dataset_job(payload)
+    return _serialize_qwen_caption_dataset_job(job)
+
+
+@app.get("/qwen/caption/jobs")
+def list_qwen_caption_dataset_jobs():
+    with QWEN_CAPTION_DATASET_JOBS_LOCK:
+        live_jobs = {
+            job_id: _serialize_qwen_caption_dataset_job(job)
+            for job_id, job in QWEN_CAPTION_DATASET_JOBS.items()
+        }
+    jobs_by_id: Dict[str, Dict[str, Any]] = {}
+    try:
+        for child in QWEN_CAPTION_DATASET_JOB_ROOT.iterdir():
+            if not child.is_dir():
+                continue
+            payload = _load_qwen_caption_dataset_job_payload(child.name)
+            if payload:
+                jobs_by_id[str(payload.get("job_id") or child.name)] = payload
+    except Exception:
+        pass
+    jobs_by_id.update(live_jobs)
+    jobs = list(jobs_by_id.values())
+    jobs.sort(key=lambda item: float(item.get("created_at") or 0.0), reverse=True)
+    return jobs
+
+
+@app.get("/qwen/caption/jobs/{job_id}")
+def get_qwen_caption_dataset_job(job_id: str):
+    return _qwen_caption_dataset_serialized_job(job_id)
+
+
+@app.post("/qwen/caption/jobs/{job_id}/resume")
+def resume_qwen_caption_dataset_job(job_id: str):
+    job = _resume_qwen_caption_dataset_job(job_id)
+    return _serialize_qwen_caption_dataset_job(job)
+
+
+@app.post("/qwen/caption/jobs/{job_id}/cancel")
+def cancel_qwen_caption_dataset_job(job_id: str):
+    job = _get_qwen_caption_dataset_job(job_id)
+    if job.status in {"completed", "failed", "cancelled"}:
+        return _serialize_qwen_caption_dataset_job(job)
+    job.cancel_event.set()
+    if job.process is not None and job.process.poll() is None:
+        try:
+            job.process.terminate()
+        except Exception:
+            pass
+    job.status = "cancelled"
+    job.message = "Cancellation requested"
+    job.updated_at = time.time()
+    _persist_qwen_caption_dataset_job(job)
+    return _serialize_qwen_caption_dataset_job(job)
 
 
 def _qwen_prepass_progress_token_budget(payload: QwenPrepassRequest) -> int:
@@ -57607,6 +63765,12 @@ app.include_router(
         get_text_label_fn=get_text_label,
         get_text_labels_fn=get_text_labels,
         set_text_label_fn=set_text_label,
+        get_captions_fn=get_captions,
+        get_captions_batch_fn=get_captions_batch,
+        add_caption_fn=add_caption,
+        update_caption_fn=update_caption,
+        delete_caption_fn=delete_caption,
+        export_captions_fn=export_captions,
         register_path_fn=register_dataset_path,
         open_path_fn=open_dataset_path,
         save_transient_fn=save_transient_dataset,

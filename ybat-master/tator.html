@@ -436,9 +436,19 @@
                                                     <label for="qwenCaptionWindowMaxSentences">Window max sentences<span class="help-icon" title="Maximum sentence count requested for each local crop/window caption in Detailed/windowed mode. Default is 3.">?</span></label>
                                                     <input id="qwenCaptionWindowMaxSentences" type="number" min="1" max="10" value="3">
                                                 </div>
+                                                <div class="qwen-caption-settings__field qwen-caption-settings__field--wide">
+                                                    <label for="qwenCaptionWindowFullImageStrategy">Windowed full-image compose<span class="help-icon" title="Controls the final full-image composition stage after window observations. Auto uses text-only composition for set-and-forget runs to avoid resending a large full-image tensor, while manual diagnostics can still choose a visual full-image pass.">?</span></label>
+                                                    <select id="qwenCaptionWindowFullImageStrategy">
+                                                        <option value="" selected>Auto: set-and-forget text-only</option>
+                                                        <option value="text_only">Text-only from windows</option>
+                                                        <option value="visual">Visual full-image pass</option>
+                                                    </select>
+                                                    <div class="training-help">Text-only uses completed crop observations, counts, and prompt context for the final caption; visual resends the full image after the crop passes.</div>
+                                                </div>
                                                 <div class="qwen-caption-settings__field">
-                                                    <label for="qwenCaptionMaxBoxes">Max boxes (0 = all)<span class="help-icon" title="How many labeled boxes to include in each caption prompt. In detailed/windowed mode this limit applies per crop after selecting boxes that overlap that crop; box coordinates are clipped and translated into crop-local coordinates. Use 0 to include all hints.">?</span></label>
+                                                    <label for="qwenCaptionMaxBoxes">Max boxes (0 = Auto)<span class="help-icon" title="How many labeled boxes to include in each caption prompt. Auto preserves authoritative counts but uses a representative spatial box subset for dense scenes so large MLX vision prompts stay stable. The box list is not an exhaustive inventory when Auto/subset is active. In detailed/windowed mode this limit applies per crop after selecting boxes that overlap that crop.">?</span></label>
                                                     <input type="number" id="qwenCaptionMaxBoxes" min="0" max="200" value="0" />
+                                                    <div class="training-help">Auto keeps full counts but sends representative spatial boxes when scenes are dense; omitted boxes are not absent objects.</div>
                                                 </div>
                                             </div>
                                             <div class="qwen-caption-settings__checks">
@@ -495,14 +505,28 @@
                                                         <option value="Qwen/Qwen3-VL-30B-A3B-Thinking-FP8">Qwen3-VL 30B-A3B Thinking (FP8)</option>
                                                     </select>
                                                 </div>
+                                                <div class="qwen-caption-settings__field qwen-caption-settings__field--wide">
+                                                    <label for="qwenCaptionFallbackModel">Fallback model<span class="help-icon" title="Used only when a caption stage enters a repeated-output loop and Loop recovery allows fallback. Auto picks the caption-safe Instruct/editor model for the selected runtime.">?</span></label>
+                                                    <select id="qwenCaptionFallbackModel">
+                                                        <option value="auto" selected>Auto stable fallback</option>
+                                                        <option value="none">No fallback model</option>
+                                                        <option value="Qwen/Qwen3-VL-2B-Instruct">Qwen3-VL 2B Instruct</option>
+                                                        <option value="Qwen/Qwen3-VL-4B-Instruct">Qwen3-VL 4B Instruct</option>
+                                                        <option value="Qwen/Qwen3-VL-8B-Instruct">Qwen3-VL 8B Instruct</option>
+                                                        <option value="Qwen/Qwen3-VL-30B-A3B-Instruct">Qwen3-VL 30B-A3B Instruct</option>
+                                                        <option value="mlx-community/Qwen3-VL-4B-Instruct-4bit">MLX Qwen3-VL 4B Instruct 4bit</option>
+                                                        <option value="nightmedia/Huihui-Qwen3-VL-4B-Instruct-abliterated-qx86-hi-mlx">MLX Huihui Qwen3-VL 4B Instruct abliterated 8bit</option>
+                                                    </select>
+                                                </div>
                                             </div>
                                         </section>
                                         <section class="qwen-caption-settings__section" aria-label="Generation and guards">
                                             <div class="qwen-caption-settings__title">Generation and guards</div>
                                             <div class="qwen-caption-settings__grid">
                                                 <div class="qwen-caption-settings__field">
-                                                    <label for="qwenCaptionMaxTokens">Max output tokens<span class="help-icon" title="Upper cap on generated tokens for each Qwen captioning model call: full-image caption, window captions, draft/refine, merge, and cleanup passes. Detailed/windowed mode may auto-lift this to a high-cap budget. This does not limit prompt/input tokens, and it is separate from Final sentences. Increase it if a model response is being cut off.">?</span></label>
-                                                    <input type="number" id="qwenCaptionMaxTokens" min="32" max="4096" value="1000" />
+                                                    <label for="qwenCaptionMaxTokens">Max output tokens<span class="help-icon" title="Optional hard cap on generated tokens for each Qwen captioning model call. Leave blank for Auto: Instruct calls stay compact, Thinking models get a high default, and prompt-aware budgeting reduces non-explicit output caps when prompts are large. This does not limit prompt/input tokens, and it is separate from Final sentences.">?</span></label>
+                                                    <input type="number" id="qwenCaptionMaxTokens" min="32" max="4096" placeholder="Auto" />
+                                                    <div class="training-help">Auto estimates prompt size and adapts output tokens at runtime; a number here is a hard per-call cap.</div>
                                                 </div>
                                                 <div class="qwen-caption-settings__field">
                                                     <label for="qwenCaptionFinalSentences">Final sentences<span class="help-icon" title="Maximum sentence budget for the final caption. Auto uses 10 sentences by default; increase for huge images where detail matters.">?</span></label>
@@ -515,6 +539,90 @@
                                                         <option value="deterministic">Deterministic (non-Thinking)</option>
                                                         <option value="custom">Custom</option>
                                                     </select>
+                                                </div>
+                                                <div class="qwen-caption-settings__field qwen-caption-settings__field--wide">
+                                                    <label for="qwenCaptionLoopRecovery">Loop recovery<span class="help-icon" title="If a caption stage starts repeating and risks a Metal/runtime crash, Tator unloads the failed runtime and follows the selected recovery path. Windowed full-image compose can recover from completed crop observations before retrying the same large visual prompt. Recovery events appear in the caption trace.">?</span></label>
+                                                    <select id="qwenCaptionLoopRecovery">
+                                                        <option value="safe_retry_fallback" selected>Safe retry + fallback</option>
+                                                        <option value="safe_retry">Safe retry only</option>
+                                                        <option value="off">Off (report loop error)</option>
+                                                    </select>
+                                                </div>
+                                                <div class="qwen-caption-settings__field">
+                                                    <label for="qwenCaptionAttempts">VLM attempts<span class="help-icon" title="Number of isolated child attempts before count/layout deterministic fallback. Leave blank for Auto: set-and-forget uses 3 attempts, while manual diagnostics use 2. Enter 1-5 to override.">?</span></label>
+                                                    <input type="number" id="qwenCaptionAttempts" min="1" max="5" step="1" placeholder="Auto (set-and-forget 3)" />
+                                                </div>
+                                                <div class="qwen-caption-settings__field">
+                                                    <label for="qwenCaptionArtifactLogMb">Attempt log cap (MB)<span class="help-icon" title="Maximum raw stdout/stderr and Qwen prompt-trace bytes to keep per backend caption attempt. Structured results and captions are not capped. Use 0 only when actively debugging and willing to keep full raw logs.">?</span></label>
+                                                    <input type="number" id="qwenCaptionArtifactLogMb" min="0" max="1024" step="0.25" value="1" />
+                                                </div>
+                                                <div class="qwen-caption-settings__field">
+                                                    <label for="qwenCaptionMaxFailedCaseRate">Max failed case rate<span class="help-icon" title="Set-and-forget health gate. Completed backend runs above this failed-case rate are marked unhealthy and can auto-resume. Use -1 to disable this gate.">?</span></label>
+                                                    <input type="number" id="qwenCaptionMaxFailedCaseRate" min="-1" max="1" step="0.01" value="0" />
+                                                </div>
+                                                <div class="qwen-caption-settings__field">
+                                                    <label for="qwenCaptionMaxQualityFailureRate">Max quality warning rate<span class="help-icon" title="Set-and-forget health gate for captions with guard quality warnings. Use -1 to disable this gate.">?</span></label>
+                                                    <input type="number" id="qwenCaptionMaxQualityFailureRate" min="-1" max="1" step="0.01" value="0" />
+                                                </div>
+                                                <div class="qwen-caption-settings__field">
+                                                    <label for="qwenCaptionMaxRecoveryRate">Max recovery rate<span class="help-icon" title="Set-and-forget health gate for captions that needed any recovery event. A moderate rate is allowed by default; use -1 to disable this gate.">?</span></label>
+                                                    <input type="number" id="qwenCaptionMaxRecoveryRate" min="-1" max="1" step="0.01" value="0.25" />
+                                                </div>
+                                                <div class="qwen-caption-settings__field">
+                                                    <label for="qwenCaptionMaxLoopRecoveryRate">Max loop recovery rate<span class="help-icon" title="Set-and-forget health gate for safely recovered repeated-output loops. Default 0.05 allows rare recovered loops while still failing frequent loops; enter 0 to require zero loop recoveries, or -1 to disable this gate.">?</span></label>
+                                                    <input type="number" id="qwenCaptionMaxLoopRecoveryRate" min="-1" max="1" step="0.01" value="0.05" />
+                                                </div>
+                                                <div class="qwen-caption-settings__field">
+                                                    <label for="qwenCaptionMaxDeterministicRecoveryRate">Max deterministic fallback rate<span class="help-icon" title="Set-and-forget health gate for generic count/layout captions written only after model attempts are exhausted. Default 0.01 allows rare degraded completion while keeping the run auditable; use 0 to require none, or -1 to disable.">?</span></label>
+                                                    <input type="number" id="qwenCaptionMaxDeterministicRecoveryRate" min="-1" max="1" step="0.01" value="0.01" />
+                                                </div>
+                                                <div class="qwen-caption-settings__field">
+                                                    <label for="qwenCaptionMaxFailedAttemptRate">Max failed attempt rate<span class="help-icon" title="Set-and-forget health gate for failed attempt rows across retries. Use -1 to disable this gate.">?</span></label>
+                                                    <input type="number" id="qwenCaptionMaxFailedAttemptRate" min="-1" max="1" step="0.01" value="0.25" />
+                                                </div>
+                                                <div class="qwen-caption-settings__field">
+                                                    <label for="qwenCaptionMaxSignalExitRate">Max native signal-exit rate<span class="help-icon" title="Set-and-forget health gate for child attempts that died from native signals such as Metal SIGABRT. These are isolated and retried, but frequent signal exits mean the run profile is unstable. Default 0.05 tolerates rare MLX child aborts without hiding them; use 0 to require none, or -1 to disable.">?</span></label>
+                                                    <input type="number" id="qwenCaptionMaxSignalExitRate" min="-1" max="1" step="0.01" value="0.05" />
+                                                </div>
+                                                <div class="qwen-caption-settings__field">
+                                                    <label for="qwenCaptionMinRateCases">Min live-rate cases<span class="help-icon" title="Minimum processed cases before live health-rate gates activate. Terminal completed or failed runs are always checked.">?</span></label>
+                                                    <input type="number" id="qwenCaptionMinRateCases" min="1" max="1000000" step="1" value="20" />
+                                                </div>
+                                                <div class="qwen-caption-settings__field qwen-caption-settings__field--wide">
+                                                    <label for="qwenCaptionPilotOutputDir">Certified pilot artifact dir<span class="help-icon" title="Required for 10k-scale set-and-forget backend launches. When enabled below, backend caption jobs certify this pilot output directory before starting the large run. The pilot must use the same model, prompt, windowing, token, and decode settings as the requested run.">?</span></label>
+                                                    <input type="text" id="qwenCaptionPilotOutputDir" placeholder="tmp/qwen_caption_benchmark/pilot_soak" />
+                                                </div>
+                                                <div class="qwen-caption-settings__field">
+                                                    <label for="qwenCaptionPilotTargetCases">Pilot target cases<span class="help-icon" title="Target dataset size used to project runtime from the certified pilot.">?</span></label>
+                                                    <input type="number" id="qwenCaptionPilotTargetCases" min="1" max="10000000" step="1" value="10000" />
+                                                </div>
+                                                <div class="qwen-caption-settings__field">
+                                                    <label for="qwenCaptionPilotMaxDurationHours">Pilot max hours<span class="help-icon" title="Maximum allowed projected runtime for the target dataset. 336 hours is two weeks.">?</span></label>
+                                                    <input type="number" id="qwenCaptionPilotMaxDurationHours" min="0.01" max="100000" step="1" value="336" />
+                                                </div>
+                                                <div class="qwen-caption-settings__field">
+                                                    <label for="qwenCaptionPilotMaxP95DurationHours">Pilot p95 max hours<span class="help-icon" title="Maximum projected runtime if all target cases ran at the pilot p95 case time. Defaults to the max-hours gate; use -1 to disable for manual diagnostics.">?</span></label>
+                                                    <input type="number" id="qwenCaptionPilotMaxP95DurationHours" min="-1" max="100000" step="1" value="336" />
+                                                </div>
+                                                <div class="qwen-caption-settings__field">
+                                                    <label for="qwenCaptionPilotMinCases">Pilot min cases<span class="help-icon" title="Minimum timed pilot cases required before a set-and-forget backend run can start. The default is 300 for 10k-scale deterministic-recovery confidence; lower values are diagnostic overrides and will block strict large-run launch readiness.">?</span></label>
+                                                    <input type="number" id="qwenCaptionPilotMinCases" min="1" max="1000000" step="1" value="300" />
+                                                </div>
+                                                <div class="qwen-caption-settings__field">
+                                                    <label for="qwenCaptionPilotSafetyFactor">Pilot safety factor<span class="help-icon" title="Multiplier applied to the observed pilot runtime projection.">?</span></label>
+                                                    <input type="number" id="qwenCaptionPilotSafetyFactor" min="1" max="10" step="0.05" value="1.25" />
+                                                </div>
+                                                <div class="qwen-caption-settings__field">
+                                                    <label for="qwenCaptionPilotDeterministicRecoveryConfidence">Pilot deterministic confidence<span class="help-icon" title="One-sided confidence used to bound the deterministic count/layout fallback rate from generated pilot rows. Default 0.95 is required for strict 10k-scale set-and-forget; use 0 only for manual diagnostics.">?</span></label>
+                                                    <input type="number" id="qwenCaptionPilotDeterministicRecoveryConfidence" min="0" max="0.999999" step="0.01" value="0.95" />
+                                                </div>
+                                                <div class="qwen-caption-settings__field">
+                                                    <label for="qwenCaptionPilotMaxPromptTokens">Pilot max prompt tokens<span class="help-icon" title="Set-and-forget launch gate. 10k set-and-forget requires a positive ceiling; use 0 only for manual diagnostics that intentionally disable the prompt-size gate.">?</span></label>
+                                                    <input type="number" id="qwenCaptionPilotMaxPromptTokens" min="0" max="1000000" step="100" value="9000" />
+                                                </div>
+                                                <div class="qwen-caption-settings__field">
+                                                    <label for="qwenCaptionPilotPromptAdaptedRate">Pilot max prompt adaptation rate<span class="help-icon" title="Maximum fraction of pilot cases where Tator had to adapt prompt sections or output budget because the prompt was large. Use -1 to disable.">?</span></label>
+                                                    <input type="number" id="qwenCaptionPilotPromptAdaptedRate" min="-1" max="1" step="0.01" value="1" />
                                                 </div>
                                                 <div class="qwen-caption-settings__field">
                                                     <label for="qwenCaptionTemperature">Temperature<span class="help-icon" title="Higher = more varied captions, lower = more deterministic.">?</span></label>
@@ -537,11 +645,24 @@
                                                 <label><input type="checkbox" id="qwenCaptionFinalOnly" checked /> Final answer only (no reasoning)<span class="help-icon" title="For Thinking models, suppresses internal reasoning and keeps only the final caption text.">?</span></label>
                                                 <label><input type="checkbox" id="qwenCaptionTwoStage" /> Draft + refine (Thinking)<span class="help-icon" title="Thinking caption models only. This does not run per window. In Detailed/windowed mode, Tator first makes crop observations normally; crop calls only get cleanup or coverage guard passes if needed. Then this option runs one full-image draft pass with the caption model, followed by one full-image refine/editor pass using the draft, the full prompt, raw first-stage outputs, and the Draft + refine prompt. If Detailed/windowed mode is on, a separate Window merge pass may still run afterward; that pass is controlled by windowed mode, not this checkbox.">?</span></label>
                                                 <label><input type="checkbox" id="qwenCaptionHighVram" /> Fast mode (keep Qwen loaded)<span class="help-icon" title="Keeps Qwen models loaded between caption requests to avoid reload thrash. Faster, but uses more VRAM.">?</span></label>
-                                                <label><input type="checkbox" id="qwenCaptionSaveText" checked /> Auto-save to text labels</label>
+                                                <label><input type="checkbox" id="qwenCaptionLoopCooldown" checked /> Cooldown repeated loops<span class="help-icon" title="After a stage/model/prompt/decode combination loops, temporarily skip retrying that exact combination and go straight to recovery.">?</span></label>
+                                                <label><input type="checkbox" id="qwenCaptionSaveText" checked /> Save generated captions<span class="help-icon" title="Generated captions are saved as unlimited alternate caption records. The selected primary caption is mirrored to the legacy text-label file for existing exports and skip-existing behavior.">?</span></label>
+                                                <label><input type="checkbox" id="qwenCaptionGeneratedPrimary" /> Make generated caption primary<span class="help-icon" title="Off by default for alternate-caption training. Generated captions append as alternates; enable this only when a new generated caption should replace the selected primary text label. If an image has no primary caption yet, the first saved generated caption becomes primary automatically.">?</span></label>
+                                                <label><input type="checkbox" id="qwenCaptionSetAndForget" checked /> Set-and-forget backend run<span class="help-icon" title="Default durable path for Caption image, next-N, and Caption all. Requires a caption dataset so the request runs as a persisted backend job with isolated child attempts, health gates, auto-resume after backend restarts, and auditable recovery artifacts. Uncheck only for a one-off direct current-image diagnostic. For unattended crash recovery, start the backend with tools/run_macos_backend.sh or another process supervisor; 10k-scale backend jobs require large-run-ready crash supervision by default. Cancelled jobs stay cancelled.">?</span></label>
+                                                <label><input type="checkbox" id="qwenCaptionRequirePilotCertification" /> Require certified pilot<span class="help-icon" title="For set-and-forget backend runs, block launch unless the pilot artifact directory certifies clean for the target size, duration, and exact caption settings. Backend 10k-scale set-and-forget jobs require this gate.">?</span></label>
+                                                <label><input type="checkbox" id="qwenCaptionPilotRequirePromptBudget" checked /> Require prompt-budget telemetry<span class="help-icon" title="For certified pilots, require current-runner prompt-size telemetry before a set-and-forget run can start. Disable only for legacy pilot artifacts.">?</span></label>
+                                                <label><input type="checkbox" id="qwenCaptionAllowModelDownload" /> Allow model downloads<span class="help-icon" title="Backend caption jobs fail preflight when the selected caption, editor, or fallback model is missing locally. Enable this only when a first-run model download is intentional.">?</span></label>
                                             </div>
                                         </section>
                                     </div>
                                     <div id="qwenCaptionWorkflow" class="qwen-caption-workflow" aria-live="polite"></div>
+                                    <div class="qwen-caption-readiness">
+                                        <div class="qwen-caption-row qwen-caption-status-row">
+                                            <button type="button" id="qwenCaptionReadinessRun" class="training-button secondary">Check caption readiness</button>
+                                            <span id="qwenCaptionReadinessStatus" class="training-help">Readiness not checked.</span>
+                                        </div>
+                                        <ul id="qwenCaptionReadinessResults" class="qwen-caption-readiness__list" hidden></ul>
+                                    </div>
                                     <button type="button" id="qwenCaptionRunButton" class="training-button secondary">Caption image</button>
                                     <button type="button" id="qwenCaptionCancelButton" class="training-button training-button-danger" disabled>Cancel caption</button>
                                     <div id="qwenCaptionProgress" class="qwen-caption-progress" aria-live="polite" hidden>
@@ -559,9 +680,33 @@
                                     <div class="qwen-caption-output">
                                         <label for="qwenCaptionOutput">Caption</label>
                                         <textarea id="qwenCaptionOutput" rows="9"></textarea>
+                                        <div class="qwen-caption-alternates">
+                                            <div class="qwen-caption-alternates__header">
+                                                <strong>Image captions</strong>
+                                                <span id="qwenCaptionAlternateStatus" class="training-help">Primary text label plus saved alternates.</span>
+                                            </div>
+                                            <div id="qwenCaptionArchiveStatus" class="qwen-caption-archive-status" aria-live="polite">
+                                                Caption archive status will appear here.
+                                            </div>
+                                            <div id="qwenCaptionAlternates" class="qwen-caption-alternates__list" aria-live="polite"></div>
+                                            <div class="qwen-caption-alternates__actions">
+                                                <button type="button" id="qwenCaptionSaveAlternate" class="training-button secondary">Save as new alternate</button>
+                                                <button type="button" id="qwenCaptionUpdateSelected" class="training-button secondary">Update selected</button>
+                                                <button type="button" id="qwenCaptionSetPrimary" class="training-button secondary">Set primary</button>
+                                                <button type="button" id="qwenCaptionDeleteSelected" class="training-button secondary">Delete alternate</button>
+                                            </div>
+                                        </div>
                                         <button type="button" id="qwenCaptionCopy" class="training-button secondary">Copy caption</button>
                                         <div id="qwenCaptionMeta" class="training-help"></div>
-                                        <div class="training-help">Saved captions are written to <code>text_labels/&lt;image&gt;.txt</code> and included in dataset exports. JSONL is an optional download.</div>
+                                        <div id="qwenCaptionExportHealth" class="qwen-caption-export-health" aria-live="polite">
+                                            VLM export validation has not run yet.
+                                        </div>
+                                        <div class="training-help">Saved generated captions are appended as alternate caption records and included in caption exports. Flat JSONL is the audit record stream; grouped JSON keeps each image with all of its ordered alternate captions; VLM JSONL emits one normal image/question/answer training row per caption with JSON caption answers and unique per-image questions for downstream training validation. The selected primary is mirrored to dataset text labels for compatibility with older exports and skip-existing checks.</div>
+                                        <div class="training-help">Set-and-forget is the default dataset-backed path for Caption image, next-N, and Caption all; it uses persisted backend jobs, isolated retries, health gates, and auto-resume after backend restarts when the backend launcher or another process supervisor is running. Large backend set-and-forget jobs require large-run-ready crash supervision and a 300-case confidence-backed certified pilot by default. Direct single-image captioning is only for deliberate non-set-and-forget diagnostics.</div>
+                                        <div class="qwen-caption-row qwen-caption-resume-row">
+                                            <button type="button" id="qwenCaptionResumeBackendJob" class="training-button secondary">Attach / recover now</button>
+                                            <span id="qwenCaptionBackendJobStatus" class="training-help">Set-and-forget jobs auto-resume on backend startup and periodic sweeps, and this page auto-attaches immediately and periodically when backend state is available. Use this button for an immediate manual status check.</span>
+                                        </div>
                                     </div>
                                 <div class="qwen-caption-options">
                                     <label for="qwenCaptionBatchCount">Apply captions to next N images</label>
@@ -571,10 +716,33 @@
                                         </div>
                                         <label><input type="checkbox" id="qwenCaptionBatchIncludeCurrent" checked /> Include current image</label>
                                         <label><input type="checkbox" id="qwenCaptionBatchOverwrite" /> Overwrite existing captions</label>
-                                        <div class="qwen-caption-row">
+                                        <div class="qwen-caption-row qwen-caption-actions-row">
                                             <button type="button" id="qwenCaptionBatchRunAll" class="training-button secondary">Caption all images</button>
                                             <button type="button" id="qwenCaptionBatchCancel" class="training-button secondary">Cancel batch</button>
                                             <button type="button" id="qwenCaptionDownloadJsonl" class="training-button secondary">Download captions JSONL</button>
+                                            <button type="button" id="qwenCaptionDownloadGroupedJson" class="training-button secondary">Download grouped JSON</button>
+                                            <button type="button" id="qwenCaptionDownloadVlmJsonl" class="training-button secondary">Download VLM JSONL</button>
+                                        </div>
+                                        <div class="qwen-caption-instruction-panel">
+                                            <div class="qwen-caption-settings__grid qwen-caption-settings__grid--compact">
+                                                <div class="qwen-caption-settings__field">
+                                                    <label for="qwenCaptionSubcaptionsPerImage">Generated QA per image<span class="help-icon" title="Additional VLM-created image-specific question/answer rows per image for instruction training. Range 0-20. Use 0 to keep only caption0 rows.">?</span></label>
+                                                    <input type="number" id="qwenCaptionSubcaptionsPerImage" min="0" max="20" step="1" value="8" />
+                                                </div>
+                                            </div>
+                                            <div class="qwen-caption-settings__checks">
+                                                <label><input type="checkbox" id="qwenCaptionIncludeCaption0Training" checked /> Include caption0<span class="help-icon" title="Include the broad caption row in the instruction-training JSONL.">?</span></label>
+                                                <label><input type="checkbox" id="qwenCaptionIncludeGeneratedQaTraining" checked /> Include generated QA<span class="help-icon" title="Include VLM-created question/answer rows that passed structural validation.">?</span></label>
+                                                <label><input type="checkbox" id="qwenCaptionIncludeDeterministicMetadataQa" /> Include deterministic metadata QA<span class="help-icon" title="Add code-generated QA rows from real source labels. This is off by default so source metadata and generated language stay clearly separated.">?</span></label>
+                                                <label><input type="checkbox" id="qwenCaptionIncludeSourceAnnotationsContext" checked /> Give generator read-only label context<span class="help-icon" title="Pass source annotation counts as read-only grounding context for generated QA. The VLM cannot write these source annotations.">?</span></label>
+                                                <label><input type="checkbox" id="qwenCaptionStrictGrounding" checked /> Strict QA grounding<span class="help-icon" title="Ask the generator to answer only from image evidence, caption0, or read-only source context.">?</span></label>
+                                            </div>
+                                            <div class="qwen-caption-row qwen-caption-actions-row qwen-caption-instruction-actions">
+                                                <button type="button" id="qwenCaptionBuildInstructionDataset" class="training-button secondary">Create VLM training dataset</button>
+                                                <button type="button" id="qwenCaptionDownloadInstructionJsonl" class="training-button secondary">Download instruction JSONL</button>
+                                                <button type="button" id="qwenCaptionDownloadInstructionArchive" class="training-button secondary">Download instruction archive</button>
+                                            </div>
+                                            <div class="training-help">The training-dataset path writes caption0 plus optional generated QA rows into a separate instruction archive. Generated QA never becomes source annotations, and deterministic metadata QA is included only when explicitly enabled.</div>
                                         </div>
                                     </div>
                                 </div>
@@ -4589,13 +4757,13 @@
                     <h3>Backend Connection</h3>
                     <p>The UI talks to the FastAPI server via an HTTP base URL. Enter the URL (including port) below to point the interface at a local or remote backend.</p>
                     <label for="settingsApiRoot">API base URL</label>
-                    <input type="text" id="settingsApiRoot" placeholder="http://localhost:8000" />
+                    <input type="text" id="settingsApiRoot" placeholder="Current backend origin" />
                     <div class="settings-actions">
                         <button type="button" id="settingsApply" class="training-button">Save</button>
                         <button type="button" id="settingsTest" class="training-button">Test Connection</button>
                     </div>
                     <div id="settingsStatus" class="settings-status" role="status" aria-live="polite"></div>
-                    <p class="settings-help">Tip: when tunnelling to a remote GPU box (e.g. <code>ssh -L 8000:127.0.0.1:8000 user@gpu-host</code>), set the URL to <code>http://localhost:8000</code> so the browser routes through the tunnel.</p>
+                    <p class="settings-help">By default, the UI uses the same backend origin that served this page. Override this only for tunnels or split frontend/backend setups; for example, with <code>ssh -L 8000:127.0.0.1:8000 user@gpu-host</code>, set the URL to <code>http://localhost:8000</code>.</p>
                     <div class="training-divider"></div>
                     <h3>Install Check</h3>
                     <p class="settings-help">Runs lightweight checks to confirm the backend, datasets, detectors, SAM3, CLIP, and Qwen endpoints are reachable. This does not run inference and is safe to use while GPUs are busy.</p>

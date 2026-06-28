@@ -10,6 +10,14 @@ from pydantic import BaseModel, Field
 from utils.pydantic_compat import root_validator_compat
 
 
+QWEN_CAPTION_SET_AND_FORGET_MAX_LOOP_RECOVERY_RATE = 0.05
+QWEN_CAPTION_SET_AND_FORGET_MAX_DETERMINISTIC_RECOVERY_RATE = 0.01
+QWEN_CAPTION_SET_AND_FORGET_MAX_SIGNAL_EXIT_ATTEMPT_RATE = 0.05
+QWEN_CAPTION_SET_AND_FORGET_ATTEMPTS = 3
+QWEN_CAPTION_DEFAULT_PILOT_MIN_CASES = 300
+QWEN_CAPTION_DEFAULT_PILOT_DETERMINISTIC_RECOVERY_CONFIDENCE = 0.95
+
+
 class Base64Payload(BaseModel):
     image_base64: str
     image_token: Optional[str] = None
@@ -372,14 +380,20 @@ class QwenCaptionRequest(BaseModel):
     include_counts: Optional[bool] = True
     include_coords: Optional[bool] = True
     max_boxes: Optional[int] = 0
-    max_new_tokens: Optional[int] = 1000
+    max_new_tokens: Optional[int] = None
     model_variant: Optional[Literal["auto", "Instruct", "Thinking"]] = "auto"
     model_id: Optional[str] = None
     refinement_model_id: Optional[str] = None
+    caption_loop_recovery_mode: Optional[
+        Literal["off", "safe_retry", "safe_retry_fallback"]
+    ] = "safe_retry_fallback"
+    caption_fallback_model_id: Optional[str] = None
+    caption_loop_cooldown: Optional[bool] = True
     final_answer_only: Optional[bool] = True
     final_caption_max_sentences: Optional[int] = 10
     two_stage_refine: Optional[bool] = False
     caption_mode: Optional[Literal["full", "windowed"]] = "full"
+    caption_windowed_full_image_strategy: Optional[Literal["visual", "text_only"]] = "visual"
     window_size: Optional[int] = None
     window_overlap: Optional[float] = None
     caption_window_min_sentences: Optional[int] = 1
@@ -417,10 +431,31 @@ class QwenCaptionRequest(BaseModel):
         if caption_mode not in {"full", "windowed"}:
             caption_mode = "full"
         data["caption_mode"] = caption_mode
+        strategy = (
+            str(data.get("caption_windowed_full_image_strategy") or "visual")
+            .strip()
+            .lower()
+            .replace("-", "_")
+        )
+        if strategy in {"text", "text_only", "window_text", "windowed_text", "observations", "skip_visual"}:
+            strategy = "text_only"
+        elif strategy not in {"visual", "text_only"}:
+            strategy = "visual"
+        data["caption_windowed_full_image_strategy"] = strategy
         data["model_variant"] = _normalize_qwen_variant_value(
             data.get("model_variant"),
             default="auto",
         )
+        recovery_mode = str(
+            data.get("caption_loop_recovery_mode") or "safe_retry_fallback"
+        ).strip().lower()
+        if recovery_mode not in {"off", "safe_retry", "safe_retry_fallback"}:
+            recovery_mode = "safe_retry_fallback"
+        data["caption_loop_recovery_mode"] = recovery_mode
+        fallback_model_id = (data.get("caption_fallback_model_id") or "").strip()
+        if fallback_model_id.lower() in {"", "auto", "none", "active"}:
+            fallback_model_id = ""
+        data["caption_fallback_model_id"] = fallback_model_id or None
         for field in (
             "image_width",
             "image_height",
@@ -481,10 +516,10 @@ class QwenCaptionRequest(BaseModel):
             try:
                 max_tokens_val = int(max_tokens)
             except (TypeError, ValueError, OverflowError):
-                max_tokens_val = 1000
-            values["max_new_tokens"] = max(32, min(max_tokens_val, 4096))
+                max_tokens_val = 0
+            values["max_new_tokens"] = max(32, min(max_tokens_val, 4096)) if max_tokens_val > 0 else None
         else:
-            values["max_new_tokens"] = 1000
+            values["max_new_tokens"] = None
         max_sentences = values.get("final_caption_max_sentences")
         if max_sentences is not None:
             try:
@@ -551,6 +586,17 @@ class QwenCaptionRequest(BaseModel):
         if caption_mode not in {"full", "windowed"}:
             caption_mode = "full"
         values["caption_mode"] = caption_mode
+        strategy = (
+            str(values.get("caption_windowed_full_image_strategy") or "visual")
+            .strip()
+            .lower()
+            .replace("-", "_")
+        )
+        if strategy in {"text", "text_only", "window_text", "windowed_text", "observations", "skip_visual"}:
+            strategy = "text_only"
+        elif strategy not in {"visual", "text_only"}:
+            strategy = "visual"
+        values["caption_windowed_full_image_strategy"] = strategy
         window_size = values.get("window_size")
         if window_size is not None:
             try:
@@ -568,11 +614,22 @@ class QwenCaptionRequest(BaseModel):
         values["model_id"] = model_id or None
         refinement_model_id = (values.get("refinement_model_id") or "").strip()
         values["refinement_model_id"] = refinement_model_id or None
+        recovery_mode = str(
+            values.get("caption_loop_recovery_mode") or "safe_retry_fallback"
+        ).strip().lower()
+        if recovery_mode not in {"off", "safe_retry", "safe_retry_fallback"}:
+            recovery_mode = "safe_retry_fallback"
+        values["caption_loop_recovery_mode"] = recovery_mode
+        fallback_model_id = (values.get("caption_fallback_model_id") or "").strip()
+        if fallback_model_id.lower() in {"", "auto", "none", "active"}:
+            fallback_model_id = ""
+        values["caption_fallback_model_id"] = fallback_model_id or None
         glossary = values.get("labelmap_glossary")
         if glossary is not None:
             values["labelmap_glossary"] = str(glossary).strip() or None
         values["final_answer_only"] = bool(values.get("final_answer_only", True))
         values["two_stage_refine"] = bool(values.get("two_stage_refine", False))
+        values["caption_loop_cooldown"] = bool(values.get("caption_loop_cooldown", True))
         return values
 
 
@@ -581,6 +638,7 @@ class QwenCaptionResponse(BaseModel):
     used_counts: Dict[str, int] = Field(default_factory=dict)
     used_boxes: int
     truncated: bool
+    recovery_events: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class QwenCaptionPromptPreviewSection(BaseModel):
@@ -603,6 +661,455 @@ class QwenCaptionPromptPreviewResponse(BaseModel):
     step_plan: List[Dict[str, str]] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
     meta: Dict[str, Any] = Field(default_factory=dict)
+
+
+class QwenCaptionDatasetJobRequest(BaseModel):
+    dataset_id: str
+    annotation_session_id: Optional[str] = None
+    caption_request: Dict[str, Any] = Field(default_factory=dict)
+    image_names: List[str] = Field(default_factory=list)
+    split: Optional[Literal["all", "train", "val"]] = "all"
+    max_images: Optional[int] = None
+    overwrite: Optional[bool] = False
+    save_text_labels: Optional[bool] = False
+    generated_make_primary: Optional[bool] = False
+    instruction_dataset: Optional[bool] = False
+    subcaptions_per_image: Optional[int] = 0
+    include_caption0_in_training: Optional[bool] = True
+    include_generated_qa_in_training: Optional[bool] = True
+    include_deterministic_metadata_qa: Optional[bool] = False
+    include_source_annotations_in_generator_context: Optional[bool] = True
+    strict_grounding: Optional[bool] = True
+    qa_mix: Optional[str] = "balanced"
+    answer_format: Optional[Literal["natural", "json"]] = "natural"
+    preview_only: Optional[bool] = False
+    resume: Optional[bool] = True
+    attempts: Optional[int] = 2
+    per_image_timeout_seconds: Optional[float] = 900.0
+    runner_no_output_timeout_seconds: Optional[float] = None
+    runner_heartbeat_interval_seconds: Optional[float] = 30.0
+    runner_artifact_log_bytes: Optional[int] = 1048576
+    runner_min_free_gb: Optional[float] = 5.0
+    runner_disk_safety_factor: Optional[float] = 1.25
+    cooldown_after_crash_seconds: Optional[float] = 5.0
+    cooldown_after_success_seconds: Optional[float] = None
+    max_failures: Optional[int] = 0
+    continue_on_quality_failures: Optional[bool] = False
+    set_and_forget: Optional[bool] = False
+    auto_resume_count: Optional[int] = 0
+    max_auto_resumes: Optional[int] = None
+    max_failed_case_rate: Optional[float] = 0.0
+    max_quality_failure_rate: Optional[float] = 0.0
+    max_recovery_event_case_rate: Optional[float] = 0.25
+    max_loop_recovery_case_rate: Optional[float] = 0.0
+    max_deterministic_recovery_case_rate: Optional[float] = 0.0
+    max_failed_attempt_row_rate: Optional[float] = 0.25
+    max_signal_exit_attempt_row_rate: Optional[float] = None
+    min_rate_cases: Optional[int] = 20
+    resume_reprocess_recovery_events: Optional[bool] = False
+    allow_model_download: Optional[bool] = False
+    require_pilot_certification: Optional[bool] = False
+    pilot_output_dir: Optional[str] = None
+    pilot_target_cases: Optional[int] = 10000
+    pilot_max_duration_hours: Optional[float] = 336.0
+    pilot_max_p95_duration_hours: Optional[float] = None
+    pilot_min_cases: Optional[int] = QWEN_CAPTION_DEFAULT_PILOT_MIN_CASES
+    pilot_duration_safety_factor: Optional[float] = 1.25
+    pilot_require_prompt_budget_data: Optional[bool] = True
+    pilot_max_prompt_tokens: Optional[int] = 0
+    pilot_max_prompt_budget_adapted_case_rate: Optional[float] = 1.0
+    pilot_deterministic_recovery_confidence: Optional[float] = (
+        QWEN_CAPTION_DEFAULT_PILOT_DETERMINISTIC_RECOVERY_CONFIDENCE
+    )
+    run_name: Optional[str] = None
+    output_dir: Optional[str] = None
+
+    @root_validator_compat(pre=True)
+    def _normalize_caption_job_input(cls, values):  # noqa: N805
+        if not isinstance(values, Mapping):
+            return values
+        data = dict(values)
+        set_and_forget_raw = data.get("set_and_forget")
+        set_and_forget_requested = (
+            set_and_forget_raw is True
+            or str(set_and_forget_raw or "").strip().lower() in {"1", "true", "yes", "on"}
+        )
+        loop_rate_was_provided = (
+            "max_loop_recovery_case_rate" in data
+            and data.get("max_loop_recovery_case_rate") is not None
+            and str(data.get("max_loop_recovery_case_rate")).strip() != ""
+        )
+        if set_and_forget_requested and not loop_rate_was_provided:
+            data["max_loop_recovery_case_rate"] = QWEN_CAPTION_SET_AND_FORGET_MAX_LOOP_RECOVERY_RATE
+        deterministic_rate_was_provided = (
+            "max_deterministic_recovery_case_rate" in data
+            and data.get("max_deterministic_recovery_case_rate") is not None
+            and str(data.get("max_deterministic_recovery_case_rate")).strip() != ""
+        )
+        if set_and_forget_requested and not deterministic_rate_was_provided:
+            data["max_deterministic_recovery_case_rate"] = (
+                QWEN_CAPTION_SET_AND_FORGET_MAX_DETERMINISTIC_RECOVERY_RATE
+            )
+        signal_exit_rate_was_provided = (
+            "max_signal_exit_attempt_row_rate" in data
+            and data.get("max_signal_exit_attempt_row_rate") is not None
+            and str(data.get("max_signal_exit_attempt_row_rate")).strip() != ""
+        )
+        if set_and_forget_requested and not signal_exit_rate_was_provided:
+            data["max_signal_exit_attempt_row_rate"] = (
+                QWEN_CAPTION_SET_AND_FORGET_MAX_SIGNAL_EXIT_ATTEMPT_RATE
+            )
+        attempts_was_provided = (
+            "attempts" in data
+            and data.get("attempts") is not None
+            and str(data.get("attempts")).strip() != ""
+        )
+        if set_and_forget_requested and not attempts_was_provided:
+            data["attempts"] = QWEN_CAPTION_SET_AND_FORGET_ATTEMPTS
+        data["dataset_id"] = str(data.get("dataset_id") or "").strip()
+        data["annotation_session_id"] = str(data.get("annotation_session_id") or "").strip() or None
+        raw_request = data.get("caption_request")
+        if not isinstance(raw_request, Mapping):
+            raw_request = {}
+        cleaned_request = dict(raw_request)
+        for image_field in (
+            "image_base64",
+            "image_token",
+            "image_name",
+            "label_hints",
+            "image_width",
+            "image_height",
+        ):
+            cleaned_request.pop(image_field, None)
+        data["caption_request"] = cleaned_request
+        data["image_names"] = [
+            str(name or "").strip()
+            for name in (data.get("image_names") or [])
+            if str(name or "").strip()
+        ]
+        split = str(data.get("split") or "all").strip().lower()
+        data["split"] = split if split in {"all", "train", "val"} else "all"
+        for field in (
+            "max_images",
+            "attempts",
+            "per_image_timeout_seconds",
+            "runner_no_output_timeout_seconds",
+            "runner_heartbeat_interval_seconds",
+            "runner_artifact_log_bytes",
+            "runner_min_free_gb",
+            "runner_disk_safety_factor",
+            "cooldown_after_crash_seconds",
+            "cooldown_after_success_seconds",
+            "max_failures",
+            "auto_resume_count",
+            "max_auto_resumes",
+            "max_failed_case_rate",
+            "max_quality_failure_rate",
+            "max_recovery_event_case_rate",
+            "max_loop_recovery_case_rate",
+            "max_deterministic_recovery_case_rate",
+            "max_failed_attempt_row_rate",
+            "max_signal_exit_attempt_row_rate",
+            "min_rate_cases",
+            "pilot_target_cases",
+            "pilot_max_duration_hours",
+            "pilot_max_p95_duration_hours",
+            "pilot_min_cases",
+            "pilot_duration_safety_factor",
+            "pilot_max_prompt_tokens",
+            "pilot_max_prompt_budget_adapted_case_rate",
+            "pilot_deterministic_recovery_confidence",
+            "subcaptions_per_image",
+        ):
+            if data.get(field) is None:
+                continue
+            try:
+                numeric_value = float(data.get(field))
+            except (TypeError, ValueError, OverflowError):
+                data[field] = None
+                continue
+            if not math.isfinite(numeric_value):
+                data[field] = None
+        data["pilot_output_dir"] = str(data.get("pilot_output_dir") or "").strip() or None
+        data["run_name"] = str(data.get("run_name") or "").strip() or None
+        data["output_dir"] = str(data.get("output_dir") or "").strip() or None
+        return data
+
+    @root_validator_compat(skip_on_failure=True)
+    def _validate_caption_job(cls, values):  # noqa: N805
+        dataset_id = str(values.get("dataset_id") or "").strip()
+        if not dataset_id:
+            raise ValueError("dataset_id_required")
+        values["dataset_id"] = dataset_id
+        max_images = values.get("max_images")
+        if max_images is not None:
+            try:
+                max_images_int = int(max_images)
+            except (TypeError, ValueError, OverflowError):
+                max_images_int = 0
+            values["max_images"] = max(0, max_images_int) if max_images_int > 0 else None
+        attempts = values.get("attempts")
+        try:
+            attempts_int = int(attempts) if attempts is not None else 2
+        except (TypeError, ValueError, OverflowError):
+            attempts_int = 2
+        values["attempts"] = max(1, min(attempts_int, 5))
+        timeout = values.get("per_image_timeout_seconds")
+        try:
+            timeout_float = float(timeout) if timeout is not None else 900.0
+        except (TypeError, ValueError, OverflowError):
+            timeout_float = 900.0
+        values["per_image_timeout_seconds"] = max(30.0, min(timeout_float, 7200.0))
+        watchdog = values.get("runner_no_output_timeout_seconds")
+        if watchdog is None:
+            watchdog_float = max(300.0, values["per_image_timeout_seconds"] + 180.0)
+        else:
+            try:
+                watchdog_float = float(watchdog)
+            except (TypeError, ValueError, OverflowError):
+                watchdog_float = max(300.0, values["per_image_timeout_seconds"] + 180.0)
+        if not math.isfinite(watchdog_float):
+            watchdog_float = max(300.0, values["per_image_timeout_seconds"] + 180.0)
+        values["runner_no_output_timeout_seconds"] = max(0.0, min(watchdog_float, 86400.0))
+        heartbeat = values.get("runner_heartbeat_interval_seconds")
+        try:
+            heartbeat_float = float(heartbeat) if heartbeat is not None else 30.0
+        except (TypeError, ValueError, OverflowError):
+            heartbeat_float = 30.0
+        if not math.isfinite(heartbeat_float):
+            heartbeat_float = 30.0
+        values["runner_heartbeat_interval_seconds"] = max(0.0, min(heartbeat_float, 3600.0))
+        artifact_log_bytes = values.get("runner_artifact_log_bytes")
+        try:
+            artifact_log_bytes_int = int(artifact_log_bytes) if artifact_log_bytes is not None else 1048576
+        except (TypeError, ValueError, OverflowError):
+            artifact_log_bytes_int = 1048576
+        values["runner_artifact_log_bytes"] = max(0, min(artifact_log_bytes_int, 1_073_741_824))
+        min_free = values.get("runner_min_free_gb")
+        try:
+            min_free_float = float(min_free) if min_free is not None else 5.0
+        except (TypeError, ValueError, OverflowError):
+            min_free_float = 5.0
+        if not math.isfinite(min_free_float):
+            min_free_float = 5.0
+        values["runner_min_free_gb"] = max(0.0, min(min_free_float, 100_000.0))
+        disk_safety = values.get("runner_disk_safety_factor")
+        try:
+            disk_safety_float = float(disk_safety) if disk_safety is not None else 1.25
+        except (TypeError, ValueError, OverflowError):
+            disk_safety_float = 1.25
+        if not math.isfinite(disk_safety_float):
+            disk_safety_float = 1.25
+        values["runner_disk_safety_factor"] = max(1.0, min(disk_safety_float, 10.0))
+        cooldown = values.get("cooldown_after_crash_seconds")
+        try:
+            cooldown_float = float(cooldown) if cooldown is not None else 5.0
+        except (TypeError, ValueError, OverflowError):
+            cooldown_float = 5.0
+        values["cooldown_after_crash_seconds"] = max(0.0, min(cooldown_float, 300.0))
+        success_cooldown = values.get("cooldown_after_success_seconds")
+        if success_cooldown is not None:
+            try:
+                success_cooldown_float = float(success_cooldown)
+            except (TypeError, ValueError, OverflowError):
+                success_cooldown_float = 0.0
+            if not math.isfinite(success_cooldown_float):
+                success_cooldown_float = 0.0
+            values["cooldown_after_success_seconds"] = max(0.0, min(success_cooldown_float, 300.0))
+        max_failures = values.get("max_failures")
+        try:
+            max_failures_int = int(max_failures) if max_failures is not None else 0
+        except (TypeError, ValueError, OverflowError):
+            max_failures_int = 0
+        values["max_failures"] = max(0, max_failures_int)
+        auto_resume_count = values.get("auto_resume_count")
+        try:
+            auto_resume_count_int = int(auto_resume_count) if auto_resume_count is not None else 0
+        except (TypeError, ValueError, OverflowError):
+            auto_resume_count_int = 0
+        values["auto_resume_count"] = max(0, min(auto_resume_count_int, 1000))
+        max_auto_resumes = values.get("max_auto_resumes")
+        if max_auto_resumes is None:
+            values["max_auto_resumes"] = None
+        else:
+            try:
+                max_auto_resumes_int = int(max_auto_resumes)
+            except (TypeError, ValueError, OverflowError):
+                max_auto_resumes_int = 0
+            values["max_auto_resumes"] = max(0, min(max_auto_resumes_int, 1000))
+        rate_defaults = {
+            "max_failed_case_rate": 0.0,
+            "max_quality_failure_rate": 0.0,
+            "max_recovery_event_case_rate": 0.25,
+            "max_loop_recovery_case_rate": 0.0,
+            "max_deterministic_recovery_case_rate": 0.0,
+            "max_failed_attempt_row_rate": 0.25,
+            "max_signal_exit_attempt_row_rate": 0.0,
+        }
+        for field, default in rate_defaults.items():
+            try:
+                rate_value = float(values.get(field)) if values.get(field) is not None else default
+            except (TypeError, ValueError, OverflowError):
+                rate_value = default
+            if not math.isfinite(rate_value):
+                rate_value = default
+            values[field] = -1.0 if rate_value < 0 else max(0.0, min(rate_value, 1.0))
+        min_rate_cases = values.get("min_rate_cases")
+        try:
+            min_rate_cases_int = int(min_rate_cases) if min_rate_cases is not None else 20
+        except (TypeError, ValueError, OverflowError):
+            min_rate_cases_int = 20
+        values["min_rate_cases"] = max(1, min(min_rate_cases_int, 1_000_000))
+        pilot_target_cases = values.get("pilot_target_cases")
+        try:
+            pilot_target_cases_int = int(pilot_target_cases) if pilot_target_cases is not None else 10000
+        except (TypeError, ValueError, OverflowError):
+            pilot_target_cases_int = 10000
+        values["pilot_target_cases"] = max(1, min(pilot_target_cases_int, 10_000_000))
+        pilot_max_duration_hours = values.get("pilot_max_duration_hours")
+        try:
+            pilot_max_duration_hours_float = (
+                float(pilot_max_duration_hours) if pilot_max_duration_hours is not None else 336.0
+            )
+        except (TypeError, ValueError, OverflowError):
+            pilot_max_duration_hours_float = 336.0
+        if not math.isfinite(pilot_max_duration_hours_float):
+            pilot_max_duration_hours_float = 336.0
+        values["pilot_max_duration_hours"] = max(0.01, min(pilot_max_duration_hours_float, 100_000.0))
+        pilot_max_p95_duration_hours = values.get("pilot_max_p95_duration_hours")
+        if pilot_max_p95_duration_hours is not None:
+            try:
+                pilot_max_p95_duration_hours_float = float(pilot_max_p95_duration_hours)
+            except (TypeError, ValueError, OverflowError):
+                pilot_max_p95_duration_hours_float = pilot_max_duration_hours_float
+            if not math.isfinite(pilot_max_p95_duration_hours_float):
+                pilot_max_p95_duration_hours_float = pilot_max_duration_hours_float
+            values["pilot_max_p95_duration_hours"] = (
+                -1.0
+                if pilot_max_p95_duration_hours_float < 0
+                else max(0.01, min(pilot_max_p95_duration_hours_float, 100_000.0))
+            )
+        pilot_min_cases = values.get("pilot_min_cases")
+        try:
+            pilot_min_cases_int = (
+                int(pilot_min_cases)
+                if pilot_min_cases is not None
+                else QWEN_CAPTION_DEFAULT_PILOT_MIN_CASES
+            )
+        except (TypeError, ValueError, OverflowError):
+            pilot_min_cases_int = QWEN_CAPTION_DEFAULT_PILOT_MIN_CASES
+        values["pilot_min_cases"] = max(1, min(pilot_min_cases_int, 1_000_000))
+        pilot_duration_safety_factor = values.get("pilot_duration_safety_factor")
+        try:
+            pilot_duration_safety_factor_float = (
+                float(pilot_duration_safety_factor)
+                if pilot_duration_safety_factor is not None
+                else 1.25
+            )
+        except (TypeError, ValueError, OverflowError):
+            pilot_duration_safety_factor_float = 1.25
+        if not math.isfinite(pilot_duration_safety_factor_float):
+            pilot_duration_safety_factor_float = 1.25
+        values["pilot_duration_safety_factor"] = max(1.0, min(pilot_duration_safety_factor_float, 10.0))
+        pilot_max_prompt_tokens = values.get("pilot_max_prompt_tokens")
+        try:
+            pilot_max_prompt_tokens_int = (
+                int(pilot_max_prompt_tokens) if pilot_max_prompt_tokens is not None else 0
+            )
+        except (TypeError, ValueError, OverflowError):
+            pilot_max_prompt_tokens_int = 0
+        values["pilot_max_prompt_tokens"] = max(0, min(pilot_max_prompt_tokens_int, 1_000_000))
+        pilot_adapted_rate = values.get("pilot_max_prompt_budget_adapted_case_rate")
+        try:
+            pilot_adapted_rate_float = (
+                float(pilot_adapted_rate) if pilot_adapted_rate is not None else 1.0
+            )
+        except (TypeError, ValueError, OverflowError):
+            pilot_adapted_rate_float = 1.0
+        if not math.isfinite(pilot_adapted_rate_float):
+            pilot_adapted_rate_float = 1.0
+        values["pilot_max_prompt_budget_adapted_case_rate"] = (
+            -1.0 if pilot_adapted_rate_float < 0 else max(0.0, min(pilot_adapted_rate_float, 1.0))
+        )
+        pilot_confidence = values.get("pilot_deterministic_recovery_confidence")
+        try:
+            pilot_confidence_float = (
+                float(pilot_confidence)
+                if pilot_confidence is not None
+                else QWEN_CAPTION_DEFAULT_PILOT_DETERMINISTIC_RECOVERY_CONFIDENCE
+            )
+        except (TypeError, ValueError, OverflowError):
+            pilot_confidence_float = QWEN_CAPTION_DEFAULT_PILOT_DETERMINISTIC_RECOVERY_CONFIDENCE
+        if not math.isfinite(pilot_confidence_float):
+            pilot_confidence_float = QWEN_CAPTION_DEFAULT_PILOT_DETERMINISTIC_RECOVERY_CONFIDENCE
+        values["pilot_deterministic_recovery_confidence"] = max(
+            0.0,
+            min(pilot_confidence_float, 0.999999),
+        )
+
+        def _coerce_bool(value: Any, default: bool = False) -> bool:
+            if value is None:
+                return default
+            if isinstance(value, bool):
+                return value
+            raw = str(value).strip().lower()
+            if raw in {"1", "true", "yes", "on"}:
+                return True
+            if raw in {"0", "false", "no", "off"}:
+                return False
+            return default
+
+        values["overwrite"] = _coerce_bool(values.get("overwrite"), False)
+        values["save_text_labels"] = _coerce_bool(values.get("save_text_labels"), False)
+        values["generated_make_primary"] = _coerce_bool(values.get("generated_make_primary"), False)
+        values["instruction_dataset"] = _coerce_bool(values.get("instruction_dataset"), False)
+        values["include_caption0_in_training"] = _coerce_bool(
+            values.get("include_caption0_in_training"),
+            True,
+        )
+        values["include_generated_qa_in_training"] = _coerce_bool(
+            values.get("include_generated_qa_in_training"),
+            True,
+        )
+        values["include_deterministic_metadata_qa"] = _coerce_bool(
+            values.get("include_deterministic_metadata_qa"),
+            False,
+        )
+        values["include_source_annotations_in_generator_context"] = _coerce_bool(
+            values.get("include_source_annotations_in_generator_context"),
+            True,
+        )
+        values["strict_grounding"] = _coerce_bool(values.get("strict_grounding"), True)
+        try:
+            subcaptions = int(values.get("subcaptions_per_image") or 0)
+        except (TypeError, ValueError, OverflowError):
+            subcaptions = 0
+        values["subcaptions_per_image"] = max(0, min(subcaptions, 20))
+        qa_mix = str(values.get("qa_mix") or "balanced").strip().lower()
+        values["qa_mix"] = qa_mix or "balanced"
+        answer_format = str(values.get("answer_format") or "natural").strip().lower()
+        values["answer_format"] = answer_format if answer_format in {"natural", "json"} else "natural"
+        values["preview_only"] = _coerce_bool(values.get("preview_only"), False)
+        values["resume"] = _coerce_bool(values.get("resume"), True)
+        values["continue_on_quality_failures"] = _coerce_bool(
+            values.get("continue_on_quality_failures"),
+            False,
+        )
+        values["set_and_forget"] = _coerce_bool(values.get("set_and_forget"), False)
+        values["resume_reprocess_recovery_events"] = _coerce_bool(
+            values.get("resume_reprocess_recovery_events"),
+            False,
+        )
+        values["allow_model_download"] = _coerce_bool(values.get("allow_model_download"), False)
+        values["require_pilot_certification"] = _coerce_bool(
+            values.get("require_pilot_certification"),
+            False,
+        )
+        values["pilot_require_prompt_budget_data"] = _coerce_bool(
+            values.get("pilot_require_prompt_budget_data"),
+            True,
+        )
+        return values
 
 
 def _normalize_qwen_variant_value(value: Any, *, default: Optional[str] = "auto") -> Optional[str]:

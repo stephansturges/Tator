@@ -36,6 +36,8 @@ Tools
   - Endpoint method map: `python tools/run_ui_endpoint_method_check.py http://127.0.0.1:8000`
   - UI contract checks: `python tools/run_ui_contract_tests.py http://127.0.0.1:8000`
   - UI smoke: `python tools/run_ui_smoke.py --base-url http://127.0.0.1:8000`
+  - Qwen caption rendered smoke: `python tools/run_qwen_caption_ui_smoke.py --base-url http://127.0.0.1:8000`
+    - Add `--fail-on-unsupervised-backend` before unattended set-and-forget runs to require advertised crash-restart supervision.
   - UI concurrency smoke: `python tools/run_ui_concurrency_smoke.py --base-url http://127.0.0.1:8000`
   - UI data-ops smoke: `python tools/run_ui_data_ops_tests.py --base-url http://127.0.0.1:8000`
   - Playwright control coverage: `python tools/check_playwright_control_coverage.py`

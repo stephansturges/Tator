@@ -26,6 +26,12 @@ def build_datasets_router(
     get_text_label_fn: Callable[[str, str], Any],
     get_text_labels_fn: Callable[[str, list[str]], Any],
     set_text_label_fn: Callable[[str, str, dict], Any],
+    get_captions_fn: Callable[[str, str], Any],
+    get_captions_batch_fn: Callable[[str, list[str]], Any],
+    add_caption_fn: Callable[[str, str, dict], Any],
+    update_caption_fn: Callable[[str, str, dict], Any],
+    delete_caption_fn: Callable[[str, str, dict], Any],
+    export_captions_fn: Callable[..., Any],
     register_path_fn: Callable[
         [
             str,
@@ -150,6 +156,47 @@ def build_datasets_router(
     @router.post("/datasets/{dataset_id}/text_labels/{image_name:path}")
     def set_text_label(dataset_id: str, image_name: str, payload: dict = Body(...)):  # noqa: B008
         return set_text_label_fn(dataset_id, image_name, payload or {})
+
+    @router.get("/datasets/{dataset_id}/captions/export")
+    def export_captions(
+        dataset_id: str,
+        include_caption0_in_training: bool = Query(True),
+        include_generated_qa_in_training: bool = Query(True),
+        include_deterministic_metadata_qa: bool = Query(False),
+    ):
+        return export_captions_fn(
+            dataset_id,
+            {
+                "include_caption0_in_training": include_caption0_in_training,
+                "include_generated_qa_in_training": include_generated_qa_in_training,
+                "include_deterministic_metadata_qa": include_deterministic_metadata_qa,
+            },
+        )
+
+    @router.post("/datasets/{dataset_id}/captions/batch")
+    def get_captions_batch(dataset_id: str, payload: dict = Body(...)):  # noqa: B008
+        raw_names = (payload or {}).get("image_names") or []
+        if not isinstance(raw_names, list):
+            raw_names = []
+        image_names = [str(name or "").strip() for name in raw_names if str(name or "").strip()]
+        return get_captions_batch_fn(dataset_id, image_names)
+
+    @router.patch("/datasets/{dataset_id}/captions/by_id/{caption_id}")
+    def update_caption(dataset_id: str, caption_id: str, payload: dict = Body(...)):  # noqa: B008
+        return update_caption_fn(dataset_id, caption_id, payload or {})
+
+    @router.delete("/datasets/{dataset_id}/captions/by_id/{caption_id}")
+    def delete_caption(dataset_id: str, caption_id: str, session_id: str = Query("")):
+        payload = {"session_id": session_id} if str(session_id or "").strip() else {}
+        return delete_caption_fn(dataset_id, caption_id, payload)
+
+    @router.get("/datasets/{dataset_id}/captions/{image_name:path}")
+    def get_captions(dataset_id: str, image_name: str):
+        return get_captions_fn(dataset_id, image_name)
+
+    @router.post("/datasets/{dataset_id}/captions/{image_name:path}")
+    def add_caption(dataset_id: str, image_name: str, payload: dict = Body(...)):  # noqa: B008
+        return add_caption_fn(dataset_id, image_name, payload or {})
 
     @router.post("/datasets/register_path")
     def register_dataset_path(payload: dict = Body(...)):  # noqa: B008

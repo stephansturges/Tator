@@ -2449,6 +2449,167 @@ def test_text_label_routes_accept_encoded_split_prefixed_image_names(
     ).read_text(encoding="utf-8") == "new val caption"
 
 
+def test_caption_alternate_routes_append_update_export_and_delete(
+    tmp_path, monkeypatch
+) -> None:
+    entry = _entry_for_annotation(tmp_path)
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: entry)
+    client = TestClient(api.app)
+
+    response = client.post(
+        "/datasets/ds/captions/sub%2Fimg.jpg",
+        json={"caption": "primary caption", "source": "manual"},
+    )
+    assert response.status_code == 200
+    first = response.json()["caption"]
+    assert first["caption"] == "primary caption"
+    assert first["is_primary"] is True
+    overlay_root = Path(entry["registry_root"]) / api.DATASET_ANNOTATION_OVERLAY_DIRNAME
+    assert (overlay_root / "text_labels" / "sub" / "img.txt").read_text(encoding="utf-8") == "primary caption"
+
+    response = client.post(
+        "/datasets/ds/captions/sub%2Fimg.jpg",
+        json={"caption": "alternate caption", "source": "qwen_caption_job"},
+    )
+    assert response.status_code == 200
+    second = response.json()["caption"]
+    assert second["caption"] == "alternate caption"
+    assert second["is_primary"] is False
+
+    response = client.get("/datasets/ds/captions/sub%2Fimg.jpg")
+    assert response.status_code == 200
+    bundle = response.json()
+    assert bundle["primary_caption"] == "primary caption"
+    assert [item["caption"] for item in bundle["captions"]] == [
+        "primary caption",
+        "alternate caption",
+    ]
+
+    response = client.patch(
+        f"/datasets/ds/captions/by_id/{second['id']}",
+        json={"caption": "promoted alternate", "make_primary": True},
+    )
+    assert response.status_code == 200
+    assert response.json()["caption"]["is_primary"] is True
+    assert (overlay_root / "text_labels" / "sub" / "img.txt").read_text(encoding="utf-8") == "promoted alternate"
+
+    response = client.patch(
+        f"/datasets/ds/captions/by_id/{second['id']}",
+        json={"caption": "edited promoted alternate"},
+    )
+    assert response.status_code == 200
+    assert response.json()["caption"]["is_primary"] is True
+    assert (overlay_root / "text_labels" / "sub" / "img.txt").read_text(encoding="utf-8") == "edited promoted alternate"
+
+    response = client.post(
+        "/datasets/ds/captions/sub%2Fimg.jpg",
+        json={"caption": "third alternate", "source": "manual"},
+    )
+    assert response.status_code == 200
+    third = response.json()["caption"]
+    assert third["caption"] == "third alternate"
+    assert third["is_primary"] is False
+
+    response = client.get("/datasets/ds/captions/export")
+    assert response.status_code == 200
+    export_payload = response.json()
+    assert export_payload["summary"] == {
+        "image_count": 2,
+        "caption_count": 4,
+        "training_row_count": 4,
+        "images_with_multiple_captions": 1,
+        "max_captions_per_image": 3,
+    }
+    exported = export_payload["captions"]
+    assert any(item["caption"] == "primary caption" for item in exported)
+    assert any(item["caption"] == "edited promoted alternate" for item in exported)
+    exported_for_image = [item for item in exported if item["image_name"] == "sub/img.jpg"]
+    assert [item["caption"] for item in exported_for_image] == [
+        "edited promoted alternate",
+        "primary caption",
+        "third alternate",
+    ]
+    assert [item["caption_index"] for item in exported_for_image] == [1, 2, 3]
+    assert exported_for_image[0]["is_primary"] is True
+    assert [item["caption"] for item in export_payload["grouped"]["sub/img.jpg"]] == [
+        "edited promoted alternate",
+        "primary caption",
+        "third alternate",
+    ]
+    archive = export_payload["archive"]
+    assert archive["format"] == "tator_caption_grouped_v1"
+    assert archive["dataset_id"] == "ds"
+    assert archive["image_count"] == 2
+    assert archive["caption_count"] == 4
+    assert archive["summary"] == export_payload["summary"]
+    archived_image = next(item for item in archive["images"] if item["image_name"] == "sub/img.jpg")
+    assert archived_image["caption_count"] == 3
+    assert archived_image["primary_caption"] == "edited promoted alternate"
+    assert [item["caption"] for item in archived_image["captions"]] == [
+        "edited promoted alternate",
+        "primary caption",
+        "third alternate",
+    ]
+    assert [item["caption_index"] for item in archived_image["captions"]] == [1, 2, 3]
+    assert archived_image["captions"][0]["is_primary"] is True
+    assert archived_image["captions"][0]["caption_source"] == "qwen_caption_job"
+    assert archived_image["captions"][2]["caption_source"] == "manual"
+    assert "metadata" in archived_image["captions"][0]
+    training_rows = export_payload["training_rows"]
+    training_rows_for_image = [item for item in training_rows if item["image_path"] == "sub/img.jpg"]
+    assert [json.loads(item["answer"]) for item in training_rows_for_image] == [
+        {"caption": "edited promoted alternate"},
+        {"caption": "primary caption"},
+        {"caption": "third alternate"},
+    ]
+    assert len({item["question"] for item in training_rows_for_image}) == 3
+    assert training_rows_for_image[0]["metadata"]["row_type"] == "caption0"
+    assert training_rows_for_image[1]["metadata"]["row_type"] == "alternate_caption"
+    assert training_rows_for_image[0]["metadata"]["caption_index"] == 1
+    assert training_rows_for_image[0]["metadata"]["dataset_id"] == "ds"
+    assert export_payload["instruction_summary"] == {
+        "instruction_training_row_count": 2,
+        "generated_qa_pair_count": 0,
+        "deterministic_metadata_qa_pair_count": 0,
+        "rejected_training_row_count": 0,
+    }
+    instruction_archive = export_payload["instruction_archive"]
+    assert instruction_archive["format"] == "tator_caption_instruction_archive_v1"
+    assert instruction_archive["settings"] == {
+        "include_caption0_in_training": True,
+        "include_generated_qa_in_training": True,
+        "include_deterministic_metadata_qa": False,
+    }
+    assert instruction_archive["training_row_count"] == 2
+    assert len(export_payload["instruction_training_rows"]) == 2
+    assert {row["metadata"]["row_type"] for row in export_payload["instruction_training_rows"]} == {
+        "caption0"
+    }
+    assert all(
+        row["metadata"]["source_archive"] == "tator_caption_instruction_archive_v1"
+        for row in export_payload["instruction_training_rows"]
+    )
+    deterministic_response = client.get(
+        "/datasets/ds/captions/export?include_caption0_in_training=false"
+        "&include_generated_qa_in_training=false&include_deterministic_metadata_qa=true"
+    )
+    assert deterministic_response.status_code == 200
+    deterministic_payload = deterministic_response.json()
+    assert deterministic_payload["instruction_summary"]["instruction_training_row_count"] >= 0
+    assert all(
+        row["metadata"]["row_type"] == "deterministic_metadata_qa"
+        for row in deterministic_payload["instruction_training_rows"]
+    )
+
+    response = client.delete(f"/datasets/ds/captions/by_id/{first['id']}")
+    assert response.status_code == 200
+    response = client.get("/datasets/ds/captions/sub%2Fimg.jpg")
+    assert [item["caption"] for item in response.json()["captions"]] == [
+        "edited promoted alternate",
+        "third alternate",
+    ]
+
+
 def test_set_text_label_requires_active_lock_owner_when_locked(tmp_path, monkeypatch) -> None:
     entry = _entry_for_annotation(tmp_path)
     meta = {
@@ -2484,6 +2645,57 @@ def test_set_text_label_requires_active_lock_owner_when_locked(tmp_path, monkeyp
         / "img.txt"
     )
     assert overlay_text.read_text(encoding="utf-8") == "saved"
+
+
+def test_caption_alternate_routes_require_active_lock_owner_when_locked(
+    tmp_path, monkeypatch
+) -> None:
+    entry = _entry_for_annotation(tmp_path)
+    meta = {
+        "id": "ds",
+        "annotation_lock": _active_lock("sess-lock"),
+    }
+    meta_path = Path(entry["registry_root"]) / api.DATASET_META_NAME
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: entry)
+    client = TestClient(api.app)
+
+    response = client.post(
+        "/datasets/ds/captions/sub%2Fimg.jpg",
+        json={"caption": "blocked"},
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"] == "annotation_lock_session_required"
+
+    response = client.post(
+        "/datasets/ds/captions/sub%2Fimg.jpg",
+        json={"caption": "saved", "session_id": "sess-lock"},
+    )
+    assert response.status_code == 200
+    caption_id = response.json()["caption"]["id"]
+
+    response = client.patch(
+        f"/datasets/ds/captions/by_id/{caption_id}",
+        json={"caption": "wrong", "session_id": "wrong"},
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"] == "annotation_lock_active"
+
+    response = client.patch(
+        f"/datasets/ds/captions/by_id/{caption_id}",
+        json={"caption": "updated", "session_id": "sess-lock"},
+    )
+    assert response.status_code == 200
+    assert response.json()["caption"]["caption"] == "updated"
+
+    response = client.delete(f"/datasets/ds/captions/by_id/{caption_id}")
+    assert response.status_code == 409
+    assert response.json()["detail"] == "annotation_lock_session_required"
+
+    response = client.delete(
+        f"/datasets/ds/captions/by_id/{caption_id}?session_id=sess-lock"
+    )
+    assert response.status_code == 200
 
 
 def test_set_text_label_allows_direct_write_without_active_lock(tmp_path, monkeypatch) -> None:

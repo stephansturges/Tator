@@ -1,4 +1,6 @@
 import json
+import os
+import time
 
 import pytest
 from fastapi import HTTPException
@@ -102,6 +104,59 @@ def test_qwen_progress_token_updates_preview_and_count():
     assert progress["generated_tokens"] == 2
     assert progress["token_preview"] == "A caption"
     assert progress["live_output"] == "A caption"
+
+
+def test_qwen_progress_and_status_report_backend_crash_supervision(monkeypatch):
+    _reset_qwen_progress()
+    monkeypatch.setenv("TATOR_BACKEND_LAUNCHER", "tools/run_macos_backend.sh")
+    monkeypatch.setenv("TATOR_BACKEND_LAUNCHER_RESTARTS_CRASHES", "1")
+    monkeypatch.setenv("TATOR_BACKEND_LAUNCHER_RESTART_MAX", "0")
+    monkeypatch.setenv("TATOR_BACKEND_LAUNCHER_RESTART_DELAY", "1")
+    monkeypatch.setenv("TATOR_BACKEND_LAUNCHER_RESTART_MAX_DELAY", "30")
+
+    progress = api.qwen_progress()
+    status = api.qwen_status()
+
+    assert progress["supervision"]["restart_capable"] is True
+    assert progress["supervision"]["set_and_forget_ready"] is True
+    assert progress["supervision"]["launcher"] == "tools/run_macos_backend.sh"
+    assert progress["supervision"]["restart_max"] == "0"
+    assert progress["supervision"]["restart_policy"]["ready"] is True
+    assert progress["supervision"]["restart_policy"]["restart_max"] == 0
+    assert status["supervision"] == progress["supervision"]
+    assert status["progress"]["supervision"] == progress["supervision"]
+
+
+def test_qwen_progress_reports_underprovisioned_backend_restart_policy(monkeypatch):
+    _reset_qwen_progress()
+    monkeypatch.setenv("TATOR_BACKEND_LAUNCHER", "tools/run_macos_backend.sh")
+    monkeypatch.setenv("TATOR_BACKEND_LAUNCHER_RESTARTS_CRASHES", "1")
+    monkeypatch.setenv("TATOR_BACKEND_LAUNCHER_RESTART_MAX", "1")
+    monkeypatch.setenv("TATOR_BACKEND_LAUNCHER_RESTART_DELAY", "1")
+    monkeypatch.setenv("TATOR_BACKEND_LAUNCHER_RESTART_MAX_DELAY", "30")
+
+    supervision = api.qwen_progress()["supervision"]
+    checks = {check["name"]: check for check in supervision["restart_policy"]["checks"]}
+
+    assert supervision["restart_capable"] is True
+    assert supervision["set_and_forget_ready"] is False
+    assert supervision["restart_policy"]["ready"] is False
+    assert checks["restart_count_budget"]["status"] == "error"
+    assert checks["restart_count_budget"]["restart_max"] == 1
+    assert "not large-run ready" in supervision["message"]
+
+
+def test_qwen_progress_reports_missing_backend_crash_supervision(monkeypatch):
+    _reset_qwen_progress()
+    monkeypatch.delenv("TATOR_BACKEND_LAUNCHER", raising=False)
+    monkeypatch.delenv("TATOR_BACKEND_LAUNCHER_RESTARTS_CRASHES", raising=False)
+
+    supervision = api.qwen_progress()["supervision"]
+
+    assert supervision["restart_capable"] is False
+    assert supervision["set_and_forget_ready"] is False
+    assert supervision["launcher"] is None
+    assert "not advertising crash-restart supervision" in supervision["message"]
 
 
 def test_qwen_progress_step_plan_metadata_and_region():
@@ -259,6 +314,29 @@ def test_qwen_progress_expires_stale_active_request(monkeypatch):
     assert api.qwen_cancel_event.is_set()
 
 
+def test_qwen_progress_uses_caption_specific_stale_timeout(monkeypatch):
+    _reset_qwen_progress()
+    monkeypatch.setattr(api, "QWEN_PROGRESS_STALE_SECONDS", 1800.0)
+    monkeypatch.setattr(api, "QWEN_CAPTION_PROGRESS_STALE_SECONDS", 5.0)
+    api._qwen_progress_start(
+        kind="caption",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="test",
+        max_new_tokens=10,
+    )
+    with api.qwen_progress_lock:
+        api.qwen_progress_state["updated_at"] = 100.0
+        api.qwen_progress_state["started_at"] = 100.0
+    monkeypatch.setattr(api.time, "time", lambda: 110.0)
+
+    progress = api.qwen_progress()
+
+    assert progress["active"] is False
+    assert progress["phase"] == "error"
+    assert progress["error"] == "stale_progress"
+
+
 def test_qwen_progress_keeps_fresh_active_request_active(monkeypatch):
     _reset_qwen_progress()
     monkeypatch.setattr(api, "QWEN_PROGRESS_STALE_SECONDS", 5.0)
@@ -400,6 +478,41 @@ def test_qwen_caption_io_events_are_exposed_in_progress(monkeypatch, tmp_path):
     assert "degenerate_reason: punctuation_loop" in events[-1]["text"]
 
 
+def test_qwen_caption_io_prompt_budget_records_requested_and_effective_caps(monkeypatch, tmp_path):
+    _reset_qwen_progress()
+    monkeypatch.setattr(api, "LOG_ROOT", tmp_path)
+    api._qwen_progress_start(
+        kind="caption",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_MLX,
+        message="test",
+        max_new_tokens=3000,
+    )
+
+    api._qwen_caption_io_prompt_budget(
+        call_id="call-1",
+        source="qwen_chat_mlx",
+        runtime_platform=api.QWEN_PLATFORM_MLX,
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        prompt_tokens=6400,
+        requested_max_new_tokens=3000,
+        effective_max_new_tokens=512,
+        explicit_max_new_tokens=False,
+    )
+
+    latest_jsonl = tmp_path / "qwen_caption_io_latest.jsonl"
+    records = [json.loads(line) for line in latest_jsonl.read_text(encoding="utf-8").splitlines()]
+    assert records[-1]["event"] == "prompt_budget"
+    assert records[-1]["requested_max_new_tokens"] == 3000
+    assert records[-1]["effective_max_new_tokens"] == 512
+    assert records[-1]["max_new_tokens"] == 512
+    assert records[-1]["explicit_max_new_tokens"] is False
+
+    event = api.qwen_progress()["io_events"][-1]
+    assert "requested_max_new_tokens: 3000" in event["text"]
+    assert "effective_max_new_tokens: 512" in event["text"]
+
+
 def test_qwen_caption_io_readable_failure_does_not_break_request(monkeypatch, tmp_path):
     _reset_qwen_progress()
     monkeypatch.setattr(api, "LOG_ROOT", tmp_path)
@@ -536,6 +649,56 @@ def test_qwen_caption_io_reset_rejects_nested_symlinked_run_parent_before_mkdir(
     api._qwen_caption_io_reset_latest("run-through-linked-parent")
 
     assert list(outside.iterdir()) == []
+
+
+def test_qwen_caption_io_prunes_old_run_logs_by_file_count(monkeypatch, tmp_path):
+    _reset_qwen_progress()
+    monkeypatch.setattr(api, "LOG_ROOT", tmp_path)
+    monkeypatch.setattr(api, "QWEN_CAPTION_IO_RUN_LOG_MAX_FILES", 4)
+    monkeypatch.setattr(api, "QWEN_CAPTION_IO_RUN_LOG_MAX_BYTES", 0)
+    run_root = tmp_path / "qwen_caption_io"
+    run_root.mkdir(parents=True)
+    base = time.time() - 1000
+    for index in range(6):
+        path = run_root / f"old-{index}.jsonl"
+        path.write_text(f"{index}\n", encoding="utf-8")
+        mtime = base + index
+        os.utime(path, (mtime, mtime))
+
+    api._qwen_caption_io_reset_latest("current")
+
+    remaining = sorted(path.name for path in run_root.iterdir() if path.is_file())
+    assert remaining == ["old-2.jsonl", "old-3.jsonl", "old-4.jsonl", "old-5.jsonl"]
+
+
+def test_qwen_caption_io_prune_keeps_active_run_logs(monkeypatch, tmp_path):
+    _reset_qwen_progress()
+    monkeypatch.setattr(api, "LOG_ROOT", tmp_path)
+    monkeypatch.setattr(api, "QWEN_CAPTION_IO_RUN_LOG_MAX_FILES", 1)
+    monkeypatch.setattr(api, "QWEN_CAPTION_IO_RUN_LOG_MAX_BYTES", 1)
+    run_root = tmp_path / "qwen_caption_io"
+    run_root.mkdir(parents=True)
+    active_jsonl = run_root / "active.jsonl"
+    active_log = run_root / "active.log"
+    stale_jsonl = run_root / "stale.jsonl"
+    stale_log = run_root / "stale.log"
+    active_jsonl.write_text("active jsonl\n", encoding="utf-8")
+    active_log.write_text("active log\n", encoding="utf-8")
+    stale_jsonl.write_text("stale jsonl\n", encoding="utf-8")
+    stale_log.write_text("stale log\n", encoding="utf-8")
+    old_time = time.time() - 1000
+    new_time = time.time()
+    for path in (active_jsonl, active_log):
+        os.utime(path, (old_time, old_time))
+    for path in (stale_jsonl, stale_log):
+        os.utime(path, (new_time, new_time))
+
+    api._qwen_caption_io_prune_run_logs("active")
+
+    assert active_jsonl.exists()
+    assert active_log.exists()
+    assert not stale_jsonl.exists()
+    assert not stale_log.exists()
 
 
 def test_qwen_prepass_trace_reset_replaces_symlinked_latest_logs(tmp_path):

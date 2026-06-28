@@ -127,6 +127,15 @@ row before training.
   disagree with the report's selected flattened-row count, image count,
   review-row count, or manual-review count. Archive JSONL also rejects duplicate
   `image_path` rows.
+- The backend now emits the same versioned `instruction_artifact_consistency`
+  object in the instruction archive, instruction report, API export payload, and
+  instruction summary. If this object is not OK, training readiness is forced to
+  `blocked` with `instruction_artifacts_inconsistent`.
+- Flat-layout instruction exports now canonicalize split-prefixed and
+  non-split-prefixed image keys before merging manifest rows, saved captions,
+  text-label mirrors, and generated QA. This prevents nested images such as
+  `sub/img.jpg` from being duplicated as both a manifest image and a synthetic
+  caption-only image, and prevents basename collisions in archive rows.
 - The browser-side review JSONL import validator now rejects unsupported
   actionable row origins and duplicate or conflicting actionable review targets
   before calling the backend, giving operators immediate feedback on review
@@ -196,10 +205,13 @@ row before training.
   - `node --check ybat-master/ybat.js`
 - Focused instruction-dataset, export, and UI contract tests:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py tests/test_qwen_training_backend.py tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete tests/test_labeling_panel_layout_contract.py tests/test_qwen_caption_ui_smoke_tool.py -q`
-  - Current result: 160 passed.
+  - Current result: 161 passed.
 - Current artifact-consistency UI contract tests:
   - `./.venv-macos/bin/python -m pytest tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports tests/test_labeling_panel_layout_contract.py::test_qwen_caption_export_preserves_saved_alternates_and_primary_rows -q`
   - Result: 2 passed.
+- Current backend artifact-consistency and canonical image-key tests:
+  - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py::test_caption_instruction_archive_separates_generated_qa_from_source_annotations tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_blocks_mismatched_backend_counts tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete -q`
+  - Result: 4 passed.
 - Current review-import fail-closed tests:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_persists_review_metadata tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_mismatched_dataset_id tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_duplicate_actionable_targets tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_unmatchable_actionable_rows_atomically -q`
   - Result: 7 passed.
@@ -211,7 +223,7 @@ row before training.
   - Result: 25 passed.
 - Current caption/instruction/UI contract tests outside the trainer file:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete tests/test_labeling_panel_layout_contract.py tests/test_qwen_caption_ui_smoke_tool.py -q`
-  - Result: 135 passed.
+  - Result: 136 passed.
 - Earlier targeted trainer import compatibility:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_imports_flat_question_answer_rows tests/test_qwen_caption_dataset_job.py::test_caption_instruction_training_rows_import_into_qwen_trainer -q`
   - Result: 2 passed.
@@ -228,7 +240,7 @@ row before training.
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_operation_audit.py tests/test_qwen_caption_soak_audit.py tests/test_qwen_caption_soak_certification.py tests/test_qwen_caption_soak_drill.py -q`
   - Result: 90 passed.
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_soak_preflight.py tests/test_qwen_caption_soak_supervisor.py tests/test_qwen_caption_soak_watchdog.py tests/test_qwen_caption_unattended_launcher.py -q`
-  - Result: 135 passed.
+  - Result: 136 passed.
 - Rendered browser smoke:
   - `./.venv-macos/bin/python tools/run_qwen_caption_ui_smoke.py --base-url http://127.0.0.1:8000 --out-json tmp/qwen_caption_ui_smoke_report.json --screenshot tmp/qwen_caption_ui_smoke.png`
   - Result: `ok=true`, caption readiness reported 39 pass, 1 warning, 0 fail;

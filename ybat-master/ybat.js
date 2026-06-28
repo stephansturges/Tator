@@ -35115,6 +35115,18 @@ async function cancelRfDetrTrainingJobRequest() {
             return { ok: false, errors, warnings };
         }
         const report = payload.instruction_report;
+        const backendConsistency = payload?.instruction_artifact_consistency
+            || report?.instruction_artifact_consistency
+            || payload?.instruction_archive?.instruction_artifact_consistency;
+        if (backendConsistency && typeof backendConsistency === "object") {
+            const backendErrors = Array.isArray(backendConsistency.errors) ? backendConsistency.errors : [];
+            const backendErrorCount = Number(backendConsistency.error_count || backendErrors.length || 0);
+            if (backendConsistency.ok === false || backendErrorCount > 0) {
+                const firstErrors = backendErrors.slice(0, 3).join("; ");
+                const suffix = backendErrors.length > 3 ? `; +${backendErrors.length - 3} more` : "";
+                errors.push(`backend artifact consistency failed${firstErrors ? `: ${firstErrors}${suffix}` : ""}`);
+            }
+        }
         const metrics = report?.corpus_quality_metrics || {};
         const rowCount = Number(rowValidation?.rowCount);
         const selectedCount = Number(metrics.selected_flattened_row_count);
@@ -35172,6 +35184,8 @@ async function cancelRfDetrTrainingJobRequest() {
             generated_qa_per_image_duplicate_question_rate_above_threshold: "per-image duplicate generated questions are high",
             generated_qa_question_diversity_ratio_below_threshold: "generated question diversity is low",
             source_class_coverage_rate_below_threshold: "source class coverage is low",
+            instruction_artifacts_inconsistent: "instruction artifacts are inconsistent",
+            regenerate_instruction_artifacts: "regenerate instruction artifacts",
         };
         const key = String(value || "").trim();
         return labels[key] || key.replace(/_/g, " ");

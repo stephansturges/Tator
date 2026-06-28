@@ -20238,6 +20238,7 @@ CAPTION_INSTRUCTION_ARCHIVE_FORMAT = "tator_caption_instruction_archive_v1"
 CAPTION_INSTRUCTION_SOURCE_ANNOTATIONS_FORMAT = "tator_source_annotations_v1"
 CAPTION_INSTRUCTION_TRAINING_ROWS_FORMAT = "tator_caption_instruction_rows_v1"
 CAPTION_INSTRUCTION_REVIEW_ROWS_FORMAT = "tator_caption_instruction_review_rows_v1"
+CAPTION_INSTRUCTION_ARTIFACT_CONSISTENCY_FORMAT = "tator_caption_instruction_artifact_consistency_v1"
 CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ROWS = 200000
 CAPTION_INSTRUCTION_TRAINABLE_VALIDATION_STATUSES = {"accepted", "machine_validated"}
 CAPTION_INSTRUCTION_NONTRAINABLE_VALIDATION_STATUSES = {"rejected", "failed", "invalid"}
@@ -21778,6 +21779,170 @@ def _caption_instruction_training_readiness(
     }
 
 
+def _caption_instruction_artifact_consistency_validation(
+    *,
+    training_rows: Sequence[Mapping[str, Any]],
+    archive_rows: Sequence[Mapping[str, Any]],
+    review_rows: Sequence[Mapping[str, Any]],
+    report: Mapping[str, Any],
+    archive_image_count: Optional[int] = None,
+) -> Dict[str, Any]:
+    errors: List[str] = []
+    warnings: List[str] = []
+
+    def _optional_nonnegative_int(value: Any, field_name: str) -> Optional[int]:
+        if value is None:
+            errors.append(f"{field_name} is missing")
+            return None
+        if isinstance(value, bool):
+            errors.append(f"{field_name} is invalid")
+            return None
+        try:
+            integer = int(value)
+        except (TypeError, ValueError, OverflowError):
+            errors.append(f"{field_name} is invalid")
+            return None
+        if isinstance(value, float) and not value.is_integer():
+            errors.append(f"{field_name} is invalid")
+            return None
+        if integer < 0:
+            errors.append(f"{field_name} is invalid")
+            return None
+        return integer
+
+    report_mapping = report if isinstance(report, Mapping) else {}
+    if not report_mapping:
+        errors.append("instruction_report is missing")
+    elif str(report_mapping.get("format") or "").strip() != "tator_caption_instruction_report_v1":
+        errors.append("instruction_report format is invalid")
+
+    metrics = report_mapping.get("corpus_quality_metrics")
+    metrics_mapping = metrics if isinstance(metrics, Mapping) else {}
+    if not metrics_mapping:
+        errors.append("instruction_report.corpus_quality_metrics is missing")
+
+    export_validation = report_mapping.get("instruction_export_validation")
+    export_validation_mapping = export_validation if isinstance(export_validation, Mapping) else {}
+    if not export_validation_mapping:
+        errors.append("instruction_report.instruction_export_validation is missing")
+
+    training_row_count = len(training_rows) if isinstance(training_rows, Sequence) else 0
+    archive_row_count = len(archive_rows) if isinstance(archive_rows, Sequence) else 0
+    review_row_count = len(review_rows) if isinstance(review_rows, Sequence) else 0
+    selected_review_row_count = sum(
+        1 for row in review_rows if isinstance(row, Mapping) and bool(row.get("selected_for_training"))
+    )
+    manual_review_required_count = sum(
+        1 for row in review_rows if isinstance(row, Mapping) and bool(row.get("requires_manual_review"))
+    )
+
+    report_image_count = _optional_nonnegative_int(report_mapping.get("image_count"), "instruction_report.image_count")
+    report_selected_count = _optional_nonnegative_int(
+        report_mapping.get("selected_flattened_row_count"),
+        "instruction_report.selected_flattened_row_count",
+    )
+    metrics_image_count = _optional_nonnegative_int(
+        metrics_mapping.get("image_count"),
+        "instruction_report.corpus_quality_metrics.image_count",
+    )
+    metrics_selected_count = _optional_nonnegative_int(
+        metrics_mapping.get("selected_flattened_row_count"),
+        "instruction_report.corpus_quality_metrics.selected_flattened_row_count",
+    )
+    report_review_row_count = _optional_nonnegative_int(
+        report_mapping.get("instruction_review_row_count"),
+        "instruction_report.instruction_review_row_count",
+    )
+    report_manual_review_count = _optional_nonnegative_int(
+        report_mapping.get("manual_review_required_count"),
+        "instruction_report.manual_review_required_count",
+    )
+    export_row_count = _optional_nonnegative_int(
+        export_validation_mapping.get("row_count"),
+        "instruction_report.instruction_export_validation.row_count",
+    )
+
+    if export_validation_mapping:
+        if export_validation_mapping.get("ok") is not True:
+            errors.append("instruction_report.instruction_export_validation is not ok")
+        export_error_count = _optional_nonnegative_int(
+            export_validation_mapping.get("error_count"),
+            "instruction_report.instruction_export_validation.error_count",
+        )
+        if export_error_count and export_error_count > 0:
+            errors.append("instruction_report.instruction_export_validation has errors")
+
+    if report_selected_count is not None and training_row_count != report_selected_count:
+        errors.append(
+            f"training row count {training_row_count} does not match report selected row count {report_selected_count}"
+        )
+    if metrics_selected_count is not None and report_selected_count is not None and metrics_selected_count != report_selected_count:
+        errors.append(
+            "instruction_report.corpus_quality_metrics.selected_flattened_row_count "
+            "does not match report selected_flattened_row_count"
+        )
+    if export_row_count is not None and report_selected_count is not None and export_row_count != report_selected_count:
+        errors.append(
+            "instruction_report.instruction_export_validation.row_count "
+            "does not match report selected_flattened_row_count"
+        )
+    if report_image_count is not None and archive_row_count != report_image_count:
+        errors.append(f"archive row count {archive_row_count} does not match report image count {report_image_count}")
+    if archive_image_count is not None and archive_row_count != archive_image_count:
+        errors.append(f"archive row count {archive_row_count} does not match archive image count {archive_image_count}")
+    if metrics_image_count is not None and report_image_count is not None and metrics_image_count != report_image_count:
+        errors.append("instruction_report.corpus_quality_metrics.image_count does not match report image_count")
+    if report_review_row_count is not None and review_row_count != report_review_row_count:
+        errors.append(
+            f"review row count {review_row_count} does not match report review row count {report_review_row_count}"
+        )
+    if report_selected_count is not None and selected_review_row_count != report_selected_count:
+        errors.append(
+            f"selected review row count {selected_review_row_count} does not match report selected row count {report_selected_count}"
+        )
+    if report_manual_review_count is not None and manual_review_required_count != report_manual_review_count:
+        errors.append(
+            f"manual review row count {manual_review_required_count} does not match report manual review count {report_manual_review_count}"
+        )
+
+    image_paths: Set[str] = set()
+    duplicate_image_paths: Set[str] = set()
+    for index, row in enumerate(archive_rows, start=1):
+        if not isinstance(row, Mapping):
+            errors.append(f"archive row {index} is not an object")
+            continue
+        image_path = str(row.get("image_path") or "").strip()
+        if not image_path:
+            errors.append(f"archive row {index} missing image_path")
+            continue
+        if image_path in image_paths:
+            duplicate_image_paths.add(image_path)
+        image_paths.add(image_path)
+    for image_path in sorted(duplicate_image_paths):
+        errors.append(f"duplicate archive image_path {image_path}")
+
+    return {
+        "format": CAPTION_INSTRUCTION_ARTIFACT_CONSISTENCY_FORMAT,
+        "ok": not errors,
+        "error_count": len(errors),
+        "errors": errors,
+        "warnings": warnings,
+        "counts": {
+            "training_row_count": training_row_count,
+            "archive_row_count": archive_row_count,
+            "review_row_count": review_row_count,
+            "selected_review_row_count": selected_review_row_count,
+            "manual_review_required_count": manual_review_required_count,
+            "report_image_count": report_image_count,
+            "report_selected_flattened_row_count": report_selected_count,
+            "report_instruction_review_row_count": report_review_row_count,
+            "report_manual_review_required_count": report_manual_review_count,
+            "archive_image_count": archive_image_count,
+            "instruction_export_validation_row_count": export_row_count,
+        },
+    }
+
+
 def _dataset_caption_instruction_archive(
     indexed_records: Sequence[Mapping[str, Any]],
     instruction_records: Sequence[Mapping[str, Any]],
@@ -21790,14 +21955,19 @@ def _dataset_caption_instruction_archive(
     exported_at = exported_at or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     manifest = _annotation_manifest_for_entry(entry)
     labelmap = [str(label or "").strip() for label in (manifest.get("labelmap") or []) if str(label or "").strip()]
+    yolo_layout = str(manifest.get("yolo_layout") or entry.get("yolo_layout") or "flat").strip().lower()
     rows_by_key: Dict[str, Dict[str, Any]] = {}
+    image_key_aliases: Dict[str, str] = {}
     for row in manifest.get("images") or []:
         if not isinstance(row, Mapping):
             continue
         split = _annotation_normalise_split(row.get("split"))
         rel = _annotation_normalise_image_relpath(row.get("image_relpath") or row.get("image_name"))
-        image_name = str(row.get("image_name") or rel.as_posix()).strip()
-        image_key = _dataset_caption_image_key(split, rel)
+        image_name = str(rel.as_posix() or row.get("image_name") or "").strip()
+        image_key = _dataset_caption_image_key(split if yolo_layout == "split" else None, rel)
+        if yolo_layout != "split":
+            image_key_aliases[_dataset_caption_image_key(split, rel)] = image_key
+        image_key_aliases[image_key] = image_key
         rows_by_key[image_key] = {
             "image_name": image_name,
             "image_key": image_key,
@@ -21806,7 +21976,8 @@ def _dataset_caption_instruction_archive(
         }
     for record in indexed_records:
         public = _dataset_caption_record_public(record)
-        image_key = str(public.get("image_key") or public.get("image_name") or "").strip()
+        raw_image_key = str(public.get("image_key") or public.get("image_name") or "").strip()
+        image_key = image_key_aliases.get(raw_image_key, raw_image_key)
         if image_key and image_key not in rows_by_key:
             rows_by_key[image_key] = {
                 "image_name": str(public.get("image_name") or image_key).strip(),
@@ -21823,13 +21994,15 @@ def _dataset_caption_instruction_archive(
     records_by_key: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for record in indexed_records:
         public = _dataset_caption_record_public(record)
-        image_key = str(public.get("image_key") or public.get("image_name") or "").strip()
+        raw_image_key = str(public.get("image_key") or public.get("image_name") or "").strip()
+        image_key = image_key_aliases.get(raw_image_key, raw_image_key)
         if image_key and public.get("caption"):
             records_by_key[image_key].append(public)
     instruction_by_key: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for record in instruction_records:
         public = _dataset_caption_instruction_record_public(record)
-        image_key = str(public.get("image_key") or public.get("image_name") or "").strip()
+        raw_image_key = str(public.get("image_key") or public.get("image_name") or "").strip()
+        image_key = image_key_aliases.get(raw_image_key, raw_image_key)
         if image_key and public.get("question") and public.get("answer"):
             instruction_by_key[image_key].append(public)
             if image_key not in rows_by_key:
@@ -22283,6 +22456,27 @@ def _dataset_caption_instruction_archive(
         for image in images
         if isinstance(image, Mapping)
     ]
+    instruction_artifact_consistency = _caption_instruction_artifact_consistency_validation(
+        training_rows=training_rows,
+        archive_rows=archive_rows,
+        review_rows=review_rows,
+        report=captioning_report,
+        archive_image_count=len(images),
+    )
+    training_readiness["instruction_artifact_consistency_error_count"] = int(
+        instruction_artifact_consistency.get("error_count") or 0
+    )
+    if not instruction_artifact_consistency.get("ok"):
+        blocking_reasons = training_readiness.setdefault("blocking_reasons", [])
+        if isinstance(blocking_reasons, list) and "instruction_artifacts_inconsistent" not in blocking_reasons:
+            blocking_reasons.append("instruction_artifacts_inconsistent")
+        required_actions = training_readiness.setdefault("required_actions", [])
+        if isinstance(required_actions, list) and "regenerate_instruction_artifacts" not in required_actions:
+            required_actions.append("regenerate_instruction_artifacts")
+        training_readiness["status"] = "blocked"
+        training_readiness["ready_for_training"] = False
+    captioning_report["training_readiness"] = training_readiness
+    captioning_report["instruction_artifact_consistency"] = instruction_artifact_consistency
     return {
         "format": CAPTION_INSTRUCTION_ARCHIVE_FORMAT,
         "archive_schema_version": CAPTION_INSTRUCTION_ARCHIVE_FORMAT,
@@ -22311,6 +22505,7 @@ def _dataset_caption_instruction_archive(
         "provenance_summary": dict(sorted(provenance_summary.items())),
         "corpus_quality_metrics": corpus_quality_metrics,
         "instruction_export_validation": instruction_export_validation,
+        "instruction_artifact_consistency": instruction_artifact_consistency,
         "training_readiness": training_readiness,
         "captioning_report": captioning_report,
         "rejections": rejections,
@@ -22544,11 +22739,12 @@ def export_captions(dataset_id: str, options: Optional[Mapping[str, Any]] = None
         )
         for record in records
     }
+    caption_yolo_layout = str(entry.get("yolo_layout") or "flat").strip().lower()
     for image in _annotation_collect_images(entry):
         image_name = str(image.get("image_name") or "").strip()
         split = str(image.get("split") or "").strip() or None
         rel = Path(str(image.get("image_relpath") or image_name))
-        image_key = _dataset_caption_image_key(split, rel)
+        image_key = _dataset_caption_image_key(split if caption_yolo_layout == "split" else None, rel)
         caption = _annotation_effective_text_label(entry, rel, split)
         key = (image_key, caption)
         if caption and key not in existing:
@@ -22611,6 +22807,11 @@ def export_captions(dataset_id: str, options: Optional[Mapping[str, Any]] = None
         if isinstance(instruction_archive.get("instruction_export_validation"), Mapping)
         else {}
     )
+    instruction_artifact_consistency = (
+        dict(instruction_archive.get("instruction_artifact_consistency"))
+        if isinstance(instruction_archive.get("instruction_artifact_consistency"), Mapping)
+        else {}
+    )
     summary = {
         "image_count": len(grouped),
         "caption_count": len(indexed_records),
@@ -22638,6 +22839,10 @@ def export_captions(dataset_id: str, options: Optional[Mapping[str, Any]] = None
         "instruction_export_validation_error_count": int(
             instruction_export_validation.get("error_count") or 0
         ),
+        "instruction_artifact_consistency_ok": bool(instruction_artifact_consistency.get("ok")),
+        "instruction_artifact_consistency_error_count": int(
+            instruction_artifact_consistency.get("error_count") or 0
+        ),
         "rejected_training_row_count": int(instruction_archive.get("rejected_training_row_count") or 0),
     }
     instruction_archive["summary"] = dict(instruction_summary)
@@ -22651,6 +22856,7 @@ def export_captions(dataset_id: str, options: Optional[Mapping[str, Any]] = None
         "instruction_review_rows": instruction_review_rows,
         "instruction_report": instruction_report,
         "instruction_export_validation": instruction_export_validation,
+        "instruction_artifact_consistency": instruction_artifact_consistency,
         "instruction_archive": instruction_archive,
         "archive": _dataset_caption_grouped_archive(indexed_records, dataset_id=dataset_id, summary=summary),
         "summary": summary,

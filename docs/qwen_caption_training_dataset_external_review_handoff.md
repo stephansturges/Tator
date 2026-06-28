@@ -608,7 +608,16 @@ count. Archive JSONL must match the report image count and archive image count
 and cannot contain duplicate image paths. Review JSONL must match the report's
 total review-row count, selected review-row count, and manual-review count. This
 prevents stale, partial, mixed, or hand-edited artifacts from being mistaken for
-the current reviewed export set.
+the current reviewed export set. The backend emits the same versioned
+`instruction_artifact_consistency` object in the archive, report, API export
+payload, and summary; failures force readiness to `blocked` with
+`instruction_artifacts_inconsistent`.
+
+The export merge also canonicalizes flat-layout image keys before constructing
+instruction artifacts. Saved captions, text-label mirrors, source manifest rows,
+and generated QA for `sub/img.jpg` are therefore merged into one instruction
+image even if one path temporarily carries a `train/` prefix. This prevents both
+phantom source-manifest-missing rows and duplicate archive image paths.
 
 ## Review Rows
 
@@ -876,7 +885,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Result:
 
 ```text
-160 passed
+161 passed
 ```
 
 Focused artifact-consistency contract:
@@ -956,7 +965,7 @@ Caption/instruction/UI contract suite outside the trainer file:
 Result:
 
 ```text
-135 passed
+136 passed
 ```
 
 Syntax and formatting checks:

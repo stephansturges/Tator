@@ -139,7 +139,12 @@ record per JSONL line, keeping caption0, generated QA, optional deterministic
 metadata QA, source annotation provenance, and per-image export metadata separate
 from trainer rows. The archive download is blocked if row-level validation
 passes but the archive row count no longer matches the report image count or
-archive image count, or if the archive contains duplicate image paths.
+archive image count, or if the archive contains duplicate image paths. The
+backend also emits `instruction_artifact_consistency`; when it is not OK, the
+report readiness is blocked and the browser refuses the related download.
+Flat-layout image keys are canonicalized before export so a saved caption and a
+manifest row for the same nested image are not exported as duplicate instruction
+objects.
 **Download review JSONL** exports one candidate-level row for each caption0,
 generated QA, and deterministic metadata QA item. Review rows preserve candidate
 answers, selected training answers, source summaries, rejection reasons,

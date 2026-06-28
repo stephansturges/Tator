@@ -583,10 +583,21 @@ def test_caption_instruction_archive_separates_generated_qa_from_source_annotati
     assert archive["instruction_export_validation"]["ok"] is True
     assert archive["instruction_export_validation"]["error_count"] == 0
     assert archive["instruction_export_validation"]["row_count"] == 2
+    consistency = archive["instruction_artifact_consistency"]
+    assert consistency == report["instruction_artifact_consistency"]
+    assert consistency["format"] == "tator_caption_instruction_artifact_consistency_v1"
+    assert consistency["ok"] is True
+    assert consistency["error_count"] == 0
+    assert consistency["counts"]["training_row_count"] == 2
+    assert consistency["counts"]["archive_row_count"] == 1
+    assert consistency["counts"]["review_row_count"] == 3
+    assert consistency["counts"]["selected_review_row_count"] == 2
+    assert consistency["counts"]["manual_review_required_count"] == 3
     readiness = report["training_readiness"]
     assert readiness["status"] == "needs_review"
     assert readiness["ready_for_training"] is False
     assert readiness["instruction_export_validation_error_count"] == 0
+    assert readiness["instruction_artifact_consistency_error_count"] == 0
     assert readiness["selected_training_row_count"] == 2
     assert readiness["selected_manual_review_row_count"] == 2
     assert readiness["pending_manual_review_row_count"] == 2
@@ -1254,6 +1265,63 @@ def test_caption_instruction_training_readiness_blocks_invalid_export_rows() -> 
     assert readiness["instruction_export_validation_error_count"] == 5
     assert "instruction_training_rows_invalid" in readiness["blocking_reasons"]
     assert "fix_instruction_training_rows" in readiness["required_actions"]
+
+
+def test_caption_instruction_artifact_consistency_validator_blocks_mismatched_backend_counts() -> None:
+    import localinferenceapi as api
+
+    validation = api._caption_instruction_artifact_consistency_validation(
+        training_rows=[
+            {
+                "image_path": "frame.jpg",
+                "question": "Describe this image.",
+                "answer": "A caption.",
+                "metadata": {"qa_id": "caption0"},
+            }
+        ],
+        archive_rows=[
+            {"image_path": "frame.jpg"},
+            {"image_path": "frame.jpg"},
+        ],
+        review_rows=[
+            {
+                "image_path": "frame.jpg",
+                "qa_id": "caption0",
+                "selected_for_training": True,
+                "requires_manual_review": True,
+            }
+        ],
+        report={
+            "format": "tator_caption_instruction_report_v1",
+            "image_count": 2,
+            "selected_flattened_row_count": 2,
+            "instruction_review_row_count": 2,
+            "manual_review_required_count": 2,
+            "corpus_quality_metrics": {
+                "image_count": 2,
+                "selected_flattened_row_count": 2,
+            },
+            "instruction_export_validation": {
+                "ok": True,
+                "error_count": 0,
+                "errors": [],
+                "row_count": 2,
+            },
+        },
+        archive_image_count=2,
+    )
+
+    assert validation["format"] == "tator_caption_instruction_artifact_consistency_v1"
+    assert validation["ok"] is False
+    assert validation["error_count"] >= 4
+    assert "training row count 1 does not match report selected row count 2" in validation["errors"]
+    assert "review row count 1 does not match report review row count 2" in validation["errors"]
+    assert "selected review row count 1 does not match report selected row count 2" in validation["errors"]
+    assert "manual review row count 1 does not match report manual review count 2" in validation["errors"]
+    assert "duplicate archive image_path frame.jpg" in validation["errors"]
+    assert validation["counts"]["training_row_count"] == 1
+    assert validation["counts"]["archive_row_count"] == 2
+    assert validation["counts"]["review_row_count"] == 1
 
 
 def test_caption_instruction_training_validator_requires_complete_row_metadata() -> None:

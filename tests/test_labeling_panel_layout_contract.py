@@ -352,6 +352,7 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     assert "training_readiness" in js
     assert "instruction_export_validation" in js
     assert "artifact consistency failed" in js
+    assert "backend artifact consistency failed" in js
     assert "does not match report selected row count" in js
     assert "function downloadCaptionInstructionJsonl" in js
     assert "function downloadCaptionInstructionArchive" in js
@@ -710,6 +711,9 @@ def test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports
             "const trainingMismatch = validateCaptionInstructionArtifactConsistency({ instruction_report: { ...report, corpus_quality_metrics: { ...report.corpus_quality_metrics, selected_flattened_row_count: 2 }, instruction_export_validation: { ok: true, error_count: 0, errors: [], row_count: 2 } } }, 'training', { rowCount: 1 });",
             "assert.strictEqual(trainingMismatch.ok, false);",
             "assert(trainingMismatch.errors.some((error) => error.includes('training row count 1 does not match report selected row count 2')));",
+            "const backendMismatch = validateCaptionInstructionArtifactConsistency({ instruction_report: report, instruction_artifact_consistency: { ok: false, error_count: 1, errors: ['server mismatch'] } }, 'training', { rowCount: 1 });",
+            "assert.strictEqual(backendMismatch.ok, false);",
+            "assert(backendMismatch.errors.some((error) => error.includes('backend artifact consistency failed: server mismatch')));",
         ]
     )
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)

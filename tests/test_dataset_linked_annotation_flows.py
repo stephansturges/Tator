@@ -2514,9 +2514,9 @@ def test_caption_alternate_routes_append_update_export_and_delete(
     assert response.status_code == 200
     export_payload = response.json()
     assert export_payload["summary"] == {
-        "image_count": 2,
-        "caption_count": 4,
-        "training_row_count": 4,
+        "image_count": 1,
+        "caption_count": 3,
+        "training_row_count": 3,
         "images_with_multiple_captions": 1,
         "max_captions_per_image": 3,
     }
@@ -2539,8 +2539,8 @@ def test_caption_alternate_routes_append_update_export_and_delete(
     archive = export_payload["archive"]
     assert archive["format"] == "tator_caption_grouped_v1"
     assert archive["dataset_id"] == "ds"
-    assert archive["image_count"] == 2
-    assert archive["caption_count"] == 4
+    assert archive["image_count"] == 1
+    assert archive["caption_count"] == 3
     assert archive["summary"] == export_payload["summary"]
     archived_image = next(item for item in archive["images"] if item["image_name"] == "sub/img.jpg")
     assert archived_image["caption_count"] == 3
@@ -2571,12 +2571,14 @@ def test_caption_alternate_routes_append_update_export_and_delete(
         "instruction_training_row_count": 1,
         "generated_qa_pair_count": 0,
         "deterministic_metadata_qa_pair_count": 0,
-        "instruction_review_row_count": 2,
-        "manual_review_required_count": 2,
+        "instruction_review_row_count": 1,
+        "manual_review_required_count": 1,
         "training_readiness_status": "needs_review",
         "instruction_export_validation_ok": True,
         "instruction_export_validation_error_count": 0,
-        "rejected_training_row_count": 1,
+        "instruction_artifact_consistency_ok": True,
+        "instruction_artifact_consistency_error_count": 0,
+        "rejected_training_row_count": 0,
     }
     instruction_archive = export_payload["instruction_archive"]
     assert instruction_archive["format"] == "tator_caption_instruction_archive_v1"
@@ -2588,15 +2590,22 @@ def test_caption_alternate_routes_append_update_export_and_delete(
         "answer_format": "natural",
     }
     assert instruction_archive["training_row_count"] == 1
-    assert instruction_archive["rejection_reason_counts"] == {"source_manifest_row_missing": 1}
+    assert instruction_archive["rejection_reason_counts"] == {}
     assert len(export_payload["instruction_archive_rows"]) == instruction_archive["image_count"]
-    assert len(export_payload["instruction_review_rows"]) == 2
-    assert export_payload["instruction_report"]["instruction_review_row_count"] == 2
+    assert len(export_payload["instruction_review_rows"]) == 1
+    assert export_payload["instruction_report"]["instruction_review_row_count"] == 1
     assert export_payload["instruction_export_validation"]["ok"] is True
+    assert export_payload["instruction_artifact_consistency"]["ok"] is True
+    assert export_payload["instruction_artifact_consistency"] == instruction_archive["instruction_artifact_consistency"]
     assert export_payload["instruction_report"]["instruction_export_validation"]["ok"] is True
+    assert export_payload["instruction_report"]["instruction_artifact_consistency"]["ok"] is True
     assert export_payload["instruction_report"]["training_readiness"]["status"] == "needs_review"
     assert (
         export_payload["instruction_report"]["training_readiness"]["instruction_export_validation_error_count"]
+        == 0
+    )
+    assert (
+        export_payload["instruction_report"]["training_readiness"]["instruction_artifact_consistency_error_count"]
         == 0
     )
     assert export_payload["instruction_report"]["training_readiness"]["pending_manual_review_row_count"] == 1
@@ -2615,9 +2624,8 @@ def test_caption_alternate_routes_append_update_export_and_delete(
     }
     assert archive_row_by_path["sub/img.jpg"]["source_annotations"]["format"] == "tator_source_annotations_v1"
     assert "export_metadata" in archive_row_by_path["sub/img.jpg"]
-    assert any(
+    assert not any(
         row["source_annotations"]["status"] == "source_manifest_row_missing"
-        and row["export_metadata"]["flattening_eligible"] is False
         for row in export_payload["instruction_archive_rows"]
     )
     assert export_payload["instruction_report"]["format"] == "tator_caption_instruction_report_v1"

@@ -276,6 +276,15 @@ instruction report.
 This guard exists to catch stale, partial, mixed, or hand-edited artifacts
 before a reviewer or trainer consumes them. Row validation still checks content;
 artifact consistency checks whether the files agree with the run report.
+The backend emits this check as `instruction_artifact_consistency` in the
+archive, report, API payload, and summary. A failed backend consistency check
+blocks training readiness with `instruction_artifacts_inconsistent`, and the UI
+also refuses the corresponding download.
+
+Flat-layout image keys are canonicalized before this check runs. That means a
+saved caption keyed as `sub/img.jpg` and a manifest row that temporarily appears
+as `train/sub/img.jpg` are merged into one instruction image, not exported as a
+duplicate source-manifest row.
 
 ## Source Annotation Contract
 
@@ -543,7 +552,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-160 passed
+161 passed
 ```
 
 Focused artifact-consistency contract:
@@ -621,7 +630,7 @@ Focused instruction-dataset and UI contract suite:
 Latest recorded result:
 
 ```text
-135 passed
+136 passed
 ```
 
 Runtime and unattended hardening suites have also been run in prior hardening

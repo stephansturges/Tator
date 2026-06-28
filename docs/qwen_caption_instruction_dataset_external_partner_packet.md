@@ -257,9 +257,17 @@ The additional consistency checks are:
   review-row, manual-review, readiness, and corpus-quality fields.
 
 This matters because reviewers should not need to infer whether a hand-edited,
-stale, partial, or mixed artifact belongs to the current run. The UI now fails
-closed before writing a mismatched download, while the backend and trainer keep
-their own validation boundaries for scripted or hand-edited paths.
+stale, partial, or mixed artifact belongs to the current run. The backend emits
+the same versioned `instruction_artifact_consistency` object in the archive,
+report, API payload, and summary. If the object is not OK, training readiness is
+forced to `blocked` with `instruction_artifacts_inconsistent`. The UI also
+fails closed before writing a mismatched download, while the trainer keeps its
+own final validation boundary for hand-edited paths.
+
+Flat-layout image keys are canonicalized before merge so `foo.jpg` and
+`train/foo.jpg` do not become two separate instruction objects for the same
+image. This also prevents nested paths with the same basename, such as
+`a/img.jpg` and `b/img.jpg`, from colliding in instruction archive rows.
 
 ### Review Import
 
@@ -497,7 +505,7 @@ Result:
 Result:
 
 ```text
-160 passed
+161 passed
 ```
 
 Focused artifact-consistency contract:

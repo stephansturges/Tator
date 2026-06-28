@@ -157,6 +157,8 @@ What is implemented in this checkpoint:
   fallback, set-and-forget supervision, and model-download state.
 - Ready-report gating for trainer JSONL export, enabled in the UI by default and
   available through the API with `require_ready_instruction_export=true`.
+- Instruction launch preflight in the UI and backend request model so a dataset
+  job cannot start with every trainable row family disabled.
 - Model dropdown styling that makes missing/download-needed models visually
   distinct from local models.
 - Representative prompt box subsets for dense scenes, while authoritative counts
@@ -866,7 +868,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Result:
 
 ```text
-157 passed
+159 passed
 ```
 
 Focused review-import fail-closed tests:
@@ -931,7 +933,7 @@ Caption/instruction/UI contract suite outside the trainer file:
 Result:
 
 ```text
-132 passed
+134 passed
 ```
 
 Syntax and formatting checks:

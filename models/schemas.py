@@ -1075,6 +1075,12 @@ class QwenCaptionDatasetJobRequest(BaseModel):
             values.get("include_deterministic_metadata_qa"),
             False,
         )
+        if bool(values["instruction_dataset"]) and not (
+            bool(values["include_caption0_in_training"])
+            or bool(values["include_generated_qa_in_training"])
+            or bool(values["include_deterministic_metadata_qa"])
+        ):
+            raise ValueError("instruction_dataset_requires_training_row_family")
         values["include_source_annotations_in_generator_context"] = _coerce_bool(
             values.get("include_source_annotations_in_generator_context"),
             True,

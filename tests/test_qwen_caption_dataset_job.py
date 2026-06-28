@@ -166,6 +166,18 @@ def test_caption_dataset_job_request_normalizes_instruction_dataset_controls() -
     assert negative.subcaptions_per_image == 0
 
 
+def test_caption_dataset_job_request_rejects_instruction_dataset_with_no_row_family() -> None:
+    with pytest.raises(ValueError, match="instruction_dataset_requires_training_row_family"):
+        QwenCaptionDatasetJobRequest(
+            dataset_id="ds",
+            caption_request={"user_prompt": "Describe it"},
+            instruction_dataset=True,
+            include_caption0_in_training=False,
+            include_generated_qa_in_training=False,
+            include_deterministic_metadata_qa=False,
+        )
+
+
 def test_caption_dataset_job_request_normalizes_runner_artifact_log_limit() -> None:
     payload = QwenCaptionDatasetJobRequest(
         dataset_id="ds",

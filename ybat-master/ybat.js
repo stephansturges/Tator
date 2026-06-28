@@ -22670,10 +22670,19 @@ async function cancelRfDetrTrainingJobRequest() {
                     return;
                 }
                 const settings = getCaptionInstructionDatasetSettings(true);
-                const rowHint = settings.subcaptions_per_image > 0
-                    ? `${settings.subcaptions_per_image} generated QA row${settings.subcaptions_per_image === 1 ? "" : "s"} per image`
-                    : "caption0 rows only";
-                if (!confirm(`Create a VLM training dataset for ${imageNames.length} images with ${rowHint}? This can take a while.`)) {
+                const validation = validateCaptionInstructionLaunchSettings(settings);
+                if (!validation.ok) {
+                    const message = validation.errors[0] || "Instruction dataset settings are invalid.";
+                    setQwenCaptionStatus("Instruction dataset not started");
+                    setQwenCaptionBackendJobStatus(message);
+                    setSamStatus(message, { variant: "warn", duration: 7000 });
+                    return;
+                }
+                const rowHint = describeCaptionInstructionLaunchSettings(settings);
+                const warningText = validation.warnings.length
+                    ? `\n\nNote: ${validation.warnings.join(" ")}`
+                    : "";
+                if (!confirm(`Create a VLM training dataset for ${imageNames.length} images with ${rowHint}? This can take a while.${warningText}`)) {
                     return;
                 }
                 runQwenCaptionBatch(imageNames, {
@@ -29325,6 +29334,55 @@ async function cancelRfDetrTrainingJobRequest() {
         };
     }
 
+    function validateCaptionInstructionLaunchSettings(settings) {
+        const resolved = settings && typeof settings === "object" ? settings : {};
+        const errors = [];
+        const warnings = [];
+        if (!resolved.instruction_dataset) {
+            return { ok: true, errors, warnings };
+        }
+        const includeCaption0 = resolved.include_caption0_in_training !== false;
+        const includeGeneratedQa = resolved.include_generated_qa_in_training !== false;
+        const includeDeterministic = resolved.include_deterministic_metadata_qa === true;
+        const subcaptions = Math.max(0, Math.min(Number.parseInt(resolved.subcaptions_per_image || "0", 10) || 0, 20));
+        if (!includeCaption0 && !includeGeneratedQa && !includeDeterministic) {
+            errors.push("Enable at least one instruction training row family: caption0, generated QA, or deterministic metadata QA.");
+        }
+        if (!includeGeneratedQa && subcaptions > 0) {
+            warnings.push(`Generated QA count is ${subcaptions}, but generated QA is excluded from trainer JSONL.`);
+        }
+        if (includeGeneratedQa && subcaptions === 0) {
+            warnings.push("Generated QA is selected, but no new generated QA rows will be requested.");
+        }
+        return {
+            ok: errors.length === 0,
+            errors,
+            warnings,
+        };
+    }
+
+    function describeCaptionInstructionLaunchSettings(settings) {
+        const resolved = settings && typeof settings === "object" ? settings : {};
+        const parts = [];
+        const subcaptions = Math.max(0, Math.min(Number.parseInt(resolved.subcaptions_per_image || "0", 10) || 0, 20));
+        if (resolved.include_caption0_in_training !== false) {
+            parts.push("caption0 rows");
+        }
+        if (resolved.include_generated_qa_in_training !== false) {
+            if (subcaptions > 0) {
+                parts.push(`${subcaptions} generated QA candidate${subcaptions === 1 ? "" : "s"} per image`);
+            } else {
+                parts.push("existing generated QA rows only");
+            }
+        } else if (subcaptions > 0) {
+            parts.push(`${subcaptions} generated QA candidate${subcaptions === 1 ? "" : "s"} per image for archive/review only`);
+        }
+        if (resolved.include_deterministic_metadata_qa === true) {
+            parts.push("deterministic metadata QA rows");
+        }
+        return parts.length ? parts.join(", ") : "no selected training rows";
+    }
+
     function getCaptionDatasetId() {
         if (isAnnotationDatasetModeActive()) {
             return getActiveAnnotationDatasetIdForCaption();
@@ -31723,6 +31781,17 @@ async function cancelRfDetrTrainingJobRequest() {
         const setAndForget = qwenElements.captionSetAndForget?.checked !== false;
         const healthGates = getCaptionHealthGateSettings();
         const pilotCertification = getCaptionPilotCertificationSettings(setAndForget);
+        const instructionSettings = getCaptionInstructionDatasetSettings(!!options.instructionDataset);
+        if (options.instructionDataset) {
+            const validation = validateCaptionInstructionLaunchSettings(instructionSettings);
+            if (!validation.ok) {
+                const message = validation.errors[0] || "Instruction dataset settings are invalid.";
+                setQwenCaptionStatus("Instruction dataset not started");
+                setQwenCaptionBackendJobStatus(message);
+                setSamStatus(message, { variant: "warn", duration: 7000 });
+                return false;
+            }
+        }
         const runToken = qwenCaptionBatchRunToken + 1;
         qwenCaptionBatchRunToken = runToken;
         qwenCaptionBatchActive = true;
@@ -31763,7 +31832,7 @@ async function cancelRfDetrTrainingJobRequest() {
                     runner_artifact_log_bytes: getCaptionRunnerArtifactLogBytes(),
                     max_failures: 0,
                     continue_on_quality_failures: false,
-                    ...getCaptionInstructionDatasetSettings(!!options.instructionDataset),
+                    ...instructionSettings,
                     ...healthGates,
                     ...pilotCertification,
                 }),

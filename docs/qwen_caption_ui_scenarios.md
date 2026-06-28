@@ -108,7 +108,10 @@ caption0-only instruction export and high values cannot explode the prompt or
 artifact size. **Include caption0** and **Include generated QA** control the
 flattened instruction JSONL, while **Include deterministic metadata QA** is off
 by default and adds code-generated rows from real source labels only when
-explicitly enabled. **Generated QA mix** controls whether the generated-QA pass
+explicitly enabled. The UI refuses to launch an instruction run when all three
+trainable row families are disabled, and its confirmation text distinguishes
+trainer JSONL rows from generated QA candidates that are archive/review-only.
+**Generated QA mix** controls whether the generated-QA pass
 leans balanced, scene-level, object-focused, or caption-variant oriented.
 **Generated answer format** controls whether generated answers are natural text
 or parseable JSON. **Give generator read-only label context** may pass source

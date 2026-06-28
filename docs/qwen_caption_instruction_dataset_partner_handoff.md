@@ -164,6 +164,10 @@ Implemented controls:
 - **Import reviewed JSONL**
 - **Download instruction report**
 
+The launch controls fail closed if all trainable row families are disabled. The
+confirmation text also separates trainer JSONL rows from generated QA
+candidates that will be generated only for archive/review.
+
 The UI also makes model availability clearer. Model dropdown entries are styled
 so local models use the normal local color and models needing download are red.
 Backend jobs fail preflight for missing models unless downloads are explicitly
@@ -525,7 +529,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-157 passed
+159 passed
 ```
 
 Focused review-import fail-closed suite:
@@ -588,7 +592,7 @@ Focused instruction-dataset and UI contract suite:
 Latest recorded result:
 
 ```text
-132 passed
+134 passed
 ```
 
 Runtime and unattended hardening suites have also been run in prior hardening

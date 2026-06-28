@@ -334,7 +334,11 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     assert "/qwen/caption/jobs" in js
     assert "qwenCaptionBatchBackendJobId" in js
     assert "function getCaptionInstructionDatasetSettings" in js
+    assert "function validateCaptionInstructionLaunchSettings" in js
+    assert "function describeCaptionInstructionLaunchSettings" in js
     assert "subcaptions_per_image: subcaptions" in js
+    assert "Enable at least one instruction training row family" in js
+    assert "excluded from trainer JSONL" in js
     assert "instructionDataset: true" in js
     assert "function validateCaptionInstructionTrainingRows" in js
     assert "function validateCaptionInstructionArchiveRows" in js
@@ -563,6 +567,53 @@ def test_qwen_caption_instruction_training_validator_blocks_non_trainable_rows()
             "const unknownReview = validateCaptionInstructionTrainingRows([{ ...base, metadata: { ...base.metadata, review_status: 'maybe' } }]);",
             "assert.strictEqual(unknownReview.ok, false);",
             "assert(unknownReview.errors.some((error) => error.includes('review_status is unsupported')));",
+        ]
+    )
+    subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
+
+
+def test_qwen_caption_instruction_launch_settings_block_empty_training_family():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            _extract_js_function(js, "validateCaptionInstructionLaunchSettings"),
+            _extract_js_function(js, "describeCaptionInstructionLaunchSettings"),
+            "const empty = validateCaptionInstructionLaunchSettings({",
+            "  instruction_dataset: true,",
+            "  include_caption0_in_training: false,",
+            "  include_generated_qa_in_training: false,",
+            "  include_deterministic_metadata_qa: false,",
+            "  subcaptions_per_image: 8,",
+            "});",
+            "assert.strictEqual(empty.ok, false);",
+            "assert(empty.errors.some((error) => error.includes('Enable at least one instruction training row family')));",
+            "const archiveOnlyQa = validateCaptionInstructionLaunchSettings({",
+            "  instruction_dataset: true,",
+            "  include_caption0_in_training: true,",
+            "  include_generated_qa_in_training: false,",
+            "  include_deterministic_metadata_qa: false,",
+            "  subcaptions_per_image: 3,",
+            "});",
+            "assert.strictEqual(archiveOnlyQa.ok, true);",
+            "assert(archiveOnlyQa.warnings.some((warning) => warning.includes('excluded from trainer JSONL')));",
+            "const summary = describeCaptionInstructionLaunchSettings({",
+            "  instruction_dataset: true,",
+            "  include_caption0_in_training: false,",
+            "  include_generated_qa_in_training: false,",
+            "  include_deterministic_metadata_qa: true,",
+            "  subcaptions_per_image: 3,",
+            "});",
+            "assert(summary.includes('generated QA candidates per image for archive/review only'));",
+            "assert(summary.includes('deterministic metadata QA rows'));",
+            "const existingOnly = describeCaptionInstructionLaunchSettings({",
+            "  instruction_dataset: true,",
+            "  include_caption0_in_training: false,",
+            "  include_generated_qa_in_training: true,",
+            "  include_deterministic_metadata_qa: false,",
+            "  subcaptions_per_image: 0,",
+            "});",
+            "assert(existingOnly.includes('existing generated QA rows only'));",
         ]
     )
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)

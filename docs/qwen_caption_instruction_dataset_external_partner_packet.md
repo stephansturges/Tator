@@ -125,6 +125,13 @@ Implemented controls include:
 - **Import reviewed JSONL**
 - **Download instruction report**
 
+The launch path also validates the selected row-family configuration before a
+backend job starts. If `caption0`, generated QA, and deterministic metadata QA
+are all disabled, the UI refuses to launch and the backend request model rejects
+the payload. If generated QA candidates are requested but excluded from trainer
+JSONL, the confirmation text says they are archive/review-only rather than
+describing them as trainer rows.
+
 ### Source Annotation Summaries
 
 Source annotation summaries are built from existing label evidence. They are
@@ -448,7 +455,7 @@ Result:
 Result:
 
 ```text
-157 passed
+159 passed
 ```
 
 Additional validation recorded in the hardening report includes trainer import

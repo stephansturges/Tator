@@ -34584,6 +34584,10 @@ async function cancelRfDetrTrainingJobRequest() {
             const imagePath = String(row?.image_path || "").trim();
             const question = String(row?.question || "").trim();
             const answer = String(row?.answer || "").trim();
+            const metadata = row?.metadata && typeof row.metadata === "object" ? row.metadata : {};
+            const rowType = String(metadata.row_type || "").trim();
+            const answerFormat = String(metadata.answer_format || "").trim().toLowerCase();
+            const validationStatus = String(metadata.validation_status || "").trim().toLowerCase();
             if (!imagePath) {
                 errors.push(`row ${rowNumber} missing image_path`);
             } else {

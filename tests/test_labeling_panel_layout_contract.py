@@ -351,6 +351,13 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "function validateCaptionVlmTrainingRows" in js
     assert "function validateCaptionInstructionTrainingRows" in js
     assert "function validateCaptionInstructionArchiveRows" in js
+    instruction_validator_start = js.index("function validateCaptionInstructionTrainingRows")
+    instruction_validator_end = js.index("function describeCaptionInstructionValidation", instruction_validator_start)
+    instruction_validator = js[instruction_validator_start:instruction_validator_end]
+    assert "const metadata = row?.metadata" in instruction_validator
+    assert "const rowType = String(metadata.row_type" in instruction_validator
+    assert "const answerFormat = String(metadata.answer_format" in instruction_validator
+    assert "const validationStatus = String(metadata.validation_status" in instruction_validator
     assert "duplicate image_path + question" in js
     assert "function setCaptionExportHealth" in js
     assert "VLM JSONL export blocked" in js

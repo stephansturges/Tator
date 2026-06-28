@@ -679,6 +679,66 @@ def test_caption_instruction_archive_rejects_structured_generated_qa_without_sou
     assert archive["archive_rows"][0]["export_metadata"]["selected_training_row_count"] == 0
 
 
+def test_caption_instruction_archive_rejects_caption0_count_contradiction(
+    monkeypatch,
+) -> None:
+    import localinferenceapi as api
+
+    manifest = {
+        "labelmap": ["Boat"],
+        "images": [
+            {
+                "split": "train",
+                "image_relpath": "frame.jpg",
+                "image_name": "frame.jpg",
+                "label_lines": ["0 0.5 0.5 0.1 0.1"],
+                "label_source_present": True,
+                "label_source": "dataset_label_file",
+            }
+        ],
+    }
+    monkeypatch.setattr(api, "_annotation_manifest_for_entry", lambda _entry: manifest)
+    captions = [
+        {
+            "id": "caption-1",
+            "image_name": "frame.jpg",
+            "image_key": "train/frame.jpg",
+            "split": "train",
+            "caption": "A top-down view shows two boats near the dock.",
+            "source": "qwen_caption_job",
+            "is_primary": True,
+            "caption_index": 1,
+        }
+    ]
+
+    archive = api._dataset_caption_instruction_archive(
+        captions,
+        [],
+        dataset_id="ds",
+        entry={"id": "ds"},
+        settings=api._caption_instruction_export_settings(
+            {
+                "include_caption0_in_training": True,
+                "include_generated_qa_in_training": True,
+                "include_deterministic_metadata_qa": False,
+            }
+        ),
+        exported_at="2026-01-01T00:00:00Z",
+    )
+    caption0 = archive["images"][0]["language_annotations"]["caption0"]
+
+    assert caption0["validation_status"] == "rejected"
+    assert caption0["rejection_reasons"] == ["caption0_count_contradicts_source_annotations"]
+    assert caption0["validation"]["exact_count_claims"] == [
+        {"class_name": "Boat", "count": 2, "text": "two boats"}
+    ]
+    assert archive["training_rows"] == []
+    assert archive["training_row_count"] == 0
+    assert archive["rejection_reason_counts"] == {"caption0_validation_rejected": 1}
+    assert archive["captioning_report"]["rows_excluded_because_generated_answers_contradicted_source_annotations"] == 1
+    assert archive["archive_rows"][0]["export_metadata"]["selected_training_row_count"] == 0
+
+
 def test_caption_instruction_archive_keeps_non_manifest_records_out_of_training_rows(
     monkeypatch,
 ) -> None:

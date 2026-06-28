@@ -20876,6 +20876,43 @@ _CAPTION_INSTRUCTION_STRUCTURED_CLAIM_RE = re.compile(
     r"\b(how many|count|counts|which .*classes|what .*classes|visible classes|is there|are there any|where|which part|uncertain|uncertainty)\b",
     flags=re.IGNORECASE,
 )
+_CAPTION_INSTRUCTION_NUMBER_WORDS = {
+    "zero": 0,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+    "single": 1,
+    "solitary": 1,
+}
+
+
+def _caption_instruction_number_token_to_int(token: str) -> Optional[int]:
+    raw = str(token or "").strip().lower()
+    if not raw:
+        return None
+    if raw.isdigit():
+        try:
+            return int(raw)
+        except (TypeError, ValueError, OverflowError):
+            return None
+    return _CAPTION_INSTRUCTION_NUMBER_WORDS.get(raw)
 
 
 def _caption_instruction_label_terms(label: str) -> List[str]:
@@ -20885,8 +20922,99 @@ def _caption_instruction_label_terms(label: str) -> List[str]:
     spaced = _caption_instruction_question_class_name(raw)
     camel = re.sub(r"(?<!^)(?=[A-Z])", " ", spaced)
     terms = {raw, spaced, camel}
+    if raw.lower() == "person":
+        terms.update({"people", "persons"})
     terms.update(term.lower() for term in list(terms))
     return sorted((term for term in terms if term.strip()), key=len, reverse=True)
+
+
+def _caption_instruction_exact_count_claims(
+    text: str,
+    labelmap: Sequence[str],
+) -> List[Dict[str, Any]]:
+    haystack = str(text or "")
+    if not haystack:
+        return []
+    claims: List[Dict[str, Any]] = []
+    seen: Set[Tuple[str, int, str]] = set()
+    number_pattern = r"(?:\d+|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|single|solitary)"
+    modifier_pattern = r"(?:[a-z][\w-]*\s+){0,3}"
+    for label in labelmap:
+        label_name = str(label or "").strip()
+        if not label_name:
+            continue
+        for term in _caption_instruction_label_terms(label_name):
+            escaped = re.escape(term).replace(r"\ ", r"\s+")
+            pattern = re.compile(
+                rf"\b(?:(?:a|an)\s+)?(?P<number>{number_pattern})\s+{modifier_pattern}{escaped}s?\b",
+                flags=re.IGNORECASE,
+            )
+            for match in pattern.finditer(haystack):
+                count = _caption_instruction_number_token_to_int(match.group("number"))
+                if count is None:
+                    continue
+                key = (label_name, count, match.group(0).lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+                claims.append({"class_name": label_name, "count": count, "text": match.group(0)})
+    return claims
+
+
+def _caption_instruction_caption0_for_archive(
+    caption0: Mapping[str, Any],
+    *,
+    image_name: str,
+    source_annotations: Mapping[str, Any],
+    labelmap: Sequence[str],
+) -> Dict[str, Any]:
+    caption = str(caption0.get("caption") or "").strip()
+    source_status = str(source_annotations.get("status") or "").strip()
+    counts = source_annotations.get("object_counts") if isinstance(source_annotations, Mapping) else {}
+    counts = counts if isinstance(counts, Mapping) else {}
+    exact_count_claims = _caption_instruction_exact_count_claims(caption, labelmap)
+    rejection_reasons: List[str] = []
+    if exact_count_claims and source_status in {"missing_label_file", "source_manifest_row_missing"}:
+        rejection_reasons.append("caption0_structured_claim_without_source_annotations")
+    for claim in exact_count_claims:
+        label = str(claim.get("class_name") or "").strip()
+        try:
+            expected = int(counts.get(label) or 0)
+        except (TypeError, ValueError, OverflowError):
+            expected = 0
+        try:
+            observed = int(claim.get("count") or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if source_status not in {"missing_label_file", "source_manifest_row_missing"} and observed != expected:
+            rejection_reasons.append("caption0_count_contradicts_source_annotations")
+            break
+    if re.search(r"\buncertain(?:ty)?\b", caption, flags=re.IGNORECASE) and not source_annotations.get("uncertainty"):
+        rejection_reasons.append("unsupported_uncertainty_claim")
+    validation_status = "rejected" if rejection_reasons else "accepted"
+    validated_against = ["image"]
+    if source_status not in {"missing_label_file", "source_manifest_row_missing"}:
+        validated_against.append("source_annotations")
+    return {
+        "caption_id": str(caption0.get("id") or "").strip(),
+        "qa_id": str(caption0.get("id") or f"{image_name}__caption0").strip(),
+        "row_type": "caption0",
+        "question": "Describe this image in detail.",
+        "caption": caption,
+        "answer": caption,
+        "answer_source": str(caption0.get("source") or "caption_record").strip() or "caption_record",
+        "source": str(caption0.get("source") or "").strip(),
+        "metadata": dict(caption0.get("metadata") or {}),
+        "validated_against": validated_against,
+        "validation_status": validation_status,
+        "review_status": "unreviewed",
+        "rejection_reasons": rejection_reasons,
+        "validation": {
+            "status": validation_status,
+            "rejection_reasons": rejection_reasons,
+            "exact_count_claims": exact_count_claims,
+        },
+    }
 
 
 def _caption_instruction_match_source_label(text: str, source_annotations: Mapping[str, Any]) -> Optional[str]:
@@ -20920,7 +21048,7 @@ def _caption_instruction_structured_source_rewrite(
     question: str,
     source_annotations: Mapping[str, Any],
 ) -> Optional[Dict[str, Any]]:
-    if str(source_annotations.get("status") or "").strip() == "missing_label_file":
+    if str(source_annotations.get("status") or "").strip() in {"missing_label_file", "source_manifest_row_missing"}:
         return None
     counts = source_annotations.get("object_counts") if isinstance(source_annotations, Mapping) else {}
     if not isinstance(counts, Mapping):
@@ -21193,6 +21321,28 @@ def _dataset_caption_instruction_archive(
             if bool(settings.get("include_deterministic_metadata_qa"))
             else []
         )
+        caption0_archive = (
+            _caption_instruction_caption0_for_archive(
+                caption0,
+                image_name=image_name,
+                source_annotations=source_annotations,
+                labelmap=labelmap,
+            )
+            if caption0
+            else None
+        )
+        if (
+            caption0_archive
+            and str(caption0_archive.get("validation_status") or "").strip() != "accepted"
+            and bool(settings.get("include_caption0_in_training"))
+        ):
+            rejections.append(
+                {
+                    "reason": "caption0_validation_rejected",
+                    "image_path": image_name,
+                    "rejection_reasons": list(caption0_archive.get("rejection_reasons") or []),
+                }
+            )
         image_entry = {
             "image_id": Path(image_name).stem,
             "image_path": image_name,
@@ -21202,22 +21352,7 @@ def _dataset_caption_instruction_archive(
             "split": row_data.get("split"),
             "source_annotations": source_annotations,
             "language_annotations": {
-                "caption0": {
-                    "caption_id": str(caption0.get("id") or "").strip(),
-                    "qa_id": str(caption0.get("id") or f"{image_name}__caption0").strip(),
-                    "row_type": "caption0",
-                    "question": "Describe this image in detail.",
-                    "caption": str(caption0.get("caption") or "").strip(),
-                    "answer": str(caption0.get("caption") or "").strip(),
-                    "answer_source": str(caption0.get("source") or "caption_record").strip() or "caption_record",
-                    "source": str(caption0.get("source") or "").strip(),
-                    "metadata": dict(caption0.get("metadata") or {}),
-                    "validated_against": ["image", "source_annotations"],
-                    "validation_status": "accepted",
-                    "review_status": "unreviewed",
-                }
-                if caption0
-                else None,
+                "caption0": caption0_archive,
                 "generated_qa_pairs": generated_pairs,
             },
             "deterministic_metadata_qa_pairs": deterministic_pairs,
@@ -21243,22 +21378,29 @@ def _dataset_caption_instruction_archive(
                 },
             },
         }
-        if caption0 and bool(settings.get("include_caption0_in_training")) and can_flatten_image:
+        if (
+            caption0
+            and caption0_archive
+            and str(caption0_archive.get("validation_status") or "").strip() == "accepted"
+            and bool(settings.get("include_caption0_in_training"))
+            and can_flatten_image
+        ):
             _append_training_row(
                 _caption_instruction_training_row(
                     image_name=image_name,
                     question="Describe this image in detail.",
-                    answer=str(caption0.get("caption") or "").strip(),
+                    answer=str(caption0_archive.get("answer") or "").strip(),
                     row_type="caption0",
-                    answer_source=str(caption0.get("source") or "caption_record").strip() or "caption_record",
-                    qa_id=str(caption0.get("id") or f"{image_name}__caption0").strip(),
+                    answer_source=str(caption0_archive.get("answer_source") or "caption_record").strip()
+                    or "caption_record",
+                    qa_id=str(caption0_archive.get("qa_id") or f"{image_name}__caption0").strip(),
                     split=str(row_data.get("split") or "").strip() or None,
                     answer_format="natural",
-                    validation_status="accepted",
-                    review_status="unreviewed",
-                    validated_against=["image", "source_annotations"],
+                    validation_status=str(caption0_archive.get("validation_status") or "accepted").strip(),
+                    review_status=str(caption0_archive.get("review_status") or "unreviewed").strip(),
+                    validated_against=list(caption0_archive.get("validated_against") or []),
                     metadata={
-                        "caption_id": str(caption0.get("id") or "").strip(),
+                        "caption_id": str(caption0_archive.get("caption_id") or "").strip(),
                         "source_archive": CAPTION_INSTRUCTION_ARCHIVE_FORMAT,
                     },
                 )
@@ -21417,9 +21559,21 @@ def _dataset_caption_instruction_archive(
         reason_tokens.update(str(item).strip() for item in rejection.get("rejection_reasons") or [] if str(item).strip())
         if reason_tokens & {"unavailable_or_sensitive_context"}:
             unavailable_context_rejection_count += 1
-        if reason_tokens & {"structured_claim_requires_deterministic_row", "unsupported_count_claim", "unsupported_class_claim", "unsupported_spatial_claim"}:
+        if reason_tokens & {
+            "structured_claim_requires_deterministic_row",
+            "unsupported_count_claim",
+            "unsupported_class_claim",
+            "unsupported_spatial_claim",
+            "caption0_count_contradicts_source_annotations",
+        }:
             contradiction_rejection_count += 1
-        if reason_tokens & {"missing_required_field", "invalid_json_answer", "upstream_validation_rejected"}:
+        if reason_tokens & {
+            "missing_required_field",
+            "invalid_json_answer",
+            "upstream_validation_rejected",
+            "caption0_structured_claim_without_source_annotations",
+            "source_manifest_row_missing",
+        }:
             invalid_provenance_rejection_count += 1
         if reason_tokens & {"unsupported_uncertainty_claim"}:
             uncertainty_rejection_count += 1

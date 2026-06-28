@@ -2,6 +2,53 @@
 
 Date: 2026-06-28
 
+## Canonical Review Packet
+
+This is the canonical external review packet for the caption-to-instruction-data
+work in this repository. It is written for a team that needs to understand what
+was implemented, why the implementation is shaped this way, how to test it, and
+what still must be proven before generated rows are used for fine-tuning.
+
+The packet is deliberately dataset-neutral. It does not rely on project-specific
+dataset names, class lists, or private evaluation assumptions. When sharing this
+document externally, treat it as a reusable implementation handoff for an
+annotation-assisted VLM training-data workflow.
+
+Supporting documents:
+
+- `docs/qwen_caption_instruction_dataset_hardening_report.md` records the latest
+  implementation and validation ledger.
+- `docs/qwen_caption_prompt_stack.md` records prompt, token-budget, box-subset,
+  loop-recovery, and set-and-forget runtime contracts.
+- `docs/qwen_caption_ui_scenarios.md` records the UI scenarios that should stay
+  visible and understandable to operators.
+- `docs/qwen_caption_instruction_dataset_partner_handoff.md` is the shorter
+  partner-facing summary.
+
+Validated checkpoint:
+
+- Current implementation checkpoint: `eb4fa2b Require ready instruction exports
+  by default`.
+- Recent preceding checkpoints added review import, review parsing hardening,
+  reviewed-out row exclusion, ready-report gating, and caption instruction
+  export compatibility.
+- The repo may contain unrelated local untracked files; they are not part of
+  this review packet unless explicitly listed in Git history.
+
+Definition of done for this checkpoint:
+
+- The UI and backend can create caption-based instruction artifacts end to end.
+- The trainer can import the flat exported instruction rows.
+- Readiness and review metadata can prevent unsafe trainer JSONL export by
+  default.
+- Structural and UI smoke tests pass.
+
+Definition of not done:
+
+- The generated corpus is not certified training-grade until a real-data pilot,
+  manual generated-QA review, review import, re-export, and at least one small
+  training import or fine-tuning dry run have been completed.
+
 ## Purpose
 
 This document is a complete handoff for an external review of the Qwen captioning
@@ -85,6 +132,18 @@ What is implemented in this checkpoint:
 - Direct trainer import of the flat instruction JSONL row shape.
 - Runtime hardening for prompt size, output-token overrides, loop detection,
   fallback, set-and-forget supervision, and model-download state.
+- Ready-report gating for trainer JSONL export, enabled in the UI by default and
+  available through the API with `require_ready_instruction_export=true`.
+- Model dropdown styling that makes missing/download-needed models visually
+  distinct from local models.
+- Representative prompt box subsets for dense scenes, while authoritative counts
+  remain separate and complete.
+- Prompt-size and effective output-token telemetry so a large rendered prompt can
+  reduce automatic generation budget without overriding an explicit user cap.
+- A live repeated-output inspector for streaming caption paths, plus bounded
+  recovery so repeated punctuation or token loops are not accepted as captions.
+- Set-and-forget defaults that route dataset work through persisted backend jobs
+  instead of relying on a browser tab or one direct model call.
 
 The latest hardening pass specifically closed the review loop:
 
@@ -96,6 +155,13 @@ The latest hardening pass specifically closed the review loop:
 - deterministic metadata QA review rows are skipped on import because those rows
   are rebuilt from source labels during export and are not saved language
   records.
+- selected caption0 or generated-QA language rows that are rejected or marked
+  needs-revision are kept in archive/review artifacts but excluded from
+  flattened trainer rows;
+- readiness returns `ready`, `needs_review`, or `blocked`, and the default
+  trainer JSONL path refuses anything other than `ready`;
+- scripted exports can enforce the same default by requesting
+  `require_ready_instruction_export=true` from the caption export endpoint.
 
 What is intentionally not claimed at this checkpoint:
 
@@ -103,11 +169,13 @@ What is intentionally not claimed at this checkpoint:
   and human review of generated QA.
 - Review JSONL import applies decisions and notes only. It does not edit source
   labels, questions, answers, boxes, or final annotations.
-- The implementation creates training data. It does not launch fine-tuning from
-  the caption panel.
+- The implementation creates and exports training data. It does not launch
+  fine-tuning from the caption panel.
 - Process-level Metal/GPU aborts are not catchable Python exceptions. The
   supported strategy is subprocess isolation, persisted artifacts, supervised
   restart, and resume.
+- A ready report means the structural readiness gates passed. It is not a
+  substitute for reviewing semantic usefulness of generated QA before training.
 
 ## Reviewer Starting Point
 
@@ -330,10 +398,16 @@ generated by the VLM. In the instruction archive they live under:
 Important behavior:
 
 - If a label file is missing, source status records the missing label condition.
+- If a label file exists but is empty, source status records that the image has
+  no source objects. The VLM is not asked to invent label-specific facts for
+  objects that are absent from source labels.
 - If a caption or QA record refers to an image no longer present in the dataset
   manifest, source status becomes `source_manifest_row_missing`.
 - Missing or non-manifest source data prevents flattening into trainer rows.
 - The row remains visible in the archive for audit.
+- Images with no trusted labels can still receive ordinary visual captions or
+  generated visual QA, but source-grounded count/class claims cannot be
+  flattened unless they are supported by the source annotation state.
 
 ### Language Annotations
 
@@ -587,6 +661,14 @@ metadata so oversized prompts can be detected and adapted.
 The caption runner detects repeated output loops, trims looped output, and can
 retry with safer decoding settings. Loop/recovery events are tracked in audit
 summaries so batch health can be measured instead of guessed.
+
+The full-image composition stage can legitimately take longer than crop
+observation stages because it may combine the full image, full-frame counts,
+representative box evidence, and all completed window observations. The runtime
+should not reload a model just because the pipeline reaches this stage. Reloads
+are expected only when the operator does not keep the model resident, when a
+different explicit editor or fallback model is selected, or when loop/error
+recovery deliberately unloads the runtime before retrying safely.
 
 ### Set-And-Forget Mode
 

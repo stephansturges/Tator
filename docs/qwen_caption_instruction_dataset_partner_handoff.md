@@ -2,6 +2,15 @@
 
 Date: 2026-06-28
 
+## Start Here
+
+For a complete external implementation review, start with
+`docs/qwen_caption_training_dataset_external_review_handoff.md`. This shorter
+handoff is a companion summary; the external review handoff is the canonical
+packet for what changed, why it changed, which invariants matter, how artifacts
+are shaped, what was tested, and what still requires a real-data pilot before
+training use.
+
 ## Status
 
 The captioning stack now has a functional UI and backend path for creating

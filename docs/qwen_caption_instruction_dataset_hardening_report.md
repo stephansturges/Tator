@@ -128,6 +128,10 @@ row before training.
   the export-review-import loop without editing source labels, questions,
   answers, boxes, or final annotations. Rows carrying a different dataset id
   are skipped by the backend and blocked by the UI import preflight.
+- The backend rejects duplicate actionable review targets before applying any
+  imported review metadata. Exact duplicate decisions and conflicting duplicate
+  decisions both fail closed, so API or script imports cannot silently let the
+  last duplicate row win.
 - Caption0 or generated-QA candidates marked rejected or needs-revision by
   manual review remain in the archive and review JSONL but are excluded from
   flattened trainer rows.

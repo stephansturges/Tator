@@ -592,6 +592,9 @@ The review import is deliberately conservative:
 - It accepts JSON arrays, JSON objects containing row arrays, and JSONL files.
 - It refuses to apply rows whose embedded dataset id does not match the selected
   dataset.
+- It rejects duplicate actionable review targets before applying any imported
+  metadata. Exact duplicates and conflicting duplicate decisions both fail
+  closed, so API/script imports cannot silently let the last duplicate row win.
 - It ignores blank or unknown decisions instead of inventing a review result.
 - It applies decisions only to matching caption0 or generated-QA records.
 - It records reviewer, notes, source row metadata, and decision timestamps.

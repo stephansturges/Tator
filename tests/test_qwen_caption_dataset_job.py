@@ -909,6 +909,92 @@ def test_caption_instruction_review_import_skips_mismatched_dataset_id(
     assert "review_decision" not in records[0]["metadata"]
 
 
+@pytest.mark.parametrize(
+    ("second_decision", "expected_detail"),
+    [
+        ("rejected", "review_rows_conflicting_duplicate_target:row_1:row_2"),
+        ("accepted", "review_rows_duplicate_target:row_1:row_2"),
+    ],
+)
+def test_caption_instruction_review_import_rejects_duplicate_actionable_targets(
+    monkeypatch,
+    tmp_path,
+    second_decision,
+    expected_detail,
+) -> None:
+    import localinferenceapi as api
+
+    entry = {"id": "ds", "dataset_root": str(tmp_path), "registry_root": str(tmp_path)}
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: entry)
+    monkeypatch.setattr(
+        api,
+        "_annotation_manifest_for_entry",
+        lambda _entry: {
+            "labelmap": [],
+            "images": [
+                {
+                    "image_name": "frame.jpg",
+                    "image_relpath": "frame.jpg",
+                    "split": "train",
+                    "label_source_present": True,
+                    "label_lines": [],
+                }
+            ],
+        },
+    )
+    api._write_dataset_caption_instruction_records(
+        entry,
+        [
+            {
+                "id": "qa-1",
+                "image_name": "frame.jpg",
+                "image_key": "train/frame.jpg",
+                "split": "train",
+                "question": "What is the scene type?",
+                "answer": "A waterfront area.",
+                "row_type": "generated_qa",
+                "answer_source": "vlm_generated",
+                "validation_status": "accepted",
+            }
+        ],
+    )
+
+    base_row = {
+        "format": "tator_caption_instruction_review_rows_v1",
+        "dataset_id": "ds",
+        "image_path": "frame.jpg",
+        "split": "train",
+        "row_origin": "generated_qa",
+        "qa_id": "qa-1",
+        "row_type": "generated_qa",
+        "question": "What is the scene type?",
+        "candidate_answer": "A waterfront area.",
+        "training_answer": "A waterfront area.",
+        "validation_status": "accepted",
+        "selected_for_training": True,
+        "requires_manual_review": True,
+        "review_decision": "accepted",
+        "review_notes": "first decision",
+        "rejection_reasons": [],
+        "source_summary": {"status": "empty_label_file"},
+    }
+    duplicate_row = {
+        **base_row,
+        "row_type": "unexpected_external_type",
+        "review_decision": second_decision,
+        "review_notes": "duplicate decision",
+    }
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.apply_caption_instruction_review("ds", {"rows": [base_row, duplicate_row]})
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == expected_detail
+    records = api._load_dataset_caption_instruction_records(entry)
+    assert records[0]["review_status"] == ""
+    assert "review_decision" not in records[0]["metadata"]
+
+
 def test_caption_instruction_training_readiness_blocks_selected_needs_revision_rows() -> None:
     import localinferenceapi as api
 

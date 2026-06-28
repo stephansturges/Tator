@@ -22611,6 +22611,55 @@ def _caption_instruction_review_image_candidates(
     return image_names, image_keys
 
 
+def _caption_instruction_review_target_key(row: Mapping[str, Any]) -> Tuple[str, str, str, str, str]:
+    row_origin = str(row.get("row_origin") or "").strip()
+    qa_id = str(row.get("qa_id") or "").strip()
+    if qa_id:
+        return ("qa_id", row_origin, qa_id, "", "")
+    image_path = str(row.get("image_path") or row.get("image_name") or row.get("image") or "").strip()
+    split = str(row.get("split") or "").strip()
+    question = _caption_instruction_normalized_question(row.get("question"))
+    answer = str(row.get("candidate_answer") or row.get("training_answer") or "").strip()
+    return ("question_answer", row_origin, image_path, split, f"{question}\u0000{answer}")
+
+
+def _caption_instruction_reject_duplicate_review_targets(
+    rows: Sequence[Any],
+    *,
+    dataset_id: str,
+) -> None:
+    seen: Dict[Tuple[str, str, str, str, str], Tuple[int, str]] = {}
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, Mapping):
+            continue
+        if str(row.get("format") or "").strip() != CAPTION_INSTRUCTION_REVIEW_ROWS_FORMAT:
+            continue
+        if not _caption_instruction_review_dataset_id_matches(row, dataset_id):
+            continue
+        decision = _caption_instruction_review_decision(row.get("review_decision"))
+        if decision not in {"accepted", "rejected", "needs_revision"}:
+            continue
+        image_path = str(row.get("image_path") or row.get("image_name") or row.get("image") or "").strip()
+        row_origin = str(row.get("row_origin") or "").strip()
+        if not image_path or not row_origin:
+            continue
+        key = _caption_instruction_review_target_key(row)
+        prior = seen.get(key)
+        if prior is None:
+            seen[key] = (index, decision)
+            continue
+        prior_index, prior_decision = prior
+        detail = (
+            "review_rows_conflicting_duplicate_target"
+            if decision != prior_decision
+            else "review_rows_duplicate_target"
+        )
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail=f"{detail}:row_{prior_index}:row_{index}",
+        )
+
+
 def _caption_instruction_apply_review_metadata(
     record: Dict[str, Any],
     row: Mapping[str, Any],
@@ -22681,6 +22730,7 @@ def apply_caption_instruction_review(dataset_id: str, payload: Dict[str, Any]):
     entry = _resolve_dataset_entry(dataset_id)
     _require_dataset_annotation_lock_owner_if_active(entry, payload)
     rows = _caption_instruction_review_payload_rows(payload)
+    _caption_instruction_reject_duplicate_review_targets(rows, dataset_id=dataset_id)
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     reviewer = str((payload or {}).get("reviewer") or "").strip()
 

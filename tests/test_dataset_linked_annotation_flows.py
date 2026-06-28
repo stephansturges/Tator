@@ -2574,6 +2574,8 @@ def test_caption_alternate_routes_append_update_export_and_delete(
         "instruction_review_row_count": 2,
         "manual_review_required_count": 2,
         "training_readiness_status": "needs_review",
+        "instruction_export_validation_ok": True,
+        "instruction_export_validation_error_count": 0,
         "rejected_training_row_count": 1,
     }
     instruction_archive = export_payload["instruction_archive"]
@@ -2590,7 +2592,13 @@ def test_caption_alternate_routes_append_update_export_and_delete(
     assert len(export_payload["instruction_archive_rows"]) == instruction_archive["image_count"]
     assert len(export_payload["instruction_review_rows"]) == 2
     assert export_payload["instruction_report"]["instruction_review_row_count"] == 2
+    assert export_payload["instruction_export_validation"]["ok"] is True
+    assert export_payload["instruction_report"]["instruction_export_validation"]["ok"] is True
     assert export_payload["instruction_report"]["training_readiness"]["status"] == "needs_review"
+    assert (
+        export_payload["instruction_report"]["training_readiness"]["instruction_export_validation_error_count"]
+        == 0
+    )
     assert export_payload["instruction_report"]["training_readiness"]["pending_manual_review_row_count"] == 1
     strict_export_response = client.get("/datasets/ds/captions/export?require_ready_instruction_export=true")
     assert strict_export_response.status_code == 409

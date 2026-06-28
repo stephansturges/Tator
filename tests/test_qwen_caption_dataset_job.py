@@ -567,9 +567,14 @@ def test_caption_instruction_archive_separates_generated_qa_from_source_annotati
     assert report["instruction_review_row_count"] == 3
     assert report["manual_review_required_count"] == 3
     assert report["split_training_row_counts"] == {"train": 2}
+    assert archive["instruction_export_validation"] == report["instruction_export_validation"]
+    assert archive["instruction_export_validation"]["ok"] is True
+    assert archive["instruction_export_validation"]["error_count"] == 0
+    assert archive["instruction_export_validation"]["row_count"] == 2
     readiness = report["training_readiness"]
     assert readiness["status"] == "needs_review"
     assert readiness["ready_for_training"] is False
+    assert readiness["instruction_export_validation_error_count"] == 0
     assert readiness["selected_training_row_count"] == 2
     assert readiness["selected_manual_review_row_count"] == 2
     assert readiness["pending_manual_review_row_count"] == 2
@@ -653,6 +658,8 @@ def test_caption_instruction_archive_separates_generated_qa_from_source_annotati
     assert sum(1 for row in deterministic["instruction_review_rows"] if row["selected_for_training"]) == 8
     assert deterministic["captioning_report"]["training_readiness"]["status"] == "ready"
     assert deterministic["captioning_report"]["training_readiness"]["ready_for_training"] is True
+    assert deterministic["captioning_report"]["instruction_export_validation"]["ok"] is True
+    assert deterministic["instruction_export_validation"]["row_count"] == 8
     assert deterministic["captioning_report"]["training_readiness"]["pending_manual_review_row_count"] == 0
     assert deterministic["archive_rows"][0]["export_metadata"]["deterministic_metadata_qa_pair_count"] == 8
     deterministic_metrics = deterministic["corpus_quality_metrics"]
@@ -1027,6 +1034,75 @@ def test_caption_instruction_training_readiness_blocks_selected_needs_revision_r
     assert readiness["needs_revision_manual_review_row_count"] == 1
     assert "selected_row_needs_revision_by_manual_review" in readiness["blocking_reasons"]
     assert "revise_selected_language_rows" in readiness["required_actions"]
+
+
+def test_caption_instruction_training_readiness_blocks_invalid_export_rows() -> None:
+    import localinferenceapi as api
+
+    validation = api._caption_instruction_validate_training_rows(
+        [
+            {
+                "image_path": "frame.jpg",
+                "question": "Return the object counts as JSON.",
+                "answer": "{not json",
+                "metadata": {
+                    "qa_id": "qa-1",
+                    "row_type": "deterministic_object_count_schema",
+                    "answer_source": "source_annotations.object_counts",
+                    "answer_format": "object_count_json",
+                    "validation_status": "machine_validated",
+                },
+            },
+            {
+                "image_path": "frame.jpg",
+                "question": "Return the object counts as JSON.",
+                "answer": "{}",
+                "metadata": {
+                    "qa_id": "qa-2",
+                    "row_type": "deterministic_object_count_schema",
+                    "answer_source": "source_annotations.object_counts",
+                    "answer_format": "object_count_json",
+                    "validation_status": "machine_validated",
+                },
+            },
+            {
+                "image_path": "frame.jpg",
+                "question": "Describe the scene.",
+                "answer": "A caption.",
+                "metadata": {
+                    "qa_id": "qa-3",
+                    "row_type": "caption0",
+                    "answer_source": "caption_record",
+                    "validation_status": "accepted",
+                    "review_status": "rejected",
+                },
+            },
+        ]
+    )
+
+    assert validation["ok"] is False
+    assert validation["error_count"] == 3
+    assert "row 1 answer is not valid JSON" in validation["errors"]
+    assert "duplicate image_path + question at row 2" in validation["errors"]
+    assert "row 3 has non-trainable review status" in validation["errors"]
+
+    readiness = api._caption_instruction_training_readiness(
+        corpus_quality_metrics={
+            "selected_flattened_row_count": 3,
+            "image_count": 1,
+            "generated_qa_candidate_count": 0,
+            "source_class_count": 0,
+        },
+        review_rows=[],
+        settings={"include_generated_qa_in_training": True},
+        export_validation=validation,
+    )
+
+    assert readiness["status"] == "blocked"
+    assert readiness["ready_for_training"] is False
+    assert readiness["instruction_export_validation_error_count"] == 3
+    assert "instruction_training_rows_invalid" in readiness["blocking_reasons"]
+    assert "fix_instruction_training_rows" in readiness["required_actions"]
 
 
 def test_caption_instruction_archive_excludes_needs_revision_generated_qa_from_training_rows(

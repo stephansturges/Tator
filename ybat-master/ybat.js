@@ -34923,6 +34923,24 @@ async function cancelRfDetrTrainingJobRequest() {
                 errors.push("training_readiness.thresholds is missing");
             }
         }
+        const exportValidation = report.instruction_export_validation;
+        if (!exportValidation || typeof exportValidation !== "object") {
+            errors.push("report missing instruction_export_validation");
+        } else {
+            if (typeof exportValidation.ok !== "boolean") {
+                errors.push("instruction_export_validation.ok must be boolean");
+            }
+            const errorCount = Number(exportValidation.error_count || 0);
+            if (!Number.isFinite(errorCount) || errorCount < 0) {
+                errors.push("instruction_export_validation.error_count is invalid");
+            }
+            if (!Array.isArray(exportValidation.errors)) {
+                errors.push("instruction_export_validation.errors must be an array");
+            }
+            if (exportValidation.ok === false || errorCount > 0) {
+                errors.push("instruction_export_validation contains training-row errors");
+            }
+        }
         return {
             ok: errors.length === 0,
             errors,

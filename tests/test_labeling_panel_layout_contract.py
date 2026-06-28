@@ -345,6 +345,7 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     assert "function validateCaptionInstructionReport" in js
     assert "corpus_quality_metrics" in js
     assert "training_readiness" in js
+    assert "instruction_export_validation" in js
     assert "function downloadCaptionInstructionJsonl" in js
     assert "function downloadCaptionInstructionArchive" in js
     assert "function downloadCaptionInstructionReview" in js
@@ -416,6 +417,8 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "training_readiness.status is invalid" in report_validator
     assert "training_readiness.ready_for_training must be boolean" in report_validator
     assert "training_readiness.thresholds is missing" in report_validator
+    assert "report missing instruction_export_validation" in report_validator
+    assert "instruction_export_validation contains training-row errors" in report_validator
     assert "Training readiness blocked" in js
     assert "Training readiness needs review" in js
     assert "Instruction JSONL export blocked: invalid readiness report" in js

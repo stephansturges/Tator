@@ -20870,6 +20870,74 @@ def _caption_instruction_training_row(
     }
 
 
+def _caption_instruction_validate_training_rows(rows: Sequence[Any]) -> Dict[str, Any]:
+    errors: List[str] = []
+    warnings: List[str] = []
+    image_paths: Set[str] = set()
+    image_question_pairs: Set[Tuple[str, str]] = set()
+    row_list = (
+        list(rows)
+        if isinstance(rows, Sequence) and not isinstance(rows, (str, bytes, bytearray))
+        else []
+    )
+    for index, row in enumerate(row_list, start=1):
+        row_number = index
+        if not isinstance(row, Mapping):
+            errors.append(f"row {row_number} is not an object")
+            continue
+        image_path = str(row.get("image_path") or "").strip()
+        question = str(row.get("question") or "").strip()
+        answer = str(row.get("answer") or "").strip()
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), Mapping) else {}
+        if not isinstance(row.get("metadata"), Mapping):
+            errors.append(f"row {row_number} metadata is missing or invalid")
+        qa_id = str(metadata.get("qa_id") or "").strip()
+        row_type = str(metadata.get("row_type") or "").strip()
+        answer_source = str(metadata.get("answer_source") or "").strip()
+        answer_format = str(metadata.get("answer_format") or "").strip().lower()
+        validation_status = str(metadata.get("validation_status") or "").strip().lower()
+        review_status = _caption_instruction_review_decision(metadata.get("review_status"))
+        if not image_path:
+            errors.append(f"row {row_number} missing image_path")
+        else:
+            image_paths.add(image_path)
+        if not question:
+            errors.append(f"row {row_number} missing question")
+        if not answer:
+            errors.append(f"row {row_number} missing answer")
+        if not qa_id:
+            errors.append(f"row {row_number} metadata missing qa_id")
+        if not row_type:
+            errors.append(f"row {row_number} metadata missing row_type")
+        if not answer_source:
+            errors.append(f"row {row_number} metadata missing answer_source")
+        if validation_status == "rejected":
+            errors.append(f"row {row_number} was rejected by archive validation")
+        if review_status in {"rejected", "needs_revision"}:
+            errors.append(f"row {row_number} has non-trainable review status")
+        if answer and (row_type.startswith("deterministic_") or answer_format == "json" or answer_format.endswith("_json")):
+            try:
+                json.loads(answer)
+            except Exception:
+                errors.append(f"row {row_number} answer is not valid JSON")
+        if image_path and question:
+            pair_key = (image_path, question)
+            if pair_key in image_question_pairs:
+                errors.append(f"duplicate image_path + question at row {row_number}")
+            image_question_pairs.add(pair_key)
+    if not row_list:
+        warnings.append("no instruction rows to export")
+    return {
+        "ok": not errors,
+        "errors": errors[:100],
+        "error_count": len(errors),
+        "warnings": warnings[:100],
+        "warning_count": len(warnings),
+        "row_count": len(row_list),
+        "image_count": len(image_paths),
+    }
+
+
 _CAPTION_INSTRUCTION_UNAVAILABLE_CONTEXT_RE = re.compile(
     r"\b(identity|identify|license plate|plate number|age|gender|ethnicity|intent|intention|why)\b",
     flags=re.IGNORECASE,
@@ -21567,6 +21635,7 @@ def _caption_instruction_training_readiness(
     corpus_quality_metrics: Mapping[str, Any],
     review_rows: Sequence[Mapping[str, Any]],
     settings: Mapping[str, Any],
+    export_validation: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     thresholds = {
         "min_selected_flattened_rows": 1,
@@ -21618,6 +21687,10 @@ def _caption_instruction_training_readiness(
         blocking_reasons.append("no_images")
     if selected_rows < thresholds["min_selected_flattened_rows"]:
         blocking_reasons.append("no_selected_training_rows")
+    export_validation_errors = int((export_validation or {}).get("error_count") or 0)
+    if export_validation_errors > 0 or (export_validation and not bool(export_validation.get("ok"))):
+        blocking_reasons.append("instruction_training_rows_invalid")
+        required_actions.append("fix_instruction_training_rows")
     if rejected_manual_review_rows:
         blocking_reasons.append("selected_row_rejected_by_manual_review")
     if needs_revision_manual_review_rows:
@@ -21673,6 +21746,7 @@ def _caption_instruction_training_readiness(
         "pending_manual_review_row_count": manual_review_pending_count,
         "rejected_manual_review_row_count": len(rejected_manual_review_rows),
         "needs_revision_manual_review_row_count": len(needs_revision_manual_review_rows),
+        "instruction_export_validation_error_count": export_validation_errors,
         "generated_qa_rejection_rate": generated_rejection_rate,
         "generated_qa_global_duplicate_question_rate": generated_global_duplicate_rate,
         "generated_qa_per_image_duplicate_question_rate": generated_per_image_duplicate_rate,
@@ -22120,6 +22194,7 @@ def _dataset_caption_instruction_archive(
         training_rows,
         rejections,
     )
+    instruction_export_validation = _caption_instruction_validate_training_rows(training_rows)
     review_rows = _caption_instruction_review_rows(
         images,
         training_rows,
@@ -22132,6 +22207,7 @@ def _dataset_caption_instruction_archive(
         corpus_quality_metrics=corpus_quality_metrics,
         review_rows=review_rows,
         settings=settings,
+        export_validation=instruction_export_validation,
     )
     captioning_report = {
         "format": "tator_caption_instruction_report_v1",
@@ -22160,6 +22236,7 @@ def _dataset_caption_instruction_archive(
         },
         "provenance_summary": dict(sorted(provenance_summary.items())),
         "corpus_quality_metrics": corpus_quality_metrics,
+        "instruction_export_validation": instruction_export_validation,
         "training_readiness": training_readiness,
         "instruction_review_row_count": len(review_rows),
         "manual_review_required_count": manual_review_required_count,
@@ -22210,6 +22287,7 @@ def _dataset_caption_instruction_archive(
         "rejection_reason_counts": dict(sorted(rejection_reason_counts.items())),
         "provenance_summary": dict(sorted(provenance_summary.items())),
         "corpus_quality_metrics": corpus_quality_metrics,
+        "instruction_export_validation": instruction_export_validation,
         "training_readiness": training_readiness,
         "captioning_report": captioning_report,
         "rejections": rejections,
@@ -22505,6 +22583,11 @@ def export_captions(dataset_id: str, options: Optional[Mapping[str, Any]] = None
         if isinstance(instruction_archive.get("captioning_report"), Mapping)
         else {}
     )
+    instruction_export_validation = (
+        dict(instruction_archive.get("instruction_export_validation"))
+        if isinstance(instruction_archive.get("instruction_export_validation"), Mapping)
+        else {}
+    )
     summary = {
         "image_count": len(grouped),
         "caption_count": len(indexed_records),
@@ -22528,6 +22611,10 @@ def export_captions(dataset_id: str, options: Optional[Mapping[str, Any]] = None
             else ""
         ).strip()
         or "unknown",
+        "instruction_export_validation_ok": bool(instruction_export_validation.get("ok")),
+        "instruction_export_validation_error_count": int(
+            instruction_export_validation.get("error_count") or 0
+        ),
         "rejected_training_row_count": int(instruction_archive.get("rejected_training_row_count") or 0),
     }
     instruction_archive["summary"] = dict(instruction_summary)
@@ -22540,6 +22627,7 @@ def export_captions(dataset_id: str, options: Optional[Mapping[str, Any]] = None
         "instruction_archive_rows": instruction_archive_rows,
         "instruction_review_rows": instruction_review_rows,
         "instruction_report": instruction_report,
+        "instruction_export_validation": instruction_export_validation,
         "instruction_archive": instruction_archive,
         "archive": _dataset_caption_grouped_archive(indexed_records, dataset_id=dataset_id, summary=summary),
         "summary": summary,

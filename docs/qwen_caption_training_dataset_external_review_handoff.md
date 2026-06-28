@@ -129,6 +129,8 @@ What is implemented in this checkpoint:
 - Run-level instruction reports with corpus quality metrics.
 - Training-readiness classification.
 - Browser-side instruction export validation.
+- Server-side flattened trainer-row validation exposed as
+  `instruction_export_validation` in the archive, report, and API payload.
 - Direct trainer import of the flat instruction JSONL row shape.
 - Runtime hardening for prompt size, output-token overrides, loop detection,
   fallback, set-and-forget supervision, and model-download state.
@@ -561,6 +563,12 @@ gate only for deliberate review-pending diagnostics. Scripts can request the
 same server-side behavior with
 `/captions/export?require_ready_instruction_export=true`, which returns HTTP
 409 unless readiness is `ready`.
+
+The report also includes `instruction_export_validation`, which is the backend
+equivalent of the browser's trainer JSONL validator. It checks required fields,
+row metadata, duplicate image/question pairs, invalid JSON answers, rejected
+validation status, and non-trainable review status. Any validation error blocks
+training readiness with `instruction_training_rows_invalid`.
 
 ## Review Rows
 

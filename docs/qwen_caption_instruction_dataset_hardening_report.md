@@ -115,6 +115,11 @@ row before training.
 - The browser-side instruction JSONL validator now validates row type, answer
   format, and validation status from row metadata before writing a download,
   preventing rejected or malformed rows from being saved by the UI.
+- The backend now emits `instruction_export_validation` in the archive, report,
+  API payload, and instruction summary. The same flattened trainer-row checks
+  run server-side, and training readiness becomes blocked if malformed,
+  duplicate, rejected, needs-revision, or invalid-JSON rows ever reach the
+  trainer export path.
 - The instruction archive now exposes both a full JSON audit object and
   per-image `instruction_archive_rows` for JSONL download. The report records
   row-type distribution, split image counts, split training-row counts,

@@ -226,6 +226,118 @@ def test_qwen_conversation_dataset_imports_flat_question_answer_rows(tmp_path):
     }
 
 
+@pytest.mark.parametrize(
+    ("metadata", "answer", "error_pattern"),
+    [
+        (
+            {"row_type": "generated_qa", "validation_status": "rejected"},
+            "A rejected answer.",
+            "qwen_training_row_validation_rejected:line_1",
+        ),
+        (
+            {"row_type": "generated_qa", "review_status": "needs-revision"},
+            "A row needing revision.",
+            "qwen_training_row_review_not_trainable:needs_revision:line_1",
+        ),
+        (
+            {"row_type": "caption0", "review_decision": "reject"},
+            "A rejected caption.",
+            "qwen_training_row_review_not_trainable:rejected:line_1",
+        ),
+        (
+            {
+                "row_type": "deterministic_object_count_schema",
+                "answer_format": "object_count_json",
+                "validation_status": "machine_validated",
+            },
+            "{not json",
+            "qwen_training_row_invalid_json_answer:line_1",
+        ),
+    ],
+)
+def test_qwen_conversation_dataset_rejects_non_trainable_flat_rows(
+    tmp_path,
+    metadata,
+    answer,
+    error_pattern,
+):
+    dataset_root = tmp_path / "dataset"
+    image_dir = dataset_root / "train" / "images"
+    image_dir.mkdir(parents=True)
+    Image.new("RGB", (4, 4), (8, 16, 32)).save(image_dir / "sample.png")
+    row = {
+        "image_path": "sample.png",
+        "question": "Describe this image in detail.",
+        "answer": answer,
+        "metadata": metadata,
+    }
+    (dataset_root / "train" / "annotations.jsonl").write_text(
+        json.dumps(row) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(training.TrainingError, match=error_pattern):
+        training.QwenConversationDataset(dataset_root, "train", processor=object())
+
+
+def test_qwen_conversation_dataset_rejects_duplicate_flat_questions(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    image_dir = dataset_root / "train" / "images"
+    image_dir.mkdir(parents=True)
+    Image.new("RGB", (4, 4), (8, 16, 32)).save(image_dir / "sample.png")
+    rows = [
+        {
+            "image_path": "sample.png",
+            "question": "Describe this image in detail.",
+            "answer": "A compact scene is shown.",
+            "metadata": {"row_type": "caption0"},
+        },
+        {
+            "image_path": "sample.png",
+            "question": "Describe this image in detail.",
+            "answer": "A duplicate caption.",
+            "metadata": {"row_type": "generated_qa"},
+        },
+    ]
+    (dataset_root / "train" / "annotations.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(training.TrainingError, match="qwen_training_duplicate_flat_question:line_2"):
+        training.QwenConversationDataset(dataset_root, "train", processor=object())
+
+
+def test_qwen_conversation_dataset_ignores_blank_flat_rows_before_duplicate_check(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    image_dir = dataset_root / "train" / "images"
+    image_dir.mkdir(parents=True)
+    Image.new("RGB", (4, 4), (8, 16, 32)).save(image_dir / "sample.png")
+    rows = [
+        {
+            "image_path": "sample.png",
+            "question": "Describe this image in detail.",
+            "answer": "",
+            "metadata": {"row_type": "caption0"},
+        },
+        {
+            "image_path": "sample.png",
+            "question": "Describe this image in detail.",
+            "answer": "A compact scene is shown.",
+            "metadata": {"row_type": "caption0"},
+        },
+    ]
+    (dataset_root / "train" / "annotations.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+    dataset = training.QwenConversationDataset(dataset_root, "train", processor=object())
+
+    assert len(dataset) == 1
+    assert dataset.entries[0]["conversations"][1]["value"] == "A compact scene is shown."
+
+
 def test_qwen_conversation_dataset_rejects_symlinked_annotation_escape(tmp_path):
     dataset_root = tmp_path / "dataset"
     split_root = dataset_root / "train"

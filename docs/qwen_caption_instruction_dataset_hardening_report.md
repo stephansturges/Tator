@@ -159,7 +159,10 @@ row before training.
   requested generated-QA mix and answer format.
 - The Qwen training dataset loader now accepts exported flat instruction rows
   directly, preserving row metadata while converting each row into the
-  conversation format used by fine-tuning.
+  conversation format used by fine-tuning. The loader now also fails closed on
+  stale or hand-edited flat rows that carry rejected validation state,
+  rejected/needs-revision review state, invalid deterministic JSON answers, or
+  duplicate image/question pairs.
 
 ## Validation Completed
 
@@ -170,8 +173,17 @@ row before training.
   - `node --check ybat-master/ybat.js`
 - Focused instruction-dataset, export, and UI contract tests:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py tests/test_qwen_training_backend.py tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete tests/test_labeling_panel_layout_contract.py tests/test_qwen_caption_ui_smoke_tool.py -q`
-  - Result: 137 passed.
-- Trainer import compatibility:
+  - Current result: 146 passed.
+- Current trainer-import fail-closed boundary tests:
+  - `./.venv-macos/bin/python -m pytest tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_imports_flat_question_answer_rows tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_non_trainable_flat_rows tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_duplicate_flat_questions tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_ignores_blank_flat_rows_before_duplicate_check -q`
+  - Result: 7 passed.
+- Current full trainer backend test file:
+  - `./.venv-macos/bin/python -m pytest tests/test_qwen_training_backend.py -q`
+  - Result: 20 passed.
+- Current caption/instruction/UI contract tests outside the trainer file:
+  - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete tests/test_labeling_panel_layout_contract.py tests/test_qwen_caption_ui_smoke_tool.py -q`
+  - Result: 126 passed.
+- Earlier targeted trainer import compatibility:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_imports_flat_question_answer_rows tests/test_qwen_caption_dataset_job.py::test_caption_instruction_training_rows_import_into_qwen_trainer -q`
   - Result: 2 passed.
 - Additional instruction archive provenance and manifest-gating regression:

@@ -1,4 +1,4 @@
-# Qwen Caption Training Dataset External Review Handoff
+# Qwen Caption Training Dataset Complete External Review Handoff
 
 Date: 2026-06-28
 
@@ -27,11 +27,12 @@ Supporting documents:
 
 Validated checkpoint:
 
-- Current implementation checkpoint: `eb4fa2b Require ready instruction exports
-  by default`.
+- This packet describes the implementation through the trainer-import
+  fail-closed boundary hardening on 2026-06-28.
 - Recent preceding checkpoints added review import, review parsing hardening,
-  reviewed-out row exclusion, ready-report gating, and caption instruction
-  export compatibility.
+  reviewed-out row exclusion, ready-report gating, caption instruction export
+  compatibility, duplicate review-target rejection, and server-side instruction
+  export validation.
 - The repo may contain unrelated local untracked files; they are not part of
   this review packet unless explicitly listed in Git history.
 
@@ -41,6 +42,8 @@ Definition of done for this checkpoint:
 - The trainer can import the flat exported instruction rows.
 - Readiness and review metadata can prevent unsafe trainer JSONL export by
   default.
+- The trainer has its own final import boundary and refuses stale or edited flat
+  rows that contradict the export/review contract.
 - Structural and UI smoke tests pass.
 
 Definition of not done:
@@ -85,6 +88,13 @@ The UI now exposes a one-click **Create VLM training dataset** workflow with
 controls for generated QA count, generated QA mix, answer format, deterministic
 metadata QA, source-context use, and strict grounding. The browser also validates
 instruction JSONL before download.
+
+The final training loader is now deliberately defensive. It accepts the flat
+instruction JSONL shape exported by the caption workflow, but it does not trust
+that file blindly. If the file has been edited after export, or if stale rows
+carry rejected validation, rejected or needs-revision review state, invalid JSON
+answers, or duplicate image/question pairs, the trainer import fails before any
+fine-tuning step starts.
 
 The runtime was hardened around the failure modes observed during captioning:
 oversized prompts, confusing output-token settings, repeated/refinement passes,
@@ -132,6 +142,9 @@ What is implemented in this checkpoint:
 - Server-side flattened trainer-row validation exposed as
   `instruction_export_validation` in the archive, report, and API payload.
 - Direct trainer import of the flat instruction JSONL row shape.
+- Trainer-side fail-closed checks for stale or hand-edited flat rows carrying
+  rejected validation state, rejected/needs-revision review state, invalid
+  deterministic JSON answers, or duplicate image/question pairs.
 - Runtime hardening for prompt size, output-token overrides, loop detection,
   fallback, set-and-forget supervision, and model-download state.
 - Ready-report gating for trainer JSONL export, enabled in the UI by default and
@@ -370,6 +383,7 @@ mutate final annotations.
 | Review JSONL import | Implemented | Human decisions can be applied back to saved caption and generated-QA records. |
 | Training-readiness status | Implemented | Exports can be blocked, warned, or marked ready based on row and review state. |
 | Flat JSONL trainer import | Implemented | The Qwen trainer can consume exported rows directly. |
+| Trainer import fail-closed checks | Implemented | Stale or edited files cannot bypass export readiness and review state silently. |
 | Prompt-size adaptation | Implemented | Dense label scenes no longer require dumping every box into a prompt. |
 | Loop detection and retry | Implemented | Repetition stalls become observable recovery events instead of silent hangs. |
 | Set-and-forget supervision | Implemented as the durable default | Long dataset jobs are designed around backend jobs, resume, and recovery rather than browser babysitting. |
@@ -476,6 +490,11 @@ fine-tuning:
 
 This removes the need for a manual conversion step between browser export and
 training import.
+
+The loader does not blindly trust flat rows. If a stale or hand-edited JSONL file
+contains explicit rejected validation status, rejected or needs-revision review
+status, invalid JSON for deterministic or JSON-formatted rows, or duplicate
+image/question pairs, import fails before fine-tuning starts.
 
 ## Validation And Rejection Rules
 
@@ -785,7 +804,9 @@ Training loader:
   - direct import of flat instruction rows
   - conversion to Qwen conversation entries
   - preservation of row metadata
-  - review-decision metadata preserved from exported rows
+  - fail-closed rejection of non-trainable review state
+  - invalid deterministic or JSON-formatted answer rejection
+  - duplicate image/question pair rejection
 
 UI:
 
@@ -810,18 +831,7 @@ Docs:
 
 Validation performed for the implementation described in this handoff:
 
-```bash
-./.venv-macos/bin/python -m pytest \
-  tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_imports_flat_question_answer_rows \
-  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_training_rows_import_into_qwen_trainer \
-  -q
-```
-
-Result:
-
-```text
-2 passed
-```
+Current combined caption/instruction/trainer/UI contract suite:
 
 ```bash
 ./.venv-macos/bin/python -m pytest \
@@ -836,7 +846,55 @@ Result:
 Result:
 
 ```text
-137 passed
+146 passed
+```
+
+Focused trainer-import boundary tests:
+
+```bash
+./.venv-macos/bin/python -m pytest \
+  tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_imports_flat_question_answer_rows \
+  tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_non_trainable_flat_rows \
+  tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_duplicate_flat_questions \
+  tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_ignores_blank_flat_rows_before_duplicate_check \
+  -q
+```
+
+Result:
+
+```text
+7 passed
+```
+
+Full trainer backend test file:
+
+```bash
+./.venv-macos/bin/python -m pytest \
+  tests/test_qwen_training_backend.py \
+  -q
+```
+
+Result:
+
+```text
+20 passed
+```
+
+Caption/instruction/UI contract suite outside the trainer file:
+
+```bash
+./.venv-macos/bin/python -m pytest \
+  tests/test_qwen_caption_dataset_job.py \
+  tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete \
+  tests/test_labeling_panel_layout_contract.py \
+  tests/test_qwen_caption_ui_smoke_tool.py \
+  -q
+```
+
+Result:
+
+```text
+126 passed
 ```
 
 Syntax and formatting checks:
@@ -938,6 +996,9 @@ no matches
 
 10. Import the exported instruction JSONL into the Qwen trainer and verify that
     image paths resolve and rows are converted to conversations.
+11. Attempt trainer import with a deliberately rejected review row, a
+    needs-revision review row, an invalid deterministic JSON answer, and a
+    duplicate image/question pair. Each case should fail before training.
 
 ## Remaining Work Before Treating The Corpus As Training-Ready
 

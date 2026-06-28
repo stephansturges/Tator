@@ -12,9 +12,10 @@ import inspect
 import logging
 import os
 import random
+import re
 from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import torch
@@ -366,14 +367,63 @@ def _conversation_to_messages(
     return messages
 
 
+def _normalise_training_review_decision(value: Any) -> str:
+    decision = re.sub(r"[\s-]+", "_", str(value or "").strip().lower())
+    if decision in {"reject", "rejected", "deny", "denied", "drop", "dropped", "fail", "failed"}:
+        return "rejected"
+    if decision in {"revise", "revised", "needs_revision", "needs_review", "needs_rewrite", "edit", "edited"}:
+        return "needs_revision"
+    if decision in {"accept", "accepted", "approve", "approved", "keep", "kept", "pass", "passed"}:
+        return "accepted"
+    return decision or "unreviewed"
+
+
+def _flat_training_row_error_suffix(line_number: Optional[int]) -> str:
+    return f":line_{line_number}" if line_number is not None else ""
+
+
+def _validate_flat_training_row_metadata(
+    payload: Dict[str, Any],
+    *,
+    line_number: Optional[int] = None,
+) -> None:
+    metadata = payload.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    validation_status = str(metadata.get("validation_status") or "").strip().lower()
+    if validation_status in {"rejected", "failed", "invalid"}:
+        raise TrainingError(
+            f"qwen_training_row_validation_rejected{_flat_training_row_error_suffix(line_number)}"
+        )
+    review_status = _normalise_training_review_decision(
+        metadata.get("review_status") or metadata.get("review_decision")
+    )
+    if review_status in {"rejected", "needs_revision"}:
+        raise TrainingError(
+            f"qwen_training_row_review_not_trainable:{review_status}{_flat_training_row_error_suffix(line_number)}"
+        )
+    row_type = str(metadata.get("row_type") or "").strip().lower()
+    answer_format = str(metadata.get("answer_format") or "").strip().lower()
+    answer = str(payload.get("answer") or "").strip()
+    if answer and (row_type.startswith("deterministic_") or answer_format == "json" or answer_format.endswith("_json")):
+        try:
+            json.loads(answer)
+        except Exception as exc:  # noqa: BLE001
+            raise TrainingError(
+                f"qwen_training_row_invalid_json_answer{_flat_training_row_error_suffix(line_number)}"
+            ) from exc
+
+
 def _flat_training_row_to_conversation_entry(
     payload: Dict[str, Any],
     image_name: str,
+    *,
+    line_number: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
     question = str(payload.get("question") or "").strip()
     answer = str(payload.get("answer") or "").strip()
     if not question or not answer:
         return None
+    _validate_flat_training_row_metadata(payload, line_number=line_number)
     user_value = question if "<image>" in question else f"<image>\n{question}"
     entry: Dict[str, Any] = {
         "image": image_name,
@@ -405,8 +455,9 @@ class QwenConversationDataset(Dataset):
         jsonl_path = _resolve_annotation_path(dataset_root, split)
         if jsonl_path is None:
             raise TrainingError(f"qwen_annotations_missing:{dataset_root / split / 'annotations.jsonl'}")
+        seen_flat_image_questions: Set[Tuple[str, str]] = set()
         with jsonl_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
+            for line_number, line in enumerate(handle, start=1):
                 line = line.strip()
                 if not line:
                     continue
@@ -446,8 +497,19 @@ class QwenConversationDataset(Dataset):
                             }
                         )
                 elif "question" in payload and "answer" in payload:
-                    entry = _flat_training_row_to_conversation_entry(payload, image_name)
+                    entry = _flat_training_row_to_conversation_entry(
+                        payload,
+                        image_name,
+                        line_number=line_number,
+                    )
                     if entry is not None:
+                        question = str(payload.get("question") or "").strip()
+                        flat_key = (image_name, question)
+                        if flat_key in seen_flat_image_questions:
+                            raise TrainingError(
+                                f"qwen_training_duplicate_flat_question:line_{line_number}"
+                            )
+                        seen_flat_image_questions.add(flat_key)
                         self.entries.append(entry)
                 else:
                     continue

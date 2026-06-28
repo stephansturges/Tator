@@ -1,4 +1,4 @@
-# Qwen Caption Instruction Dataset Partner Handoff
+# Qwen Caption Instruction Dataset External Team Handoff
 
 Date: 2026-06-28
 
@@ -16,7 +16,8 @@ training use.
 The captioning stack now has a functional UI and backend path for creating
 caption-based VLM training datasets. The implementation is wired end to end for
 dataset-backed generation, artifact export, human review import, readiness
-reporting, and trainer import compatibility.
+reporting, trainer import compatibility, and trainer-side rejection of stale or
+hand-edited non-trainable rows.
 
 This is an implementation handoff, not a claim that any generated corpus is
 already training-grade. The code path is structurally tested. A real-data pilot,
@@ -46,6 +47,9 @@ The new work adds a separate instruction-dataset path:
 - The browser validates instruction JSONL before download.
 - A reviewer can import reviewed JSONL decisions back into the dataset.
 - The Qwen trainer can import the flat exported instruction rows directly.
+- The Qwen trainer refuses flat rows that carry rejected validation state,
+  rejected or needs-revision review state, invalid deterministic JSON answers,
+  or duplicate image/question pairs.
 
 The key point is that instruction dataset creation is now a product workflow,
 not a manual script chain.
@@ -184,6 +188,13 @@ allowed.
 
 The Qwen trainer imports this flat shape directly and converts each row into an
 image/question/answer conversation.
+
+The trainer import is a final safety boundary, not a blind loader. It preserves
+metadata from exported rows, then rejects rows that are explicitly marked
+non-trainable, rows with invalid JSON answers for deterministic or JSON-formatted
+types, and duplicate image/question pairs. This protects fine-tuning runs from
+stale review artifacts or manual JSONL edits that bypass the normal export
+readiness gate.
 
 ### Instruction Archive Rows
 
@@ -488,7 +499,7 @@ Related documentation:
 The implementation has been checked with focused backend, trainer, UI contract,
 and rendered UI smoke tests.
 
-Focused instruction-dataset and UI contract suite:
+Current combined caption/instruction/trainer/UI contract suite:
 
 ```bash
 ./.venv-macos/bin/python -m pytest \
@@ -503,22 +514,53 @@ Focused instruction-dataset and UI contract suite:
 Latest recorded result:
 
 ```text
-137 passed
+146 passed
 ```
 
-Trainer import compatibility:
+Focused trainer-import boundary suite:
 
 ```bash
 ./.venv-macos/bin/python -m pytest \
   tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_imports_flat_question_answer_rows \
-  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_training_rows_import_into_qwen_trainer \
+  tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_non_trainable_flat_rows \
+  tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_duplicate_flat_questions \
+  tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_ignores_blank_flat_rows_before_duplicate_check \
   -q
 ```
 
-Recorded result:
+Latest recorded result:
 
 ```text
-2 passed
+7 passed
+```
+
+Full trainer backend suite:
+
+```bash
+./.venv-macos/bin/python -m pytest tests/test_qwen_training_backend.py -q
+```
+
+Latest recorded result:
+
+```text
+20 passed
+```
+
+Focused instruction-dataset and UI contract suite:
+
+```bash
+./.venv-macos/bin/python -m pytest \
+  tests/test_qwen_caption_dataset_job.py \
+  tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete \
+  tests/test_labeling_panel_layout_contract.py \
+  tests/test_qwen_caption_ui_smoke_tool.py \
+  -q
+```
+
+Latest recorded result:
+
+```text
+126 passed
 ```
 
 Runtime and unattended hardening suites have also been run in prior hardening

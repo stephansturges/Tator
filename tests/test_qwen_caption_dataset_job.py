@@ -840,7 +840,7 @@ def test_caption_instruction_review_decision_normalizes_external_review_values()
     assert api._caption_instruction_review_decision("Needs-Rewrite") == "needs_revision"
 
 
-def test_caption_instruction_review_import_skips_mismatched_dataset_id(
+def test_caption_instruction_review_import_rejects_mismatched_dataset_id(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -881,36 +881,36 @@ def test_caption_instruction_review_import_skips_mismatched_dataset_id(
         ],
     )
 
-    result = api.apply_caption_instruction_review(
-        "ds",
-        {
-            "rows": [
-                {
-                    "format": "tator_caption_instruction_review_rows_v1",
-                    "dataset_id": "other-dataset",
-                    "image_path": "frame.jpg",
-                    "split": "train",
-                    "row_origin": "generated_qa",
-                    "qa_id": "qa-1",
-                    "row_type": "generated_qa",
-                    "question": "What is the scene type?",
-                    "candidate_answer": "A waterfront area.",
-                    "training_answer": "A waterfront area.",
-                    "validation_status": "accepted",
-                    "selected_for_training": True,
-                    "requires_manual_review": True,
-                    "review_decision": "rejected",
-                    "review_notes": "wrong dataset",
-                    "rejection_reasons": [],
-                    "source_summary": {"status": "empty_label_file"},
-                }
-            ]
-        },
-    )
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.apply_caption_instruction_review(
+            "ds",
+            {
+                "rows": [
+                    {
+                        "format": "tator_caption_instruction_review_rows_v1",
+                        "dataset_id": "other-dataset",
+                        "image_path": "frame.jpg",
+                        "split": "train",
+                        "row_origin": "generated_qa",
+                        "qa_id": "qa-1",
+                        "row_type": "generated_qa",
+                        "question": "What is the scene type?",
+                        "candidate_answer": "A waterfront area.",
+                        "training_answer": "A waterfront area.",
+                        "validation_status": "accepted",
+                        "selected_for_training": True,
+                        "requires_manual_review": True,
+                        "review_decision": "rejected",
+                        "review_notes": "wrong dataset",
+                        "rejection_reasons": [],
+                        "source_summary": {"status": "empty_label_file"},
+                    }
+                ]
+            },
+        )
 
-    assert result["applied_count"] == 0
-    assert result["skipped_count"] == 1
-    assert result["skipped_rows"][0]["reason"] == "dataset_id_mismatch"
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "review_rows_dataset_id_mismatch:row_1:other-dataset!=ds"
     records = api._load_dataset_caption_instruction_records(entry)
     assert records[0]["review_status"] == ""
     assert "review_decision" not in records[0]["metadata"]

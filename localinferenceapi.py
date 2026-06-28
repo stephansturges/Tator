@@ -22661,6 +22661,28 @@ def _caption_instruction_review_dataset_id_matches(row: Mapping[str, Any], datas
     return row_dataset_id == str(dataset_id or "").strip()
 
 
+def _caption_instruction_reject_dataset_id_mismatches(
+    rows: Sequence[Any],
+    *,
+    dataset_id: str,
+) -> None:
+    expected = str(dataset_id or "").strip()
+    if not expected:
+        return
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, Mapping):
+            continue
+        if str(row.get("format") or "").strip() != CAPTION_INSTRUCTION_REVIEW_ROWS_FORMAT:
+            continue
+        row_dataset_id = str(row.get("dataset_id") or "").strip()
+        if not row_dataset_id or row_dataset_id == expected:
+            continue
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail=f"review_rows_dataset_id_mismatch:row_{index}:{row_dataset_id}!={expected}",
+        )
+
+
 def _caption_instruction_review_image_candidates(
     entry: Dict[str, Any],
     row: Mapping[str, Any],
@@ -22818,6 +22840,7 @@ def apply_caption_instruction_review(dataset_id: str, payload: Dict[str, Any]):
     entry = _resolve_dataset_entry(dataset_id)
     _require_dataset_annotation_lock_owner_if_active(entry, payload)
     rows = _caption_instruction_review_payload_rows(payload)
+    _caption_instruction_reject_dataset_id_mismatches(rows, dataset_id=dataset_id)
     _caption_instruction_reject_duplicate_review_targets(rows, dataset_id=dataset_id)
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     reviewer = str((payload or {}).get("reviewer") or "").strip()

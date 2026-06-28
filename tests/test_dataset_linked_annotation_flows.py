@@ -2632,6 +2632,18 @@ def test_caption_alternate_routes_append_update_export_and_delete(
         for row in export_payload["instruction_training_rows"]
     )
     selected_review_row = next(row for row in export_payload["instruction_review_rows"] if row["selected_for_training"])
+    mismatched_review_row = {
+        **selected_review_row,
+        "dataset_id": "other-dataset",
+        "review_decision": "accepted",
+        "review_notes": "wrong dataset should fail closed",
+    }
+    mismatched_review_response = client.post(
+        "/datasets/ds/captions/instruction_review",
+        json={"rows": [mismatched_review_row]},
+    )
+    assert mismatched_review_response.status_code == 400
+    assert "review_rows_dataset_id_mismatch:row_1:other-dataset!=ds" in mismatched_review_response.text
     selected_review_row["review_decision"] = "accepted"
     selected_review_row["review_notes"] = "route-level review import"
     review_response = client.post(

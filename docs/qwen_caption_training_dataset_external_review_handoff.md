@@ -618,7 +618,7 @@ The review import is deliberately conservative:
 
 - It accepts JSON arrays, JSON objects containing row arrays, and JSONL files.
 - It refuses to apply rows whose embedded dataset id does not match the selected
-  dataset.
+  dataset, and this rejection happens before any review metadata is written.
 - It rejects duplicate actionable review targets before applying any imported
   metadata. Exact duplicates and conflicting duplicate decisions both fail
   closed, so API/script imports cannot silently let the last duplicate row win.

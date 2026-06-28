@@ -132,7 +132,8 @@ row before training.
   decision metadata back to saved caption and generated-QA records. This closes
   the export-review-import loop without editing source labels, questions,
   answers, boxes, or final annotations. Rows carrying a different dataset id
-  are skipped by the backend and blocked by the UI import preflight.
+  are blocked by the UI import preflight and rejected by the backend before any
+  review metadata is applied.
 - The backend rejects duplicate actionable review targets before applying any
   imported review metadata. Exact duplicate decisions and conflicting duplicate
   decisions both fail closed, so API or script imports cannot silently let the

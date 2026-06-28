@@ -124,7 +124,7 @@ These rules define the correctness of the implementation:
 - A row that is rejected or marked needs-revision by review is excluded from
   flattened training output.
 - A review file with a mismatched embedded dataset id is blocked in the UI and
-  skipped by the backend.
+  rejected by the backend before any review metadata is applied.
 
 Any change that violates these invariants should be treated as a regression.
 
@@ -348,7 +348,7 @@ It ignores:
 - deterministic metadata QA rows, because those are regenerated from labels at
   export time
 
-It blocks or skips:
+It fails closed on:
 
 - rows with an embedded dataset id that does not match the selected dataset
 
@@ -583,7 +583,7 @@ language quality.
 7. Confirm that deterministic metadata QA is absent unless explicitly enabled.
 8. Import a reviewed JSONL file and verify that only review metadata changes.
 9. Attempt to import a review file with a different embedded dataset id and
-   confirm that it is blocked or skipped.
+   confirm that it is rejected before any review metadata is applied.
 10. Import the instruction JSONL into the Qwen trainer and verify conversation
     conversion.
 11. Review generated QA content manually for visual grounding and usefulness.

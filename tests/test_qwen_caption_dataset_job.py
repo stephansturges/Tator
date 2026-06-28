@@ -739,6 +739,9 @@ def test_caption_instruction_review_import_persists_review_metadata(
             }
         ],
     )
+    text_label_path = tmp_path / "text_labels" / "frame.txt"
+    text_label_path.parent.mkdir(parents=True, exist_ok=True)
+    text_label_path.write_text("A primary caption.", encoding="utf-8")
     synthetic_caption_id = (
         "primary_"
         + hashlib.sha1("ds|train/frame.jpg|A primary caption.".encode("utf-8")).hexdigest()[:16]
@@ -1305,6 +1308,11 @@ def test_caption_instruction_review_import_rejects_stale_caption0_text(
         {"qa_id": "primary-review"},
         {"metadata": {"synthetic": True}},
         {"answer_source": "text_label"},
+        {
+            "qa_id": "primary_0000000000000000",
+            "metadata": {"synthetic": True},
+            "answer_source": "text_label",
+        },
     ],
 )
 def test_caption_instruction_review_import_rejects_arbitrary_caption0_creation(
@@ -1336,6 +1344,9 @@ def test_caption_instruction_review_import_rejects_arbitrary_caption0_creation(
         "primary_"
         + hashlib.sha1("ds|train/frame.jpg|A primary caption.".encode("utf-8")).hexdigest()[:16]
     )
+    text_label_path = tmp_path / "text_labels" / "frame.txt"
+    text_label_path.parent.mkdir(parents=True, exist_ok=True)
+    text_label_path.write_text("A primary caption.", encoding="utf-8")
     row = {
         "format": "tator_caption_instruction_review_rows_v1",
         "dataset_id": "ds",

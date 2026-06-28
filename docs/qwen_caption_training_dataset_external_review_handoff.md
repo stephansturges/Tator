@@ -672,8 +672,9 @@ The review import is deliberately conservative:
   question or answer no longer matches the saved language record, and
   unresolvable synthetic caption0 review targets before applying any imported
   metadata. Caption0 review rows can materialize a saved caption review record
-  only when they carry current exported synthetic text-label provenance; arbitrary
-  caption0 rows are rejected instead of becoming new captions.
+  only when their synthetic id matches the selected dataset, resolved image key,
+  and current text-label caption; arbitrary or forged caption0 rows are rejected
+  instead of becoming new captions.
 - It ignores blank or unknown decisions instead of inventing a review result.
 - It applies decisions only to matching caption0 or generated-QA records.
 - It skips deterministic metadata QA decisions because those rows are rebuilt
@@ -682,7 +683,7 @@ The review import is deliberately conservative:
 - It records reviewer, notes, source row metadata, and decision timestamps.
 - It does not change questions, answers, source labels, boxes, image paths, or
   selected final annotations.
-- It reports how many rows were received, applied, created from exported
+- It reports how many rows were received, applied, created from recomputed
   synthetic text-label caption0 provenance, or skipped.
 - Rejected and needs-revision caption0 or generated-QA candidates remain in the
   archive and review rows, but they are not flattened into trainer rows.
@@ -905,7 +906,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Result:
 
 ```text
-170 passed
+171 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch
@@ -941,7 +942,7 @@ Focused review-import fail-closed tests:
 Result:
 
 ```text
-14 passed
+15 passed
 ```
 
 Focused trainer-import boundary tests:
@@ -989,7 +990,7 @@ Caption/instruction/UI contract suite outside the trainer file:
 Result:
 
 ```text
-145 passed
+146 passed
 ```
 
 Syntax and formatting checks:

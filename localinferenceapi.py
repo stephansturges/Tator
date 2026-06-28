@@ -20071,9 +20071,12 @@ def _dataset_caption_synthetic_primary(
     caption = str(caption or "").strip()
     if not caption:
         return None
-    digest = hashlib.sha1(f"{dataset_id}|{image_key}|{caption}".encode("utf-8")).hexdigest()[:16]
     return {
-        "id": f"primary_{digest}",
+        "id": _dataset_caption_synthetic_primary_id(
+            dataset_id=dataset_id,
+            image_key=image_key,
+            caption=caption,
+        ),
         "image_name": image_name,
         "image": image_name,
         "image_key": image_key,
@@ -20086,6 +20089,18 @@ def _dataset_caption_synthetic_primary(
         "updated_at": "",
         "metadata": {"synthetic": True},
     }
+
+
+def _dataset_caption_synthetic_primary_id(
+    *,
+    dataset_id: str,
+    image_key: str,
+    caption: str,
+) -> str:
+    digest = hashlib.sha1(
+        f"{str(dataset_id or '').strip()}|{str(image_key or '').strip()}|{str(caption or '').strip()}".encode("utf-8")
+    ).hexdigest()[:16]
+    return f"primary_{digest}"
 
 
 def _dataset_caption_bundle_for_image(
@@ -23202,7 +23217,15 @@ def _caption_instruction_match_caption_record(
     return bool(candidate_caption)
 
 
-def _caption_instruction_review_allows_synthetic_caption0_create(row: Mapping[str, Any]) -> bool:
+def _caption_instruction_review_allows_synthetic_caption0_create(
+    entry: Dict[str, Any],
+    row: Mapping[str, Any],
+    *,
+    dataset_id: str,
+    image_names: Set[str],
+    image_keys: Set[str],
+    image_path: str,
+) -> bool:
     qa_id = str(row.get("qa_id") or "").strip()
     if not re.match(r"^primary_[0-9a-f]{16}$", qa_id):
         return False
@@ -23213,7 +23236,40 @@ def _caption_instruction_review_allows_synthetic_caption0_create(row: Mapping[st
     if answer_source != "text_label":
         return False
     candidate_caption = str(row.get("candidate_answer") or row.get("training_answer") or "").strip()
-    return bool(candidate_caption)
+    if not candidate_caption:
+        return False
+    for candidate_name in list(image_names) or [image_path]:
+        split_overrides = [row.get("split"), None] if row.get("split") else [None, "train", "val"]
+        for split_override in split_overrides:
+            try:
+                split_name, image_relpath, resolved_image_key = _dataset_caption_context(
+                    entry,
+                    candidate_name,
+                    {"split": split_override} if split_override else None,
+                )
+            except Exception:
+                continue
+            current_caption = _annotation_effective_text_label(entry, image_relpath, split_name)
+            if str(current_caption or "").strip() != candidate_caption:
+                continue
+            candidate_image_keys = {
+                str(resolved_image_key or "").strip(),
+                _dataset_caption_image_key(None, image_relpath),
+            }
+            if split_name:
+                candidate_image_keys.add(_dataset_caption_image_key(split_name, image_relpath))
+            candidate_image_keys.update(str(key or "").strip() for key in image_keys if str(key or "").strip())
+            for candidate_image_key in candidate_image_keys:
+                if not candidate_image_key:
+                    continue
+                expected_qa_id = _dataset_caption_synthetic_primary_id(
+                    dataset_id=dataset_id,
+                    image_key=candidate_image_key,
+                    caption=candidate_caption,
+                )
+                if expected_qa_id == qa_id:
+                    return True
+    return False
 
 
 def _caption_instruction_review_can_resolve_caption_context(
@@ -23317,7 +23373,14 @@ def _caption_instruction_reject_unmatchable_actionable_review_rows(
                         status_code=HTTP_400_BAD_REQUEST,
                         detail=f"review_rows_caption0_answer_missing:row_{index}",
                     )
-                if not _caption_instruction_review_allows_synthetic_caption0_create(row):
+                if not _caption_instruction_review_allows_synthetic_caption0_create(
+                    entry,
+                    row,
+                    dataset_id=dataset_id,
+                    image_names=image_names,
+                    image_keys=image_keys,
+                    image_path=image_path,
+                ):
                     raise HTTPException(
                         status_code=HTTP_400_BAD_REQUEST,
                         detail=f"review_rows_caption0_creation_not_allowed:row_{index}",
@@ -23430,7 +23493,14 @@ def apply_caption_instruction_review(dataset_id: str, payload: Dict[str, Any]):
             if not caption:
                 skipped_rows.append({"row_index": index, "qa_id": qa_id, "row_origin": row_origin, "reason": "caption0_answer_missing"})
                 continue
-            if not _caption_instruction_review_allows_synthetic_caption0_create(row):
+            if not _caption_instruction_review_allows_synthetic_caption0_create(
+                entry,
+                row,
+                dataset_id=dataset_id,
+                image_names=image_names,
+                image_keys=image_keys,
+                image_path=image_path,
+            ):
                 skipped_rows.append({"row_index": index, "qa_id": qa_id, "row_origin": row_origin, "reason": "caption0_creation_not_allowed"})
                 continue
             split_name: Optional[str] = None

@@ -300,8 +300,9 @@ Review import fails closed on:
   or training answer no longer matches the stored caption or generated-QA record
 - ambiguous generated-QA or caption0 matches
 - unresolvable caption0 targets
-- caption0 rows that would create a new saved caption without current exported
-  synthetic text-label provenance
+- caption0 rows that would create a new saved caption without a synthetic id
+  that matches the selected dataset, resolved image key, and current text-label
+  caption
 
 Review import does not edit source labels, boxes, image paths, generated
 questions, generated answers, deterministic metadata QA rows, or final
@@ -521,7 +522,7 @@ Result:
 Result:
 
 ```text
-170 passed
+171 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

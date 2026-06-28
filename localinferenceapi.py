@@ -20896,7 +20896,9 @@ def _caption_instruction_validate_training_rows(rows: Sequence[Any]) -> Dict[str
         answer_source = str(metadata.get("answer_source") or "").strip()
         answer_format = str(metadata.get("answer_format") or "").strip().lower()
         validation_status = str(metadata.get("validation_status") or "").strip().lower()
-        review_status = _caption_instruction_review_decision(metadata.get("review_status"))
+        review_status = _caption_instruction_review_decision(
+            metadata.get("review_status") or metadata.get("review_decision")
+        )
         if not image_path:
             errors.append(f"row {row_number} missing image_path")
         else:
@@ -20911,7 +20913,7 @@ def _caption_instruction_validate_training_rows(rows: Sequence[Any]) -> Dict[str
             errors.append(f"row {row_number} metadata missing row_type")
         if not answer_source:
             errors.append(f"row {row_number} metadata missing answer_source")
-        if validation_status == "rejected":
+        if validation_status in {"rejected", "failed", "invalid"}:
             errors.append(f"row {row_number} was rejected by archive validation")
         if review_status in {"rejected", "needs_revision"}:
             errors.append(f"row {row_number} has non-trainable review status")

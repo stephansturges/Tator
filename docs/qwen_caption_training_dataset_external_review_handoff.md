@@ -16,6 +16,8 @@ annotation-assisted VLM training-data workflow.
 
 Supporting documents:
 
+- `docs/qwen_caption_instruction_dataset_external_partner_packet.md` is the
+  complete external partner packet for what was implemented and why.
 - `docs/qwen_caption_instruction_dataset_hardening_report.md` records the latest
   implementation and validation ledger.
 - `docs/qwen_caption_prompt_stack.md` records prompt, token-budget, box-subset,
@@ -138,7 +140,9 @@ What is implemented in this checkpoint:
   generated-QA metadata.
 - Run-level instruction reports with corpus quality metrics.
 - Training-readiness classification.
-- Browser-side instruction export validation.
+- Browser-side instruction export validation for required row metadata, JSON
+  answers, duplicate image/question pairs, rejected/failed/invalid validation
+  status, and non-trainable review status.
 - Browser-side review import validation for unsupported actionable row origins
   and duplicate or conflicting actionable review targets.
 - Server-side flattened trainer-row validation exposed as
@@ -857,7 +861,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Result:
 
 ```text
-150 passed
+151 passed
 ```
 
 Focused review-import fail-closed tests:
@@ -922,7 +926,7 @@ Caption/instruction/UI contract suite outside the trainer file:
 Result:
 
 ```text
-130 passed
+131 passed
 ```
 
 Syntax and formatting checks:

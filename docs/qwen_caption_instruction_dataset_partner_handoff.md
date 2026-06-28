@@ -5,11 +5,10 @@ Date: 2026-06-28
 ## Start Here
 
 For a complete external implementation review, start with
-`docs/qwen_caption_training_dataset_external_review_handoff.md`. This shorter
-handoff is a companion summary; the external review handoff is the canonical
-packet for what changed, why it changed, which invariants matter, how artifacts
-are shaped, what was tested, and what still requires a real-data pilot before
-training use.
+`docs/qwen_caption_instruction_dataset_external_partner_packet.md`. It explains
+what changed, why it changed, which invariants matter, how artifacts are shaped,
+what was tested, and what still requires a real-data pilot before training use.
+This shorter handoff is a companion summary.
 
 ## Status
 
@@ -44,7 +43,9 @@ The new work adds a separate instruction-dataset path:
   only.
 - The backend exports trainer rows, per-image archive rows, review rows, and a
   run-level report.
-- The browser validates instruction JSONL before download.
+- The browser validates instruction JSONL before download, including required
+  row metadata, rejected/failed/invalid validation state, non-trainable review
+  state, duplicate image/question pairs, and JSON answer formats.
 - The browser validates reviewed JSONL before import, including unsupported
   actionable row origins and duplicate or conflicting actionable review targets.
 - A reviewer can import reviewed JSONL decisions back into the dataset.
@@ -522,7 +523,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-150 passed
+151 passed
 ```
 
 Focused review-import fail-closed suite:
@@ -585,7 +586,7 @@ Focused instruction-dataset and UI contract suite:
 Latest recorded result:
 
 ```text
-130 passed
+131 passed
 ```
 
 Runtime and unattended hardening suites have also been run in prior hardening

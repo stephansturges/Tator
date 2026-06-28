@@ -34647,9 +34647,13 @@ async function cancelRfDetrTrainingJobRequest() {
             const question = String(row?.question || "").trim();
             const answer = String(row?.answer || "").trim();
             const metadata = row?.metadata && typeof row.metadata === "object" ? row.metadata : {};
+            const metadataIsObject = row?.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata);
+            const qaId = String(metadata.qa_id || "").trim();
             const rowType = String(metadata.row_type || "").trim();
+            const answerSource = String(metadata.answer_source || "").trim();
             const answerFormat = String(metadata.answer_format || "").trim().toLowerCase();
             const validationStatus = String(metadata.validation_status || "").trim().toLowerCase();
+            const reviewStatus = normalizeCaptionInstructionReviewDecision(metadata.review_status || metadata.review_decision);
             if (!imagePath) {
                 errors.push(`row ${rowNumber} missing image_path`);
             } else {
@@ -34661,8 +34665,23 @@ async function cancelRfDetrTrainingJobRequest() {
             if (!answer) {
                 errors.push(`row ${rowNumber} missing answer`);
             }
-            if (validationStatus === "rejected") {
+            if (!metadataIsObject) {
+                errors.push(`row ${rowNumber} metadata is missing or invalid`);
+            }
+            if (!qaId) {
+                errors.push(`row ${rowNumber} metadata missing qa_id`);
+            }
+            if (!rowType) {
+                errors.push(`row ${rowNumber} metadata missing row_type`);
+            }
+            if (!answerSource) {
+                errors.push(`row ${rowNumber} metadata missing answer_source`);
+            }
+            if (["rejected", "failed", "invalid"].includes(validationStatus)) {
                 errors.push(`row ${rowNumber} was rejected by archive validation`);
+            }
+            if (["rejected", "needs_revision"].includes(reviewStatus)) {
+                errors.push(`row ${rowNumber} has non-trainable review status`);
             }
             if (answer && (rowType.startsWith("deterministic_") || answerFormat === "json" || answerFormat.endsWith("_json"))) {
                 try {

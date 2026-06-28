@@ -403,9 +403,14 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     instruction_validator_end = js.index("function describeCaptionInstructionValidation", instruction_validator_start)
     instruction_validator = js[instruction_validator_start:instruction_validator_end]
     assert "const metadata = row?.metadata" in instruction_validator
+    assert "metadata missing qa_id" in instruction_validator
+    assert "metadata missing row_type" in instruction_validator
+    assert "metadata missing answer_source" in instruction_validator
     assert "const rowType = String(metadata.row_type" in instruction_validator
     assert "const answerFormat = String(metadata.answer_format" in instruction_validator
     assert "const validationStatus = String(metadata.validation_status" in instruction_validator
+    assert "metadata.review_status || metadata.review_decision" in instruction_validator
+    assert "has non-trainable review status" in instruction_validator
     report_validator_start = js.index("function validateCaptionInstructionReport")
     report_validator_end = js.index("async function downloadCaptionJsonl", report_validator_start)
     report_validator = js[report_validator_start:report_validator_end]
@@ -502,6 +507,41 @@ def test_qwen_caption_instruction_review_import_parser_accepts_reviewer_file_sha
             "assert.strictEqual(parseCaptionInstructionReviewRowsText(jsonl).length, 2);",
             "assert.deepStrictEqual(captionInstructionReviewDatasetMismatches([{ ...row, dataset_id: 'ds' }], 'ds'), []);",
             "assert.deepStrictEqual(captionInstructionReviewDatasetMismatches([{ ...row, dataset_id: 'other' }], 'ds'), ['other']);",
+        ]
+    )
+    subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
+
+
+def test_qwen_caption_instruction_training_validator_blocks_non_trainable_rows():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            _extract_js_function(js, "normalizeCaptionInstructionReviewDecision"),
+            _extract_js_function(js, "validateCaptionInstructionTrainingRows"),
+            "const base = {",
+            "  image_path: 'train/frame.jpg',",
+            "  question: 'Describe the image.',",
+            "  answer: 'A grounded answer.',",
+            "  metadata: {",
+            "    qa_id: 'qa-1',",
+            "    row_type: 'generated_qa',",
+            "    answer_source: 'vlm_generated',",
+            "    validation_status: 'accepted',",
+            "  },",
+            "};",
+            "assert.strictEqual(validateCaptionInstructionTrainingRows([base]).ok, true);",
+            "const rejected = validateCaptionInstructionTrainingRows([{ ...base, metadata: { ...base.metadata, validation_status: 'invalid' } }]);",
+            "assert.strictEqual(rejected.ok, false);",
+            "assert(rejected.errors.some((error) => error.includes('rejected by archive validation')));",
+            "const needsRevision = validateCaptionInstructionTrainingRows([{ ...base, metadata: { ...base.metadata, review_decision: 'needs-revision' } }]);",
+            "assert.strictEqual(needsRevision.ok, false);",
+            "assert(needsRevision.errors.some((error) => error.includes('non-trainable review status')));",
+            "const missingMetadata = validateCaptionInstructionTrainingRows([{ image_path: 'train/frame.jpg', question: 'Q?', answer: 'A.' }]);",
+            "assert.strictEqual(missingMetadata.ok, false);",
+            "assert(missingMetadata.errors.some((error) => error.includes('metadata missing qa_id')));",
+            "assert(missingMetadata.errors.some((error) => error.includes('metadata missing row_type')));",
+            "assert(missingMetadata.errors.some((error) => error.includes('metadata missing answer_source')));",
         ]
     )
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)

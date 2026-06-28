@@ -119,10 +119,12 @@ from the image, caption0, or read-only source context.
 **Download instruction JSONL** exports normal `image_path` / `question` /
 `answer` rows. The trainer imports this flat shape directly and normalizes each
 row into an image/question/answer conversation. The UI validates missing image
-paths, blank questions, blank answers, invalid JSON for JSON row types, and
-duplicate image/question pairs before writing the file. It also validates the
-instruction report's training-readiness block: `blocked` readiness refuses the
-download, while `needs_review` readiness is blocked by default by **Require
+paths, blank questions, blank answers, required row metadata,
+rejected/failed/invalid validation state, non-trainable review state, invalid
+JSON for JSON row types, and duplicate image/question pairs before writing the
+file. It also validates the instruction report's training-readiness block:
+`blocked` readiness refuses the download, while `needs_review` readiness is
+blocked by default by **Require
 ready report for trainer JSONL**. Operators can disable that gate only for
 deliberate review-pending diagnostics. Scripted exports can use
 `require_ready_instruction_export=true` for the same server-side refusal. A

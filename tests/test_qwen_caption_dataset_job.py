@@ -1179,18 +1179,43 @@ def test_caption_instruction_training_readiness_blocks_invalid_export_rows() -> 
                     "review_status": "rejected",
                 },
             },
+            {
+                "image_path": "frame.jpg",
+                "question": "Describe the invalid row.",
+                "answer": "A caption.",
+                "metadata": {
+                    "qa_id": "qa-4",
+                    "row_type": "caption0",
+                    "answer_source": "caption_record",
+                    "validation_status": "invalid",
+                },
+            },
+            {
+                "image_path": "frame.jpg",
+                "question": "Describe the row needing revision.",
+                "answer": "A caption.",
+                "metadata": {
+                    "qa_id": "qa-5",
+                    "row_type": "generated_qa",
+                    "answer_source": "vlm_generated",
+                    "validation_status": "accepted",
+                    "review_decision": "needs-revision",
+                },
+            },
         ]
     )
 
     assert validation["ok"] is False
-    assert validation["error_count"] == 3
+    assert validation["error_count"] == 5
     assert "row 1 answer is not valid JSON" in validation["errors"]
     assert "duplicate image_path + question at row 2" in validation["errors"]
     assert "row 3 has non-trainable review status" in validation["errors"]
+    assert "row 4 was rejected by archive validation" in validation["errors"]
+    assert "row 5 has non-trainable review status" in validation["errors"]
 
     readiness = api._caption_instruction_training_readiness(
         corpus_quality_metrics={
-            "selected_flattened_row_count": 3,
+            "selected_flattened_row_count": 5,
             "image_count": 1,
             "generated_qa_candidate_count": 0,
             "source_class_count": 0,
@@ -1202,7 +1227,7 @@ def test_caption_instruction_training_readiness_blocks_invalid_export_rows() -> 
 
     assert readiness["status"] == "blocked"
     assert readiness["ready_for_training"] is False
-    assert readiness["instruction_export_validation_error_count"] == 3
+    assert readiness["instruction_export_validation_error_count"] == 5
     assert "instruction_training_rows_invalid" in readiness["blocking_reasons"]
     assert "fix_instruction_training_rows" in readiness["required_actions"]
 

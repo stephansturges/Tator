@@ -344,13 +344,19 @@ It ignores:
 
 - blank decisions
 - unknown decisions
-- rows that cannot be matched to saved caption or generated-QA records
 - deterministic metadata QA rows, because those are regenerated from labels at
   export time
 
 It fails closed on:
 
 - rows with an embedded dataset id that does not match the selected dataset
+- malformed review rows
+- duplicate actionable review targets
+- unsupported actionable row origins
+- actionable rows without an image path
+- stale generated-QA targets
+- ambiguous generated-QA or caption0 matches
+- synthetic caption0 review targets whose image cannot be resolved
 
 It never edits:
 
@@ -514,7 +520,24 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-146 passed
+149 passed
+```
+
+Focused review-import fail-closed suite:
+
+```bash
+./.venv-macos/bin/python -m pytest \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_persists_review_metadata \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_mismatched_dataset_id \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_duplicate_actionable_targets \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_unmatchable_actionable_rows_atomically \
+  -q
+```
+
+Latest recorded result:
+
+```text
+7 passed
 ```
 
 Focused trainer-import boundary suite:
@@ -560,7 +583,7 @@ Focused instruction-dataset and UI contract suite:
 Latest recorded result:
 
 ```text
-126 passed
+129 passed
 ```
 
 Runtime and unattended hardening suites have also been run in prior hardening

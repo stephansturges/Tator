@@ -139,10 +139,12 @@ selected-for-training flags, and blank review decision/note fields so a human
 can audit the corpus before fine-tuning. **Import reviewed JSONL** reads that
 artifact after a reviewer fills accepted, rejected, or needs-revision decisions
 and applies only review metadata to matching saved caption and generated-QA
-records; rows from a different dataset are blocked before import. It does not
-edit source labels, generated answers, or deterministic metadata rows. Rejected
-or needs-revision language candidates stay auditable in the archive and review
-JSONL but are excluded from flattened trainer rows.
+records; rows from a different dataset are blocked before import. The backend
+also rejects malformed or stale actionable language review rows before writing
+any review metadata, so mixed valid/stale packets do not partially apply. It
+does not edit source labels, generated answers, or deterministic metadata rows.
+Rejected or needs-revision language candidates stay auditable in the archive and
+review JSONL but are excluded from flattened trainer rows.
 **Download instruction report** exports run-level counts, rejection reasons,
 source-field provenance, split image counts, split row counts, QA count per
 image, selected flattened-row counts, duplicate-question/diversity metrics,

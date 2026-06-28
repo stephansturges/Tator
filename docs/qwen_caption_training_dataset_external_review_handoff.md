@@ -622,8 +622,15 @@ The review import is deliberately conservative:
 - It rejects duplicate actionable review targets before applying any imported
   metadata. Exact duplicates and conflicting duplicate decisions both fail
   closed, so API/script imports cannot silently let the last duplicate row win.
+- It rejects malformed review rows, unsupported actionable row origins,
+  actionable rows without an image path, stale generated-QA targets, ambiguous
+  generated-QA or caption0 matches, and unresolvable synthetic caption0 review
+  targets before applying any imported metadata.
 - It ignores blank or unknown decisions instead of inventing a review result.
 - It applies decisions only to matching caption0 or generated-QA records.
+- It skips deterministic metadata QA decisions because those rows are rebuilt
+  from source labels at export time and do not correspond to persisted language
+  records.
 - It records reviewer, notes, source row metadata, and decision timestamps.
 - It does not change questions, answers, source labels, boxes, image paths, or
   selected final annotations.
@@ -846,7 +853,24 @@ Current combined caption/instruction/trainer/UI contract suite:
 Result:
 
 ```text
-146 passed
+149 passed
+```
+
+Focused review-import fail-closed tests:
+
+```bash
+./.venv-macos/bin/python -m pytest \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_persists_review_metadata \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_mismatched_dataset_id \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_duplicate_actionable_targets \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_unmatchable_actionable_rows_atomically \
+  -q
+```
+
+Result:
+
+```text
+7 passed
 ```
 
 Focused trainer-import boundary tests:
@@ -894,7 +918,7 @@ Caption/instruction/UI contract suite outside the trainer file:
 Result:
 
 ```text
-126 passed
+129 passed
 ```
 
 Syntax and formatting checks:

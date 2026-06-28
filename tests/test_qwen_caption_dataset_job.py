@@ -1002,6 +1002,108 @@ def test_caption_instruction_review_import_rejects_duplicate_actionable_targets(
     assert "review_decision" not in records[0]["metadata"]
 
 
+@pytest.mark.parametrize(
+    ("bad_row_update", "expected_detail"),
+    [
+        (
+            {
+                "qa_id": "qa-missing",
+                "question": "What unsupported question is this?",
+                "candidate_answer": "An unmatched answer.",
+                "training_answer": "An unmatched answer.",
+            },
+            "review_rows_generated_qa_not_found:row_2",
+        ),
+        (
+            {
+                "image_path": "",
+                "image_name": "",
+                "image": "",
+            },
+            "review_rows_missing_image_path:row_2",
+        ),
+        (
+            {
+                "row_origin": "freeform_review",
+            },
+            "review_rows_unsupported_row_origin:row_2:freeform_review",
+        ),
+    ],
+)
+def test_caption_instruction_review_import_rejects_unmatchable_actionable_rows_atomically(
+    monkeypatch,
+    tmp_path,
+    bad_row_update,
+    expected_detail,
+) -> None:
+    import localinferenceapi as api
+
+    entry = {"id": "ds", "dataset_root": str(tmp_path), "registry_root": str(tmp_path)}
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: entry)
+    monkeypatch.setattr(
+        api,
+        "_annotation_manifest_for_entry",
+        lambda _entry: {
+            "labelmap": [],
+            "images": [
+                {
+                    "image_name": "frame.jpg",
+                    "image_relpath": "frame.jpg",
+                    "split": "train",
+                    "label_source_present": True,
+                    "label_lines": [],
+                }
+            ],
+        },
+    )
+    api._write_dataset_caption_instruction_records(
+        entry,
+        [
+            {
+                "id": "qa-1",
+                "image_name": "frame.jpg",
+                "image_key": "train/frame.jpg",
+                "split": "train",
+                "question": "What is the scene type?",
+                "answer": "A waterfront area.",
+                "row_type": "generated_qa",
+                "answer_source": "vlm_generated",
+                "validation_status": "accepted",
+            }
+        ],
+    )
+
+    base_row = {
+        "format": "tator_caption_instruction_review_rows_v1",
+        "dataset_id": "ds",
+        "image_path": "frame.jpg",
+        "split": "train",
+        "row_origin": "generated_qa",
+        "qa_id": "qa-1",
+        "row_type": "generated_qa",
+        "question": "What is the scene type?",
+        "candidate_answer": "A waterfront area.",
+        "training_answer": "A waterfront area.",
+        "validation_status": "accepted",
+        "selected_for_training": True,
+        "requires_manual_review": True,
+        "review_decision": "accepted",
+        "review_notes": "valid first row should not be partially applied",
+        "rejection_reasons": [],
+        "source_summary": {"status": "empty_label_file"},
+    }
+    bad_row = {**base_row, **bad_row_update, "review_decision": "rejected"}
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.apply_caption_instruction_review("ds", {"rows": [base_row, bad_row]})
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == expected_detail
+    records = api._load_dataset_caption_instruction_records(entry)
+    assert records[0]["review_status"] == ""
+    assert "review_decision" not in records[0]["metadata"]
+
+
 def test_caption_instruction_training_readiness_blocks_selected_needs_revision_rows() -> None:
     import localinferenceapi as api
 

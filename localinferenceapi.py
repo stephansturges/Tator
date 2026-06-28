@@ -22835,6 +22835,115 @@ def _caption_instruction_match_caption_record(
     return bool(candidate_caption and str(record.get("caption") or "").strip() == candidate_caption)
 
 
+def _caption_instruction_review_can_resolve_caption_context(
+    entry: Dict[str, Any],
+    row: Mapping[str, Any],
+    *,
+    image_names: Set[str],
+    image_path: str,
+) -> bool:
+    for candidate_name in list(image_names) or [image_path]:
+        split_overrides = [row.get("split"), None] if row.get("split") else [None, "train", "val"]
+        for split_override in split_overrides:
+            try:
+                _dataset_caption_context(
+                    entry,
+                    candidate_name,
+                    {"split": split_override} if split_override else None,
+                )
+                return True
+            except Exception:
+                continue
+    return False
+
+
+def _caption_instruction_reject_unmatchable_actionable_review_rows(
+    entry: Dict[str, Any],
+    rows: Sequence[Any],
+    *,
+    dataset_id: str,
+    caption_records: Sequence[Mapping[str, Any]],
+    instruction_records: Sequence[Mapping[str, Any]],
+) -> None:
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, Mapping):
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"review_rows_row_not_object:row_{index}",
+            )
+        qa_id = str(row.get("qa_id") or "").strip()
+        row_origin = str(row.get("row_origin") or "").strip()
+        if str(row.get("format") or "").strip() != CAPTION_INSTRUCTION_REVIEW_ROWS_FORMAT:
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"review_rows_invalid_format:row_{index}",
+            )
+        if not _caption_instruction_review_dataset_id_matches(row, dataset_id):
+            continue
+        decision = _caption_instruction_review_decision(row.get("review_decision"))
+        if decision not in {"accepted", "rejected", "needs_revision"}:
+            continue
+        if row_origin == "deterministic_metadata_qa":
+            continue
+        image_path = str(row.get("image_path") or row.get("image_name") or row.get("image") or "").strip()
+        image_names, image_keys = _caption_instruction_review_image_candidates(entry, row)
+        if not image_path or not image_keys:
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"review_rows_missing_image_path:row_{index}",
+            )
+        if row_origin == "generated_qa":
+            matches = [
+                record
+                for record in instruction_records
+                if _caption_instruction_match_instruction_record(record, row, image_keys=image_keys)
+            ]
+            if not matches:
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail=f"review_rows_generated_qa_not_found:row_{index}",
+                )
+            if len(matches) > 1:
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail=f"review_rows_generated_qa_ambiguous:row_{index}",
+                )
+            continue
+        if row_origin == "caption0":
+            matches = [
+                record
+                for record in caption_records
+                if _caption_instruction_match_caption_record(record, row, image_keys=image_keys)
+            ]
+            if len(matches) > 1:
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail=f"review_rows_caption0_ambiguous:row_{index}",
+                )
+            if not matches:
+                caption = str(row.get("candidate_answer") or row.get("training_answer") or "").strip()
+                if not caption:
+                    raise HTTPException(
+                        status_code=HTTP_400_BAD_REQUEST,
+                        detail=f"review_rows_caption0_answer_missing:row_{index}",
+                    )
+                if not _caption_instruction_review_can_resolve_caption_context(
+                    entry,
+                    row,
+                    image_names=image_names,
+                    image_path=image_path,
+                ):
+                    raise HTTPException(
+                        status_code=HTTP_400_BAD_REQUEST,
+                        detail=f"review_rows_caption0_image_not_found:row_{index}",
+                    )
+            continue
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail=f"review_rows_unsupported_row_origin:row_{index}:{row_origin or 'missing'}",
+        )
+
+
 def apply_caption_instruction_review(dataset_id: str, payload: Dict[str, Any]):
     payload = payload or {}
     entry = _resolve_dataset_entry(dataset_id)
@@ -22842,11 +22951,17 @@ def apply_caption_instruction_review(dataset_id: str, payload: Dict[str, Any]):
     rows = _caption_instruction_review_payload_rows(payload)
     _caption_instruction_reject_dataset_id_mismatches(rows, dataset_id=dataset_id)
     _caption_instruction_reject_duplicate_review_targets(rows, dataset_id=dataset_id)
-    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    reviewer = str((payload or {}).get("reviewer") or "").strip()
-
     caption_records = _load_dataset_caption_records(entry)
     instruction_records = _load_dataset_caption_instruction_records(entry)
+    _caption_instruction_reject_unmatchable_actionable_review_rows(
+        entry,
+        rows,
+        dataset_id=dataset_id,
+        caption_records=caption_records,
+        instruction_records=instruction_records,
+    )
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    reviewer = str((payload or {}).get("reviewer") or "").strip()
     used_caption_ids = {str(record.get("id") or "").strip() for record in caption_records if str(record.get("id") or "").strip()}
 
     caption_changed = False

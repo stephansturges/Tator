@@ -138,6 +138,11 @@ row before training.
   imported review metadata. Exact duplicate decisions and conflicting duplicate
   decisions both fail closed, so API or script imports cannot silently let the
   last duplicate row win.
+- The backend rejects malformed or unmatchable actionable review rows before
+  applying any imported review metadata. Stale generated-QA targets, unsupported
+  actionable row origins, missing image paths, ambiguous matches, and
+  unresolvable synthetic caption0 review targets fail the whole import rather
+  than partially applying earlier rows.
 - Caption0 or generated-QA candidates marked rejected or needs-revision by
   manual review remain in the archive and review JSONL but are excluded from
   flattened trainer rows.
@@ -174,7 +179,10 @@ row before training.
   - `node --check ybat-master/ybat.js`
 - Focused instruction-dataset, export, and UI contract tests:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py tests/test_qwen_training_backend.py tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete tests/test_labeling_panel_layout_contract.py tests/test_qwen_caption_ui_smoke_tool.py -q`
-  - Current result: 146 passed.
+  - Current result: 149 passed.
+- Current review-import fail-closed tests:
+  - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_persists_review_metadata tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_mismatched_dataset_id tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_duplicate_actionable_targets tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_unmatchable_actionable_rows_atomically -q`
+  - Result: 7 passed.
 - Current trainer-import fail-closed boundary tests:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_imports_flat_question_answer_rows tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_non_trainable_flat_rows tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_duplicate_flat_questions tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_ignores_blank_flat_rows_before_duplicate_check -q`
   - Result: 7 passed.
@@ -183,7 +191,7 @@ row before training.
   - Result: 20 passed.
 - Current caption/instruction/UI contract tests outside the trainer file:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete tests/test_labeling_panel_layout_contract.py tests/test_qwen_caption_ui_smoke_tool.py -q`
-  - Result: 126 passed.
+  - Result: 129 passed.
 - Earlier targeted trainer import compatibility:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_imports_flat_question_answer_rows tests/test_qwen_caption_dataset_job.py::test_caption_instruction_training_rows_import_into_qwen_trainer -q`
   - Result: 2 passed.

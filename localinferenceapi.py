@@ -23202,6 +23202,20 @@ def _caption_instruction_match_caption_record(
     return bool(candidate_caption)
 
 
+def _caption_instruction_review_allows_synthetic_caption0_create(row: Mapping[str, Any]) -> bool:
+    qa_id = str(row.get("qa_id") or "").strip()
+    if not re.match(r"^primary_[0-9a-f]{16}$", qa_id):
+        return False
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), Mapping) else {}
+    if metadata.get("synthetic") is not True:
+        return False
+    answer_source = str(row.get("answer_source") or row.get("source") or "").strip()
+    if answer_source != "text_label":
+        return False
+    candidate_caption = str(row.get("candidate_answer") or row.get("training_answer") or "").strip()
+    return bool(candidate_caption)
+
+
 def _caption_instruction_review_can_resolve_caption_context(
     entry: Dict[str, Any],
     row: Mapping[str, Any],
@@ -23302,6 +23316,11 @@ def _caption_instruction_reject_unmatchable_actionable_review_rows(
                     raise HTTPException(
                         status_code=HTTP_400_BAD_REQUEST,
                         detail=f"review_rows_caption0_answer_missing:row_{index}",
+                    )
+                if not _caption_instruction_review_allows_synthetic_caption0_create(row):
+                    raise HTTPException(
+                        status_code=HTTP_400_BAD_REQUEST,
+                        detail=f"review_rows_caption0_creation_not_allowed:row_{index}",
                     )
                 if not _caption_instruction_review_can_resolve_caption_context(
                     entry,
@@ -23410,6 +23429,9 @@ def apply_caption_instruction_review(dataset_id: str, payload: Dict[str, Any]):
             caption = str(row.get("candidate_answer") or row.get("training_answer") or "").strip()
             if not caption:
                 skipped_rows.append({"row_index": index, "qa_id": qa_id, "row_origin": row_origin, "reason": "caption0_answer_missing"})
+                continue
+            if not _caption_instruction_review_allows_synthetic_caption0_create(row):
+                skipped_rows.append({"row_index": index, "qa_id": qa_id, "row_origin": row_origin, "reason": "caption0_creation_not_allowed"})
                 continue
             split_name: Optional[str] = None
             image_key = next(iter(sorted(image_keys)), image_path)

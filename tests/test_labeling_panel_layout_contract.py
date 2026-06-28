@@ -558,6 +558,9 @@ def test_qwen_caption_instruction_review_import_formats_backend_failures():
             "assert(duplicate.includes('rows 1 and 5'));",
             "const unsupported = formatCaptionInstructionReviewImportApiError('review_rows_unsupported_row_origin:row_6:freeform_review');",
             "assert(unsupported.includes('freeform_review is not a persisted review row type'));",
+            "const blockedCreate = formatCaptionInstructionReviewImportApiError('review_rows_caption0_creation_not_allowed:row_7');",
+            "assert(blockedCreate.includes('blocked at row 7'));",
+            "assert(blockedCreate.includes('lacks current synthetic text-label export provenance'));",
             "assert(formatCaptionInstructionReviewImportApiError('plain backend error').includes('plain backend error'));",
         ]
     )

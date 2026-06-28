@@ -406,6 +406,8 @@ It fails closed on:
 - stale generated-QA targets
 - ambiguous generated-QA or caption0 matches
 - synthetic caption0 review targets whose image cannot be resolved
+- caption0 rows that would create a new saved caption without current exported
+  synthetic text-label provenance
 
 It never edits:
 
@@ -569,7 +571,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-167 passed
+170 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch
@@ -605,7 +607,7 @@ Focused review-import fail-closed suite:
 Latest recorded result:
 
 ```text
-11 passed
+14 passed
 ```
 
 Focused trainer-import boundary suite:
@@ -651,7 +653,7 @@ Focused instruction-dataset and UI contract suite:
 Latest recorded result:
 
 ```text
-142 passed
+145 passed
 ```
 
 Runtime and unattended hardening suites have also been run in prior hardening

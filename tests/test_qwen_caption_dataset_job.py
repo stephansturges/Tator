@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -738,6 +739,10 @@ def test_caption_instruction_review_import_persists_review_metadata(
             }
         ],
     )
+    synthetic_caption_id = (
+        "primary_"
+        + hashlib.sha1("ds|train/frame.jpg|A primary caption.".encode("utf-8")).hexdigest()[:16]
+    )
 
     result = api.apply_caption_instruction_review(
         "ds",
@@ -769,11 +774,12 @@ def test_caption_instruction_review_import_persists_review_metadata(
                     "image_path": "frame.jpg",
                     "split": "train",
                     "row_origin": "caption0",
-                    "qa_id": "primary-review",
+                    "qa_id": synthetic_caption_id,
                     "row_type": "caption0",
                     "question": "Describe this image in detail.",
                     "candidate_answer": "A primary caption.",
                     "training_answer": "A primary caption.",
+                    "answer_source": "text_label",
                     "validation_status": "accepted",
                     "selected_for_training": True,
                     "requires_manual_review": True,
@@ -781,6 +787,7 @@ def test_caption_instruction_review_import_persists_review_metadata(
                     "review_notes": "too vague",
                     "rejection_reasons": [],
                     "source_summary": {"status": "empty_label_file"},
+                    "metadata": {"synthetic": True},
                 },
                 {
                     "format": "tator_caption_instruction_review_rows_v1",
@@ -822,7 +829,7 @@ def test_caption_instruction_review_import_persists_review_metadata(
 
     caption_records = api._load_dataset_caption_records(entry)
     assert len(caption_records) == 1
-    assert caption_records[0]["id"] == "primary-review"
+    assert caption_records[0]["id"] == synthetic_caption_id
     assert caption_records[0]["caption"] == "A primary caption."
     assert caption_records[0]["is_primary"] is False
     assert caption_records[0]["metadata"]["review_decision"] == "rejected"
@@ -845,7 +852,7 @@ def test_caption_instruction_review_import_persists_review_metadata(
     training_rows = archive["training_rows"]
     assert len(training_rows) == 1
     assert training_rows[0]["metadata"]["qa_id"] == "qa-1"
-    assert all(row["metadata"]["qa_id"] != "primary-review" for row in training_rows)
+    assert all(row["metadata"]["qa_id"] != synthetic_caption_id for row in training_rows)
     assert archive["captioning_report"]["rejection_reason_counts"]["caption0_manual_review_rejected"] == 1
     readiness = archive["captioning_report"]["training_readiness"]
     assert readiness["status"] == "ready"
@@ -1290,6 +1297,72 @@ def test_caption_instruction_review_import_rejects_stale_caption0_text(
     assert len(records) == 1
     assert records[0]["caption"] == "Current caption text."
     assert "review_decision" not in records[0]["metadata"]
+
+
+@pytest.mark.parametrize(
+    "row_update",
+    [
+        {"qa_id": "primary-review"},
+        {"metadata": {"synthetic": True}},
+        {"answer_source": "text_label"},
+    ],
+)
+def test_caption_instruction_review_import_rejects_arbitrary_caption0_creation(
+    monkeypatch,
+    tmp_path,
+    row_update,
+) -> None:
+    import localinferenceapi as api
+
+    entry = {"id": "ds", "dataset_root": str(tmp_path), "registry_root": str(tmp_path)}
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: entry)
+    monkeypatch.setattr(
+        api,
+        "_annotation_manifest_for_entry",
+        lambda _entry: {
+            "labelmap": [],
+            "images": [
+                {
+                    "image_name": "frame.jpg",
+                    "image_relpath": "frame.jpg",
+                    "split": "train",
+                    "label_source_present": True,
+                    "label_lines": [],
+                }
+            ],
+        },
+    )
+    synthetic_caption_id = (
+        "primary_"
+        + hashlib.sha1("ds|train/frame.jpg|A primary caption.".encode("utf-8")).hexdigest()[:16]
+    )
+    row = {
+        "format": "tator_caption_instruction_review_rows_v1",
+        "dataset_id": "ds",
+        "image_path": "frame.jpg",
+        "split": "train",
+        "row_origin": "caption0",
+        "qa_id": synthetic_caption_id,
+        "row_type": "caption0",
+        "question": "Describe this image in detail.",
+        "candidate_answer": "A primary caption.",
+        "training_answer": "A primary caption.",
+        "validation_status": "accepted",
+        "selected_for_training": True,
+        "requires_manual_review": True,
+        "review_decision": "accepted",
+        "review_notes": "arbitrary caption creation should fail",
+        "rejection_reasons": [],
+        "source_summary": {"status": "empty_label_file"},
+    }
+    row.update(row_update)
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.apply_caption_instruction_review("ds", {"rows": [row]})
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "review_rows_caption0_creation_not_allowed:row_1"
+    assert api._load_dataset_caption_records(entry) == []
 
 
 def test_caption_instruction_training_readiness_blocks_selected_needs_revision_rows() -> None:

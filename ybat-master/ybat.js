@@ -35666,6 +35666,7 @@ async function cancelRfDetrTrainingJobRequest() {
             review_rows_caption0_ambiguous: "the caption0 row matches multiple saved caption records",
             review_rows_caption0_not_found: "the caption0 row no longer matches the saved caption text for that image",
             review_rows_caption0_answer_missing: "the caption0 row is missing the reviewed caption text",
+            review_rows_caption0_creation_not_allowed: "the caption0 row would create a new caption record but lacks current synthetic text-label export provenance",
             review_rows_caption0_image_not_found: "the caption0 row image could not be resolved in the selected dataset",
         };
         const code = raw.split(":")[0];

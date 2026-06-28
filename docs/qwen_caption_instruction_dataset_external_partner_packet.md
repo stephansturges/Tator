@@ -294,6 +294,8 @@ Review import fails closed on:
 - unsupported actionable row origins
 - duplicate actionable review targets
 - stale generated-QA targets
+- QA ids whose review-row image path does not match the stored caption or
+  generated-QA record
 - ambiguous generated-QA or caption0 matches
 - unresolvable caption0 targets
 
@@ -301,6 +303,9 @@ Review import does not edit source labels, boxes, image paths, generated
 questions, generated answers, deterministic metadata QA rows, or final
 annotations. Rejected and needs-revision language rows remain auditable in
 archive and review artifacts but are excluded from flattened trainer rows.
+Deterministic metadata decisions are treated as non-persisted because those rows
+are rebuilt from trusted labels during export; the UI warns instead of sending a
+deterministic-only review file to the backend.
 
 ### Training Readiness
 
@@ -512,7 +517,7 @@ Result:
 Result:
 
 ```text
-162 passed
+163 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

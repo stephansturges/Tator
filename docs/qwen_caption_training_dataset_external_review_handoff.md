@@ -660,8 +660,9 @@ The review import is deliberately conservative:
   closed, so API/script imports cannot silently let the last duplicate row win.
 - It rejects malformed review rows, unsupported actionable row origins,
   actionable rows without an image path, stale generated-QA targets, ambiguous
-  generated-QA or caption0 matches, and unresolvable synthetic caption0 review
-  targets before applying any imported metadata.
+  generated-QA or caption0 matches, QA ids whose review-row image path does not
+  match the stored caption/generated-QA record, and unresolvable synthetic
+  caption0 review targets before applying any imported metadata.
 - It ignores blank or unknown decisions instead of inventing a review result.
 - It applies decisions only to matching caption0 or generated-QA records.
 - It skips deterministic metadata QA decisions because those rows are rebuilt
@@ -693,6 +694,8 @@ The caption panel now includes:
 - import for reviewed JSONL decisions
 - browser preflight for reviewed JSONL decisions, including unsupported
   actionable row origins and duplicate or conflicting actionable review targets
+- browser filtering for deterministic-only review decisions, which are not
+  persisted because deterministic rows are rebuilt from source labels
 - readiness check button and rendered readiness results
 - set-and-forget defaults and backend supervision status text
 - model select styling that marks download-needed models in red and local models
@@ -891,7 +894,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Result:
 
 ```text
-162 passed
+163 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch
@@ -925,7 +928,7 @@ Focused review-import fail-closed tests:
 Result:
 
 ```text
-7 passed
+8 passed
 ```
 
 Focused trainer-import boundary tests:
@@ -973,7 +976,7 @@ Caption/instruction/UI contract suite outside the trainer file:
 Result:
 
 ```text
-137 passed
+138 passed
 ```
 
 Syntax and formatting checks:

@@ -124,6 +124,8 @@ These rules define the correctness of the implementation:
 - Rows can remain in the archive while being excluded from training JSONL.
 - Human review applies review metadata only. It does not edit source labels,
   boxes, generated questions, generated answers, or final annotations.
+- Human review target matching requires image context as well as QA id; a known
+  QA id with a mismatched image path is rejected before any metadata is written.
 - Training readiness is based on selected rows, validation state, manual review
   state, and corpus-quality gates.
 - A row that is rejected or marked needs-revision by review is excluded from
@@ -388,6 +390,8 @@ It ignores:
 It fails closed on:
 
 - rows with an embedded dataset id that does not match the selected dataset
+- generated-QA or caption0 targets whose QA id does not match the row's image
+  context
 - malformed review rows
 - duplicate actionable review targets
 - unsupported actionable row origins
@@ -558,7 +562,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-162 passed
+163 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch
@@ -592,7 +596,7 @@ Focused review-import fail-closed suite:
 Latest recorded result:
 
 ```text
-7 passed
+8 passed
 ```
 
 Focused trainer-import boundary suite:
@@ -638,7 +642,7 @@ Focused instruction-dataset and UI contract suite:
 Latest recorded result:
 
 ```text
-137 passed
+138 passed
 ```
 
 Runtime and unattended hardening suites have also been run in prior hardening

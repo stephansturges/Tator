@@ -1039,6 +1039,14 @@ def test_caption_instruction_review_import_rejects_duplicate_actionable_targets(
         ),
         (
             {
+                "image_path": "other.jpg",
+                "image_name": "other.jpg",
+                "image": "other.jpg",
+            },
+            "review_rows_generated_qa_not_found:row_2",
+        ),
+        (
+            {
                 "image_path": "",
                 "image_name": "",
                 "image": "",

@@ -34934,7 +34934,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 const normalizedQuestion = question.replace(/\s+/g, " ").toLowerCase();
                 const answerForTarget = candidateAnswer || trainingAnswer;
                 const targetKey = qaId
-                    ? `qa_id\u0000${rowOrigin}\u0000${qaId}`
+                    ? `qa_id\u0000${rowOrigin}\u0000${qaId}\u0000${imagePath}\u0000${split}`
                     : `question_answer\u0000${rowOrigin}\u0000${imagePath}\u0000${split}\u0000${normalizedQuestion}\u0000${answerForTarget}`;
                 const prior = actionableTargets.get(targetKey);
                 if (prior) {
@@ -35666,10 +35666,17 @@ async function cancelRfDetrTrainingJobRequest() {
             setSamStatus(message, { variant: "warn", duration: 4000 });
             return;
         }
+        const persistableRows = reviewedRows.filter((row) => ["caption0", "generated_qa"].includes(String(row?.row_origin || "").trim()));
+        if (!persistableRows.length) {
+            const message = "Instruction review import found decisions only for deterministic rows; those rows are rebuilt from source labels and are not persisted.";
+            setCaptionExportHealth(message, "warn");
+            setSamStatus(message, { variant: "warn", duration: 5000 });
+            return;
+        }
         const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/captions/instruction_review`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(captionMutationPayload({ rows: reviewedRows })),
+            body: JSON.stringify(captionMutationPayload({ rows: persistableRows })),
         });
         if (!resp.ok) {
             const detail = await resp.text();

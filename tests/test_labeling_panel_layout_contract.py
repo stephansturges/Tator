@@ -359,6 +359,9 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     assert "function downloadCaptionInstructionReview" in js
     assert "function importCaptionInstructionReviewFile" in js
     assert "function downloadCaptionInstructionReport" in js
+    assert "persistableRows" in js
+    assert "decisions only for deterministic rows" in js
+    assert "rows: persistableRows" in js
     assert "captionInstructionReadinessSummary" in js
     assert "require_ready_instruction_export" in js
     assert 'saveBlobToDisk(blob, "caption_instruction_training.jsonl")' in js
@@ -461,7 +464,7 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "conflicting duplicate actionable review target" in review_validator
     assert "normalizeCaptionInstructionReviewDecision" in js
     assert "accepted, rejected, or needs-revision decisions" in js
-    assert "captionMutationPayload({ rows: reviewedRows })" in js
+    assert "captionMutationPayload({ rows: persistableRows })" in js
     assert "duplicate image_path + question" in js
     assert "function setCaptionExportHealth" in js
     assert "VLM JSONL export blocked" in js

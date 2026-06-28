@@ -23089,10 +23089,10 @@ def _caption_instruction_review_image_candidates(
 def _caption_instruction_review_target_key(row: Mapping[str, Any]) -> Tuple[str, str, str, str, str]:
     row_origin = str(row.get("row_origin") or "").strip()
     qa_id = str(row.get("qa_id") or "").strip()
-    if qa_id:
-        return ("qa_id", row_origin, qa_id, "", "")
     image_path = str(row.get("image_path") or row.get("image_name") or row.get("image") or "").strip()
     split = str(row.get("split") or "").strip()
+    if qa_id:
+        return ("qa_id", row_origin, qa_id, image_path, split)
     question = _caption_instruction_normalized_question(row.get("question"))
     answer = str(row.get("candidate_answer") or row.get("training_answer") or "").strip()
     return ("question_answer", row_origin, image_path, split, f"{question}\u0000{answer}")
@@ -23166,12 +23166,12 @@ def _caption_instruction_match_instruction_record(
     *,
     image_keys: Set[str],
 ) -> bool:
-    qa_id = str(row.get("qa_id") or "").strip()
-    if qa_id and str(record.get("id") or "").strip() == qa_id:
-        return True
     record_image_key = str(record.get("image_key") or record.get("image_name") or "").strip()
     if record_image_key not in image_keys:
         return False
+    qa_id = str(row.get("qa_id") or "").strip()
+    if qa_id and str(record.get("id") or "").strip() == qa_id:
+        return True
     row_question = _caption_instruction_normalized_question(row.get("question"))
     if row_question and _caption_instruction_normalized_question(record.get("question")) != row_question:
         return False
@@ -23190,12 +23190,12 @@ def _caption_instruction_match_caption_record(
     *,
     image_keys: Set[str],
 ) -> bool:
-    qa_id = str(row.get("qa_id") or "").strip()
-    if qa_id and str(record.get("id") or "").strip() == qa_id:
-        return True
     record_image_key = str(record.get("image_key") or record.get("image_name") or "").strip()
     if record_image_key not in image_keys:
         return False
+    qa_id = str(row.get("qa_id") or "").strip()
+    if qa_id and str(record.get("id") or "").strip() == qa_id:
+        return True
     candidate_caption = str(row.get("candidate_answer") or row.get("training_answer") or "").strip()
     return bool(candidate_caption and str(record.get("caption") or "").strip() == candidate_caption)
 

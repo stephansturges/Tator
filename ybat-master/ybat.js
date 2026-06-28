@@ -35638,10 +35638,14 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const rowMatch = raw.match(/(?:^|:)row_(\d+)/);
         const rowText = rowMatch ? ` at row ${rowMatch[1]}` : "";
-        const duplicateMatch = raw.match(/^review_rows_(conflicting_duplicate_target|duplicate_target):row_(\d+):row_(\d+)$/);
+        const duplicateMatch = raw.match(/^review_rows_(conflicting_duplicate_target|duplicate_target|conflicting_duplicate_resolved_target|duplicate_resolved_target):row_(\d+):row_(\d+)$/);
         if (duplicateMatch) {
-            const conflict = duplicateMatch[1] === "conflicting_duplicate_target";
-            return `Instruction review import blocked: ${conflict ? "conflicting duplicate" : "duplicate"} actionable decision targeting rows ${duplicateMatch[2]} and ${duplicateMatch[3]}. Keep one reviewed row per caption0 or generated-QA target.`;
+            const conflict = duplicateMatch[1].startsWith("conflicting_");
+            const resolved = duplicateMatch[1].includes("_resolved_");
+            const targetText = resolved
+                ? "the same saved caption or generated-QA record"
+                : "the same actionable review target";
+            return `Instruction review import blocked: ${conflict ? "conflicting duplicate" : "duplicate"} decisions at rows ${duplicateMatch[2]} and ${duplicateMatch[3]} target ${targetText}. Keep one reviewed row per caption0 or generated-QA target.`;
         }
         const datasetMatch = raw.match(/^review_rows_dataset_id_mismatch:row_(\d+):(.+)!=(.+)$/);
         if (datasetMatch) {
@@ -35666,7 +35670,7 @@ async function cancelRfDetrTrainingJobRequest() {
             review_rows_caption0_ambiguous: "the caption0 row matches multiple saved caption records",
             review_rows_caption0_not_found: "the caption0 row no longer matches the saved caption text for that image",
             review_rows_caption0_answer_missing: "the caption0 row is missing the reviewed caption text",
-            review_rows_caption0_creation_not_allowed: "the caption0 row would create a new caption record but lacks current synthetic text-label export provenance",
+            review_rows_caption0_creation_not_allowed: "the caption0 row would create a new caption record but its synthetic id does not match the selected dataset, resolved image key, and current text-label caption",
             review_rows_caption0_image_not_found: "the caption0 row image could not be resolved in the selected dataset",
         };
         const code = raw.split(":")[0];

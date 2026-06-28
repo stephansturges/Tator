@@ -23113,6 +23113,23 @@ def _caption_instruction_review_target_key(row: Mapping[str, Any]) -> Tuple[str,
     return ("question_answer", row_origin, image_path, split, f"{question}\u0000{answer}")
 
 
+def _caption_instruction_review_resolved_target_key(
+    row_origin: str,
+    record: Mapping[str, Any],
+) -> Tuple[str, str, str, str]:
+    origin = str(row_origin or "").strip()
+    record_id = str(record.get("id") or "").strip()
+    if record_id:
+        return (origin, "id", record_id, "")
+    image_key = str(record.get("image_key") or record.get("image_name") or record.get("image") or "").strip()
+    if origin == "generated_qa":
+        question = _caption_instruction_normalized_question(record.get("question"))
+        answer = str(record.get("answer") or "").strip()
+        return (origin, "content", image_key, f"{question}\u0000{answer}")
+    caption = str(record.get("caption") or "").strip()
+    return (origin, "content", image_key, caption)
+
+
 def _caption_instruction_reject_duplicate_review_targets(
     rows: Sequence[Any],
     *,
@@ -23302,6 +23319,7 @@ def _caption_instruction_reject_unmatchable_actionable_review_rows(
     caption_records: Sequence[Mapping[str, Any]],
     instruction_records: Sequence[Mapping[str, Any]],
 ) -> None:
+    resolved_seen: Dict[Tuple[str, str, str, str], Tuple[int, str]] = {}
     for index, row in enumerate(rows, start=1):
         if not isinstance(row, Mapping):
             raise HTTPException(
@@ -23345,6 +23363,20 @@ def _caption_instruction_reject_unmatchable_actionable_review_rows(
                     status_code=HTTP_400_BAD_REQUEST,
                     detail=f"review_rows_generated_qa_ambiguous:row_{index}",
                 )
+            resolved_key = _caption_instruction_review_resolved_target_key(row_origin, matches[0])
+            prior = resolved_seen.get(resolved_key)
+            if prior is not None:
+                prior_index, prior_decision = prior
+                detail = (
+                    "review_rows_conflicting_duplicate_resolved_target"
+                    if decision != prior_decision
+                    else "review_rows_duplicate_resolved_target"
+                )
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail=f"{detail}:row_{prior_index}:row_{index}",
+                )
+            resolved_seen[resolved_key] = (index, decision)
             continue
         if row_origin == "caption0":
             matches = [
@@ -23366,6 +23398,22 @@ def _caption_instruction_reject_unmatchable_actionable_review_rows(
                     status_code=HTTP_400_BAD_REQUEST,
                     detail=f"review_rows_caption0_not_found:row_{index}",
                 )
+            if matches:
+                resolved_key = _caption_instruction_review_resolved_target_key(row_origin, matches[0])
+                prior = resolved_seen.get(resolved_key)
+                if prior is not None:
+                    prior_index, prior_decision = prior
+                    detail = (
+                        "review_rows_conflicting_duplicate_resolved_target"
+                        if decision != prior_decision
+                        else "review_rows_duplicate_resolved_target"
+                    )
+                    raise HTTPException(
+                        status_code=HTTP_400_BAD_REQUEST,
+                        detail=f"{detail}:row_{prior_index}:row_{index}",
+                    )
+                resolved_seen[resolved_key] = (index, decision)
+                continue
             if not matches:
                 caption = str(row.get("candidate_answer") or row.get("training_answer") or "").strip()
                 if not caption:

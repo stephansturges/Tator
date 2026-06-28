@@ -664,7 +664,9 @@ The review import is deliberately conservative:
   dataset, and this rejection happens before any review metadata is written.
 - It rejects duplicate actionable review targets before applying any imported
   metadata. Exact duplicates and conflicting duplicate decisions both fail
-  closed, so API/script imports cannot silently let the last duplicate row win.
+  closed. Rows that use different row identities but resolve to the same saved
+  caption or generated-QA record also fail closed, so API/script imports cannot
+  silently let the last duplicate row win.
 - It rejects malformed review rows, unsupported actionable row origins,
   actionable rows without an image path, stale generated-QA targets, ambiguous
   generated-QA or caption0 matches, QA ids whose review-row image path does not
@@ -906,7 +908,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Result:
 
 ```text
-171 passed
+175 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch
@@ -933,6 +935,7 @@ Focused review-import fail-closed tests:
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_persists_review_metadata \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_mismatched_dataset_id \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_duplicate_actionable_targets \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_duplicate_resolved_actionable_targets \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_unmatchable_actionable_rows_atomically \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_stale_generated_qa_text \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_stale_caption0_text \
@@ -942,7 +945,7 @@ Focused review-import fail-closed tests:
 Result:
 
 ```text
-15 passed
+19 passed
 ```
 
 Focused trainer-import boundary tests:
@@ -990,7 +993,7 @@ Caption/instruction/UI contract suite outside the trainer file:
 Result:
 
 ```text
-146 passed
+150 passed
 ```
 
 Syntax and formatting checks:

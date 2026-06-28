@@ -400,7 +400,8 @@ It fails closed on:
 - generated-QA or caption0 targets whose QA id and image context match but
   whose reviewed question or answer text is stale
 - malformed review rows
-- duplicate actionable review targets
+- duplicate actionable review targets, including rows that use different row
+  identities but resolve to the same saved caption or generated-QA record
 - unsupported actionable row origins
 - actionable rows without an image path
 - stale generated-QA targets
@@ -572,7 +573,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-171 passed
+175 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch
@@ -599,6 +600,7 @@ Focused review-import fail-closed suite:
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_persists_review_metadata \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_mismatched_dataset_id \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_duplicate_actionable_targets \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_duplicate_resolved_actionable_targets \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_unmatchable_actionable_rows_atomically \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_stale_generated_qa_text \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_stale_caption0_text \
@@ -608,7 +610,7 @@ Focused review-import fail-closed suite:
 Latest recorded result:
 
 ```text
-15 passed
+19 passed
 ```
 
 Focused trainer-import boundary suite:
@@ -654,7 +656,7 @@ Focused instruction-dataset and UI contract suite:
 Latest recorded result:
 
 ```text
-146 passed
+150 passed
 ```
 
 Runtime and unattended hardening suites have also been run in prior hardening

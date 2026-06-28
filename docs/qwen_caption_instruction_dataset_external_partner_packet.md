@@ -303,7 +303,8 @@ Review import fails closed on:
 - QA ids whose review-row image path does not match the stored caption or
   generated-QA record
 - QA ids whose image path matches but whose reviewed question, candidate answer,
-  or training answer no longer matches the stored caption or generated-QA record
+  or selected training answer no longer matches the stored caption/generated-QA
+  record and current source-rewritten archive view
 - ambiguous generated-QA or caption0 matches
 - unresolvable caption0 targets
 - caption0 rows that would create a new saved caption without a synthetic id
@@ -528,7 +529,7 @@ Result:
 Result:
 
 ```text
-184 passed
+185 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

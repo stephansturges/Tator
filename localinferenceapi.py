@@ -23155,6 +23155,52 @@ def _caption_instruction_review_has_current_text(row_origin: str, row: Mapping[s
     return True
 
 
+def _caption_instruction_current_review_row_status(
+    row_origin: str,
+    row: Mapping[str, Any],
+    *,
+    image_names: Set[str],
+    image_keys: Set[str],
+    current_review_rows: Sequence[Mapping[str, Any]],
+) -> str:
+    origin = str(row_origin or "").strip()
+    qa_id = str(row.get("qa_id") or "").strip()
+    question = _caption_instruction_normalized_question(row.get("question"))
+    candidate_answer = str(row.get("candidate_answer") or "").strip()
+    training_answer = str(row.get("training_answer") or "").strip()
+    selected_for_training = bool(row.get("selected_for_training"))
+    matched_by_identity = False
+    for current in current_review_rows:
+        if not isinstance(current, Mapping):
+            continue
+        if str(current.get("row_origin") or "").strip() != origin:
+            continue
+        current_qa_id = str(current.get("qa_id") or "").strip()
+        if qa_id and current_qa_id != qa_id:
+            continue
+        current_image = str(current.get("image_path") or current.get("image_name") or current.get("image") or "").strip()
+        current_split = str(current.get("split") or "").strip()
+        current_image_aliases = {current_image}
+        if current_split and current_image:
+            current_image_aliases.add(f"{current_split}/{current_image}")
+        if not (current_image_aliases & image_keys or current_image in image_names):
+            continue
+        matched_by_identity = True
+        current_question = _caption_instruction_normalized_question(current.get("question"))
+        if question and current_question and current_question != question:
+            return "question_stale"
+        current_candidate_answer = str(current.get("candidate_answer") or "").strip()
+        if candidate_answer and current_candidate_answer and current_candidate_answer != candidate_answer:
+            return "candidate_answer_stale"
+        current_training_answer = str(current.get("training_answer") or "").strip()
+        if selected_for_training and bool(current.get("selected_for_training")) is not True:
+            return "training_answer_stale"
+        if training_answer and current_training_answer != training_answer:
+            return "training_answer_stale"
+        return "ok"
+    return "not_found" if not matched_by_identity else "question_stale"
+
+
 def _caption_instruction_reject_duplicate_review_targets(
     rows: Sequence[Any],
     *,
@@ -23349,6 +23395,7 @@ def _caption_instruction_reject_unmatchable_actionable_review_rows(
     dataset_id: str,
     caption_records: Sequence[Mapping[str, Any]],
     instruction_records: Sequence[Mapping[str, Any]],
+    current_review_rows: Sequence[Mapping[str, Any]],
 ) -> None:
     resolved_seen: Dict[Tuple[str, str, str, str], Tuple[int, str]] = {}
     for index, row in enumerate(rows, start=1):
@@ -23404,6 +23451,23 @@ def _caption_instruction_reject_unmatchable_actionable_review_rows(
                     status_code=HTTP_400_BAD_REQUEST,
                     detail=f"review_rows_generated_qa_ambiguous:row_{index}",
                 )
+            current_status = _caption_instruction_current_review_row_status(
+                row_origin,
+                row,
+                image_names=image_names,
+                image_keys=image_keys,
+                current_review_rows=current_review_rows,
+            )
+            if current_status == "training_answer_stale":
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail=f"review_rows_generated_qa_training_answer_stale:row_{index}",
+                )
+            if current_status != "ok":
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail=f"review_rows_generated_qa_not_found:row_{index}",
+                )
             resolved_key = _caption_instruction_review_resolved_target_key(row_origin, matches[0])
             prior = resolved_seen.get(resolved_key)
             if prior is not None:
@@ -23450,6 +23514,23 @@ def _caption_instruction_reject_unmatchable_actionable_review_rows(
                     detail=f"review_rows_caption0_not_found:row_{index}",
                 )
             if matches:
+                current_status = _caption_instruction_current_review_row_status(
+                    row_origin,
+                    row,
+                    image_names=image_names,
+                    image_keys=image_keys,
+                    current_review_rows=current_review_rows,
+                )
+                if current_status == "training_answer_stale":
+                    raise HTTPException(
+                        status_code=HTTP_400_BAD_REQUEST,
+                        detail=f"review_rows_caption0_training_answer_stale:row_{index}",
+                    )
+                if current_status != "ok":
+                    raise HTTPException(
+                        status_code=HTTP_400_BAD_REQUEST,
+                        detail=f"review_rows_caption0_not_found:row_{index}",
+                    )
                 resolved_key = _caption_instruction_review_resolved_target_key(row_origin, matches[0])
                 prior = resolved_seen.get(resolved_key)
                 if prior is not None:
@@ -23510,12 +23591,23 @@ def apply_caption_instruction_review(dataset_id: str, payload: Dict[str, Any]):
     _caption_instruction_reject_duplicate_review_targets(rows, dataset_id=dataset_id)
     caption_records = _load_dataset_caption_records(entry)
     instruction_records = _load_dataset_caption_instruction_records(entry)
+    current_archive = _dataset_caption_instruction_archive(
+        caption_records,
+        instruction_records,
+        dataset_id=dataset_id,
+        entry=entry,
+        settings=_caption_instruction_export_settings({}),
+    )
+    current_review_rows = [
+        row for row in (current_archive.get("instruction_review_rows") or []) if isinstance(row, Mapping)
+    ]
     _caption_instruction_reject_unmatchable_actionable_review_rows(
         entry,
         rows,
         dataset_id=dataset_id,
         caption_records=caption_records,
         instruction_records=instruction_records,
+        current_review_rows=current_review_rows,
     )
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     reviewer = str((payload or {}).get("reviewer") or "").strip()

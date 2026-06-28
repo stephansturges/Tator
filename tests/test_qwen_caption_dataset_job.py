@@ -1714,6 +1714,95 @@ def test_caption_instruction_review_import_rejects_stale_generated_qa_text(
     assert "review_decision" not in records[0]["metadata"]
 
 
+def test_caption_instruction_review_import_rejects_stale_rewritten_training_answer(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import localinferenceapi as api
+
+    entry = {"id": "ds", "dataset_root": str(tmp_path), "registry_root": str(tmp_path)}
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: entry)
+    monkeypatch.setattr(
+        api,
+        "_annotation_manifest_for_entry",
+        lambda _entry: {
+            "labelmap": ["Boat"],
+            "images": [
+                {
+                    "image_name": "frame.jpg",
+                    "image_relpath": "frame.jpg",
+                    "split": "train",
+                    "label_source_present": True,
+                    "label_lines": ["0 0.5 0.5 0.2 0.2"],
+                }
+            ],
+        },
+    )
+    api._write_dataset_caption_instruction_records(
+        entry,
+        [
+            {
+                "id": "qa-1",
+                "image_name": "frame.jpg",
+                "image_key": "train/frame.jpg",
+                "split": "train",
+                "question": "How many boats are visible?",
+                "answer": "There are two boats.",
+                "row_type": "generated_qa",
+                "answer_source": "vlm_generated",
+                "validation_status": "accepted",
+            }
+        ],
+    )
+    base_row = {
+        "format": "tator_caption_instruction_review_rows_v1",
+        "dataset_id": "ds",
+        "image_path": "frame.jpg",
+        "split": "train",
+        "row_origin": "generated_qa",
+        "qa_id": "qa-1",
+        "row_type": "generated_count_validated",
+        "question": "How many boats are visible?",
+        "candidate_answer": "There are two boats.",
+        "training_answer": '{"object_counts":{"Boat":2}}',
+        "validation_status": "accepted",
+        "selected_for_training": True,
+        "requires_manual_review": True,
+        "review_decision": "accepted",
+        "review_notes": "stale deterministic answer should fail",
+        "rejection_reasons": [],
+        "source_summary": {"status": "ok", "object_counts": {"Boat": 1}},
+    }
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.apply_caption_instruction_review("ds", {"rows": [base_row]})
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "review_rows_generated_qa_training_answer_stale:row_1"
+    records = api._load_dataset_caption_instruction_records(entry)
+    assert records[0]["review_status"] == ""
+    assert "review_decision" not in records[0]["metadata"]
+
+    result = api.apply_caption_instruction_review(
+        "ds",
+        {
+            "rows": [
+                {
+                    **base_row,
+                    "training_answer": '{"object_counts":{"Boat":1}}',
+                    "review_notes": "current deterministic answer is accepted",
+                }
+            ]
+        },
+    )
+
+    assert result["applied_count"] == 1
+    records = api._load_dataset_caption_instruction_records(entry)
+    assert records[0]["review_status"] == "accepted"
+    assert records[0]["metadata"]["review_decision"] == "accepted"
+    assert records[0]["metadata"]["review_notes"] == "current deterministic answer is accepted"
+
+
 def test_caption_instruction_review_import_rejects_stale_caption0_text(
     monkeypatch,
     tmp_path,

@@ -130,7 +130,8 @@ These rules define the correctness of the implementation:
   QA id with a mismatched image path is rejected before any metadata is written.
 - Human review target matching also requires current reviewed text; a known QA
   id with the right image is still rejected when the reviewed question,
-  candidate answer, or training answer no longer matches the saved record.
+  candidate answer, or selected training answer no longer matches the saved
+  record and current source-rewritten archive view.
 - Training readiness is based on selected rows, validation state, manual review
   state, and corpus-quality gates.
 - A row that is rejected or marked needs-revision by review is excluded from
@@ -578,7 +579,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-184 passed
+185 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch
@@ -611,6 +612,7 @@ Focused review-import fail-closed suite:
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_rows_missing_current_text \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_unmatchable_actionable_rows_atomically \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_stale_generated_qa_text \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_stale_rewritten_training_answer \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_stale_caption0_text \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_arbitrary_caption0_creation \
   -q
@@ -619,7 +621,7 @@ Focused review-import fail-closed suite:
 Latest recorded result:
 
 ```text
-28 passed
+30 passed
 ```
 
 Focused trainer-import boundary suite:
@@ -665,7 +667,7 @@ Focused instruction-dataset and UI contract suite:
 Latest recorded result:
 
 ```text
-159 passed
+160 passed
 ```
 
 Runtime and unattended hardening suites have also been run in prior hardening

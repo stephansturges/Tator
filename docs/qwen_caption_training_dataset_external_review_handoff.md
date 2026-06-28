@@ -149,9 +149,10 @@ What is implemented in this checkpoint:
   formatting for server-side review-import failures.
 - Server-side review import target matching requires image context and current
   reviewed text, so a review row with the same QA id is rejected if its
-  question or candidate/training answer is missing or no longer matches the
-  saved language record. A missing or mismatched QA id is also rejected instead
-  of falling back to text-only matching.
+  question, candidate answer, or selected training answer is missing or no
+  longer matches the saved language record and current source-rewritten archive
+  view. A missing or mismatched QA id is also rejected instead of falling back
+  to text-only matching.
 - Server-side flattened trainer-row validation exposed as
   `instruction_export_validation` in the archive, report, and API payload.
 - Direct trainer import of the flat instruction JSONL row shape.
@@ -914,7 +915,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Result:
 
 ```text
-184 passed
+185 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch
@@ -947,6 +948,7 @@ Focused review-import fail-closed tests:
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_rows_missing_current_text \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_unmatchable_actionable_rows_atomically \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_stale_generated_qa_text \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_stale_rewritten_training_answer \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_stale_caption0_text \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_arbitrary_caption0_creation \
   -q
@@ -955,7 +957,7 @@ Focused review-import fail-closed tests:
 Result:
 
 ```text
-28 passed
+30 passed
 ```
 
 Focused trainer-import boundary tests:
@@ -1003,7 +1005,7 @@ Caption/instruction/UI contract suite outside the trainer file:
 Result:
 
 ```text
-159 passed
+160 passed
 ```
 
 Syntax and formatting checks:

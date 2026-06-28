@@ -117,9 +117,10 @@ becomes source annotations. **Strict QA grounding** asks the model to answer onl
 from the image, caption0, or read-only source context.
 
 **Download instruction JSONL** exports normal `image_path` / `question` /
-`answer` rows. The UI validates missing image paths, blank questions, blank
-answers, invalid JSON for JSON row types, and duplicate image/question pairs
-before writing the file.
+`answer` rows. The trainer imports this flat shape directly and normalizes each
+row into an image/question/answer conversation. The UI validates missing image
+paths, blank questions, blank answers, invalid JSON for JSON row types, and
+duplicate image/question pairs before writing the file.
 **Download instruction archive** exports one per-image construction archive
 record per JSONL line, keeping caption0, generated QA, optional deterministic
 metadata QA, source annotation provenance, and per-image export metadata separate

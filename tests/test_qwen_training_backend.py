@@ -175,6 +175,57 @@ def test_qwen_training_image_resolver_rejects_symlinked_image_root_escape(tmp_pa
     assert training._resolve_image_path(dataset_root, "train", "external.png") is None
 
 
+def test_qwen_conversation_dataset_imports_flat_question_answer_rows(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    image_dir = dataset_root / "train" / "images" / "nested"
+    image_dir.mkdir(parents=True)
+    Image.new("RGB", (4, 4), (8, 16, 32)).save(image_dir / "sample.png")
+    rows = [
+        {
+            "image_path": "nested/sample.png",
+            "question": "Describe this image in detail.",
+            "answer": "A compact scene is shown.",
+            "metadata": {"row_type": "caption0"},
+        },
+        {
+            "image_path": "nested/sample.png",
+            "question": "How many buildings are present?",
+            "answer": '{"object_counts":{"Building":1}}',
+            "metadata": {
+                "row_type": "deterministic_count",
+                "answer_format": "object_count_json",
+            },
+        },
+    ]
+    (dataset_root / "train" / "annotations.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+    dataset = training.QwenConversationDataset(dataset_root, "train", processor=object())
+
+    assert len(dataset) == 2
+    assert dataset.entries[0]["image"] == "nested/sample.png"
+    assert dataset.entries[0]["metadata"]["row_type"] == "caption0"
+    assert dataset.entries[0]["conversations"] == [
+        {"from": "human", "value": "<image>\nDescribe this image in detail."},
+        {"from": "gpt", "value": "A compact scene is shown."},
+    ]
+    item = dataset[0]
+    user_message = item["messages"][0]
+    assistant_message = item["messages"][1]
+    assert user_message["role"] == "user"
+    assert user_message["content"][0]["type"] == "image"
+    assert user_message["content"][1] == {
+        "type": "text",
+        "text": "Describe this image in detail.",
+    }
+    assert assistant_message == {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "A compact scene is shown."}],
+    }
+
+
 def test_qwen_conversation_dataset_rejects_symlinked_annotation_escape(tmp_path):
     dataset_root = tmp_path / "dataset"
     split_root = dataset_root / "train"

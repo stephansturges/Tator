@@ -763,6 +763,10 @@ flat records, compatibility grouped map, caption-only training rows, instruction
 training rows, per-image instruction archive rows, the instruction report, and
 the full instruction audit object. This keeps browser downloads and scriptable
 exports aligned around stable multi-caption and instruction-dataset contracts.
+The Qwen trainer accepts the flat `image_path` / `question` / `answer` training
+row shape directly and normalizes each row into the conversation format used for
+fine-tuning, so the download remains easy to inspect without requiring a manual
+conversion step.
 Generated captions append as alternate records by default. **Make generated
 caption primary** is a separate opt-in promotion control; when it is off, a
 generated caption can still become primary only if the image has no existing

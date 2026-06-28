@@ -31,7 +31,8 @@ row before training.
   - generated answer format is explicit: natural text or JSON.
 - The backend exports:
   - `instruction_training_rows`: flattened `image_path` / `question` / `answer`
-    rows for training.
+    rows for training. The Qwen trainer imports this flat shape directly and
+    normalizes each row into a two-turn image/question/answer conversation.
   - `instruction_archive_rows`: one per-image construction archive record per
     image, ready to download as JSONL.
   - `instruction_archive`: a versioned per-image archive containing caption0,
@@ -116,6 +117,9 @@ row before training.
 - Export options let callers include or exclude caption0, generated QA, and
   deterministic metadata QA without altering saved data, while preserving the
   requested generated-QA mix and answer format.
+- The Qwen training dataset loader now accepts exported flat instruction rows
+  directly, preserving row metadata while converting each row into the
+  conversation format used by fine-tuning.
 
 ## Validation Completed
 
@@ -125,8 +129,11 @@ row before training.
 - JavaScript syntax:
   - `node --check ybat-master/ybat.js`
 - Focused instruction-dataset, export, and UI contract tests:
-  - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete tests/test_labeling_panel_layout_contract.py tests/test_qwen_caption_ui_smoke_tool.py -q`
-  - Result: 115 passed.
+  - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py tests/test_qwen_training_backend.py tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete tests/test_labeling_panel_layout_contract.py tests/test_qwen_caption_ui_smoke_tool.py -q`
+  - Result: 130 passed.
+- Trainer import compatibility:
+  - `./.venv-macos/bin/python -m pytest tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_imports_flat_question_answer_rows tests/test_qwen_caption_dataset_job.py::test_caption_instruction_training_rows_import_into_qwen_trainer -q`
+  - Result: 2 passed.
 - Additional instruction archive provenance and manifest-gating regression:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py -q`
   - Result: 64 passed.
@@ -143,7 +150,7 @@ row before training.
   - Result: 135 passed.
 - Rendered browser smoke:
   - `./.venv-macos/bin/python tools/run_qwen_caption_ui_smoke.py --base-url http://127.0.0.1:8000 --out-json tmp/qwen_caption_ui_smoke_report.json --screenshot tmp/qwen_caption_ui_smoke.png`
-  - Result: `ok=true`, caption readiness reported 29 pass, 1 warning, 0 fail;
+  - Result: `ok=true`, caption readiness reported 28 pass, 2 warnings, 0 fail;
     no console errors, no failed requests, no bad HTTP responses, no clipped
     caption action buttons. The screenshot confirms the generated-QA mix,
     answer-format, archive, and report controls are visible and readable in the
@@ -161,5 +168,3 @@ row before training.
   fine-tuning.
 - Add corpus-level metrics for generated QA diversity, rejection rate, duplicate
   question rate, and class/context coverage.
-- Add a trainer import smoke that reads `instruction_training_rows` and verifies
-  the exact downstream loader shape.

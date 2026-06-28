@@ -366,6 +366,28 @@ def _conversation_to_messages(
     return messages
 
 
+def _flat_training_row_to_conversation_entry(
+    payload: Dict[str, Any],
+    image_name: str,
+) -> Optional[Dict[str, Any]]:
+    question = str(payload.get("question") or "").strip()
+    answer = str(payload.get("answer") or "").strip()
+    if not question or not answer:
+        return None
+    user_value = question if "<image>" in question else f"<image>\n{question}"
+    entry: Dict[str, Any] = {
+        "image": image_name,
+        "conversations": [
+            {"from": "human", "value": user_value},
+            {"from": "gpt", "value": answer},
+        ],
+    }
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict):
+        entry["metadata"] = dict(metadata)
+    return entry
+
+
 class QwenConversationDataset(Dataset):
     def __init__(
         self,
@@ -396,9 +418,16 @@ class QwenConversationDataset(Dataset):
                     continue
                 image_name = payload.get("image")
                 if not isinstance(image_name, str):
+                    image_name = payload.get("image_path")
+                if not isinstance(image_name, str):
+                    continue
+                image_name = image_name.strip()
+                if not image_name:
                     continue
                 if "conversations" in payload:
-                    self.entries.append(payload)
+                    entry = dict(payload)
+                    entry["image"] = image_name
+                    self.entries.append(entry)
                 elif "detections" in payload:
                     detections = payload.get("detections") or []
                     if not isinstance(detections, list):
@@ -416,6 +445,10 @@ class QwenConversationDataset(Dataset):
                                 ],
                             }
                         )
+                elif "question" in payload and "answer" in payload:
+                    entry = _flat_training_row_to_conversation_entry(payload, image_name)
+                    if entry is not None:
+                        self.entries.append(entry)
                 else:
                     continue
                 if max_items and len(self.entries) >= max_items:

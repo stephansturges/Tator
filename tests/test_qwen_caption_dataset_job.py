@@ -608,6 +608,93 @@ def test_caption_instruction_archive_separates_generated_qa_from_source_annotati
     assert deterministic["archive_rows"][0]["export_metadata"]["deterministic_metadata_qa_pair_count"] == 8
 
 
+def test_caption_instruction_training_rows_import_into_qwen_trainer(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import localinferenceapi as api
+    from tools import qwen_training as training
+
+    manifest = {
+        "labelmap": ["Boat", "Building"],
+        "images": [
+            {
+                "split": "train",
+                "image_relpath": "frame.jpg",
+                "image_name": "frame.jpg",
+                "label_lines": ["0 0.25 0.25 0.10 0.10"],
+                "label_source_present": True,
+                "label_source": "dataset_label_file",
+            }
+        ],
+    }
+    monkeypatch.setattr(api, "_annotation_manifest_for_entry", lambda _entry: manifest)
+    captions = [
+        {
+            "id": "caption-1",
+            "image_name": "frame.jpg",
+            "image_key": "train/frame.jpg",
+            "split": "train",
+            "caption": "A high-angle scene shows one boat near the shoreline.",
+            "source": "qwen_caption_job",
+            "is_primary": True,
+            "caption_index": 1,
+        }
+    ]
+    generated = [
+        {
+            "id": "qa-1",
+            "image_name": "frame.jpg",
+            "image_key": "train/frame.jpg",
+            "split": "train",
+            "question": "How many boats are visible?",
+            "answer": "Two boats are visible.",
+            "row_type": "generated_qa",
+            "answer_source": "vlm_generated",
+        }
+    ]
+    archive = api._dataset_caption_instruction_archive(
+        captions,
+        generated,
+        dataset_id="ds",
+        entry={"id": "ds"},
+        settings=api._caption_instruction_export_settings(
+            {
+                "include_caption0_in_training": True,
+                "include_generated_qa_in_training": True,
+                "include_deterministic_metadata_qa": True,
+            }
+        ),
+        exported_at="2026-01-01T00:00:00Z",
+    )
+    training_rows = archive["training_rows"]
+    dataset_root = tmp_path / "qwen_dataset"
+    image_dir = dataset_root / "train" / "images"
+    image_dir.mkdir(parents=True)
+    Image.new("RGB", (8, 8), (40, 50, 60)).save(image_dir / "frame.jpg")
+    (dataset_root / "train" / "annotations.jsonl").write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in training_rows),
+        encoding="utf-8",
+    )
+
+    dataset = training.QwenConversationDataset(dataset_root, "train", processor=object())
+    row_types = {entry["metadata"]["row_type"] for entry in dataset.entries}
+    generated_count = next(
+        entry for entry in dataset.entries if entry["metadata"]["row_type"] == "generated_count_validated"
+    )
+
+    assert len(dataset) == archive["training_row_count"] == len(training_rows)
+    assert {"caption0", "generated_count_validated", "deterministic_count"}.issubset(row_types)
+    assert generated_count["conversations"][0] == {
+        "from": "human",
+        "value": "<image>\nHow many boats are visible?",
+    }
+    assert json.loads(generated_count["conversations"][1]["value"]) == {"object_counts": {"Boat": 1}}
+    item = dataset[0]
+    assert item["messages"][0]["content"][0]["type"] == "image"
+    assert item["images"][0].size == (8, 8)
+
+
 def test_caption_instruction_archive_rejects_structured_generated_qa_without_source_labels(
     monkeypatch,
 ) -> None:

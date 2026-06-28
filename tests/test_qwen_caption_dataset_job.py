@@ -810,11 +810,17 @@ def test_caption_instruction_review_import_persists_review_metadata(
     caption_review = next(row for row in review_rows if row["row_origin"] == "caption0")
     generated_review = next(row for row in review_rows if row["row_origin"] == "generated_qa")
     assert caption_review["review_decision"] == "rejected"
+    assert caption_review["selected_for_training"] is False
     assert generated_review["review_decision"] == "accepted"
+    training_rows = archive["training_rows"]
+    assert len(training_rows) == 1
+    assert training_rows[0]["metadata"]["qa_id"] == "qa-1"
+    assert all(row["metadata"]["qa_id"] != "primary-review" for row in training_rows)
+    assert archive["captioning_report"]["rejection_reason_counts"]["caption0_manual_review_rejected"] == 1
     readiness = archive["captioning_report"]["training_readiness"]
-    assert readiness["status"] == "blocked"
-    assert readiness["rejected_manual_review_row_count"] == 1
-    assert "selected_row_rejected_by_manual_review" in readiness["blocking_reasons"]
+    assert readiness["status"] == "ready"
+    assert readiness["rejected_manual_review_row_count"] == 0
+    assert "selected_row_rejected_by_manual_review" not in readiness["blocking_reasons"]
 
 
 def test_caption_instruction_review_decision_normalizes_external_review_values() -> None:
@@ -859,6 +865,75 @@ def test_caption_instruction_training_readiness_blocks_selected_needs_revision_r
     assert readiness["needs_revision_manual_review_row_count"] == 1
     assert "selected_row_needs_revision_by_manual_review" in readiness["blocking_reasons"]
     assert "revise_selected_language_rows" in readiness["required_actions"]
+
+
+def test_caption_instruction_archive_excludes_needs_revision_generated_qa_from_training_rows(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import localinferenceapi as api
+
+    entry = {"id": "ds", "dataset_root": str(tmp_path), "registry_root": str(tmp_path)}
+    monkeypatch.setattr(
+        api,
+        "_annotation_manifest_for_entry",
+        lambda _entry: {
+            "labelmap": [],
+            "images": [
+                {
+                    "image_name": "frame.jpg",
+                    "image_relpath": "frame.jpg",
+                    "split": "train",
+                    "label_source_present": True,
+                    "label_lines": [],
+                }
+            ],
+        },
+    )
+    caption_records = [
+        {
+            "id": "cap-1",
+            "image_name": "frame.jpg",
+            "image_key": "train/frame.jpg",
+            "split": "train",
+            "caption": "A waterfront scene.",
+            "source": "text_label",
+            "is_primary": True,
+        }
+    ]
+    instruction_records = [
+        {
+            "id": "qa-revise",
+            "image_name": "frame.jpg",
+            "image_key": "train/frame.jpg",
+            "split": "train",
+            "question": "What is the scene type?",
+            "answer": "A waterfront area.",
+            "row_type": "generated_qa",
+            "answer_source": "vlm_generated",
+            "validation_status": "accepted",
+            "metadata": {"review_decision": "needs-revision"},
+        }
+    ]
+
+    archive = api._dataset_caption_instruction_archive(
+        caption_records,
+        instruction_records,
+        dataset_id="ds",
+        entry=entry,
+        settings=api._caption_instruction_export_settings({}),
+        exported_at="2026-01-01T00:00:00Z",
+    )
+
+    training_qa_ids = {row["metadata"]["qa_id"] for row in archive["training_rows"]}
+    assert training_qa_ids == {"cap-1"}
+    generated_review = next(row for row in archive["instruction_review_rows"] if row["row_origin"] == "generated_qa")
+    assert generated_review["review_decision"] == "needs-revision"
+    assert generated_review["selected_for_training"] is False
+    report = archive["captioning_report"]
+    assert report["rejection_reason_counts"]["generated_qa_manual_review_needs_revision"] == 1
+    assert report["training_readiness"]["status"] == "needs_review"
+    assert report["training_readiness"]["pending_manual_review_row_count"] == 1
 
 
 def test_caption_instruction_training_rows_import_into_qwen_trainer(

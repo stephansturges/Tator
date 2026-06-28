@@ -276,7 +276,9 @@ The intended flow is:
     JSONL back into the dataset. The import persists only `accepted`,
     `rejected`, or `needs_revision` review metadata on caption or generated-QA
     records.
-12. The next export reflects those review decisions in training readiness.
+12. The next export reflects those review decisions in training readiness and
+    excludes rejected or needs-revision language candidates from flattened
+    trainer rows.
 13. The trainer imports the flat instruction JSONL and converts each row into a
     Qwen conversation record.
 
@@ -517,6 +519,8 @@ The review import is deliberately conservative:
   selected final annotations.
 - It reports how many rows were received, applied, created as caption review
   records, or skipped.
+- Rejected and needs-revision caption0 or generated-QA candidates remain in the
+  archive and review rows, but they are not flattened into trainer rows.
 
 ## UI/UX Work
 
@@ -732,7 +736,7 @@ Result:
 Result:
 
 ```text
-135 passed
+136 passed
 ```
 
 Syntax and formatting checks:

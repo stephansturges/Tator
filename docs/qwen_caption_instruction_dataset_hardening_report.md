@@ -127,6 +127,9 @@ row before training.
   decision metadata back to saved caption and generated-QA records. This closes
   the export-review-import loop without editing source labels, questions,
   answers, boxes, or final annotations.
+- Caption0 or generated-QA candidates marked rejected or needs-revision by
+  manual review remain in the archive and review JSONL but are excluded from
+  flattened trainer rows.
 - The instruction report now includes `corpus_quality_metrics` for generated-QA
   diversity, duplicate-question rate, generated-QA acceptance/rejection rates,
   structured rewrite rate, image-level training coverage, source-grounded row
@@ -134,8 +137,9 @@ row before training.
 - The instruction report now includes `training_readiness`, which classifies
   the exported corpus as `ready`, `needs_review`, or `blocked`. The browser
   blocks instruction JSONL when readiness is blocked and warns when selected
-  language rows or quality gates still need review. Selected rows marked
-  rejected or needs-revision by review decisions are hard blockers.
+  language rows or quality gates still need review. Reviewed-out language rows
+  are removed from flattened output; any selected row that still carries a
+  rejected or needs-revision decision is a hard blocker.
 - Export options let callers include or exclude caption0, generated QA, and
   deterministic metadata QA without altering saved data, while preserving the
   requested generated-QA mix and answer format.
@@ -152,7 +156,7 @@ row before training.
   - `node --check ybat-master/ybat.js`
 - Focused instruction-dataset, export, and UI contract tests:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py tests/test_qwen_training_backend.py tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete tests/test_labeling_panel_layout_contract.py tests/test_qwen_caption_ui_smoke_tool.py -q`
-  - Result: 135 passed.
+  - Result: 136 passed.
 - Trainer import compatibility:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_imports_flat_question_answer_rows tests/test_qwen_caption_dataset_job.py::test_caption_instruction_training_rows_import_into_qwen_trainer -q`
   - Result: 2 passed.

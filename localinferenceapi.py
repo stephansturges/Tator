@@ -21151,6 +21151,13 @@ def _caption_instruction_generated_pair_for_archive(
     final_answer_source = str(public.get("answer_source") or "vlm_generated").strip() or "vlm_generated"
     final_answer_format = str(public.get("answer_format") or metadata.get("answer_format") or "natural").strip() or "natural"
     source_fields = list(metadata.get("source_fields") or public.get("source_fields") or [])
+    review_status = str(public.get("review_status") or metadata.get("review_status") or "").strip()
+    review_decision = _caption_instruction_review_decision(
+        metadata.get("review_decision") or public.get("review_decision") or review_status
+    )
+    if review_decision in {"accepted", "rejected", "needs_revision"}:
+        review_status = review_decision
+    review_status = review_status or "unreviewed"
     if rewrite and not reasons:
         final_answer = str(rewrite.get("answer") or "").strip()
         final_row_type = str(rewrite.get("row_type") or final_row_type).strip() or final_row_type
@@ -21170,8 +21177,7 @@ def _caption_instruction_generated_pair_for_archive(
         "answer_format": final_answer_format,
         "validated_against": [str(item) for item in validated_against if str(item).strip()],
         "validation_status": validation_status,
-        "review_status": str(public.get("review_status") or metadata.get("review_status") or "unreviewed").strip()
-        or "unreviewed",
+        "review_status": review_status,
         "rejection_reasons": reasons,
     }
     if source_fields:
@@ -21843,6 +21849,11 @@ def _dataset_caption_instruction_archive(
                     "rejection_reasons": list(caption0_archive.get("rejection_reasons") or []),
                 }
             )
+        caption0_review_decision = (
+            _caption_instruction_review_decision(caption0_archive.get("review_status"))
+            if caption0_archive
+            else "unreviewed"
+        )
         image_entry = {
             "image_id": Path(image_name).stem,
             "image_path": image_name,
@@ -21885,26 +21896,35 @@ def _dataset_caption_instruction_archive(
             and bool(settings.get("include_caption0_in_training"))
             and can_flatten_image
         ):
-            _append_training_row(
-                _caption_instruction_training_row(
-                    image_name=image_name,
-                    question="Describe this image in detail.",
-                    answer=str(caption0_archive.get("answer") or "").strip(),
-                    row_type="caption0",
-                    answer_source=str(caption0_archive.get("answer_source") or "caption_record").strip()
-                    or "caption_record",
-                    qa_id=str(caption0_archive.get("qa_id") or f"{image_name}__caption0").strip(),
-                    split=str(row_data.get("split") or "").strip() or None,
-                    answer_format="natural",
-                    validation_status=str(caption0_archive.get("validation_status") or "accepted").strip(),
-                    review_status=str(caption0_archive.get("review_status") or "unreviewed").strip(),
-                    validated_against=list(caption0_archive.get("validated_against") or []),
-                    metadata={
-                        "caption_id": str(caption0_archive.get("caption_id") or "").strip(),
-                        "source_archive": CAPTION_INSTRUCTION_ARCHIVE_FORMAT,
-                    },
+            if caption0_review_decision in {"rejected", "needs_revision"}:
+                rejections.append(
+                    {
+                        "reason": f"caption0_manual_review_{caption0_review_decision}",
+                        "image_path": image_name,
+                        "review_status": caption0_review_decision,
+                    }
                 )
-            )
+            else:
+                _append_training_row(
+                    _caption_instruction_training_row(
+                        image_name=image_name,
+                        question="Describe this image in detail.",
+                        answer=str(caption0_archive.get("answer") or "").strip(),
+                        row_type="caption0",
+                        answer_source=str(caption0_archive.get("answer_source") or "caption_record").strip()
+                        or "caption_record",
+                        qa_id=str(caption0_archive.get("qa_id") or f"{image_name}__caption0").strip(),
+                        split=str(row_data.get("split") or "").strip() or None,
+                        answer_format="natural",
+                        validation_status=str(caption0_archive.get("validation_status") or "accepted").strip(),
+                        review_status=str(caption0_archive.get("review_status") or "unreviewed").strip(),
+                        validated_against=list(caption0_archive.get("validated_against") or []),
+                        metadata={
+                            "caption_id": str(caption0_archive.get("caption_id") or "").strip(),
+                            "source_archive": CAPTION_INSTRUCTION_ARCHIVE_FORMAT,
+                        },
+                    )
+                )
         if bool(settings.get("include_generated_qa_in_training")) and can_flatten_image:
             for pair in generated_pairs:
                 if str(pair.get("validation_status") or "").strip() != "accepted":
@@ -21914,6 +21934,17 @@ def _dataset_caption_instruction_archive(
                             "image_path": image_name,
                             "question": str(pair.get("question") or "").strip(),
                             "rejection_reasons": list(pair.get("rejection_reasons") or []),
+                        }
+                    )
+                    continue
+                generated_review_decision = _caption_instruction_review_decision(pair.get("review_status"))
+                if generated_review_decision in {"rejected", "needs_revision"}:
+                    rejections.append(
+                        {
+                            "reason": f"generated_qa_manual_review_{generated_review_decision}",
+                            "image_path": image_name,
+                            "question": str(pair.get("question") or "").strip(),
+                            "review_status": generated_review_decision,
                         }
                     )
                     continue

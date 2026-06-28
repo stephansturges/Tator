@@ -35669,6 +35669,7 @@ async function cancelRfDetrTrainingJobRequest() {
             review_rows_row_not_object: "the row is not a JSON object",
             review_rows_invalid_format: "the row is not an instruction review row from the current export format",
             review_rows_dataset_id_missing: "the row is missing the embedded dataset id needed to prove the review file belongs to the selected dataset",
+            review_rows_qa_id_missing: "the row is missing the stable QA id needed to match the saved caption or generated-QA record",
             review_rows_missing_image_path: "the row is missing image identity, so it cannot be matched safely",
             review_rows_generated_qa_text_missing: "the generated-QA row is missing the reviewed question or answer text needed to verify it still matches the saved record",
             review_rows_generated_qa_not_found: "the generated-QA row no longer matches a saved generated-QA record for that image, question, and answer",

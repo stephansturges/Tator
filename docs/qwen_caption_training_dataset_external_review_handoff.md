@@ -150,7 +150,8 @@ What is implemented in this checkpoint:
 - Server-side review import target matching requires image context and current
   reviewed text, so a review row with the same QA id is rejected if its
   question or candidate/training answer is missing or no longer matches the
-  saved language record.
+  saved language record. A missing or mismatched QA id is also rejected instead
+  of falling back to text-only matching.
 - Server-side flattened trainer-row validation exposed as
   `instruction_export_validation` in the archive, report, and API payload.
 - Direct trainer import of the flat instruction JSONL row shape.
@@ -670,16 +671,18 @@ The review import is deliberately conservative:
   caption or generated-QA record also fail closed, so API/script imports cannot
   silently let the last duplicate row win.
 - It rejects malformed review rows, unsupported actionable row origins,
-  actionable rows without an image path, generated-QA rows missing reviewed
-  question or answer text, caption0 rows missing reviewed caption text, stale
-  generated-QA targets, ambiguous generated-QA or caption0 matches, QA ids whose
-  review-row image path does not match the stored caption/generated-QA record,
-  same-id rows whose reviewed question or answer no longer matches the saved
-  language record, and unresolvable synthetic caption0 review targets before
-  applying any imported metadata. Caption0 review rows can materialize a saved
-  caption review record only when their synthetic id matches the selected
-  dataset, resolved image key, and current text-label caption; arbitrary or
-  forged caption0 rows are rejected instead of becoming new captions.
+  actionable rows without an image path, persisted language rows missing stable
+  QA ids, generated-QA rows missing reviewed question or answer text, caption0
+  rows missing reviewed caption text, stale generated-QA targets, ambiguous
+  generated-QA or caption0 matches, QA ids that do not match a saved record, QA
+  ids whose review-row image path does not match the stored
+  caption/generated-QA record, same-id rows whose reviewed question or answer no
+  longer matches the saved language record, and unresolvable synthetic caption0
+  review targets before applying any imported metadata. Caption0 review rows
+  can materialize a saved caption review record only when their synthetic id
+  matches the selected dataset, resolved image key, and current text-label
+  caption; arbitrary or forged caption0 rows are rejected instead of becoming
+  new captions.
 - It ignores blank or unknown decisions instead of inventing a review result.
 - It applies decisions only to matching caption0 or generated-QA records.
 - It skips deterministic metadata QA decisions because those rows are rebuilt
@@ -911,7 +914,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Result:
 
 ```text
-180 passed
+184 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch
@@ -938,6 +941,7 @@ Focused review-import fail-closed tests:
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_persists_review_metadata \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_mismatched_dataset_id \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_missing_dataset_id \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_missing_or_mismatched_qa_id \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_duplicate_actionable_targets \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_duplicate_resolved_actionable_targets \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_rows_missing_current_text \
@@ -951,7 +955,7 @@ Focused review-import fail-closed tests:
 Result:
 
 ```text
-24 passed
+28 passed
 ```
 
 Focused trainer-import boundary tests:
@@ -999,7 +1003,7 @@ Caption/instruction/UI contract suite outside the trainer file:
 Result:
 
 ```text
-155 passed
+159 passed
 ```
 
 Syntax and formatting checks:

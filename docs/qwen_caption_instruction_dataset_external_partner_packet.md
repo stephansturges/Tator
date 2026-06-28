@@ -291,6 +291,8 @@ Review import fails closed on:
 
 - missing embedded dataset id on persisted caption0 or generated-QA decisions
 - embedded dataset id mismatch
+- missing or mismatched stable QA id on persisted caption0 or generated-QA
+  decisions
 - malformed actionable rows
 - unsupported actionable row origins
 - duplicate actionable review targets, including rows that use different row
@@ -526,7 +528,7 @@ Result:
 Result:
 
 ```text
-180 passed
+184 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

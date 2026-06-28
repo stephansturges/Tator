@@ -23236,7 +23236,10 @@ def _caption_instruction_match_instruction_record(
     if not candidate_answer and training_answer and str(record.get("answer") or "").strip() != training_answer:
         return False
     qa_id = str(row.get("qa_id") or "").strip()
-    if qa_id and str(record.get("id") or "").strip() == qa_id:
+    record_id = str(record.get("id") or "").strip()
+    if qa_id and record_id != qa_id:
+        return False
+    if qa_id and record_id == qa_id:
         return True
     return bool(row_question or candidate_answer or training_answer)
 
@@ -23254,7 +23257,10 @@ def _caption_instruction_match_caption_record(
     if candidate_caption and str(record.get("caption") or "").strip() != candidate_caption:
         return False
     qa_id = str(row.get("qa_id") or "").strip()
-    if qa_id and str(record.get("id") or "").strip() == qa_id:
+    record_id = str(record.get("id") or "").strip()
+    if qa_id and record_id != qa_id:
+        return False
+    if qa_id and record_id == qa_id:
         return True
     return bool(candidate_caption)
 
@@ -23373,6 +23379,11 @@ def _caption_instruction_reject_unmatchable_actionable_review_rows(
                 detail=f"review_rows_missing_image_path:row_{index}",
             )
         if row_origin == "generated_qa":
+            if not qa_id:
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail=f"review_rows_qa_id_missing:row_{index}",
+                )
             if not _caption_instruction_review_has_current_text(row_origin, row):
                 raise HTTPException(
                     status_code=HTTP_400_BAD_REQUEST,
@@ -23409,6 +23420,11 @@ def _caption_instruction_reject_unmatchable_actionable_review_rows(
             resolved_seen[resolved_key] = (index, decision)
             continue
         if row_origin == "caption0":
+            if not qa_id:
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail=f"review_rows_qa_id_missing:row_{index}",
+                )
             if not _caption_instruction_review_has_current_text(row_origin, row):
                 raise HTTPException(
                     status_code=HTTP_400_BAD_REQUEST,

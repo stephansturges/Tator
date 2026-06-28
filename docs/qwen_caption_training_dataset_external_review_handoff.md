@@ -660,8 +660,10 @@ at export time rather than persisted language records.
 The review import is deliberately conservative:
 
 - It accepts JSON arrays, JSON objects containing row arrays, and JSONL files.
-- It refuses to apply rows whose embedded dataset id does not match the selected
-  dataset, and this rejection happens before any review metadata is written.
+- It refuses to apply persisted caption0 or generated-QA decisions without an
+  embedded dataset id, or with an embedded dataset id that does not match the
+  selected dataset, and this rejection happens before any review metadata is
+  written.
 - It rejects duplicate actionable review targets before applying any imported
   metadata. Exact duplicates and conflicting duplicate decisions both fail
   closed. Rows that use different row identities but resolve to the same saved
@@ -909,7 +911,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Result:
 
 ```text
-178 passed
+180 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch
@@ -935,6 +937,7 @@ Focused review-import fail-closed tests:
 ./.venv-macos/bin/python -m pytest \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_persists_review_metadata \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_mismatched_dataset_id \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_missing_dataset_id \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_duplicate_actionable_targets \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_duplicate_resolved_actionable_targets \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_rows_missing_current_text \
@@ -948,7 +951,7 @@ Focused review-import fail-closed tests:
 Result:
 
 ```text
-22 passed
+24 passed
 ```
 
 Focused trainer-import boundary tests:
@@ -996,7 +999,7 @@ Caption/instruction/UI contract suite outside the trainer file:
 Result:
 
 ```text
-153 passed
+155 passed
 ```
 
 Syntax and formatting checks:

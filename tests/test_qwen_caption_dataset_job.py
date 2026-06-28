@@ -949,6 +949,114 @@ def test_caption_instruction_review_import_rejects_mismatched_dataset_id(
     assert "review_decision" not in records[0]["metadata"]
 
 
+@pytest.mark.parametrize("row_origin", ["generated_qa", "caption0"])
+def test_caption_instruction_review_import_rejects_missing_dataset_id(
+    monkeypatch,
+    tmp_path,
+    row_origin,
+) -> None:
+    import localinferenceapi as api
+
+    entry = {"id": "ds", "dataset_root": str(tmp_path), "registry_root": str(tmp_path)}
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: entry)
+    monkeypatch.setattr(
+        api,
+        "_annotation_manifest_for_entry",
+        lambda _entry: {
+            "labelmap": [],
+            "images": [
+                {
+                    "image_name": "frame.jpg",
+                    "image_relpath": "frame.jpg",
+                    "split": "train",
+                    "label_source_present": True,
+                    "label_lines": [],
+                }
+            ],
+        },
+    )
+    if row_origin == "generated_qa":
+        api._write_dataset_caption_instruction_records(
+            entry,
+            [
+                {
+                    "id": "qa-1",
+                    "image_name": "frame.jpg",
+                    "image_key": "train/frame.jpg",
+                    "split": "train",
+                    "question": "What is the scene type?",
+                    "answer": "A waterfront area.",
+                    "row_type": "generated_qa",
+                    "answer_source": "vlm_generated",
+                    "validation_status": "accepted",
+                }
+            ],
+        )
+        row = {
+            "format": "tator_caption_instruction_review_rows_v1",
+            "image_path": "frame.jpg",
+            "split": "train",
+            "row_origin": "generated_qa",
+            "qa_id": "qa-1",
+            "row_type": "generated_qa",
+            "question": "What is the scene type?",
+            "candidate_answer": "A waterfront area.",
+            "training_answer": "A waterfront area.",
+            "validation_status": "accepted",
+            "selected_for_training": True,
+            "requires_manual_review": True,
+            "review_decision": "accepted",
+            "review_notes": "missing dataset id should fail",
+            "rejection_reasons": [],
+            "source_summary": {"status": "empty_label_file"},
+        }
+    else:
+        api._write_dataset_caption_records(
+            entry,
+            [
+                {
+                    "id": "caption-existing",
+                    "image_name": "frame.jpg",
+                    "image_key": "train/frame.jpg",
+                    "split": "train",
+                    "caption": "A current caption.",
+                    "source": "manual",
+                    "metadata": {},
+                }
+            ],
+        )
+        row = {
+            "format": "tator_caption_instruction_review_rows_v1",
+            "image_path": "frame.jpg",
+            "split": "train",
+            "row_origin": "caption0",
+            "qa_id": "caption-existing",
+            "row_type": "caption0",
+            "question": "Describe this image in detail.",
+            "candidate_answer": "A current caption.",
+            "training_answer": "A current caption.",
+            "validation_status": "accepted",
+            "selected_for_training": True,
+            "requires_manual_review": True,
+            "review_decision": "accepted",
+            "review_notes": "missing dataset id should fail",
+            "rejection_reasons": [],
+            "source_summary": {"status": "empty_label_file"},
+        }
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.apply_caption_instruction_review("ds", {"rows": [row]})
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "review_rows_dataset_id_missing:row_1"
+    if row_origin == "generated_qa":
+        records = api._load_dataset_caption_instruction_records(entry)
+    else:
+        records = api._load_dataset_caption_records(entry)
+    assert records[0].get("review_status", "") == ""
+    assert "review_decision" not in records[0]["metadata"]
+
+
 @pytest.mark.parametrize(
     ("second_decision", "expected_detail"),
     [

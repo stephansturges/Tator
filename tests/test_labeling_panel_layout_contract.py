@@ -515,6 +515,7 @@ def test_qwen_caption_instruction_review_import_parser_accepts_reviewer_file_sha
                 "parseCaptionInstructionReviewRowsText",
                 "\n    async function importCaptionInstructionReviewFile",
             ),
+            _extract_js_function(js, "validateCaptionInstructionReviewRows"),
             _extract_js_function(js, "captionInstructionReviewDatasetMismatches"),
             "const row = {",
             "  format: 'tator_caption_instruction_review_rows_v1',",
@@ -532,6 +533,9 @@ def test_qwen_caption_instruction_review_import_parser_accepts_reviewer_file_sha
             "assert.strictEqual(parseCaptionInstructionReviewRowsText(jsonl).length, 2);",
             "assert.deepStrictEqual(captionInstructionReviewDatasetMismatches([{ ...row, dataset_id: 'ds' }], 'ds'), []);",
             "assert.deepStrictEqual(captionInstructionReviewDatasetMismatches([{ ...row, dataset_id: 'other' }], 'ds'), ['other']);",
+            "const actionableRow = { ...row, row_origin: 'generated_qa', question: 'What is shown?', candidate_answer: 'A scene.', training_answer: 'A scene.', validation_status: 'accepted', selected_for_training: true, requires_manual_review: true, source_summary: {}, rejection_reasons: [], review_notes: '' };",
+            "assert(validateCaptionInstructionReviewRows([actionableRow]).errors.some((error) => error.includes('missing dataset_id')));",
+            "assert(!validateCaptionInstructionReviewRows([{ ...actionableRow, dataset_id: 'ds' }]).errors.some((error) => error.includes('missing dataset_id')));",
         ]
     )
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
@@ -556,6 +560,9 @@ def test_qwen_caption_instruction_review_import_formats_backend_failures():
             "assert(mismatch.includes('blocked at row 2'));",
             "assert(mismatch.includes('other-ds'));",
             "assert(mismatch.includes('current-ds'));",
+            "const missingDataset = formatCaptionInstructionReviewImportApiError('review_rows_dataset_id_missing:row_9');",
+            "assert(missingDataset.includes('blocked at row 9'));",
+            "assert(missingDataset.includes('missing the embedded dataset id'));",
             "const duplicate = formatCaptionInstructionReviewImportApiError('review_rows_conflicting_duplicate_target:row_1:row_5');",
             "assert(duplicate.includes('conflicting duplicate decisions'));",
             "assert(duplicate.includes('rows 1 and 5'));",

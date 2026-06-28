@@ -23054,8 +23054,21 @@ def _caption_instruction_reject_dataset_id_mismatches(
             continue
         if str(row.get("format") or "").strip() != CAPTION_INSTRUCTION_REVIEW_ROWS_FORMAT:
             continue
+        decision = _caption_instruction_review_decision(row.get("review_decision"))
+        row_origin = str(row.get("row_origin") or "").strip()
+        is_persisted_action = decision in {"accepted", "rejected", "needs_revision"} and row_origin in {
+            "caption0",
+            "generated_qa",
+        }
         row_dataset_id = str(row.get("dataset_id") or "").strip()
-        if not row_dataset_id or row_dataset_id == expected:
+        if not row_dataset_id:
+            if is_persisted_action:
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail=f"review_rows_dataset_id_missing:row_{index}",
+                )
+            continue
+        if row_dataset_id == expected:
             continue
         raise HTTPException(
             status_code=HTTP_400_BAD_REQUEST,

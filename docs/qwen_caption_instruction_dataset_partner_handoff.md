@@ -394,6 +394,7 @@ It ignores:
 
 It fails closed on:
 
+- persisted caption0 or generated-QA decisions missing an embedded dataset id
 - rows with an embedded dataset id that does not match the selected dataset
 - generated-QA or caption0 targets whose QA id does not match the row's image
   context
@@ -575,7 +576,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-178 passed
+180 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch
@@ -601,6 +602,7 @@ Focused review-import fail-closed suite:
 ./.venv-macos/bin/python -m pytest \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_persists_review_metadata \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_mismatched_dataset_id \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_missing_dataset_id \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_duplicate_actionable_targets \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_duplicate_resolved_actionable_targets \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_rows_missing_current_text \
@@ -614,7 +616,7 @@ Focused review-import fail-closed suite:
 Latest recorded result:
 
 ```text
-22 passed
+24 passed
 ```
 
 Focused trainer-import boundary suite:
@@ -660,7 +662,7 @@ Focused instruction-dataset and UI contract suite:
 Latest recorded result:
 
 ```text
-153 passed
+155 passed
 ```
 
 Runtime and unattended hardening suites have also been run in prior hardening

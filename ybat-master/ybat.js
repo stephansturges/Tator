@@ -34675,6 +34675,60 @@ async function cancelRfDetrTrainingJobRequest() {
         };
     }
 
+    function validateCaptionInstructionReport(report) {
+        const errors = [];
+        const warnings = [];
+        if (!report || typeof report !== "object") {
+            errors.push("report is missing");
+            return { ok: false, errors, warnings };
+        }
+        if (String(report.format || "").trim() !== "tator_caption_instruction_report_v1") {
+            errors.push("report format is invalid");
+        }
+        const metrics = report.corpus_quality_metrics;
+        if (!metrics || typeof metrics !== "object") {
+            errors.push("report missing corpus_quality_metrics");
+        } else {
+            const numericMetricKeys = [
+                "image_count",
+                "selected_flattened_row_count",
+                "rejected_training_row_count",
+                "generated_qa_candidate_count",
+                "accepted_generated_qa_count",
+                "rejected_generated_qa_count",
+                "generated_qa_question_diversity_ratio",
+                "generated_qa_acceptance_rate",
+                "generated_qa_rejection_rate",
+                "structured_rewrite_rate",
+                "source_validated_training_row_rate",
+                "source_class_coverage_rate",
+            ];
+            numericMetricKeys.forEach((key) => {
+                const value = metrics[key];
+                if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+                    errors.push(`corpus_quality_metrics.${key} is missing or invalid`);
+                }
+            });
+            if (!Array.isArray(metrics.source_classes)) {
+                errors.push("corpus_quality_metrics.source_classes must be an array");
+            }
+            if (!Array.isArray(metrics.source_classes_covered_by_training_rows)) {
+                errors.push("corpus_quality_metrics.source_classes_covered_by_training_rows must be an array");
+            }
+            if (!metrics.training_answer_format_distribution || typeof metrics.training_answer_format_distribution !== "object") {
+                errors.push("corpus_quality_metrics.training_answer_format_distribution is missing");
+            }
+            if (typeof report.image_count === "number" && typeof metrics.image_count === "number" && report.image_count !== metrics.image_count) {
+                errors.push("corpus_quality_metrics.image_count does not match report image_count");
+            }
+        }
+        return {
+            ok: errors.length === 0,
+            errors,
+            warnings,
+        };
+    }
+
     async function downloadCaptionJsonl() {
         const { records } = await prepareCaptionExportRecords();
         if (!records.length) {
@@ -34833,6 +34887,16 @@ async function cancelRfDetrTrainingJobRequest() {
             setSamStatus("No instruction report is ready for export.", { variant: "warn", duration: 3000 });
             return;
         }
+        const validation = validateCaptionInstructionReport(report);
+        if (!validation.ok) {
+            const firstErrors = (validation.errors || []).slice(0, 3).join("; ");
+            const suffix = (validation.errors || []).length > 3 ? `; +${validation.errors.length - 3} more` : "";
+            const message = `Instruction report export blocked: ${firstErrors || "invalid report"}${suffix}.`;
+            setCaptionExportHealth(message, "fail");
+            setSamStatus(message, { variant: "error", duration: 5000 });
+            return;
+        }
+        setCaptionExportHealth("Instruction report validated: corpus-quality metrics are present.", "pass");
         const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
         saveBlobToDisk(blob, "caption_instruction_report.json");
     }

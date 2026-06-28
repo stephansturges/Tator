@@ -38,8 +38,8 @@ row before training.
   - `instruction_archive`: a versioned per-image archive containing caption0,
     generated QA, optional deterministic metadata QA, source annotation
     provenance, rejected rows, and the flattened rows.
-  - `instruction_report`: run-level counts, provenance, split expansion, and
-    rejection summaries for audit.
+  - `instruction_report`: run-level counts, provenance, split expansion,
+    rejection summaries, and corpus-quality metrics for audit.
   - `instruction_summary`: row, generated QA, deterministic QA, and rejection
     counts.
 
@@ -114,6 +114,10 @@ row before training.
   row-type distribution, split image counts, split training-row counts,
   rejection reason counts, source-field provenance, QA count per image, and
   exclusion categories.
+- The instruction report now includes `corpus_quality_metrics` for generated-QA
+  diversity, duplicate-question rate, generated-QA acceptance/rejection rates,
+  structured rewrite rate, image-level training coverage, source-grounded row
+  coverage, answer-format distribution, and source-class coverage.
 - Export options let callers include or exclude caption0, generated QA, and
   deterministic metadata QA without altering saved data, while preserving the
   requested generated-QA mix and answer format.
@@ -150,7 +154,7 @@ row before training.
   - Result: 135 passed.
 - Rendered browser smoke:
   - `./.venv-macos/bin/python tools/run_qwen_caption_ui_smoke.py --base-url http://127.0.0.1:8000 --out-json tmp/qwen_caption_ui_smoke_report.json --screenshot tmp/qwen_caption_ui_smoke.png`
-  - Result: `ok=true`, caption readiness reported 28 pass, 2 warnings, 0 fail;
+  - Result: `ok=true`, caption readiness reported 29 pass, 1 warning, 0 fail;
     no console errors, no failed requests, no bad HTTP responses, no clipped
     caption action buttons. The screenshot confirms the generated-QA mix,
     answer-format, archive, and report controls are visible and readable in the
@@ -166,5 +170,3 @@ row before training.
   with existing alternate captions.
 - Review generated QA content manually for grounding quality before using it for
   fine-tuning.
-- Add corpus-level metrics for generated QA diversity, rejection rate, duplicate
-  question rate, and class/context coverage.

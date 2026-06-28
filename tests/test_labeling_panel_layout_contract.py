@@ -308,6 +308,8 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     assert "instructionDataset: true" in js
     assert "function validateCaptionInstructionTrainingRows" in js
     assert "function validateCaptionInstructionArchiveRows" in js
+    assert "function validateCaptionInstructionReport" in js
+    assert "corpus_quality_metrics" in js
     assert "function downloadCaptionInstructionJsonl" in js
     assert "function downloadCaptionInstructionArchive" in js
     assert "function downloadCaptionInstructionReport" in js
@@ -351,6 +353,7 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "function validateCaptionVlmTrainingRows" in js
     assert "function validateCaptionInstructionTrainingRows" in js
     assert "function validateCaptionInstructionArchiveRows" in js
+    assert "function validateCaptionInstructionReport" in js
     instruction_validator_start = js.index("function validateCaptionInstructionTrainingRows")
     instruction_validator_end = js.index("function describeCaptionInstructionValidation", instruction_validator_start)
     instruction_validator = js[instruction_validator_start:instruction_validator_end]
@@ -358,6 +361,13 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "const rowType = String(metadata.row_type" in instruction_validator
     assert "const answerFormat = String(metadata.answer_format" in instruction_validator
     assert "const validationStatus = String(metadata.validation_status" in instruction_validator
+    report_validator_start = js.index("function validateCaptionInstructionReport")
+    report_validator_end = js.index("async function downloadCaptionJsonl", report_validator_start)
+    report_validator = js[report_validator_start:report_validator_end]
+    assert "corpus_quality_metrics" in report_validator
+    assert "generated_qa_question_diversity_ratio" in report_validator
+    assert "source_class_coverage_rate" in report_validator
+    assert "training_answer_format_distribution" in report_validator
     assert "duplicate image_path + question" in js
     assert "function setCaptionExportHealth" in js
     assert "VLM JSONL export blocked" in js
@@ -1188,6 +1198,8 @@ def test_qwen_caption_ui_scenarios_document_set_and_forget_workflows():
     assert "Download instruction JSONL" in scenarios
     assert "Download instruction archive" in scenarios
     assert "Download instruction report" in scenarios
+    assert "duplicate-question/diversity metrics" in scenarios
+    assert "source-class coverage" in scenarios
     assert "generated QA never\nbecomes source annotations" in scenarios
     assert "duplicate image/question pairs" in scenarios
     assert "VLM export validation status" in scenarios

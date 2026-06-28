@@ -256,6 +256,40 @@ When a rewrite happens, the original generated answer is preserved as candidate
 metadata for audit, but the flattened training answer comes from the trusted
 source annotation.
 
+## Corpus Quality Metrics
+
+The instruction archive and instruction report include a
+`corpus_quality_metrics` block. It is intended to help reviewers decide whether
+an exported instruction corpus is ready for training or needs another generation
+or review pass.
+
+The metrics include:
+
+- image-level training-row coverage
+- generated-QA image coverage
+- generated-QA acceptance and rejection rates
+- unique generated-question count
+- global duplicate-question count and rate
+- per-image duplicate-question count and rate
+- generated-question diversity ratio
+- structured-rewrite count and rate
+- duplicate image/question rejection count
+- source-validated training-row count and rate
+- source classes present in trusted labels
+- source classes covered by flattened training rows
+- source-class coverage rate
+- flattened answer-format distribution
+
+The source-grounding metrics intentionally separate two concepts:
+
+- `source_validated_training_row_count` means the row was validated against
+  source annotations or carries source fields.
+- `source_classes_covered_by_training_rows` means flattened rows carry
+  class-specific or class-list source fields that cover trusted source classes.
+
+This distinction prevents broad source-validation metadata from being confused
+with true class coverage.
+
 ## UI/UX Work
 
 The caption panel now includes:
@@ -391,15 +425,7 @@ Docs:
 
 ## Validation Evidence
 
-The latest pushed implementation is:
-
-- `2827213 Accept flat caption instruction rows in Qwen trainer`
-
-The previous pushed hardening checkpoint was:
-
-- `2c7890d Validate caption instruction exports end to end`
-
-Validation performed:
+Validation performed for the implementation described in this handoff:
 
 ```bash
 ./.venv-macos/bin/python -m pytest \
@@ -458,7 +484,7 @@ Result:
 
 ```text
 ok=true
-caption readiness: 28 pass, 2 warnings, 0 fail
+caption readiness: 29 pass, 1 warning, 0 fail
 no console errors
 no failed requests
 no bad HTTP responses
@@ -536,13 +562,6 @@ Remaining work:
 
 - Run a small real VLM instruction-dataset pilot.
 - Manually review generated QA quality for grounding and usefulness.
-- Add corpus-level metrics:
-  - generated QA diversity
-  - rejection rate
-  - duplicate question rate
-  - class coverage
-  - image-context coverage
-  - structured rewrite rate
 - Decide acceptance thresholds for generated QA rows before training.
 - Run an actual small fine-tuning dry run with the exported rows, not only the
   loader import smoke.

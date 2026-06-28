@@ -127,4 +127,5 @@ metadata QA, source annotation provenance, and per-image export metadata separat
 from trainer rows.
 **Download instruction report** exports run-level counts, rejection reasons,
 source-field provenance, split image counts, split row counts, QA count per
-image, and selected flattened-row counts.
+image, selected flattened-row counts, duplicate-question/diversity metrics,
+structured-rewrite rates, answer-format distribution, and source-class coverage.

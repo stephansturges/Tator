@@ -21175,6 +21175,211 @@ def _caption_instruction_generated_pair_for_archive(
     return out
 
 
+def _caption_instruction_normalized_question(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _caption_instruction_rate(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 0.0
+    return round(max(0, numerator) / denominator, 6)
+
+
+def _caption_instruction_positive_source_classes(
+    images: Sequence[Mapping[str, Any]],
+) -> Set[str]:
+    classes: Set[str] = set()
+    for image in images:
+        source_annotations = image.get("source_annotations") if isinstance(image, Mapping) else {}
+        counts = source_annotations.get("object_counts") if isinstance(source_annotations, Mapping) else {}
+        if not isinstance(counts, Mapping):
+            continue
+        for label, count in counts.items():
+            label_name = str(label or "").strip()
+            if not label_name:
+                continue
+            try:
+                count_value = int(count or 0)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if count_value > 0:
+                classes.add(label_name)
+    return classes
+
+
+def _caption_instruction_source_field_classes(
+    fields: Sequence[Any],
+    source_classes: Set[str],
+) -> Set[str]:
+    covered: Set[str] = set()
+    for raw_field in fields or []:
+        field = str(raw_field or "").strip()
+        if not field:
+            continue
+        if field in {"source_annotations.object_counts", "source_annotations.visible_classes"}:
+            covered.update(source_classes)
+            continue
+        for prefix in (
+            "source_annotations.object_counts.",
+            "source_annotations.bbox_geometry.classes.",
+        ):
+            if not field.startswith(prefix):
+                continue
+            label = field[len(prefix):].split(".", 1)[0].strip()
+            if label in source_classes:
+                covered.add(label)
+    return covered
+
+
+def _caption_instruction_corpus_quality_metrics(
+    images: Sequence[Mapping[str, Any]],
+    training_rows: Sequence[Mapping[str, Any]],
+    rejections: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    image_count = len(images)
+    generated_pairs_by_image: Dict[str, List[Mapping[str, Any]]] = {}
+    for image in images:
+        if not isinstance(image, Mapping):
+            continue
+        image_name = str(image.get("image_path") or image.get("image_name") or "").strip()
+        language_annotations = image.get("language_annotations") if isinstance(image.get("language_annotations"), Mapping) else {}
+        generated_pairs = (
+            language_annotations.get("generated_qa_pairs")
+            if isinstance(language_annotations, Mapping)
+            else []
+        )
+        generated_pairs_by_image[image_name] = [
+            pair for pair in generated_pairs or [] if isinstance(pair, Mapping)
+        ]
+
+    generated_pairs = [
+        pair
+        for pairs in generated_pairs_by_image.values()
+        for pair in pairs
+    ]
+    generated_count = len(generated_pairs)
+    accepted_generated_pairs = [
+        pair for pair in generated_pairs if str(pair.get("validation_status") or "").strip() == "accepted"
+    ]
+    rejected_generated_pairs = [
+        pair for pair in generated_pairs if str(pair.get("validation_status") or "").strip() == "rejected"
+    ]
+    normalized_questions = [
+        _caption_instruction_normalized_question(pair.get("question"))
+        for pair in generated_pairs
+        if _caption_instruction_normalized_question(pair.get("question"))
+    ]
+    unique_questions = set(normalized_questions)
+    per_image_duplicate_count = 0
+    for pairs in generated_pairs_by_image.values():
+        image_questions = [
+            _caption_instruction_normalized_question(pair.get("question"))
+            for pair in pairs
+            if _caption_instruction_normalized_question(pair.get("question"))
+        ]
+        per_image_duplicate_count += max(0, len(image_questions) - len(set(image_questions)))
+
+    training_image_paths = {
+        str(row.get("image_path") or "").strip()
+        for row in training_rows
+        if isinstance(row, Mapping) and str(row.get("image_path") or "").strip()
+    }
+    images_with_generated_qa = {
+        image_name for image_name, pairs in generated_pairs_by_image.items() if image_name and pairs
+    }
+    images_with_accepted_generated_qa = {
+        image_name
+        for image_name, pairs in generated_pairs_by_image.items()
+        if image_name and any(str(pair.get("validation_status") or "").strip() == "accepted" for pair in pairs)
+    }
+    structured_rewrite_count = sum(
+        1
+        for pair in accepted_generated_pairs
+        if isinstance(pair.get("metadata"), Mapping)
+        and (
+            str((pair.get("metadata") or {}).get("candidate_answer") or "").strip()
+            or str((pair.get("metadata") or {}).get("candidate_question") or "").strip()
+        )
+    )
+
+    training_answer_formats = Counter()
+    source_validated_training_row_count = 0
+    source_classes = _caption_instruction_positive_source_classes(images)
+    covered_source_classes: Set[str] = set()
+    for row in training_rows:
+        if not isinstance(row, Mapping):
+            continue
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), Mapping) else {}
+        answer_format = str(metadata.get("answer_format") or "natural").strip() or "natural"
+        training_answer_formats[answer_format] += 1
+        source_fields = (
+            [str(field) for field in metadata.get("source_fields") or [] if str(field).strip()]
+            if isinstance(metadata.get("source_fields"), list)
+            else []
+        )
+        validated_against = (
+            [str(field) for field in metadata.get("validated_against") or [] if str(field).strip()]
+            if isinstance(metadata.get("validated_against"), list)
+            else []
+        )
+        if source_fields or any(field.startswith("source_annotations") for field in validated_against):
+            source_validated_training_row_count += 1
+        covered_source_classes.update(
+            _caption_instruction_source_field_classes(source_fields, source_classes)
+        )
+
+    duplicate_rejection_count = sum(
+        1
+        for rejection in rejections
+        if isinstance(rejection, Mapping)
+        and str(rejection.get("reason") or "").strip() == "duplicate_image_question"
+    )
+    return {
+        "image_count": image_count,
+        "selected_flattened_row_count": len(training_rows),
+        "rejected_training_row_count": len(rejections),
+        "images_with_training_rows_count": len(training_image_paths),
+        "image_training_coverage_rate": _caption_instruction_rate(len(training_image_paths), image_count),
+        "images_with_generated_qa_count": len(images_with_generated_qa),
+        "generated_qa_image_coverage_rate": _caption_instruction_rate(len(images_with_generated_qa), image_count),
+        "images_with_accepted_generated_qa_count": len(images_with_accepted_generated_qa),
+        "accepted_generated_qa_image_coverage_rate": _caption_instruction_rate(
+            len(images_with_accepted_generated_qa),
+            image_count,
+        ),
+        "generated_qa_candidate_count": generated_count,
+        "accepted_generated_qa_count": len(accepted_generated_pairs),
+        "rejected_generated_qa_count": len(rejected_generated_pairs),
+        "generated_qa_acceptance_rate": _caption_instruction_rate(len(accepted_generated_pairs), generated_count),
+        "generated_qa_rejection_rate": _caption_instruction_rate(len(rejected_generated_pairs), generated_count),
+        "generated_qa_unique_question_count": len(unique_questions),
+        "generated_qa_global_duplicate_question_count": max(0, len(normalized_questions) - len(unique_questions)),
+        "generated_qa_global_duplicate_question_rate": _caption_instruction_rate(
+            max(0, len(normalized_questions) - len(unique_questions)),
+            len(normalized_questions),
+        ),
+        "generated_qa_per_image_duplicate_question_count": per_image_duplicate_count,
+        "generated_qa_per_image_duplicate_question_rate": _caption_instruction_rate(
+            per_image_duplicate_count,
+            len(normalized_questions),
+        ),
+        "generated_qa_question_diversity_ratio": _caption_instruction_rate(len(unique_questions), len(normalized_questions)),
+        "structured_rewrite_count": structured_rewrite_count,
+        "structured_rewrite_rate": _caption_instruction_rate(structured_rewrite_count, len(accepted_generated_pairs)),
+        "duplicate_image_question_rejection_count": duplicate_rejection_count,
+        "source_validated_training_row_count": source_validated_training_row_count,
+        "source_validated_training_row_rate": _caption_instruction_rate(
+            source_validated_training_row_count,
+            len(training_rows),
+        ),
+        "source_class_count": len(source_classes),
+        "source_classes": sorted(source_classes, key=str.lower),
+        "source_classes_covered_by_training_rows": sorted(covered_source_classes, key=str.lower),
+        "source_class_coverage_rate": _caption_instruction_rate(len(covered_source_classes), len(source_classes)),
+        "training_answer_format_distribution": dict(sorted(training_answer_formats.items())),
+    }
+
+
 def _dataset_caption_instruction_archive(
     indexed_records: Sequence[Mapping[str, Any]],
     instruction_records: Sequence[Mapping[str, Any]],
@@ -21429,6 +21634,7 @@ def _dataset_caption_instruction_archive(
                         answer_format=str(pair.get("answer_format") or "natural").strip() or "natural",
                         validation_status=str(pair.get("validation_status") or "").strip() or None,
                         review_status=str(pair.get("review_status") or "").strip() or None,
+                        source_fields=list(pair.get("source_fields") or []),
                         validated_against=list(pair.get("validated_against") or []),
                         metadata={
                             "caption_id": str(pair.get("caption_id") or "").strip(),
@@ -21583,6 +21789,11 @@ def _dataset_caption_instruction_archive(
         "storage_mode": str(entry.get("storage_mode") or "managed").strip() or "managed",
         "yolo_layout": str(entry.get("yolo_layout") or manifest.get("yolo_layout") or "flat").strip() or "flat",
     }
+    corpus_quality_metrics = _caption_instruction_corpus_quality_metrics(
+        images,
+        training_rows,
+        rejections,
+    )
     captioning_report = {
         "format": "tator_caption_instruction_report_v1",
         "dataset_id": str(dataset_id or "").strip() or None,
@@ -21609,6 +21820,7 @@ def _dataset_caption_instruction_archive(
             "class_count": len(labelmap),
         },
         "provenance_summary": dict(sorted(provenance_summary.items())),
+        "corpus_quality_metrics": corpus_quality_metrics,
         "split_image_counts": dict(sorted(split_image_counts.items())),
         "split_training_row_counts": dict(sorted(split_training_row_counts.items())),
         "rows_excluded_because_of_uncertainty": uncertainty_rejection_count,
@@ -21654,6 +21866,7 @@ def _dataset_caption_instruction_archive(
         "split_training_row_counts": dict(sorted(split_training_row_counts.items())),
         "rejection_reason_counts": dict(sorted(rejection_reason_counts.items())),
         "provenance_summary": dict(sorted(provenance_summary.items())),
+        "corpus_quality_metrics": corpus_quality_metrics,
         "captioning_report": captioning_report,
         "rejections": rejections,
         "archive_rows": archive_rows,

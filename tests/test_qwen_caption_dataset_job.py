@@ -563,6 +563,23 @@ def test_caption_instruction_archive_separates_generated_qa_from_source_annotati
     assert report["accepted_generated_qa_count"] == 2
     assert report["selected_flattened_row_count"] == 2
     assert report["split_training_row_counts"] == {"train": 2}
+    metrics = report["corpus_quality_metrics"]
+    assert archive["corpus_quality_metrics"] == metrics
+    assert metrics["generated_qa_candidate_count"] == 2
+    assert metrics["accepted_generated_qa_count"] == 2
+    assert metrics["generated_qa_unique_question_count"] == 1
+    assert metrics["generated_qa_global_duplicate_question_count"] == 1
+    assert metrics["generated_qa_per_image_duplicate_question_count"] == 1
+    assert metrics["generated_qa_question_diversity_ratio"] == 0.5
+    assert metrics["generated_qa_acceptance_rate"] == 1.0
+    assert metrics["duplicate_image_question_rejection_count"] == 1
+    assert metrics["image_training_coverage_rate"] == 1.0
+    assert metrics["source_validated_training_row_count"] == 2
+    assert metrics["source_validated_training_row_rate"] == 1.0
+    assert metrics["source_classes"] == ["Boat", "Building"]
+    assert metrics["source_classes_covered_by_training_rows"] == []
+    assert metrics["source_class_coverage_rate"] == 0.0
+    assert metrics["training_answer_format_distribution"] == {"natural": 2}
     assert image["source_annotations"]["object_counts"] == {"Boat": 1, "Building": 1}
     assert image["source_annotations"]["annotations"][0]["class_name"] == "Boat"
     assert image["language_annotations"]["caption0"]["caption"] == "A caption about the waterfront."
@@ -606,6 +623,17 @@ def test_caption_instruction_archive_separates_generated_qa_from_source_annotati
     assert deterministic["split_training_row_counts"] == {"train": 8}
     assert deterministic["captioning_report"]["deterministic_metadata_qa_count"] == 8
     assert deterministic["archive_rows"][0]["export_metadata"]["deterministic_metadata_qa_pair_count"] == 8
+    deterministic_metrics = deterministic["corpus_quality_metrics"]
+    assert deterministic_metrics["source_validated_training_row_count"] == 8
+    assert deterministic_metrics["source_validated_training_row_rate"] == 1.0
+    assert deterministic_metrics["source_classes_covered_by_training_rows"] == ["Boat", "Building"]
+    assert deterministic_metrics["source_class_coverage_rate"] == 1.0
+    assert deterministic_metrics["training_answer_format_distribution"] == {
+        "boolean_json": 2,
+        "object_count_json": 3,
+        "spatial_fact_json": 2,
+        "visible_class_json": 1,
+    }
 
 
 def test_caption_instruction_training_rows_import_into_qwen_trainer(
@@ -954,7 +982,16 @@ def test_caption_instruction_archive_rewrites_supported_structured_generated_qa_
     assert archive["training_row_count"] == 1
     assert archive["training_rows"][0]["metadata"]["row_type"] == "generated_count_validated"
     assert archive["training_rows"][0]["metadata"]["answer_format"] == "object_count_json"
+    assert archive["training_rows"][0]["metadata"]["source_fields"] == [
+        "source_annotations.object_counts.Boat"
+    ]
     assert json.loads(archive["training_rows"][0]["answer"]) == {"object_counts": {"Boat": 1}}
+    metrics = archive["corpus_quality_metrics"]
+    assert metrics["structured_rewrite_count"] == 1
+    assert metrics["structured_rewrite_rate"] == 1.0
+    assert metrics["source_validated_training_row_count"] == 1
+    assert metrics["source_classes_covered_by_training_rows"] == ["Boat"]
+    assert metrics["source_class_coverage_rate"] == 1.0
 
 
 def test_caption_dataset_runner_summary_counts_completed_cases_not_attempts() -> None:

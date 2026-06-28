@@ -767,6 +767,10 @@ The Qwen trainer accepts the flat `image_path` / `question` / `answer` training
 row shape directly and normalizes each row into the conversation format used for
 fine-tuning, so the download remains easy to inspect without requiring a manual
 conversion step.
+The instruction report includes corpus-quality metrics for generated-QA
+diversity, duplicate-question rates, generated-QA acceptance/rejection,
+structured rewrites, source-grounded row coverage, answer-format distribution,
+and source-class coverage.
 Generated captions append as alternate records by default. **Make generated
 caption primary** is a separate opt-in promotion control; when it is off, a
 generated caption can still become primary only if the image has no existing

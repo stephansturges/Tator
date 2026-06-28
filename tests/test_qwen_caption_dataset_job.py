@@ -668,6 +668,155 @@ def test_caption_instruction_archive_separates_generated_qa_from_source_annotati
     }
 
 
+def test_caption_instruction_review_import_persists_review_metadata(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import localinferenceapi as api
+
+    entry = {"id": "ds", "dataset_root": str(tmp_path), "registry_root": str(tmp_path)}
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: entry)
+    monkeypatch.setattr(
+        api,
+        "_annotation_manifest_for_entry",
+        lambda _entry: {
+            "labelmap": [],
+            "images": [
+                {
+                    "image_name": "frame.jpg",
+                    "image_relpath": "frame.jpg",
+                    "split": "train",
+                    "label_source_present": True,
+                    "label_lines": [],
+                }
+            ],
+        },
+    )
+    api._write_dataset_caption_instruction_records(
+        entry,
+        [
+            {
+                "id": "qa-1",
+                "image_name": "frame.jpg",
+                "image_key": "train/frame.jpg",
+                "split": "train",
+                "question": "What is the scene type?",
+                "answer": "A waterfront area.",
+                "row_type": "generated_qa",
+                "answer_source": "vlm_generated",
+                "validation_status": "accepted",
+            }
+        ],
+    )
+
+    result = api.apply_caption_instruction_review(
+        "ds",
+        {
+            "reviewer": "qa-review",
+            "rows": [
+                {
+                    "format": "tator_caption_instruction_review_rows_v1",
+                    "dataset_id": "ds",
+                    "image_path": "frame.jpg",
+                    "split": "train",
+                    "row_origin": "generated_qa",
+                    "qa_id": "qa-1",
+                    "row_type": "generated_qa",
+                    "question": "What is the scene type?",
+                    "candidate_answer": "A waterfront area.",
+                    "training_answer": "A waterfront area.",
+                    "validation_status": "accepted",
+                    "selected_for_training": True,
+                    "requires_manual_review": True,
+                    "review_decision": "accepted",
+                    "review_notes": "grounded",
+                    "rejection_reasons": [],
+                    "source_summary": {"status": "empty_label_file"},
+                },
+                {
+                    "format": "tator_caption_instruction_review_rows_v1",
+                    "dataset_id": "ds",
+                    "image_path": "frame.jpg",
+                    "split": "train",
+                    "row_origin": "caption0",
+                    "qa_id": "primary-review",
+                    "row_type": "caption0",
+                    "question": "Describe this image in detail.",
+                    "candidate_answer": "A primary caption.",
+                    "training_answer": "A primary caption.",
+                    "validation_status": "accepted",
+                    "selected_for_training": True,
+                    "requires_manual_review": True,
+                    "review_decision": "reject",
+                    "review_notes": "too vague",
+                    "rejection_reasons": [],
+                    "source_summary": {"status": "empty_label_file"},
+                },
+                {
+                    "format": "tator_caption_instruction_review_rows_v1",
+                    "dataset_id": "ds",
+                    "image_path": "frame.jpg",
+                    "split": "train",
+                    "row_origin": "deterministic_metadata_qa",
+                    "qa_id": "frame.jpg__metadata_object_counts",
+                    "row_type": "deterministic_object_count_schema",
+                    "question": "Return the labeled object counts for this image as JSON.",
+                    "candidate_answer": "{}",
+                    "training_answer": "{}",
+                    "validation_status": "machine_validated",
+                    "selected_for_training": False,
+                    "requires_manual_review": False,
+                    "review_decision": "accepted",
+                    "review_notes": "",
+                    "rejection_reasons": [],
+                    "source_summary": {"status": "empty_label_file"},
+                },
+            ],
+        },
+    )
+
+    assert result["status"] == "applied"
+    assert result["received_row_count"] == 3
+    assert result["applied_count"] == 2
+    assert result["generated_qa_review_applied_count"] == 1
+    assert result["caption_review_applied_count"] == 1
+    assert result["created_caption_review_record_count"] == 1
+    assert result["skipped_count"] == 1
+    assert result["skipped_rows"][0]["reason"] == "deterministic_review_not_persisted"
+
+    instruction_records = api._load_dataset_caption_instruction_records(entry)
+    assert instruction_records[0]["review_status"] == "accepted"
+    assert instruction_records[0]["metadata"]["review_decision"] == "accepted"
+    assert instruction_records[0]["metadata"]["review_notes"] == "grounded"
+    assert instruction_records[0]["metadata"]["reviewer"] == "qa-review"
+
+    caption_records = api._load_dataset_caption_records(entry)
+    assert len(caption_records) == 1
+    assert caption_records[0]["id"] == "primary-review"
+    assert caption_records[0]["caption"] == "A primary caption."
+    assert caption_records[0]["is_primary"] is False
+    assert caption_records[0]["metadata"]["review_decision"] == "rejected"
+    assert caption_records[0]["metadata"]["review_notes"] == "too vague"
+
+    archive = api._dataset_caption_instruction_archive(
+        caption_records,
+        instruction_records,
+        dataset_id="ds",
+        entry=entry,
+        settings=api._caption_instruction_export_settings({}),
+        exported_at="2026-01-01T00:00:00Z",
+    )
+    review_rows = archive["instruction_review_rows"]
+    caption_review = next(row for row in review_rows if row["row_origin"] == "caption0")
+    generated_review = next(row for row in review_rows if row["row_origin"] == "generated_qa")
+    assert caption_review["review_decision"] == "rejected"
+    assert generated_review["review_decision"] == "accepted"
+    readiness = archive["captioning_report"]["training_readiness"]
+    assert readiness["status"] == "blocked"
+    assert readiness["rejected_manual_review_row_count"] == 1
+    assert "selected_row_rejected_by_manual_review" in readiness["blocking_reasons"]
+
+
 def test_caption_instruction_training_rows_import_into_qwen_trainer(
     monkeypatch,
     tmp_path,

@@ -32,6 +32,7 @@ def build_datasets_router(
     update_caption_fn: Callable[[str, str, dict], Any],
     delete_caption_fn: Callable[[str, str, dict], Any],
     export_captions_fn: Callable[..., Any],
+    apply_caption_instruction_review_fn: Callable[[str, dict], Any],
     register_path_fn: Callable[
         [
             str,
@@ -176,6 +177,10 @@ def build_datasets_router(
                 "answer_format": answer_format,
             },
         )
+
+    @router.post("/datasets/{dataset_id}/captions/instruction_review")
+    def apply_caption_instruction_review(dataset_id: str, payload: dict = Body(...)):  # noqa: B008
+        return apply_caption_instruction_review_fn(dataset_id, payload or {})
 
     @router.post("/datasets/{dataset_id}/captions/batch")
     def get_captions_batch(dataset_id: str, payload: dict = Body(...)):  # noqa: B008

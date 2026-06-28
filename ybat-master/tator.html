@@ -758,9 +758,11 @@
                                                 <button type="button" id="qwenCaptionDownloadInstructionJsonl" class="training-button secondary">Download instruction JSONL</button>
                                                 <button type="button" id="qwenCaptionDownloadInstructionArchive" class="training-button secondary">Download instruction archive</button>
                                                 <button type="button" id="qwenCaptionDownloadInstructionReview" class="training-button secondary">Download review JSONL</button>
+                                                <button type="button" id="qwenCaptionImportInstructionReview" class="training-button secondary">Import reviewed JSONL</button>
+                                                <input type="file" id="qwenCaptionImportInstructionReviewFile" accept=".jsonl,.json,application/json,application/jsonl" hidden />
                                                 <button type="button" id="qwenCaptionDownloadInstructionReport" class="training-button secondary">Download instruction report</button>
                                             </div>
-                                            <div class="training-help">The training-dataset path writes caption0 plus optional generated QA rows into a separate instruction archive. Generated QA never becomes source annotations, deterministic metadata QA is included only when explicitly enabled, and review JSONL records candidate-level human audit decisions before training.</div>
+                                            <div class="training-help">The training-dataset path writes caption0 plus optional generated QA rows into a separate instruction archive. Generated QA never becomes source annotations, deterministic metadata QA is included only when explicitly enabled, and review JSONL can be exported for audit then imported to apply accepted, rejected, or needs-revision decisions before training.</div>
                                         </div>
                                     </div>
                                 </div>

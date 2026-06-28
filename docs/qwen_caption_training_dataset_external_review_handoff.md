@@ -47,9 +47,29 @@ prompt-size accounting, representative spatial box subsets, loop detection,
 deterministic recovery paths, set-and-forget controls, readiness checks, and UI
 model availability coloring.
 
+## Reader Contract
+
+This document is written for an external implementation and training-data
+review. It is intentionally explicit about boundaries because the system now
+mixes four different kinds of evidence:
+
+- trusted source labels
+- generated captions
+- generated visual QA
+- deterministic metadata QA derived from labels
+
+The implementation is considered correct only if those evidence types stay
+separate all the way through UI display, backend persistence, archive export,
+review import, and trainer import. A reviewer should treat any path that lets
+generated language overwrite trusted source labels as a product regression.
+
+The implementation is also intentionally dataset-neutral. It should be reviewed
+as a reusable captioning and instruction-dataset workflow, not as a one-off
+dataset script.
+
 ## Current Checkpoint
 
-What is implemented and committed:
+What is implemented in this checkpoint:
 
 - A UI-visible one-click instruction-dataset generation path.
 - Dataset-backed caption jobs that can produce caption rows plus generated
@@ -57,6 +77,8 @@ What is implemented and committed:
 - Optional deterministic metadata QA rows derived only from trusted labels.
 - Per-image instruction archives.
 - Candidate-level review JSONL export.
+- Reviewed JSONL import that applies audit decisions back to saved caption and
+  generated-QA metadata.
 - Run-level instruction reports with corpus quality metrics.
 - Training-readiness classification.
 - Browser-side instruction export validation.
@@ -64,13 +86,23 @@ What is implemented and committed:
 - Runtime hardening for prompt size, output-token overrides, loop detection,
   fallback, set-and-forget supervision, and model-download state.
 
+The latest hardening pass specifically closed the review loop:
+
+- the frontend can import a reviewed instruction JSONL artifact;
+- the backend exposes a dataset caption review-import endpoint;
+- imported decisions are persisted as review metadata only;
+- `accepted`, `rejected`, and `needs_revision` affect subsequent readiness and
+  export decisions;
+- deterministic metadata QA review rows are skipped on import because those rows
+  are rebuilt from source labels during export and are not saved language
+  records.
+
 What is intentionally not claimed at this checkpoint:
 
 - The generated corpus is not declared training-grade without a real-data pilot
   and human review of generated QA.
-- Review JSONL is currently an export and audit artifact. A reviewed JSONL
-  import/apply workflow should be added before treating manual review as a
-  closed in-app loop.
+- Review JSONL import applies decisions and notes only. It does not edit source
+  labels, questions, answers, boxes, or final annotations.
 - The implementation creates training data. It does not launch fine-tuning from
   the caption panel.
 - Process-level Metal/GPU aborts are not catchable Python exceptions. The
@@ -240,11 +272,36 @@ The intended flow is:
 9. The run-level report computes corpus quality metrics and training readiness.
 10. The UI can download training JSONL, archive JSONL, review JSONL, and the
     report JSON.
-11. The trainer imports the flat instruction JSONL and converts each row into a
+11. A reviewer can edit review decisions externally and import the reviewed
+    JSONL back into the dataset. The import persists only `accepted`,
+    `rejected`, or `needs_revision` review metadata on caption or generated-QA
+    records.
+12. The next export reflects those review decisions in training readiness.
+13. The trainer imports the flat instruction JSONL and converts each row into a
     Qwen conversation record.
 
 At no step does generated language overwrite source labels or automatically
 mutate final annotations.
+
+## Implementation Status Matrix
+
+| Capability | Status | Why it matters |
+| --- | --- | --- |
+| Existing caption-only export | Implemented and preserved | The training path must not weaken ordinary annotation-assistance captioning. |
+| One-click instruction dataset job | Implemented | Operators can create caption plus QA training data from the UI without assembling scripts. |
+| `caption0` row generation | Implemented | Every image can retain one broad descriptive training row. |
+| Generated visual QA rows | Implemented | The system can create multiple image-grounded question/answer pairs beyond a single caption. |
+| Deterministic metadata QA | Implemented, off by default | Label-derived QA can be added only when the operator explicitly wants code-generated metadata rows. |
+| Source/generated separation | Implemented | Trusted labels remain separate from VLM-generated language. |
+| Archive JSONL | Implemented | Reviewers can inspect how each image's training candidates were built. |
+| Review JSONL export | Implemented | Candidate rows can be reviewed outside the app before training. |
+| Review JSONL import | Implemented | Human decisions can be applied back to saved caption and generated-QA records. |
+| Training-readiness status | Implemented | Exports can be blocked, warned, or marked ready based on row and review state. |
+| Flat JSONL trainer import | Implemented | The Qwen trainer can consume exported rows directly. |
+| Prompt-size adaptation | Implemented | Dense label scenes no longer require dumping every box into a prompt. |
+| Loop detection and retry | Implemented | Repetition stalls become observable recovery events instead of silent hangs. |
+| Set-and-forget supervision | Implemented as the durable default | Long dataset jobs are designed around backend jobs, resume, and recovery rather than browser babysitting. |
+| Real-data training-quality certification | Still required | Passing structural tests does not prove that generated QA is good enough for fine-tuning. |
 
 ## Data Contracts
 
@@ -443,11 +500,23 @@ This artifact is deliberately separate from `instruction_training_rows`: editing
 or annotating review rows must not mutate trusted source annotations or silently
 change what is exported for training.
 
-The current committed path exports review rows and uses review status/decision
-metadata when it is present in the archived records. It does not yet provide an
-in-app **import reviewed JSONL** action that applies external review decisions
-back onto saved caption or generated-QA metadata. That import/apply path is the
-next hardening item if the review workflow should be closed inside the UI.
+The UI also provides **Import reviewed JSONL**. The import accepts the review
+JSONL artifact after a reviewer fills `review_decision` with `accepted`,
+`rejected`, or `needs_revision`, then applies only review metadata and notes to
+matching saved caption or generated-QA records. It intentionally skips
+deterministic metadata QA rows because those rows are derived from source labels
+at export time rather than persisted language records.
+
+The review import is deliberately conservative:
+
+- It accepts JSON arrays, JSON objects containing row arrays, and JSONL files.
+- It ignores blank or unknown decisions instead of inventing a review result.
+- It applies decisions only to matching caption0 or generated-QA records.
+- It records reviewer, notes, source row metadata, and decision timestamps.
+- It does not change questions, answers, source labels, boxes, image paths, or
+  selected final annotations.
+- It reports how many rows were received, applied, created as caption review
+  records, or skipped.
 
 ## UI/UX Work
 
@@ -464,6 +533,7 @@ The caption panel now includes:
   - instruction archive
   - instruction review JSONL
   - instruction report
+- import for reviewed JSONL decisions
 - readiness check button and rendered readiness results
 - set-and-forget defaults and backend supervision status text
 - model select styling that marks download-needed models in red and local models
@@ -531,6 +601,27 @@ does not assume every failure is catchable inside Python. The documented
 operational mode uses a backend launcher or process supervisor for restart, and
 the UI reports whether crash-restart supervision is advertised.
 
+## Why The Implementation Is Shaped This Way
+
+The workflow is intentionally split into generation, archive, review, import,
+and training-import phases. That split adds some surface area, but it solves the
+training-data problems that a single "caption all images" button cannot solve:
+
+- A training row needs provenance, not only text.
+- A generated QA answer may be useful even when it is not safe to train on yet.
+- Label-derived facts should be reproducible from labels rather than copied from
+  generated prose.
+- A human reviewer needs to reject or accept rows without editing source
+  annotations.
+- The trainer needs a small stable row shape, while reviewers need a richer
+  archive.
+- Long caption jobs need durable recovery and audit telemetry because GPU
+  failures can abort the backend process.
+
+The result is a two-level export contract. The flat instruction JSONL is the
+trainer input. The archive, review rows, and report are the evidence layer that
+lets reviewers decide whether that trainer input should be trusted.
+
 ## Operator Workflows To Review
 
 ### Ordinary Captioning
@@ -548,9 +639,9 @@ review, and report artifacts.
 ### Review Before Training
 
 Use review JSONL and the instruction report to inspect selected and rejected
-candidate rows. A complete production workflow should include importing reviewed
-decisions back into saved metadata so readiness can reflect the actual review
-outcome rather than only the initial generated state.
+candidate rows. Import reviewed JSONL after decisions are filled in so readiness
+can reflect the actual review outcome rather than only the initial generated
+state.
 
 ### Fine-Tuning Dry Run
 
@@ -591,6 +682,7 @@ Training loader:
   - direct import of flat instruction rows
   - conversion to Qwen conversation entries
   - preservation of row metadata
+  - review-decision metadata preserved from exported rows
 
 UI:
 
@@ -640,7 +732,7 @@ Result:
 Result:
 
 ```text
-130 passed
+131 passed
 ```
 
 Syntax and formatting checks:
@@ -671,11 +763,12 @@ Result:
 
 ```text
 ok=true
-caption readiness: 29 pass, 2 warnings, 0 fail
+caption readiness: 30 pass, 1 warning, 0 fail
 no console errors
 no failed requests
 no bad HTTP responses
 no clipped caption action buttons
+instruction import button present
 ```
 
 Restricted project-name scan:
@@ -720,7 +813,7 @@ no matches
    - instruction-dataset controls
    - generated QA defaults
    - download buttons
-   - review JSONL export button
+   - review JSONL export and import buttons
    - readiness output
    - model availability coloring
    - button clipping
@@ -748,10 +841,10 @@ real-data validation.
 
 Remaining work:
 
-- Add and test a reviewed-JSONL import/apply workflow so external review
-  decisions can be persisted back into caption/generated-QA metadata.
 - Run a small real VLM instruction-dataset pilot.
 - Manually review generated QA quality for grounding and usefulness.
+- Import the reviewed JSONL decisions and confirm that readiness changes as
+  expected.
 - Decide acceptance thresholds for generated QA rows before training.
 - Run an actual small fine-tuning dry run with the exported rows, not only the
   loader import smoke.
@@ -790,8 +883,8 @@ Recommended pilot shape:
 - How much manual review is required before a generated instruction dataset is
   considered training-grade?
 - Is the current review JSONL schema sufficient for external audit tools?
-- Should the next import/apply path support only accepted/rejected decisions, or
-  should it also support edited replacement answers and edited questions?
+- Should review import remain metadata-only, or should a future guarded workflow
+  also support edited replacement answers and edited questions?
 - Should `needs_review` block training JSONL download in strict set-and-forget
   mode, or is the current warning sufficient?
 - Which quality gates should be hard blockers for the first real fine-tuning

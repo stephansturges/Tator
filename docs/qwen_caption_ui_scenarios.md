@@ -132,7 +132,11 @@ from trainer rows.
 generated QA, and deterministic metadata QA item. Review rows preserve candidate
 answers, selected training answers, source summaries, rejection reasons,
 selected-for-training flags, and blank review decision/note fields so a human
-can audit the corpus before fine-tuning.
+can audit the corpus before fine-tuning. **Import reviewed JSONL** reads that
+artifact after a reviewer fills accepted, rejected, or needs-revision decisions
+and applies only review metadata to matching saved caption and generated-QA
+records; it does not edit source labels, generated answers, or deterministic
+metadata rows.
 **Download instruction report** exports run-level counts, rejection reasons,
 source-field provenance, split image counts, split row counts, QA count per
 image, selected flattened-row counts, duplicate-question/diversity metrics,

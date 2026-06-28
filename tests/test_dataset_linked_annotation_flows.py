@@ -2620,6 +2620,31 @@ def test_caption_alternate_routes_append_update_export_and_delete(
         row["metadata"]["source_archive"] == "tator_caption_instruction_archive_v1"
         for row in export_payload["instruction_training_rows"]
     )
+    selected_review_row = next(row for row in export_payload["instruction_review_rows"] if row["selected_for_training"])
+    selected_review_row["review_decision"] = "accepted"
+    selected_review_row["review_notes"] = "route-level review import"
+    review_response = client.post(
+        "/datasets/ds/captions/instruction_review",
+        json={"rows": [selected_review_row]},
+    )
+    assert review_response.status_code == 200
+    review_result = review_response.json()
+    assert review_result["applied_count"] == 1
+    assert review_result["skipped_count"] == 0
+    reviewed_export_response = client.get("/datasets/ds/captions/export")
+    assert reviewed_export_response.status_code == 200
+    reviewed_export_payload = reviewed_export_response.json()
+    reviewed_row = next(
+        row
+        for row in reviewed_export_payload["instruction_review_rows"]
+        if row["qa_id"] == selected_review_row["qa_id"]
+    )
+    assert reviewed_row["review_decision"] == "accepted"
+    assert reviewed_row["review_notes"] == "route-level review import"
+    assert (
+        reviewed_export_payload["instruction_report"]["training_readiness"]["accepted_manual_review_row_count"]
+        >= 1
+    )
     deterministic_response = client.get(
         "/datasets/ds/captions/export?include_caption0_in_training=false"
         "&include_generated_qa_in_training=false&include_deterministic_metadata_qa=true"

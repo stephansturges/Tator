@@ -283,10 +283,13 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     assert "qwenCaptionDownloadInstructionJsonl" in html
     assert "qwenCaptionDownloadInstructionArchive" in html
     assert "qwenCaptionDownloadInstructionReview" in html
+    assert "qwenCaptionImportInstructionReview" in html
+    assert "qwenCaptionImportInstructionReviewFile" in html
     assert "qwenCaptionDownloadInstructionReport" in html
     assert "Create VLM training dataset" in html
+    assert "Import reviewed JSONL" in html
     assert "Generated QA never becomes source annotations" in html
-    assert "review JSONL records candidate-level human audit decisions before training" in html
+    assert "review JSONL can be exported for audit then imported" in html
     assert "deterministic metadata QA is included only when explicitly enabled" in html
     assert "qwenCaptionExportHealth" in html
     assert "qwenCaptionReadinessRun" in html
@@ -311,18 +314,23 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     assert "function validateCaptionInstructionTrainingRows" in js
     assert "function validateCaptionInstructionArchiveRows" in js
     assert "function validateCaptionInstructionReviewRows" in js
+    assert "function parseCaptionInstructionReviewRowsText" in js
+    assert "async function importCaptionInstructionReviewFile" in js
+    assert "normalizeCaptionInstructionReviewDecision" in js
     assert "function validateCaptionInstructionReport" in js
     assert "corpus_quality_metrics" in js
     assert "training_readiness" in js
     assert "function downloadCaptionInstructionJsonl" in js
     assert "function downloadCaptionInstructionArchive" in js
     assert "function downloadCaptionInstructionReview" in js
+    assert "function importCaptionInstructionReviewFile" in js
     assert "function downloadCaptionInstructionReport" in js
     assert "captionInstructionReadinessSummary" in js
     assert 'saveBlobToDisk(blob, "caption_instruction_training.jsonl")' in js
     assert 'saveBlobToDisk(blob, "caption_instruction_archive.jsonl")' in js
     assert 'saveBlobToDisk(blob, "caption_instruction_review.jsonl")' in js
     assert 'saveBlobToDisk(blob, "caption_instruction_report.json")' in js
+    assert "/captions/instruction_review" in js
     assert "async function applyQwenCaptionBackendJobCaptions" not in js
     assert "function applyQwenCaptionBackendJobCaptions" in js
     assert "result.latest_caption" in js
@@ -361,6 +369,8 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "function validateCaptionInstructionTrainingRows" in js
     assert "function validateCaptionInstructionArchiveRows" in js
     assert "function validateCaptionInstructionReviewRows" in js
+    assert "function parseCaptionInstructionReviewRowsText" in js
+    assert "async function importCaptionInstructionReviewFile" in js
     assert "function validateCaptionInstructionReport" in js
     instruction_validator_start = js.index("function validateCaptionInstructionTrainingRows")
     instruction_validator_end = js.index("function describeCaptionInstructionValidation", instruction_validator_start)
@@ -391,6 +401,9 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "requires_manual_review must be boolean" in review_validator
     assert "missing review_decision field" in review_validator
     assert "missing review_notes field" in review_validator
+    assert "normalizeCaptionInstructionReviewDecision" in js
+    assert "accepted, rejected, or needs-revision decisions" in js
+    assert "captionMutationPayload({ rows: reviewedRows })" in js
     assert "duplicate image_path + question" in js
     assert "function setCaptionExportHealth" in js
     assert "VLM JSONL export blocked" in js
@@ -411,6 +424,7 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "downloadCaptionInstructionJsonl().catch" in js
     assert "downloadCaptionInstructionArchive().catch" in js
     assert "downloadCaptionInstructionReview().catch" in js
+    assert "importCaptionInstructionReviewFile(file).catch" in js
     assert "async function runQwenCaptionReadinessCheck" in js
     assert "function collectQwenCaptionReadinessChecks" in js
     assert "renderQwenCaptionReadinessChecks" in js

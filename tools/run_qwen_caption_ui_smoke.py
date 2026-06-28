@@ -52,6 +52,7 @@ CRITICAL_CONTROLS = (
     "qwenCaptionDownloadInstructionJsonl",
     "qwenCaptionDownloadInstructionArchive",
     "qwenCaptionDownloadInstructionReview",
+    "qwenCaptionImportInstructionReview",
     "qwenCaptionDownloadInstructionReport",
     "qwenCaptionExportHealth",
     "qwenCaptionReadinessRun",
@@ -203,6 +204,7 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         instruction_jsonl_count = page.locator("text=Download instruction JSONL").count()
         instruction_archive_count = page.locator("text=Download instruction archive").count()
         instruction_review_count = page.locator("text=Download review JSONL").count()
+        instruction_import_count = page.locator("text=Import reviewed JSONL").count()
         instruction_report_count = page.locator("text=Download instruction report").count()
         instruction_help = page.locator(".qwen-caption-instruction-panel .training-help").inner_text(timeout=args.timeout_ms)
         action_button_metrics = page.evaluate(
@@ -300,6 +302,7 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
             "instruction_jsonl_button_count": instruction_jsonl_count,
             "instruction_archive_button_count": instruction_archive_count,
             "instruction_review_button_count": instruction_review_count,
+            "instruction_import_button_count": instruction_import_count,
             "instruction_report_button_count": instruction_report_count,
             "instruction_help": instruction_help,
             "action_button_metrics": action_button_metrics,
@@ -342,12 +345,14 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         and instruction_jsonl_count == 1
         and instruction_archive_count == 1
         and instruction_review_count == 1
+        and instruction_import_count == 1
         and instruction_report_count == 1,
         "Instruction dataset action and export buttons are visible.",
         build_count=instruction_build_count,
         jsonl_count=instruction_jsonl_count,
         archive_count=instruction_archive_count,
         review_count=instruction_review_count,
+        import_count=instruction_import_count,
         report_count=instruction_report_count,
     )
     add_check(
@@ -381,8 +386,9 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         report,
         "instruction_dataset_help_explains_separation",
         "Generated QA never becomes source annotations" in instruction_help
-        and "deterministic metadata QA is included only when explicitly enabled" in instruction_help,
-        "Instruction dataset help explains generated QA/source annotation separation.",
+        and "deterministic metadata QA is included only when explicitly enabled" in instruction_help
+        and "imported to apply accepted, rejected, or needs-revision decisions before training" in instruction_help,
+        "Instruction dataset help explains generated QA/source annotation separation and review import.",
         help_text=instruction_help,
     )
     add_check(

@@ -1091,6 +1091,7 @@
         qwenCaptionDownloadInstructionJsonl: "Download flattened instruction-training image/question/answer rows.",
         qwenCaptionDownloadInstructionArchive: "Download one per-image instruction archive row per line.",
         qwenCaptionDownloadInstructionReview: "Download candidate-level caption and QA review rows for manual audit before training.",
+        qwenCaptionImportInstructionReview: "Import reviewed instruction JSONL decisions and apply only review metadata to saved caption and QA records.",
         qwenCaptionDownloadInstructionReport: "Download instruction-dataset counts, provenance, splits, and rejection summary.",
         qwenCaptionReadinessRun: "Run a fast caption-panel readiness check before loading a dataset or starting Qwen.",
         qwenCaptionGeneratedPrimary: "Promote generated captions to the primary text label instead of appending them as alternates.",
@@ -2513,6 +2514,8 @@ const AUTOMATION_LOCKED_TABS = new Set([
         captionDownloadInstructionJsonl: null,
         captionDownloadInstructionArchive: null,
         captionDownloadInstructionReview: null,
+        captionImportInstructionReview: null,
+        captionImportInstructionReviewFile: null,
         captionDownloadInstructionReport: null,
         captionReadinessRun: null,
         captionReadinessStatus: null,
@@ -21959,6 +21962,8 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenElements.captionDownloadInstructionJsonl = document.getElementById("qwenCaptionDownloadInstructionJsonl");
         qwenElements.captionDownloadInstructionArchive = document.getElementById("qwenCaptionDownloadInstructionArchive");
         qwenElements.captionDownloadInstructionReview = document.getElementById("qwenCaptionDownloadInstructionReview");
+        qwenElements.captionImportInstructionReview = document.getElementById("qwenCaptionImportInstructionReview");
+        qwenElements.captionImportInstructionReviewFile = document.getElementById("qwenCaptionImportInstructionReviewFile");
         qwenElements.captionDownloadInstructionReport = document.getElementById("qwenCaptionDownloadInstructionReport");
         qwenElements.captionReadinessRun = document.getElementById("qwenCaptionReadinessRun");
         qwenElements.captionReadinessStatus = document.getElementById("qwenCaptionReadinessStatus");
@@ -22744,6 +22749,23 @@ async function cancelRfDetrTrainingJobRequest() {
                 downloadCaptionInstructionReview().catch((error) => {
                     console.warn("Instruction review download failed", error);
                     setSamStatus(`Instruction review export failed: ${error.message || error}`, { variant: "error", duration: 4000 });
+                });
+            });
+        }
+        if (qwenElements.captionImportInstructionReview && qwenElements.captionImportInstructionReviewFile) {
+            qwenElements.captionImportInstructionReview.addEventListener("click", () => {
+                qwenElements.captionImportInstructionReviewFile.click();
+            });
+            qwenElements.captionImportInstructionReviewFile.addEventListener("change", () => {
+                const file = qwenElements.captionImportInstructionReviewFile.files?.[0] || null;
+                qwenElements.captionImportInstructionReviewFile.value = "";
+                if (!file) {
+                    return;
+                }
+                importCaptionInstructionReviewFile(file).catch((error) => {
+                    console.warn("Instruction review import failed", error);
+                    setSamStatus(`Instruction review import failed: ${error.message || error}`, { variant: "error", duration: 5000 });
+                    setCaptionExportHealth(`Instruction review import failed: ${error.message || error}`, "fail");
                 });
             });
         }
@@ -34779,6 +34801,20 @@ async function cancelRfDetrTrainingJobRequest() {
         };
     }
 
+    function normalizeCaptionInstructionReviewDecision(value) {
+        const decision = String(value || "").trim().toLowerCase().replace(/\s+/g, "_");
+        if (["accept", "accepted", "approve", "approved", "keep", "kept", "pass", "passed"].includes(decision)) {
+            return "accepted";
+        }
+        if (["reject", "rejected", "deny", "denied", "drop", "dropped", "fail", "failed"].includes(decision)) {
+            return "rejected";
+        }
+        if (["revise", "revised", "needs_revision", "needs_rewrite", "edit", "edited"].includes(decision)) {
+            return "needs_revision";
+        }
+        return decision || "unreviewed";
+    }
+
     function describeCaptionInstructionReviewValidation(validation) {
         if (!validation?.ok) {
             const firstErrors = (validation?.errors || []).slice(0, 3).join("; ");
@@ -35106,6 +35142,88 @@ async function cancelRfDetrTrainingJobRequest() {
         const lines = rows.map((row) => JSON.stringify(row));
         const blob = new Blob([lines.join("\n")], { type: "application/jsonl" });
         saveBlobToDisk(blob, "caption_instruction_review.jsonl");
+    }
+
+    function parseCaptionInstructionReviewRowsText(text) {
+        const raw = String(text || "").trim();
+        if (!raw) {
+            throw new Error("Review file is empty.");
+        }
+        const lines = raw.split(/\r?\n/).filter((line) => line.trim());
+        if (raw.startsWith("[") || (raw.startsWith("{") && lines.length === 1)) {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) {
+                return parsed;
+            }
+            if (parsed && typeof parsed === "object") {
+                const rows = parsed.rows || parsed.review_rows || parsed.instruction_review_rows;
+                if (Array.isArray(rows)) {
+                    return rows;
+                }
+            }
+            throw new Error("Review JSON must be an array or an object with rows.");
+        }
+        const rows = [];
+        lines.forEach((line, index) => {
+            const trimmed = line.trim();
+            try {
+                rows.push(JSON.parse(trimmed));
+            } catch (error) {
+                throw new Error(`Review JSONL parse failed at line ${index + 1}: ${error.message || error}`);
+            }
+        });
+        return rows;
+    }
+
+    async function importCaptionInstructionReviewFile(file) {
+        const datasetId = getCaptionDatasetId();
+        if (!datasetId) {
+            setCaptionExportHealth("Select a caption dataset before importing reviewed instruction rows.", "warn");
+            return;
+        }
+        const text = await file.text();
+        const rows = parseCaptionInstructionReviewRowsText(text);
+        const validation = validateCaptionInstructionReviewRows(rows);
+        if (!validation.ok) {
+            const message = describeCaptionInstructionReviewValidation(validation).replace("export blocked", "import blocked");
+            setCaptionExportHealth(message, "fail");
+            setSamStatus(message, { variant: "error", duration: 6000 });
+            return;
+        }
+        const reviewedRows = rows.filter((row) => {
+            const decision = normalizeCaptionInstructionReviewDecision(row?.review_decision);
+            return ["accepted", "rejected", "needs_revision"].includes(decision);
+        });
+        if (!reviewedRows.length) {
+            const message = "Instruction review import found no accepted, rejected, or needs-revision decisions to apply.";
+            setCaptionExportHealth(message, "warn");
+            setSamStatus(message, { variant: "warn", duration: 4000 });
+            return;
+        }
+        const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/captions/instruction_review`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(captionMutationPayload({ rows: reviewedRows })),
+        });
+        if (!resp.ok) {
+            const detail = await resp.text();
+            throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+        }
+        const result = await resp.json();
+        const applied = Number.parseInt(result?.applied_count || "0", 10) || 0;
+        const skipped = Number.parseInt(result?.skipped_count || "0", 10) || 0;
+        const created = Number.parseInt(result?.created_caption_review_record_count || "0", 10) || 0;
+        const severity = applied > 0 ? (skipped > 0 ? "warn" : "pass") : "warn";
+        const message = `Instruction review import applied ${applied} decision${applied === 1 ? "" : "s"}`
+            + `${created ? `, created ${created} caption review record${created === 1 ? "" : "s"}` : ""}`
+            + `${skipped ? `, skipped ${skipped} row${skipped === 1 ? "" : "s"}` : ""}.`;
+        setCaptionExportHealth(message, severity);
+        setSamStatus(message, { variant: severity === "pass" ? "success" : "warn", duration: 5000 });
+        if (currentImage?.name) {
+            await loadCaptionForCurrentImage().catch((error) => {
+                console.debug("Caption refresh after review import failed", error);
+            });
+        }
     }
 
     async function downloadCaptionInstructionReport() {

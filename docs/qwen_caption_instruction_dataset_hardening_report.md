@@ -86,6 +86,7 @@ row before training.
   - **Download instruction JSONL**
   - **Download instruction archive**
   - **Download review JSONL**
+  - **Import reviewed JSONL**
   - **Download instruction report**
 - Fixed caption action layout so export and instruction buttons wrap into
   readable responsive columns instead of clipping in the sidebar.
@@ -122,6 +123,10 @@ row before training.
 - The instruction export also exposes `instruction_review_rows`, a
   candidate-level audit queue that records caption0, generated-QA, and
   deterministic metadata candidates separately from flattened trainer rows.
+- The caption API now accepts reviewed instruction JSONL and applies only review
+  decision metadata back to saved caption and generated-QA records. This closes
+  the export-review-import loop without editing source labels, questions,
+  answers, boxes, or final annotations.
 - The instruction report now includes `corpus_quality_metrics` for generated-QA
   diversity, duplicate-question rate, generated-QA acceptance/rejection rates,
   structured rewrite rate, image-level training coverage, source-grounded row
@@ -146,7 +151,7 @@ row before training.
   - `node --check ybat-master/ybat.js`
 - Focused instruction-dataset, export, and UI contract tests:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py tests/test_qwen_training_backend.py tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete tests/test_labeling_panel_layout_contract.py tests/test_qwen_caption_ui_smoke_tool.py -q`
-  - Result: 130 passed.
+  - Result: 131 passed.
 - Trainer import compatibility:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_imports_flat_question_answer_rows tests/test_qwen_caption_dataset_job.py::test_caption_instruction_training_rows_import_into_qwen_trainer -q`
   - Result: 2 passed.
@@ -166,11 +171,11 @@ row before training.
   - Result: 135 passed.
 - Rendered browser smoke:
   - `./.venv-macos/bin/python tools/run_qwen_caption_ui_smoke.py --base-url http://127.0.0.1:8000 --out-json tmp/qwen_caption_ui_smoke_report.json --screenshot tmp/qwen_caption_ui_smoke.png`
-  - Result: `ok=true`, caption readiness reported 29 pass, 2 warnings, 0 fail;
+  - Result: `ok=true`, caption readiness reported 30 pass, 1 warning, 0 fail;
     no console errors, no failed requests, no bad HTTP responses, no clipped
     caption action buttons. The screenshot confirms the generated-QA mix,
-    answer-format, archive, and report controls are visible and readable in the
-    caption panel.
+    answer-format, archive, review import, and report controls are visible and
+    readable in the caption panel.
 - Restricted project-name scan:
   - Source, docs, tests, tools, UI, and backend entrypoint scan.
   - Result: no matches.
@@ -181,4 +186,5 @@ row before training.
   one empty-label image, one image with multiple object classes, and one image
   with existing alternate captions.
 - Review generated QA content manually with the review JSONL before using it
-  for fine-tuning.
+  for fine-tuning, then import reviewed decisions so readiness reflects that
+  audit.

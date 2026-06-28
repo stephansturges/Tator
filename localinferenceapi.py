@@ -20238,6 +20238,7 @@ CAPTION_INSTRUCTION_ARCHIVE_FORMAT = "tator_caption_instruction_archive_v1"
 CAPTION_INSTRUCTION_SOURCE_ANNOTATIONS_FORMAT = "tator_source_annotations_v1"
 CAPTION_INSTRUCTION_TRAINING_ROWS_FORMAT = "tator_caption_instruction_rows_v1"
 CAPTION_INSTRUCTION_REVIEW_ROWS_FORMAT = "tator_caption_instruction_review_rows_v1"
+CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ROWS = 200000
 
 
 def _dataset_caption_instruction_records_path(
@@ -20970,6 +20971,14 @@ def _caption_instruction_caption0_for_archive(
     labelmap: Sequence[str],
 ) -> Dict[str, Any]:
     caption = str(caption0.get("caption") or "").strip()
+    metadata = dict(caption0.get("metadata") or {})
+    review_status = str(metadata.get("review_status") or caption0.get("review_status") or "").strip()
+    review_decision = _caption_instruction_review_decision(
+        metadata.get("review_decision") or caption0.get("review_decision") or review_status
+    )
+    if review_decision in {"accepted", "rejected", "needs_revision"}:
+        review_status = review_decision
+    review_status = review_status or "unreviewed"
     source_status = str(source_annotations.get("status") or "").strip()
     counts = source_annotations.get("object_counts") if isinstance(source_annotations, Mapping) else {}
     counts = counts if isinstance(counts, Mapping) else {}
@@ -21005,10 +21014,10 @@ def _caption_instruction_caption0_for_archive(
         "answer": caption,
         "answer_source": str(caption0.get("source") or "caption_record").strip() or "caption_record",
         "source": str(caption0.get("source") or "").strip(),
-        "metadata": dict(caption0.get("metadata") or {}),
+        "metadata": metadata,
         "validated_against": validated_against,
         "validation_status": validation_status,
-        "review_status": "unreviewed",
+        "review_status": review_status,
         "rejection_reasons": rejection_reasons,
         "validation": {
             "status": validation_status,
@@ -22489,6 +22498,284 @@ def export_captions(dataset_id: str, options: Optional[Mapping[str, Any]] = None
         "archive": _dataset_caption_grouped_archive(indexed_records, dataset_id=dataset_id, summary=summary),
         "summary": summary,
         "instruction_summary": instruction_summary,
+    }
+
+
+def _caption_instruction_review_payload_rows(payload: Any) -> List[Any]:
+    if isinstance(payload, list):
+        raw_rows = payload
+    elif isinstance(payload, Mapping):
+        raw_rows = (
+            payload.get("rows")
+            or payload.get("review_rows")
+            or payload.get("instruction_review_rows")
+            or []
+        )
+    else:
+        raw_rows = []
+    if not isinstance(raw_rows, list):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="review_rows_list_required")
+    if len(raw_rows) > CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ROWS:
+        raise HTTPException(status_code=HTTP_413_CONTENT_TOO_LARGE, detail="review_rows_too_many")
+    return list(raw_rows)
+
+
+def _caption_instruction_review_image_candidates(
+    entry: Dict[str, Any],
+    row: Mapping[str, Any],
+) -> Tuple[Set[str], Set[str]]:
+    image_path = str(row.get("image_path") or row.get("image_name") or row.get("image") or "").strip()
+    split = str(row.get("split") or "").strip() or None
+    image_names: Set[str] = set()
+    image_keys: Set[str] = set()
+    if not image_path:
+        return image_names, image_keys
+    image_names.add(image_path)
+    image_keys.add(image_path)
+    if split:
+        image_keys.add(f"{split}/{image_path}")
+    elif not re.match(r"^(?:train|val|valid|test)/", image_path):
+        image_keys.add(f"train/{image_path}")
+        image_keys.add(f"val/{image_path}")
+    names_to_try = [image_path]
+    if split and image_path.startswith(f"{split}/"):
+        stripped = image_path[len(split) + 1 :].strip()
+        if stripped:
+            names_to_try.append(stripped)
+            image_names.add(stripped)
+    for name in names_to_try:
+        split_overrides = [split, None] if split else [None, "train", "val"]
+        for split_override in split_overrides:
+            try:
+                ctx_payload = {"split": split_override} if split_override else None
+                resolved_split, _rel, image_key = _dataset_caption_context(entry, name, ctx_payload)
+            except Exception:
+                continue
+            if image_key:
+                image_keys.add(str(image_key))
+            if resolved_split and name:
+                image_keys.add(f"{resolved_split}/{name}")
+    return image_names, image_keys
+
+
+def _caption_instruction_apply_review_metadata(
+    record: Dict[str, Any],
+    row: Mapping[str, Any],
+    *,
+    decision: str,
+    now: str,
+    reviewer: str = "",
+) -> None:
+    metadata = dict(record.get("metadata")) if isinstance(record.get("metadata"), Mapping) else {}
+    metadata.update(
+        {
+            "review_decision": decision,
+            "review_notes": str(row.get("review_notes") or "").strip(),
+            "reviewed_at": now,
+            "review_imported_from": CAPTION_INSTRUCTION_REVIEW_ROWS_FORMAT,
+            "review_row_origin": str(row.get("row_origin") or "").strip(),
+        }
+    )
+    if reviewer:
+        metadata["reviewer"] = reviewer
+    record["metadata"] = metadata
+    record["review_status"] = decision
+    record["updated_at"] = now
+
+
+def _caption_instruction_match_instruction_record(
+    record: Mapping[str, Any],
+    row: Mapping[str, Any],
+    *,
+    image_keys: Set[str],
+) -> bool:
+    qa_id = str(row.get("qa_id") or "").strip()
+    if qa_id and str(record.get("id") or "").strip() == qa_id:
+        return True
+    record_image_key = str(record.get("image_key") or record.get("image_name") or "").strip()
+    if record_image_key not in image_keys:
+        return False
+    row_question = _caption_instruction_normalized_question(row.get("question"))
+    if row_question and _caption_instruction_normalized_question(record.get("question")) != row_question:
+        return False
+    candidate_answer = str(row.get("candidate_answer") or row.get("training_answer") or "").strip()
+    if candidate_answer and str(record.get("answer") or "").strip() not in {
+        candidate_answer,
+        str(row.get("training_answer") or "").strip(),
+    }:
+        return False
+    return bool(row_question or candidate_answer)
+
+
+def _caption_instruction_match_caption_record(
+    record: Mapping[str, Any],
+    row: Mapping[str, Any],
+    *,
+    image_keys: Set[str],
+) -> bool:
+    qa_id = str(row.get("qa_id") or "").strip()
+    if qa_id and str(record.get("id") or "").strip() == qa_id:
+        return True
+    record_image_key = str(record.get("image_key") or record.get("image_name") or "").strip()
+    if record_image_key not in image_keys:
+        return False
+    candidate_caption = str(row.get("candidate_answer") or row.get("training_answer") or "").strip()
+    return bool(candidate_caption and str(record.get("caption") or "").strip() == candidate_caption)
+
+
+def apply_caption_instruction_review(dataset_id: str, payload: Dict[str, Any]):
+    payload = payload or {}
+    entry = _resolve_dataset_entry(dataset_id)
+    _require_dataset_annotation_lock_owner_if_active(entry, payload)
+    rows = _caption_instruction_review_payload_rows(payload)
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    reviewer = str((payload or {}).get("reviewer") or "").strip()
+
+    caption_records = _load_dataset_caption_records(entry)
+    instruction_records = _load_dataset_caption_instruction_records(entry)
+    used_caption_ids = {str(record.get("id") or "").strip() for record in caption_records if str(record.get("id") or "").strip()}
+
+    caption_changed = False
+    instruction_changed = False
+    applied_caption_count = 0
+    applied_instruction_count = 0
+    created_caption_count = 0
+    skipped_rows: List[Dict[str, Any]] = []
+
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, Mapping):
+            skipped_rows.append({"row_index": index, "qa_id": "", "row_origin": "", "reason": "row_not_object"})
+            continue
+        qa_id = str(row.get("qa_id") or "").strip()
+        row_origin = str(row.get("row_origin") or "").strip()
+        if str(row.get("format") or "").strip() != CAPTION_INSTRUCTION_REVIEW_ROWS_FORMAT:
+            skipped_rows.append({"row_index": index, "qa_id": qa_id, "row_origin": row_origin, "reason": "invalid_format"})
+            continue
+        decision = _caption_instruction_review_decision(row.get("review_decision"))
+        if decision not in {"accepted", "rejected", "needs_revision"}:
+            skipped_rows.append({"row_index": index, "qa_id": qa_id, "row_origin": row_origin, "reason": "missing_review_decision"})
+            continue
+        image_path = str(row.get("image_path") or row.get("image_name") or row.get("image") or "").strip()
+        image_names, image_keys = _caption_instruction_review_image_candidates(entry, row)
+        if not image_path or not image_keys:
+            skipped_rows.append({"row_index": index, "qa_id": qa_id, "row_origin": row_origin, "reason": "missing_image_path"})
+            continue
+
+        if row_origin == "generated_qa":
+            matched = False
+            for record in instruction_records:
+                if not _caption_instruction_match_instruction_record(record, row, image_keys=image_keys):
+                    continue
+                _caption_instruction_apply_review_metadata(
+                    record,
+                    row,
+                    decision=decision,
+                    now=now,
+                    reviewer=reviewer,
+                )
+                instruction_changed = True
+                applied_instruction_count += 1
+                matched = True
+                break
+            if not matched:
+                skipped_rows.append({"row_index": index, "qa_id": qa_id, "row_origin": row_origin, "reason": "generated_qa_not_found"})
+            continue
+
+        if row_origin == "caption0":
+            matched = False
+            for record in caption_records:
+                if not _caption_instruction_match_caption_record(record, row, image_keys=image_keys):
+                    continue
+                _caption_instruction_apply_review_metadata(
+                    record,
+                    row,
+                    decision=decision,
+                    now=now,
+                    reviewer=reviewer,
+                )
+                caption_changed = True
+                applied_caption_count += 1
+                matched = True
+                break
+            if matched:
+                continue
+            caption = str(row.get("candidate_answer") or row.get("training_answer") or "").strip()
+            if not caption:
+                skipped_rows.append({"row_index": index, "qa_id": qa_id, "row_origin": row_origin, "reason": "caption0_answer_missing"})
+                continue
+            split_name: Optional[str] = None
+            image_key = next(iter(sorted(image_keys)), image_path)
+            image_name = image_path
+            resolved_caption_context = False
+            for candidate_name in list(image_names) or [image_path]:
+                split_overrides = [row.get("split"), None] if row.get("split") else [None, "train", "val"]
+                for split_override in split_overrides:
+                    try:
+                        split_name, _rel, image_key = _dataset_caption_context(
+                            entry,
+                            candidate_name,
+                            {"split": split_override} if split_override else None,
+                        )
+                        image_name = candidate_name
+                        resolved_caption_context = True
+                        break
+                    except Exception:
+                        continue
+                if resolved_caption_context:
+                    break
+            caption_id = qa_id if qa_id and qa_id not in used_caption_ids else f"cap_{uuid.uuid4().hex}"
+            used_caption_ids.add(caption_id)
+            record = {
+                "id": caption_id,
+                "image_name": image_name,
+                "image": image_name,
+                "image_key": image_key,
+                "split": split_name or str(row.get("split") or "").strip() or None,
+                "caption": caption,
+                "title": "Reviewed caption0",
+                "source": "text_label_review",
+                "is_primary": False,
+                "created_at": now,
+                "updated_at": now,
+                "metadata": {
+                    "synthetic_source_review_qa_id": qa_id,
+                    "review_decision": decision,
+                    "review_notes": str(row.get("review_notes") or "").strip(),
+                    "reviewed_at": now,
+                    "review_imported_from": CAPTION_INSTRUCTION_REVIEW_ROWS_FORMAT,
+                    "review_row_origin": row_origin,
+                },
+            }
+            if reviewer:
+                record["metadata"]["reviewer"] = reviewer
+            caption_records.append(record)
+            caption_changed = True
+            applied_caption_count += 1
+            created_caption_count += 1
+            continue
+
+        if row_origin == "deterministic_metadata_qa":
+            skipped_rows.append({"row_index": index, "qa_id": qa_id, "row_origin": row_origin, "reason": "deterministic_review_not_persisted"})
+            continue
+        skipped_rows.append({"row_index": index, "qa_id": qa_id, "row_origin": row_origin, "reason": "unsupported_row_origin"})
+
+    if caption_changed:
+        _write_dataset_caption_records(entry, caption_records)
+    if instruction_changed:
+        _write_dataset_caption_instruction_records(entry, instruction_records)
+
+    applied_count = applied_caption_count + applied_instruction_count
+    return {
+        "status": "applied",
+        "dataset_id": dataset_id,
+        "received_row_count": len(rows),
+        "applied_count": applied_count,
+        "caption_review_applied_count": applied_caption_count,
+        "generated_qa_review_applied_count": applied_instruction_count,
+        "created_caption_review_record_count": created_caption_count,
+        "skipped_count": len(skipped_rows),
+        "skipped_rows": skipped_rows[:50],
+        "skipped_row_limit": 50,
     }
 
 
@@ -65292,6 +65579,7 @@ app.include_router(
         update_caption_fn=update_caption,
         delete_caption_fn=delete_caption,
         export_captions_fn=export_captions,
+        apply_caption_instruction_review_fn=apply_caption_instruction_review,
         register_path_fn=register_dataset_path,
         open_path_fn=open_dataset_path,
         save_transient_fn=save_transient_dataset,

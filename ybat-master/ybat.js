@@ -34742,6 +34742,7 @@ async function cancelRfDetrTrainingJobRequest() {
         const warnings = [];
         const imagePaths = new Set();
         const imageQaIds = new Set();
+        const actionableTargets = new Map();
         let selectedTrainingCount = 0;
         let manualReviewCount = 0;
         (Array.isArray(rows) ? rows : []).forEach((row, index) => {
@@ -34760,6 +34761,8 @@ async function cancelRfDetrTrainingJobRequest() {
             const trainingAnswer = String(row.training_answer || "").trim();
             const rowOrigin = String(row.row_origin || "").trim();
             const validationStatus = String(row.validation_status || "").trim();
+            const reviewDecision = normalizeCaptionInstructionReviewDecision(row.review_decision);
+            const hasActionableDecision = ["accepted", "rejected", "needs_revision"].includes(reviewDecision);
             if (!imagePath) {
                 errors.push(`review row ${rowNumber} missing image_path`);
             } else {
@@ -34806,6 +34809,26 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             if (!Object.prototype.hasOwnProperty.call(row, "review_notes")) {
                 errors.push(`review row ${rowNumber} missing review_notes field`);
+            }
+            if (hasActionableDecision && rowOrigin && !["caption0", "generated_qa", "deterministic_metadata_qa"].includes(rowOrigin)) {
+                errors.push(`review row ${rowNumber} has unsupported actionable row_origin`);
+            }
+            if (hasActionableDecision && ["caption0", "generated_qa"].includes(rowOrigin)) {
+                const split = String(row.split || "").trim();
+                const normalizedQuestion = question.replace(/\s+/g, " ").toLowerCase();
+                const answerForTarget = candidateAnswer || trainingAnswer;
+                const targetKey = qaId
+                    ? `qa_id\u0000${rowOrigin}\u0000${qaId}`
+                    : `question_answer\u0000${rowOrigin}\u0000${imagePath}\u0000${split}\u0000${normalizedQuestion}\u0000${answerForTarget}`;
+                const prior = actionableTargets.get(targetKey);
+                if (prior) {
+                    const prefix = prior.decision === reviewDecision
+                        ? "duplicate actionable review target"
+                        : "conflicting duplicate actionable review target";
+                    errors.push(`${prefix} at review row ${rowNumber} (first seen at row ${prior.rowNumber})`);
+                } else {
+                    actionableTargets.set(targetKey, { rowNumber, decision: reviewDecision });
+                }
             }
             if (imagePath && qaId) {
                 const pairKey = `${imagePath}\u0000${qaId}`;

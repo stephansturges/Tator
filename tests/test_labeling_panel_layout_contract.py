@@ -431,6 +431,9 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "requires_manual_review must be boolean" in review_validator
     assert "missing review_decision field" in review_validator
     assert "missing review_notes field" in review_validator
+    assert "unsupported actionable row_origin" in review_validator
+    assert "duplicate actionable review target" in review_validator
+    assert "conflicting duplicate actionable review target" in review_validator
     assert "normalizeCaptionInstructionReviewDecision" in js
     assert "accepted, rejected, or needs-revision decisions" in js
     assert "captionMutationPayload({ rows: reviewedRows })" in js
@@ -499,6 +502,48 @@ def test_qwen_caption_instruction_review_import_parser_accepts_reviewer_file_sha
             "assert.strictEqual(parseCaptionInstructionReviewRowsText(jsonl).length, 2);",
             "assert.deepStrictEqual(captionInstructionReviewDatasetMismatches([{ ...row, dataset_id: 'ds' }], 'ds'), []);",
             "assert.deepStrictEqual(captionInstructionReviewDatasetMismatches([{ ...row, dataset_id: 'other' }], 'ds'), ['other']);",
+        ]
+    )
+    subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
+
+
+def test_qwen_caption_instruction_review_validator_blocks_bad_actionable_rows():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            _extract_js_function(js, "normalizeCaptionInstructionReviewDecision"),
+            _extract_js_function(js, "validateCaptionInstructionReviewRows"),
+            "const base = {",
+            "  format: 'tator_caption_instruction_review_rows_v1',",
+            "  dataset_id: 'ds',",
+            "  image_path: 'train/frame.jpg',",
+            "  split: 'train',",
+            "  row_origin: 'generated_qa',",
+            "  qa_id: 'qa-1',",
+            "  row_type: 'generated_qa',",
+            "  question: 'What is shown?',",
+            "  candidate_answer: 'A waterfront area.',",
+            "  training_answer: 'A waterfront area.',",
+            "  validation_status: 'accepted',",
+            "  selected_for_training: true,",
+            "  requires_manual_review: true,",
+            "  review_decision: 'accepted',",
+            "  review_notes: '',",
+            "  rejection_reasons: [],",
+            "  source_summary: { status: 'ok' },",
+            "};",
+            "const unsupported = validateCaptionInstructionReviewRows([{ ...base, row_origin: 'freeform_review' }]);",
+            "assert.strictEqual(unsupported.ok, false);",
+            "assert(unsupported.errors.some((error) => error.includes('unsupported actionable row_origin')));",
+            "const duplicate = validateCaptionInstructionReviewRows([base, { ...base, row_type: 'external_edit' }]);",
+            "assert.strictEqual(duplicate.ok, false);",
+            "assert(duplicate.errors.some((error) => error.includes('duplicate actionable review target')));",
+            "const conflicting = validateCaptionInstructionReviewRows([base, { ...base, review_decision: 'rejected' }]);",
+            "assert.strictEqual(conflicting.ok, false);",
+            "assert(conflicting.errors.some((error) => error.includes('conflicting duplicate actionable review target')));",
+            "const deterministic = validateCaptionInstructionReviewRows([{ ...base, row_origin: 'deterministic_metadata_qa', qa_id: 'meta-1', row_type: 'deterministic_count', selected_for_training: false, requires_manual_review: false }]);",
+            "assert.strictEqual(deterministic.ok, true);",
         ]
     )
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)

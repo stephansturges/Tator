@@ -45,6 +45,8 @@ The new work adds a separate instruction-dataset path:
 - The backend exports trainer rows, per-image archive rows, review rows, and a
   run-level report.
 - The browser validates instruction JSONL before download.
+- The browser validates reviewed JSONL before import, including unsupported
+  actionable row origins and duplicate or conflicting actionable review targets.
 - A reviewer can import reviewed JSONL decisions back into the dataset.
 - The Qwen trainer can import the flat exported instruction rows directly.
 - The Qwen trainer refuses flat rows that carry rejected validation state,
@@ -520,7 +522,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-149 passed
+150 passed
 ```
 
 Focused review-import fail-closed suite:
@@ -583,7 +585,7 @@ Focused instruction-dataset and UI contract suite:
 Latest recorded result:
 
 ```text
-129 passed
+130 passed
 ```
 
 Runtime and unattended hardening suites have also been run in prior hardening

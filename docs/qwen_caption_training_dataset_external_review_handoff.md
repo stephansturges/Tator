@@ -139,6 +139,8 @@ What is implemented in this checkpoint:
 - Run-level instruction reports with corpus quality metrics.
 - Training-readiness classification.
 - Browser-side instruction export validation.
+- Browser-side review import validation for unsupported actionable row origins
+  and duplicate or conflicting actionable review targets.
 - Server-side flattened trainer-row validation exposed as
   `instruction_export_validation` in the archive, report, and API payload.
 - Direct trainer import of the flat instruction JSONL row shape.
@@ -655,6 +657,8 @@ The caption panel now includes:
   - instruction review JSONL
   - instruction report
 - import for reviewed JSONL decisions
+- browser preflight for reviewed JSONL decisions, including unsupported
+  actionable row origins and duplicate or conflicting actionable review targets
 - readiness check button and rendered readiness results
 - set-and-forget defaults and backend supervision status text
 - model select styling that marks download-needed models in red and local models
@@ -853,7 +857,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Result:
 
 ```text
-149 passed
+150 passed
 ```
 
 Focused review-import fail-closed tests:
@@ -918,7 +922,7 @@ Caption/instruction/UI contract suite outside the trainer file:
 Result:
 
 ```text
-129 passed
+130 passed
 ```
 
 Syntax and formatting checks:

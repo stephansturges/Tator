@@ -141,7 +141,9 @@ artifact after a reviewer fills accepted, rejected, or needs-revision decisions
 and applies only review metadata to matching saved caption and generated-QA
 records; rows from a different dataset are blocked before import. The backend
 also rejects malformed or stale actionable language review rows before writing
-any review metadata, so mixed valid/stale packets do not partially apply. It
+any review metadata, so mixed valid/stale packets do not partially apply. The
+browser import preflight also catches unsupported actionable row origins and
+duplicate or conflicting actionable review targets before sending the packet. It
 does not edit source labels, generated answers, or deterministic metadata rows.
 Rejected or needs-revision language candidates stay auditable in the archive and
 review JSONL but are excluded from flattened trainer rows.

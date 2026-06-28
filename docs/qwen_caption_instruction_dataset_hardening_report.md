@@ -115,6 +115,10 @@ row before training.
 - The browser-side instruction JSONL validator now validates row type, answer
   format, and validation status from row metadata before writing a download,
   preventing rejected or malformed rows from being saved by the UI.
+- The browser-side review JSONL import validator now rejects unsupported
+  actionable row origins and duplicate or conflicting actionable review targets
+  before calling the backend, giving operators immediate feedback on review
+  packets that would fail the server-side transactional import.
 - The backend now emits `instruction_export_validation` in the archive, report,
   API payload, and instruction summary. The same flattened trainer-row checks
   run server-side, and training readiness becomes blocked if malformed,
@@ -179,7 +183,7 @@ row before training.
   - `node --check ybat-master/ybat.js`
 - Focused instruction-dataset, export, and UI contract tests:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py tests/test_qwen_training_backend.py tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete tests/test_labeling_panel_layout_contract.py tests/test_qwen_caption_ui_smoke_tool.py -q`
-  - Current result: 149 passed.
+  - Current result: 150 passed.
 - Current review-import fail-closed tests:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_persists_review_metadata tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_mismatched_dataset_id tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_duplicate_actionable_targets tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_unmatchable_actionable_rows_atomically -q`
   - Result: 7 passed.
@@ -191,7 +195,7 @@ row before training.
   - Result: 20 passed.
 - Current caption/instruction/UI contract tests outside the trainer file:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete tests/test_labeling_panel_layout_contract.py tests/test_qwen_caption_ui_smoke_tool.py -q`
-  - Result: 129 passed.
+  - Result: 130 passed.
 - Earlier targeted trainer import compatibility:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_imports_flat_question_answer_rows tests/test_qwen_caption_dataset_job.py::test_caption_instruction_training_rows_import_into_qwen_trainer -q`
   - Result: 2 passed.

@@ -365,7 +365,15 @@ def test_caption_dataset_save_instruction_records_from_row_persists_generated_qa
           "response": {
             "caption": "A broad caption.",
             "generated_qa_pairs": [
-              {"question": "What borders the water?", "answer": "Buildings border the water."},
+              {
+                "question": "What borders the water?",
+                "answer": "Buildings border the water.",
+                "answer_format": "object_count_json",
+                "validated_against": ["source_annotations.object_counts"],
+                "source_fields": ["source_annotations.object_counts.Building"],
+                "validation_status": "accepted",
+                "review_status": "machine_validated"
+              },
               {"question": "How many boats are described?", "answer": "Two boats are described."}
             ]
           },
@@ -402,9 +410,65 @@ def test_caption_dataset_save_instruction_records_from_row_persists_generated_qa
     assert [record["row_type"] for record in captured[0]["records"]] == ["generated_qa", "generated_qa"]
     assert captured[0]["records"][0]["caption"] == "A broad caption."
     assert captured[0]["records"][0]["caption_id"] == "row-case"
+    assert captured[0]["records"][0]["answer_format"] == "object_count_json"
+    assert captured[0]["records"][0]["validated_against"] == ["source_annotations.object_counts"]
+    assert captured[0]["records"][0]["source_fields"] == ["source_annotations.object_counts.Building"]
+    assert captured[0]["records"][0]["validation_status"] == "accepted"
+    assert captured[0]["records"][0]["review_status"] == "machine_validated"
     assert captured[0]["records"][0]["metadata"]["case_id"] == "row-case"
     assert captured[0]["records"][0]["metadata"]["artifact_dir"] == str(result_dir)
     assert job.logs[-1]["generated_qa_rows"] == 2
+
+
+def test_caption_dataset_add_instruction_records_persists_validation_metadata(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import localinferenceapi as api
+
+    overlay_root = tmp_path / "overlay"
+    records_path = overlay_root / "captions" / "instruction_records.jsonl"
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: {"id": "ds"})
+    monkeypatch.setattr(
+        api,
+        "_dataset_caption_context",
+        lambda _entry, image_name, _payload=None: ("train", Path(image_name), f"train/{image_name}"),
+    )
+    monkeypatch.setattr(
+        api,
+        "_dataset_caption_instruction_records_path",
+        lambda _entry, ensure=False: (overlay_root, records_path),
+    )
+
+    added = api._dataset_caption_add_instruction_records(
+        "ds",
+        "frame.jpg",
+        [
+            {
+                "id": "qa-1",
+                "question": "How many buildings are present?",
+                "answer": '{"object_counts":{"Building":1}}',
+                "answer_format": "object_count_json",
+                "validated_against": ["source_annotations.object_counts"],
+                "source_fields": ["source_annotations.object_counts.Building"],
+                "validation_status": "accepted",
+                "review_status": "machine_validated",
+                "validation": {"status": "accepted"},
+            }
+        ],
+        split="train",
+    )
+    loaded = api._load_dataset_caption_instruction_records({"id": "ds"})
+    raw = json.loads(records_path.read_text().splitlines()[0])
+
+    assert added == 1
+    assert loaded[0]["answer_format"] == "object_count_json"
+    assert loaded[0]["validated_against"] == ["source_annotations.object_counts"]
+    assert loaded[0]["source_fields"] == ["source_annotations.object_counts.Building"]
+    assert loaded[0]["validation_status"] == "accepted"
+    assert loaded[0]["review_status"] == "machine_validated"
+    assert raw["source_fields"] == ["source_annotations.object_counts.Building"]
+    assert raw["validation"] == {"status": "accepted"}
 
 
 def test_caption_instruction_archive_separates_generated_qa_from_source_annotations(
@@ -613,6 +677,66 @@ def test_caption_instruction_archive_rejects_structured_generated_qa_without_sou
     assert archive["captioning_report"]["rejected_generated_qa_count"] == 1
     assert archive["captioning_report"]["rows_excluded_because_generated_answers_contradicted_source_annotations"] == 1
     assert archive["archive_rows"][0]["export_metadata"]["selected_training_row_count"] == 0
+
+
+def test_caption_instruction_archive_keeps_non_manifest_records_out_of_training_rows(
+    monkeypatch,
+) -> None:
+    import localinferenceapi as api
+
+    monkeypatch.setattr(api, "_annotation_manifest_for_entry", lambda _entry: {"labelmap": ["Boat"], "images": []})
+    captions = [
+        {
+            "id": "caption-1",
+            "image_name": "orphan.jpg",
+            "image_key": "train/orphan.jpg",
+            "split": "train",
+            "caption": "A caption for an image that is no longer in the manifest.",
+            "source": "qwen_caption_job",
+            "is_primary": True,
+            "caption_index": 1,
+        }
+    ]
+    generated = [
+        {
+            "id": "qa-1",
+            "image_name": "orphan.jpg",
+            "image_key": "train/orphan.jpg",
+            "split": "train",
+            "question": "What setting is shown?",
+            "answer": "A waterfront setting is shown.",
+            "row_type": "generated_qa",
+            "answer_source": "vlm_generated",
+        }
+    ]
+
+    archive = api._dataset_caption_instruction_archive(
+        captions,
+        generated,
+        dataset_id="ds",
+        entry={"id": "ds"},
+        settings=api._caption_instruction_export_settings(
+            {
+                "include_caption0_in_training": True,
+                "include_generated_qa_in_training": True,
+                "include_deterministic_metadata_qa": True,
+            }
+        ),
+        exported_at="2026-01-01T00:00:00Z",
+    )
+    image = archive["images"][0]
+    generated_pair = image["language_annotations"]["generated_qa_pairs"][0]
+
+    assert image["source_annotations"]["status"] == "source_manifest_row_missing"
+    assert image["export_metadata"]["flattening_eligible"] is False
+    assert image["export_metadata"]["selected_training_row_count"] == 0
+    assert generated_pair["validation_status"] == "accepted"
+    assert generated_pair["validated_against"] == ["image", "language_annotations.caption0"]
+    assert archive["training_rows"] == []
+    assert archive["training_row_count"] == 0
+    assert archive["deterministic_metadata_qa_pair_count"] == 0
+    assert archive["rejection_reason_counts"] == {"source_manifest_row_missing": 1}
+    assert archive["captioning_report"]["selected_flattened_row_count"] == 0
 
 
 def test_caption_instruction_archive_rewrites_supported_structured_generated_qa_from_source_labels(

@@ -2568,10 +2568,10 @@ def test_caption_alternate_routes_append_update_export_and_delete(
     assert training_rows_for_image[0]["metadata"]["caption_index"] == 1
     assert training_rows_for_image[0]["metadata"]["dataset_id"] == "ds"
     assert export_payload["instruction_summary"] == {
-        "instruction_training_row_count": 2,
+        "instruction_training_row_count": 1,
         "generated_qa_pair_count": 0,
         "deterministic_metadata_qa_pair_count": 0,
-        "rejected_training_row_count": 0,
+        "rejected_training_row_count": 1,
     }
     instruction_archive = export_payload["instruction_archive"]
     assert instruction_archive["format"] == "tator_caption_instruction_archive_v1"
@@ -2582,7 +2582,8 @@ def test_caption_alternate_routes_append_update_export_and_delete(
         "qa_mix": "balanced",
         "answer_format": "natural",
     }
-    assert instruction_archive["training_row_count"] == 2
+    assert instruction_archive["training_row_count"] == 1
+    assert instruction_archive["rejection_reason_counts"] == {"source_manifest_row_missing": 1}
     assert len(export_payload["instruction_archive_rows"]) == instruction_archive["image_count"]
     archive_row_by_path = {
         row["image_path"]: row
@@ -2590,10 +2591,15 @@ def test_caption_alternate_routes_append_update_export_and_delete(
     }
     assert archive_row_by_path["sub/img.jpg"]["source_annotations"]["format"] == "tator_source_annotations_v1"
     assert "export_metadata" in archive_row_by_path["sub/img.jpg"]
+    assert any(
+        row["source_annotations"]["status"] == "source_manifest_row_missing"
+        and row["export_metadata"]["flattening_eligible"] is False
+        for row in export_payload["instruction_archive_rows"]
+    )
     assert export_payload["instruction_report"]["format"] == "tator_caption_instruction_report_v1"
     assert export_payload["instruction_report"]["image_count"] == instruction_archive["image_count"]
-    assert export_payload["instruction_report"]["selected_flattened_row_count"] == 2
-    assert len(export_payload["instruction_training_rows"]) == 2
+    assert export_payload["instruction_report"]["selected_flattened_row_count"] == 1
+    assert len(export_payload["instruction_training_rows"]) == 1
     assert {row["metadata"]["row_type"] for row in export_payload["instruction_training_rows"]} == {
         "caption0"
     }

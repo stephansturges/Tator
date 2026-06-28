@@ -55,6 +55,10 @@ row before training.
   simple bbox-derived spatial facts when supported.
 - Generated QA candidates remain in the archive even when rejected, but only
   accepted generated rows are flattened into trainer rows.
+- Caption or generated-QA records whose image no longer appears in the dataset
+  manifest are kept in the instruction archive for audit, marked as
+  non-flattenable, and excluded from trainer rows with an explicit rejection
+  reason.
 - Exact duplicate image/question rows are rejected from instruction JSONL.
 - The UI blocks malformed instruction JSONL downloads before writing a file.
 
@@ -88,6 +92,10 @@ row before training.
   instruction dataset mode is enabled and `subcaptions_per_image > 0`.
 - Generated QA rows are parsed from JSON, structurally validated, deduplicated by
   question within the image, and persisted as instruction records.
+- Generated-QA provenance fields such as answer format, source fields,
+  validation targets, validation status, and review status are preserved through
+  job-result parsing, persisted instruction records, archive rows, and flattened
+  trainer rows.
 - The export layer validates generated QA again before flattening and rejects
   unsupported structured claims when trusted source labels are missing.
 - Supported generated count, class-list, presence, and simple spatial questions
@@ -112,7 +120,10 @@ row before training.
   - `node --check ybat-master/ybat.js`
 - Focused instruction-dataset, export, and UI contract tests:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete tests/test_labeling_panel_layout_contract.py tests/test_qwen_caption_ui_smoke_tool.py -q`
-  - Result: 112 passed.
+  - Result: 114 passed.
+- Additional instruction archive provenance and manifest-gating regression:
+  - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py -q`
+  - Result: 64 passed.
 - Prompt, runner, progress, launcher, and unattended contracts:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_flow_benchmark.py tests/test_qwen_caption_prompt.py tests/test_qwen_progress.py tests/test_macos_backend_launcher_contract.py -q`
   - Result: 191 passed.

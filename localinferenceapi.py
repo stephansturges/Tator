@@ -20265,6 +20265,11 @@ def _dataset_caption_instruction_record_public(record: Mapping[str, Any]) -> Dic
         if isinstance(out.get("validated_against"), list)
         else []
     )
+    out["source_fields"] = (
+        [str(item) for item in out.get("source_fields") or [] if str(item).strip()]
+        if isinstance(out.get("source_fields"), list)
+        else []
+    )
     out["validation_status"] = str(out.get("validation_status") or "").strip()
     out["review_status"] = str(out.get("review_status") or "").strip()
     out["caption_id"] = str(out.get("caption_id") or "").strip()
@@ -20359,6 +20364,19 @@ def _dataset_caption_add_instruction_records(
             "answer": answer,
             "row_type": str(raw_record.get("row_type") or "generated_qa").strip() or "generated_qa",
             "answer_source": str(raw_record.get("answer_source") or "vlm_generated").strip() or "vlm_generated",
+            "answer_format": str(raw_record.get("answer_format") or "").strip(),
+            "validated_against": (
+                [str(item) for item in raw_record.get("validated_against") or [] if str(item).strip()]
+                if isinstance(raw_record.get("validated_against"), list)
+                else []
+            ),
+            "validation_status": str(raw_record.get("validation_status") or "").strip(),
+            "review_status": str(raw_record.get("review_status") or "").strip(),
+            "source_fields": (
+                [str(item) for item in raw_record.get("source_fields") or [] if str(item).strip()]
+                if isinstance(raw_record.get("source_fields"), list)
+                else []
+            ),
             "caption_id": str(raw_record.get("caption_id") or "").strip(),
             "caption": str(raw_record.get("caption") or "").strip(),
             "created_at": str(raw_record.get("created_at") or now).strip(),
@@ -20655,7 +20673,7 @@ def _caption_instruction_deterministic_qa_pairs(
     counts = source_annotations.get("object_counts") if isinstance(source_annotations, Mapping) else {}
     if not isinstance(counts, Mapping):
         return []
-    if str(source_annotations.get("status") or "").strip() == "missing_label_file":
+    if str(source_annotations.get("status") or "").strip() in {"missing_label_file", "source_manifest_row_missing"}:
         return []
     rows: List[Dict[str, Any]] = []
     positive_counts: List[Tuple[str, int]] = []
@@ -20987,7 +21005,7 @@ def _caption_instruction_generated_pair_for_archive(
     validated_against = list(metadata.get("validated_against") or public.get("validated_against") or [])
     if not validated_against:
         validated_against = ["image", "language_annotations.caption0"]
-        if source_status != "missing_label_file":
+        if source_status not in {"missing_label_file", "source_manifest_row_missing"}:
             validated_against.append("source_annotations")
     final_question = question
     final_answer = answer
@@ -21152,6 +21170,16 @@ def _dataset_caption_instruction_archive(
         source_annotations = (
             row_data.get("source_annotations") if isinstance(row_data.get("source_annotations"), Mapping) else {}
         )
+        source_status = str(source_annotations.get("status") or "").strip()
+        can_flatten_image = source_status != "source_manifest_row_missing"
+        if not can_flatten_image and (caption0 or instruction_by_key.get(image_key)):
+            rejections.append(
+                {
+                    "reason": "source_manifest_row_missing",
+                    "image_path": image_name,
+                    "image_key": image_key,
+                }
+            )
         generated_pairs = [
             _caption_instruction_generated_pair_for_archive(pair, source_annotations=source_annotations)
             for pair in instruction_by_key.get(image_key, [])
@@ -21196,7 +21224,7 @@ def _dataset_caption_instruction_archive(
             "export_metadata": {
                 "archive_schema_version": CAPTION_INSTRUCTION_ARCHIVE_FORMAT,
                 "training_rows_format": CAPTION_INSTRUCTION_TRAINING_ROWS_FORMAT,
-                "flattening_eligible": bool(caption0 or generated_pairs or deterministic_pairs),
+                "flattening_eligible": can_flatten_image and bool(caption0 or generated_pairs or deterministic_pairs),
                 "selected_training_row_count": 0,
                 "generated_qa_candidate_count": len(generated_pairs),
                 "accepted_generated_qa_count": sum(
@@ -21215,7 +21243,7 @@ def _dataset_caption_instruction_archive(
                 },
             },
         }
-        if caption0 and bool(settings.get("include_caption0_in_training")):
+        if caption0 and bool(settings.get("include_caption0_in_training")) and can_flatten_image:
             _append_training_row(
                 _caption_instruction_training_row(
                     image_name=image_name,
@@ -21235,7 +21263,7 @@ def _dataset_caption_instruction_archive(
                     },
                 )
             )
-        if bool(settings.get("include_generated_qa_in_training")):
+        if bool(settings.get("include_generated_qa_in_training")) and can_flatten_image:
             for pair in generated_pairs:
                 if str(pair.get("validation_status") or "").strip() != "accepted":
                     rejections.append(
@@ -21267,6 +21295,9 @@ def _dataset_caption_instruction_archive(
                         },
                     )
                 )
+        if not can_flatten_image:
+            images.append(image_entry)
+            continue
         for pair in deterministic_pairs:
             _append_training_row(
                 _caption_instruction_training_row(
@@ -21512,6 +21543,9 @@ def _qwen_caption_dataset_generated_qa_pairs_from_row(row: Mapping[str, Any]) ->
             "answer_format": str(raw_pair.get("answer_format") or "").strip(),
             "validated_against": list(raw_pair.get("validated_against") or [])
             if isinstance(raw_pair.get("validated_against"), list)
+            else [],
+            "source_fields": list(raw_pair.get("source_fields") or [])
+            if isinstance(raw_pair.get("source_fields"), list)
             else [],
             "validation_status": str(raw_pair.get("validation_status") or "").strip(),
             "review_status": str(raw_pair.get("review_status") or "").strip(),

@@ -383,6 +383,10 @@ def _normalise_training_review_decision(value: Any) -> str:
     return decision or "unreviewed"
 
 
+def _normalise_flat_training_question(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
 def _flat_training_row_error_suffix(line_number: Optional[int]) -> str:
     return f":line_{line_number}" if line_number is not None else ""
 
@@ -546,7 +550,7 @@ class QwenConversationDataset(Dataset):
                         line_number=line_number,
                     )
                     if entry is not None:
-                        question = str(payload.get("question") or "").strip()
+                        question = _normalise_flat_training_question(payload.get("question"))
                         flat_key = (image_name, question)
                         if flat_key in seen_flat_image_questions:
                             raise TrainingError(

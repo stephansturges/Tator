@@ -88,12 +88,12 @@ multi-caption contract rather than separate shapes.
 **Download VLM JSONL** exports one normal `image_path` / `question` / `answer`
 training row per caption. VLM answers are JSON strings of the form
 `{"caption": "..."}`, and per-image questions are varied by caption index so
-downstream validation does not reject duplicate image/question pairs. No export
+downstream validation does not reject duplicate normalized image/question pairs. No export
 imposes a per-image caption limit, and all caption exports preserve caption
 identifiers, image-local caption indexes, primary flags, sources, timestamps,
 and metadata.
 Before writing VLM JSONL, the UI validates that each row has an image path,
-question, parseable caption JSON answer, and a unique image/question pair; bad
+question, parseable caption JSON answer, and a unique normalized image/question pair; bad
 rows are blocked instead of downloaded.
 Generated caption jobs append variants by default. Users promote one variant to
 primary with **Set primary** or by enabling **Make generated caption primary**
@@ -125,7 +125,7 @@ row into an image/question/answer conversation. The UI validates missing image
 paths, blank questions, blank answers, required row metadata,
 instruction archive provenance, missing or unknown validation/review state,
 rejected/failed/invalid validation state, non-trainable review state, invalid
-JSON for JSON row types, and duplicate image/question pairs before writing the
+JSON for JSON row types, and duplicate normalized image/question pairs before writing the
 file. It also validates the instruction report's training-readiness block:
 `blocked` readiness refuses the download, while `needs_review` readiness is
 blocked by default by **Require

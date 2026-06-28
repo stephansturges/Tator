@@ -20960,7 +20960,7 @@ def _caption_instruction_validate_training_rows(rows: Sequence[Any]) -> Dict[str
             except Exception:
                 errors.append(f"row {row_number} answer is not valid JSON")
         if image_path and question:
-            pair_key = (image_path, question)
+            pair_key = (image_path, _caption_instruction_normalized_question(question))
             if pair_key in image_question_pairs:
                 errors.append(f"duplicate image_path + question at row {row_number}")
             image_question_pairs.add(pair_key)

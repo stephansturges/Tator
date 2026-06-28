@@ -34677,7 +34677,8 @@ async function cancelRfDetrTrainingJobRequest() {
                 }
             }
             if (imagePath && question) {
-                const pairKey = `${imagePath}\u0000${question}`;
+                const normalizedQuestion = question.replace(/\s+/g, " ").toLowerCase();
+                const pairKey = `${imagePath}\u0000${normalizedQuestion}`;
                 if (imageQuestionPairs.has(pairKey)) {
                     errors.push(`duplicate image_path + question at row ${rowNumber}`);
                 }
@@ -34785,7 +34786,8 @@ async function cancelRfDetrTrainingJobRequest() {
                 }
             }
             if (imagePath && question) {
-                const pairKey = `${imagePath}\u0000${question}`;
+                const normalizedQuestion = question.replace(/\s+/g, " ").toLowerCase();
+                const pairKey = `${imagePath}\u0000${normalizedQuestion}`;
                 if (imageQuestionPairs.has(pairKey)) {
                     errors.push(`duplicate image_path + question at row ${rowNumber}`);
                 }

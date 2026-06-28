@@ -634,6 +634,9 @@ def test_qwen_caption_instruction_training_validator_blocks_non_trainable_rows()
             "const unknownReview = validateCaptionInstructionTrainingRows([{ ...base, metadata: { ...base.metadata, review_status: 'maybe' } }]);",
             "assert.strictEqual(unknownReview.ok, false);",
             "assert(unknownReview.errors.some((error) => error.includes('review_status is unsupported')));",
+            "const normalizedDuplicate = validateCaptionInstructionTrainingRows([base, { ...base, question: ' describe   THE image. ', metadata: { ...base.metadata, qa_id: 'qa-2' } }]);",
+            "assert.strictEqual(normalizedDuplicate.ok, false);",
+            "assert(normalizedDuplicate.errors.some((error) => error.includes('duplicate image_path + question')));",
         ]
     )
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
@@ -1692,7 +1695,7 @@ def test_qwen_caption_ui_scenarios_document_set_and_forget_workflows():
     assert "duplicate-question/diversity metrics" in scenarios
     assert "source-class coverage" in scenarios
     assert "generated QA never\nbecomes source annotations" in scenarios
-    assert "duplicate image/question pairs" in scenarios
+    assert "duplicate normalized image/question pairs" in scenarios
     assert "VLM export validation status" in scenarios
     assert "No export\nimposes a per-image caption limit" in scenarios
     assert "bad\nrows are blocked instead of downloaded" in scenarios

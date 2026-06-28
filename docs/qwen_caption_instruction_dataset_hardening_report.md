@@ -67,7 +67,7 @@ row before training.
   manifest are kept in the instruction archive for audit, marked as
   non-flattenable, and excluded from trainer rows with an explicit rejection
   reason.
-- Exact duplicate image/question rows are rejected from instruction JSONL.
+- Duplicate normalized image/question rows are rejected from instruction JSONL.
 - The UI blocks malformed instruction JSONL downloads before writing a file.
 
 ## UI/UX Changes
@@ -216,7 +216,7 @@ row before training.
   archive exports, the loader now also fails closed on stale or hand-edited rows
   with missing provenance, missing or unknown validation/review state, rejected
   validation state, rejected/needs-revision review state, invalid deterministic
-  JSON answers, or duplicate image/question pairs.
+  JSON answers, or duplicate normalized image/question pairs.
 
 ## Validation Completed
 
@@ -227,7 +227,7 @@ row before training.
   - `node --check ybat-master/ybat.js`
 - Focused instruction-dataset, export, and UI contract tests:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py tests/test_qwen_training_backend.py tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete tests/test_labeling_panel_layout_contract.py tests/test_qwen_caption_ui_smoke_tool.py -q`
-  - Current result: 185 passed.
+  - Current result: 187 passed.
 - Current artifact-consistency UI contract tests:
   - `./.venv-macos/bin/python -m pytest tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports tests/test_labeling_panel_layout_contract.py::test_qwen_caption_export_preserves_saved_alternates_and_primary_rows -q`
   - Result: 2 passed.
@@ -238,14 +238,14 @@ row before training.
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_persists_review_metadata tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_mismatched_dataset_id tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_missing_dataset_id tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_missing_or_mismatched_qa_id tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_duplicate_actionable_targets tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_duplicate_resolved_actionable_targets tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_rows_missing_current_text tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_unmatchable_actionable_rows_atomically tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_stale_generated_qa_text tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_stale_rewritten_training_answer tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_stale_caption0_text tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_arbitrary_caption0_creation -q`
   - Result: 30 passed.
 - Current trainer-import fail-closed boundary tests:
-  - `./.venv-macos/bin/python -m pytest tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_imports_flat_question_answer_rows tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_non_trainable_flat_rows tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_duplicate_flat_questions tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_ignores_blank_flat_rows_before_duplicate_check -q`
-  - Result: 7 passed.
+  - `./.venv-macos/bin/python -m pytest tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_imports_flat_question_answer_rows tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_non_trainable_flat_rows tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_duplicate_flat_questions tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_normalized_duplicate_flat_questions tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_ignores_blank_flat_rows_before_duplicate_check -q`
+  - Result: 8 passed.
 - Current full trainer backend test file:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_training_backend.py -q`
-  - Result: 25 passed.
+  - Result: 26 passed.
 - Current caption/instruction/UI contract tests outside the trainer file:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete tests/test_labeling_panel_layout_contract.py tests/test_qwen_caption_ui_smoke_tool.py -q`
-  - Result: 160 passed.
+  - Result: 161 passed.
 - Earlier targeted trainer import compatibility:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_imports_flat_question_answer_rows tests/test_qwen_caption_dataset_job.py::test_caption_instruction_training_rows_import_into_qwen_trainer -q`
   - Result: 2 passed.

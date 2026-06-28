@@ -2092,6 +2092,37 @@ def test_caption_instruction_training_readiness_blocks_invalid_export_rows() -> 
     assert "fix_instruction_training_rows" in readiness["required_actions"]
 
 
+def test_caption_instruction_training_validator_rejects_normalized_duplicate_questions() -> None:
+    import localinferenceapi as api
+
+    def row(question: str, qa_id: str) -> dict:
+        return {
+            "image_path": "frame.jpg",
+            "question": question,
+            "answer": "A grounded answer.",
+            "metadata": {
+                "qa_id": qa_id,
+                "row_type": "generated_qa",
+                "answer_source": "vlm_generated",
+                "answer_format": "natural",
+                "source_archive": api.CAPTION_INSTRUCTION_ARCHIVE_FORMAT,
+                "validation_status": "accepted",
+                "review_status": "unreviewed",
+            },
+        }
+
+    validation = api._caption_instruction_validate_training_rows(
+        [
+            row("Describe   the image.", "qa-1"),
+            row(" describe the IMAGE. ", "qa-2"),
+        ]
+    )
+
+    assert validation["ok"] is False
+    assert validation["error_count"] == 1
+    assert "duplicate image_path + question at row 2" in validation["errors"]
+
+
 def test_caption_instruction_artifact_consistency_validator_blocks_mismatched_backend_counts() -> None:
     import localinferenceapi as api
 

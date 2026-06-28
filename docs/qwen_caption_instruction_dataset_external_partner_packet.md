@@ -362,15 +362,15 @@ Validation checks include:
 - missing or unknown validation status
 - missing or unknown review status
 - invalid JSON for JSON-formatted answers
-- duplicate image/question pairs
+- duplicate normalized image/question pairs
 - rejected, failed, or invalid validation status
 - rejected or needs-revision review status
 
 The Qwen trainer has its own final import boundary. It imports the flat row
 shape directly, converts each row into an image/question/answer conversation,
 preserves row metadata, and refuses instruction rows with missing provenance,
-missing or unknown validation/review state, or non-trainable state even if a
-file was edited after export.
+missing or unknown validation/review state, non-trainable state, or duplicate
+normalized image/question pairs even if a file was edited after export.
 When both `review_status` and `review_decision` are present, validators inspect
 both fields and fail closed if either field is rejected, needs revision, or
 unknown.
@@ -505,15 +505,17 @@ node --check ybat-master/ybat.js
 ```bash
 ./.venv-macos/bin/python -m pytest \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_training_readiness_blocks_invalid_export_rows \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_training_validator_rejects_normalized_duplicate_questions \
   tests/test_labeling_panel_layout_contract.py::test_qwen_caption_export_preserves_saved_alternates_and_primary_rows \
   tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_training_validator_blocks_non_trainable_rows \
+  tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_normalized_duplicate_flat_questions \
   -q
 ```
 
 Result:
 
 ```text
-3 passed
+5 passed
 ```
 
 ```bash
@@ -529,7 +531,7 @@ Result:
 Result:
 
 ```text
-185 passed
+187 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

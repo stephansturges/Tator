@@ -3,6 +3,8 @@ Tools
 - macOS backend launcher
   - Run: `tools/run_macos_backend.sh`
   - Optional port override: `PORT=8080 tools/run_macos_backend.sh`
+  - If the requested port is already in use, the launcher exits before backend
+    imports/model loading instead of restarting into a bind loop.
 
 - Labelmap reorder via Hungarian assignment
   - Run: `python tools/reorder_labelmap.py --help`

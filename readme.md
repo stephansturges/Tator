@@ -57,6 +57,10 @@ If port `8000` is already in use:
 PORT=8080 tools/run_macos_backend.sh
 ```
 
+The launcher checks the requested bind address before importing the backend. If
+another process already owns the port, it prints the listener and exits instead
+of repeatedly loading models and restarting into the same bind failure.
+
 Quick health check from a second terminal:
 
 ```bash

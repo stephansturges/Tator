@@ -876,6 +876,43 @@ def test_caption_instruction_review_decision_normalizes_external_review_values()
     assert api._caption_instruction_review_decision_is_supported("acceppted") is False
 
 
+def test_caption_instruction_review_payload_rows_accepts_single_review_row_object() -> None:
+    import localinferenceapi as api
+
+    row = {
+        "format": "tator_caption_instruction_review_rows_v1",
+        "qa_id": "qa-1",
+    }
+
+    assert api._caption_instruction_review_payload_rows(row) == [row]
+
+
+def test_caption_instruction_review_payload_rows_respects_explicit_empty_rows() -> None:
+    import localinferenceapi as api
+
+    fallback_row = {
+        "format": "tator_caption_instruction_review_rows_v1",
+        "qa_id": "qa-1",
+    }
+
+    assert api._caption_instruction_review_payload_rows(
+        {
+            "rows": [],
+            "instruction_review_rows": [fallback_row],
+        }
+    ) == []
+
+
+def test_caption_instruction_review_payload_rows_rejects_non_list_wrapper_rows() -> None:
+    import localinferenceapi as api
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api._caption_instruction_review_payload_rows({"rows": None})
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "review_rows_list_required"
+
+
 def test_caption_instruction_review_import_rejects_unsupported_review_decision(
     monkeypatch,
     tmp_path,

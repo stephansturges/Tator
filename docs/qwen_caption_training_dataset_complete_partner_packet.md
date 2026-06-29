@@ -199,6 +199,12 @@ Backend failures are formatted into row-specific UI messages. For example, a
 long `review_notes` field reports the row number and the field limit instead of
 surfacing a raw server code.
 
+Review import accepts JSONL rows, a JSON array of rows, a wrapper object with
+`rows`, `review_rows`, or `instruction_review_rows`, or a single review-row
+object. Wrapper fields are resolved in that order, and an explicitly present
+field must be a list. An empty `rows: []` field therefore means "no rows" and
+does not fall through to another wrapper field.
+
 ## Non-Negotiable Training Shape
 
 The trainer learns only from model-visible rows shaped like this:

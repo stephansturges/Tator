@@ -23134,15 +23134,19 @@ def export_captions(dataset_id: str, options: Optional[Mapping[str, Any]] = None
 
 
 def _caption_instruction_review_payload_rows(payload: Any) -> List[Any]:
+    missing = object()
     if isinstance(payload, list):
         raw_rows = payload
     elif isinstance(payload, Mapping):
-        raw_rows = (
-            payload.get("rows")
-            or payload.get("review_rows")
-            or payload.get("instruction_review_rows")
-            or []
-        )
+        raw_rows = missing
+        for field in ("rows", "review_rows", "instruction_review_rows"):
+            if field in payload:
+                raw_rows = payload.get(field)
+                break
+        if raw_rows is missing and str(payload.get("format") or "").strip() == CAPTION_INSTRUCTION_REVIEW_ROWS_FORMAT:
+            raw_rows = [payload]
+        if raw_rows is missing:
+            raw_rows = []
     else:
         raw_rows = []
     if not isinstance(raw_rows, list):

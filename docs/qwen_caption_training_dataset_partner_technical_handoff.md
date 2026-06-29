@@ -104,6 +104,7 @@ The most relevant checkpoints for external review are:
 | --- | --- |
 | `803367a` | Trainer loader verifies bundled image digests when `bundle_image_sha256` is present |
 | `4a79b6f` | Review import requires bundled review rows to preserve original image identity and valid bundle SHA metadata |
+| current checkpoint | Review import rejects bundled review decisions when the selected dataset image bytes no longer match the reviewed bundle image digest |
 | `e22200f` | Partner-facing technical rationale and handoff narrative |
 | `6684d08` | Bundle validator revalidates trainer rows inside the finished bundle |
 | `2f893a8` | Bundle validator recomputes artifact consistency from bundled artifacts |
@@ -334,11 +335,19 @@ image identity. The review importer requires original image identity whenever a
 review row includes bundle image metadata. It also rejects malformed bundle
 SHA-256 values before applying decisions.
 
+When `bundle_image_sha256` is present on an actionable `caption0` or generated
+QA review row, review import resolves the current selected-dataset image using
+the original image identity, hashes the current bytes, and compares them to the
+reviewed bundle digest. The decision is rejected before any metadata mutation
+if the current image cannot be found, cannot be hashed, or no longer matches
+the reviewed bytes.
+
 The reason is practical: external reviewers should be able to review a
 self-contained bundle whose `image_path` points at `images/...`, while the
 application still needs to match that decision back to the current dataset
 archive. The copied bundle path is for portable review. The original image path
-and stable QA identity are for safe import back into the app.
+and stable QA identity are for safe import back into the app, and the digest
+check proves the reviewed pixels are still the pixels being accepted.
 
 At the trainer boundary, `bundle_image_sha256` is checked against the resolved
 training image bytes. This catches the most dangerous downstream case: a flat
@@ -781,6 +790,7 @@ copied, edited, mixed, or shared outside the UI.
 | Backend export validation | Flat trainer rows, report readiness schema, state, and count parity, embedded consistency count parity, settings fingerprint, archive-row shape, review-row shape, image alias resolution, and strict API/script export |
 | Bundle validation | Copied image/label assets, rewritten trainer/archive/review paths, trainer rows, artifact consistency, ZIP integrity, manifest inventory, required artifact paths, JSONL row-count parity, image/label inventory parity, file roles, byte counts, SHA-256 digests, trainer-row validation, and recomputed artifact consistency from the finished ZIP |
 | Review import validation | Wrong dataset, stale text, duplicate targets, unsupported origins, malformed rows, and metadata-only mutation |
+| Review bundle-image validation | Missing current image bytes, current image hash failures, and current image bytes that no longer match the reviewed bundle digest |
 | Trainer loader validation | Missing images, malformed rows, duplicate canonical image/question pairs, rejected or needs-revision rows, invalid answer format, missing provenance, bundled-image checksum drift |
 
 This redundancy is intentional. The trainer loader remains the last defense
@@ -803,6 +813,7 @@ The repository has focused coverage for:
 - browser and backend rejection of stale embedded consistency counters;
 - review JSONL export and metadata-only review import;
 - stale, duplicate, wrong-dataset, malformed, and unsupported review rows;
+- bundled review rows whose current dataset image is missing or byte-drifted;
 - trainer import of flat question/answer rows;
 - bundle construction, copied images, copied labels, trainer/archive/review
   path rewriting, stale-row bundle rejection, semantic manifest validation,

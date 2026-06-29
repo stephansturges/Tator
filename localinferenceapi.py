@@ -24627,6 +24627,83 @@ def _caption_instruction_review_image_candidates(
     return image_names, image_keys
 
 
+def _caption_instruction_review_current_image_path(
+    entry: Dict[str, Any],
+    row: Mapping[str, Any],
+    *,
+    image_names: Set[str],
+    image_path: str,
+) -> Optional[Path]:
+    dataset_root = _dataset_effective_root_from_entry(entry)
+    yolo_layout = str(entry.get("yolo_layout") or "flat").strip().lower() or "flat"
+    candidates: List[str] = []
+    for value in (
+        row.get("original_image_path"),
+        row.get("image_name"),
+        row.get("image"),
+        image_path,
+        *sorted(image_names),
+    ):
+        candidate = str(value or "").strip()
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    split_values: List[Optional[str]] = []
+    for value in (row.get("split"), None, "train", "val"):
+        split_value = str(value or "").strip() if value is not None else ""
+        normalized = split_value or None
+        if normalized not in split_values:
+            split_values.append(normalized)
+    for candidate in candidates:
+        for split_override in split_values:
+            try:
+                split_name, rel, _image_key = _dataset_caption_context(
+                    entry,
+                    candidate,
+                    {"split": split_override} if split_override else None,
+                )
+                resolved_split = str(split_name or split_override or "train")
+                return _resolve_annotation_image_path(dataset_root, yolo_layout, resolved_split, rel)
+            except Exception:
+                continue
+    return None
+
+
+def _caption_instruction_reject_stale_bundle_review_image(
+    entry: Dict[str, Any],
+    row: Mapping[str, Any],
+    *,
+    row_index: int,
+    image_names: Set[str],
+    image_path: str,
+) -> None:
+    expected_sha256 = str(row.get("bundle_image_sha256") or "").strip()
+    if not expected_sha256:
+        return
+    current_image_path = _caption_instruction_review_current_image_path(
+        entry,
+        row,
+        image_names=image_names,
+        image_path=image_path,
+    )
+    if current_image_path is None:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail=f"review_rows_bundle_image_not_found:row_{row_index}",
+        )
+    try:
+        actual_sha256 = _caption_instruction_file_sha256(current_image_path)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail=f"review_rows_bundle_image_hash_failed:row_{row_index}",
+        ) from exc
+    if actual_sha256.lower() != expected_sha256.lower():
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail=f"review_rows_bundle_image_sha256_mismatch:row_{row_index}",
+        )
+
+
 def _caption_instruction_review_target_key(row: Mapping[str, Any]) -> Tuple[str, str, str, str, str]:
     row_origin = str(row.get("row_origin") or "").strip()
     qa_id = str(row.get("qa_id") or "").strip()
@@ -24955,6 +25032,13 @@ def _caption_instruction_reject_unmatchable_actionable_review_rows(
                 status_code=HTTP_400_BAD_REQUEST,
                 detail=f"review_rows_missing_image_path:row_{index}",
             )
+        _caption_instruction_reject_stale_bundle_review_image(
+            entry,
+            row,
+            row_index=index,
+            image_names=image_names,
+            image_path=image_path,
+        )
         if row_origin == "generated_qa":
             if not qa_id:
                 raise HTTPException(

@@ -1235,6 +1235,157 @@ def test_caption_instruction_review_import_accepts_bundle_review_row_original_al
 
     entry = {"id": "ds", "dataset_root": str(tmp_path), "registry_root": str(tmp_path)}
     monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: entry)
+    image_path = tmp_path / "images" / "sub" / "img.jpg"
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (4, 4), (17, 29, 43)).save(image_path)
+    image_sha256 = hashlib.sha256(image_path.read_bytes()).hexdigest()
+    monkeypatch.setattr(
+        api,
+        "_annotation_manifest_for_entry",
+        lambda _entry: {
+            "labelmap": [],
+            "images": [
+                {
+                    "image_name": "sub/img.jpg",
+                    "image_relpath": "sub/img.jpg",
+                    "split": "train",
+                    "label_source_present": True,
+                    "label_lines": [],
+                }
+            ],
+        },
+    )
+    api._write_dataset_caption_instruction_records(
+        entry,
+        [
+            {
+                "id": "qa-1",
+                "image_name": "sub/img.jpg",
+                "image_key": "train/sub/img.jpg",
+                "split": "train",
+                "question": "What is the scene type?",
+                "answer": "A waterfront area.",
+                "row_type": "generated_qa",
+                "answer_source": "vlm_generated",
+                "validation_status": "accepted",
+            }
+        ],
+    )
+    row = {
+        "format": "tator_caption_instruction_review_rows_v1",
+        "dataset_id": "ds",
+        "image_path": "images/train/sub/img.jpg",
+        "original_image_path": "sub/img.jpg",
+        "bundle_image_sha256": image_sha256,
+        "split": "train",
+        "row_origin": "generated_qa",
+        "qa_id": "qa-1",
+        "row_type": "generated_qa",
+        "question": "What is the scene type?",
+        "candidate_answer": "A waterfront area.",
+        "training_answer": "A waterfront area.",
+        "validation_status": "accepted",
+        "selected_for_training": True,
+        "requires_manual_review": True,
+        "review_decision": "accepted",
+        "review_notes": "bundle review row still resolves through original path",
+        "rejection_reasons": [],
+        "source_summary": {"status": "empty_label_file"},
+    }
+
+    result = api.apply_caption_instruction_review("ds", {"rows": [row]})
+
+    assert result["status"] == "applied"
+    assert result["applied_count"] == 1
+    assert result["skipped_count"] == 0
+    records = api._load_dataset_caption_instruction_records(entry)
+    assert records[0]["review_status"] == "accepted"
+    assert records[0]["metadata"]["review_notes"] == "bundle review row still resolves through original path"
+
+
+def test_caption_instruction_review_import_rejects_bundle_image_sha256_mismatch(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import localinferenceapi as api
+
+    entry = {"id": "ds", "dataset_root": str(tmp_path), "registry_root": str(tmp_path)}
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: entry)
+    image_path = tmp_path / "images" / "sub" / "img.jpg"
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (4, 4), (17, 29, 43)).save(image_path)
+    monkeypatch.setattr(
+        api,
+        "_annotation_manifest_for_entry",
+        lambda _entry: {
+            "labelmap": [],
+            "images": [
+                {
+                    "image_name": "sub/img.jpg",
+                    "image_relpath": "sub/img.jpg",
+                    "split": "train",
+                    "label_source_present": True,
+                    "label_lines": [],
+                }
+            ],
+        },
+    )
+    api._write_dataset_caption_instruction_records(
+        entry,
+        [
+            {
+                "id": "qa-1",
+                "image_name": "sub/img.jpg",
+                "image_key": "train/sub/img.jpg",
+                "split": "train",
+                "question": "What is the scene type?",
+                "answer": "A waterfront area.",
+                "row_type": "generated_qa",
+                "answer_source": "vlm_generated",
+                "validation_status": "accepted",
+            }
+        ],
+    )
+    row = {
+        "format": "tator_caption_instruction_review_rows_v1",
+        "dataset_id": "ds",
+        "image_path": "images/train/sub/img.jpg",
+        "original_image_path": "sub/img.jpg",
+        "bundle_image_sha256": "0" * 64,
+        "split": "train",
+        "row_origin": "generated_qa",
+        "qa_id": "qa-1",
+        "row_type": "generated_qa",
+        "question": "What is the scene type?",
+        "candidate_answer": "A waterfront area.",
+        "training_answer": "A waterfront area.",
+        "validation_status": "accepted",
+        "selected_for_training": True,
+        "requires_manual_review": True,
+        "review_decision": "accepted",
+        "review_notes": "stale bundle image should block",
+        "rejection_reasons": [],
+        "source_summary": {"status": "empty_label_file"},
+    }
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.apply_caption_instruction_review("ds", {"rows": [row]})
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "review_rows_bundle_image_sha256_mismatch:row_1"
+    records = api._load_dataset_caption_instruction_records(entry)
+    assert records[0].get("review_status") != "accepted"
+    assert records[0].get("metadata", {}).get("review_notes") != "stale bundle image should block"
+
+
+def test_caption_instruction_review_import_rejects_missing_bundle_image(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import localinferenceapi as api
+
+    entry = {"id": "ds", "dataset_root": str(tmp_path), "registry_root": str(tmp_path)}
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: entry)
     monkeypatch.setattr(
         api,
         "_annotation_manifest_for_entry",
@@ -1284,19 +1435,19 @@ def test_caption_instruction_review_import_accepts_bundle_review_row_original_al
         "selected_for_training": True,
         "requires_manual_review": True,
         "review_decision": "accepted",
-        "review_notes": "bundle review row still resolves through original path",
+        "review_notes": "missing current image should block",
         "rejection_reasons": [],
         "source_summary": {"status": "empty_label_file"},
     }
 
-    result = api.apply_caption_instruction_review("ds", {"rows": [row]})
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.apply_caption_instruction_review("ds", {"rows": [row]})
 
-    assert result["status"] == "applied"
-    assert result["applied_count"] == 1
-    assert result["skipped_count"] == 0
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "review_rows_bundle_image_not_found:row_1"
     records = api._load_dataset_caption_instruction_records(entry)
-    assert records[0]["review_status"] == "accepted"
-    assert records[0]["metadata"]["review_notes"] == "bundle review row still resolves through original path"
+    assert records[0].get("review_status") != "accepted"
+    assert records[0].get("metadata", {}).get("review_notes") != "missing current image should block"
 
 
 def test_caption_instruction_review_import_rejects_conflicting_split_alias(

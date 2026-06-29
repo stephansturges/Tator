@@ -36930,6 +36930,9 @@ async function cancelRfDetrTrainingJobRequest() {
             review_rows_review_decision_missing: "the row is missing the review_decision column",
             review_rows_review_notes_missing: "the row is missing the review_notes column",
             review_rows_original_image_path_missing_for_bundle: "the row came from a copied bundle image but is missing the original image path needed to match the selected dataset safely",
+            review_rows_bundle_image_not_found: "the reviewed bundle image cannot be resolved in the selected dataset through its original image path",
+            review_rows_bundle_image_hash_failed: "the selected dataset image could not be hashed to verify it matches the reviewed bundle image",
+            review_rows_bundle_image_sha256_mismatch: "the selected dataset image bytes no longer match the image bytes in the reviewed bundle",
             review_rows_generated_qa_text_missing: "the generated-QA row is missing the reviewed question or answer text needed to verify it still matches the saved record",
             review_rows_generated_qa_not_found: "the generated-QA row no longer matches a saved generated-QA record for that image, question, and answer",
             review_rows_generated_qa_training_answer_stale: "the generated-QA training answer no longer matches the current selected training answer; export a fresh review JSONL before importing decisions",
@@ -36946,6 +36949,8 @@ async function cancelRfDetrTrainingJobRequest() {
             const action = [
                 "review_rows_generated_qa_not_found",
                 "review_rows_caption0_not_found",
+                "review_rows_bundle_image_not_found",
+                "review_rows_bundle_image_sha256_mismatch",
             ].includes(code)
                 ? " Export a fresh review JSONL after the latest generation/review changes, then reapply the decision."
                 : "";

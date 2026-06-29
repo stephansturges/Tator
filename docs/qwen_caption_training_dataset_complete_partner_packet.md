@@ -95,6 +95,80 @@ below.
 | Dense prompt safety | prompt budget accounting and representative box subsets | Implemented |
 | Repetition or loop safety | streaming loop inspector, controlled retry, fallback, deterministic recovery | Implemented |
 | Model-download clarity | model dropdown colors missing/download-needed models red and local models normal | Implemented |
+| Safe artifact actions during long jobs | UI disabling plus action-time checks for instruction exports, report downloads, and reviewed JSONL import | Implemented |
+| Script/API parity with browser export gates | `require_ready_instruction_export=true` on the caption export endpoint | Implemented |
+| Backend launch failure visibility | caption job creation failures are surfaced in caption status, backend-job status, and UI health text | Implemented |
+
+## Latest Hardening Checkpoint
+
+The most recent work focused on making the instruction-dataset path durable
+enough for a real operator, not only a developer running one happy-path export.
+
+### Artifact Actions Are Frozen While Captions Mutate
+
+Instruction artifact downloads and reviewed JSONL import are now disabled until
+both conditions are true:
+
+- a caption dataset is selected;
+- no caption job or instruction-dataset job is actively mutating the selected
+  dataset's caption archive.
+
+The same check also runs inside each action handler. That second check matters
+because UI state can go stale: a user may leave a file picker open, a scripted
+click can bypass a disabled button, or a backend job can start after the button
+was first rendered. In those cases the operation refuses to export or import
+against a moving target and explains the reason in the caption health/status
+surface.
+
+The reason is simple: instruction JSONL, archive JSONL, review JSONL, and the
+instruction report are one coherent export set. If a caption or generated-QA
+record changes while one of those artifacts is being built or reviewed, the
+flat trainer rows can drift away from the audit artifacts. The safe behavior is
+to wait for the mutating job to finish, then export or import against a stable
+caption archive.
+
+### Trainer JSONL Is Gated Twice
+
+The browser validates trainer JSONL before writing a file. The backend also
+supports the same strict policy through:
+
+```text
+require_ready_instruction_export=true
+```
+
+That server-side gate is required because the browser is not the only export
+client. Scripts, API clients, or future automation can request exports without
+using the UI. With the gate enabled, trainer JSONL export refuses reports whose
+readiness is `blocked` or `needs_review`. Archive, review, and report artifacts
+remain available because those are diagnostic and review artifacts; the flat
+trainer JSONL is the artifact that can directly feed fine-tuning, so it is held
+to the stricter default.
+
+### Backend Launch Failures Are Visible
+
+Dataset-scale captioning can fail before a model produces text: a backend job
+can fail to launch, a local runtime can be unavailable, or the process can abort
+under the ML runtime. The UI now treats backend launch failure as an operator
+state rather than a silent stall. Caption status, backend-job status, and health
+text all surface that the job failed to start.
+
+This is separate from model-output recovery. If the worker launches and the
+model later loops, the output-loop inspector and recovery path handle it. If the
+job cannot be created at all, the user needs a clear launch failure immediately.
+
+### Review Import Remains Metadata-Only
+
+The review loop intentionally imports decisions, not edited training content.
+Accepted, rejected, and needs-revision decisions are applied to matching
+caption0 and generated-QA records. The import path does not edit image paths,
+source labels, boxes, generated questions, generated answers, deterministic QA,
+or final annotations.
+
+This keeps the human review loop auditable. A reviewer can decide whether a row
+is trainable without silently rewriting the source of truth. Future workflows
+could support reviewed replacement text, but that would need a separate explicit
+contract with provenance for the replacement author and the original generated
+candidate.
 
 ## Non-Negotiable Training Shape
 

@@ -25107,6 +25107,16 @@ async function cancelRfDetrTrainingJobRequest() {
         if (qwenElements.captionBuildInstructionDataset) {
             qwenElements.captionBuildInstructionDataset.disabled = locked || !qwenAvailable || busy || !hasCaptionDataset;
         }
+        const captionExportDisabled = busy;
+        if (qwenElements.captionDownloadJsonl) {
+            qwenElements.captionDownloadJsonl.disabled = captionExportDisabled;
+        }
+        if (qwenElements.captionDownloadGroupedJson) {
+            qwenElements.captionDownloadGroupedJson.disabled = captionExportDisabled;
+        }
+        if (qwenElements.captionDownloadVlmJsonl) {
+            qwenElements.captionDownloadVlmJsonl.disabled = captionExportDisabled;
+        }
         const instructionExportDisabled = !hasCaptionDataset || busy;
         if (qwenElements.captionDownloadInstructionJsonl) {
             qwenElements.captionDownloadInstructionJsonl.disabled = instructionExportDisabled;
@@ -35642,7 +35652,20 @@ async function cancelRfDetrTrainingJobRequest() {
         };
     }
 
+    function captionArchiveExportBusyMessage(actionLabel) {
+        if (qwenCaptionArchiveMutationActive()) {
+            return `Wait for the active caption or instruction job to finish before ${actionLabel}; the caption archive is changing.`;
+        }
+        return "";
+    }
+
     async function downloadCaptionJsonl() {
+        const busyMessage = captionArchiveExportBusyMessage("exporting caption audit JSONL");
+        if (busyMessage) {
+            setCaptionExportHealth(busyMessage, "warn");
+            setSamStatus(busyMessage, { variant: "warn", duration: 5000 });
+            return;
+        }
         const { records } = await prepareCaptionExportRecords();
         if (!records.length) {
             return;
@@ -35700,6 +35723,12 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function downloadCaptionGroupedJson() {
+        const busyMessage = captionArchiveExportBusyMessage("exporting grouped captions");
+        if (busyMessage) {
+            setCaptionExportHealth(busyMessage, "warn");
+            setSamStatus(busyMessage, { variant: "warn", duration: 5000 });
+            return;
+        }
         const { datasetId, records } = await prepareCaptionExportRecords();
         if (!records.length) {
             return;
@@ -35710,6 +35739,12 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function downloadCaptionVlmJsonl() {
+        const busyMessage = captionArchiveExportBusyMessage("exporting VLM caption rows");
+        if (busyMessage) {
+            setCaptionExportHealth(busyMessage, "warn");
+            setSamStatus(busyMessage, { variant: "warn", duration: 5000 });
+            return;
+        }
         const { datasetId, records } = await prepareCaptionExportRecords();
         if (!records.length) {
             setCaptionExportHealth("No captions are ready for VLM export yet.", "warn");

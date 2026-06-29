@@ -538,6 +538,10 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "const hasCaptionDataset = !!getCaptionDatasetId();" in update_caption_helper
     assert "function qwenCaptionArchiveMutationActive" in js
     assert "const busy = qwenCaptionArchiveMutationActive();" in update_caption_helper
+    assert "const captionExportDisabled = busy;" in update_caption_helper
+    assert "qwenElements.captionDownloadJsonl.disabled = captionExportDisabled" in update_caption_helper
+    assert "qwenElements.captionDownloadGroupedJson.disabled = captionExportDisabled" in update_caption_helper
+    assert "qwenElements.captionDownloadVlmJsonl.disabled = captionExportDisabled" in update_caption_helper
     assert "const instructionExportDisabled = !hasCaptionDataset || busy;" in update_caption_helper
     assert "qwenElements.captionDownloadInstructionJsonl.disabled = instructionExportDisabled" in update_caption_helper
     assert "qwenElements.captionDownloadInstructionArchive.disabled = instructionExportDisabled" in update_caption_helper
@@ -558,6 +562,16 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     for function_name, action_label in instruction_artifact_actions:
         action_helper = _extract_js_function(js, function_name)
         assert f'captionInstructionArtifactBusyMessage("{action_label}")' in action_helper
+        assert 'setCaptionExportHealth(busyMessage, "warn")' in action_helper
+        assert 'setSamStatus(busyMessage, { variant: "warn", duration: 5000 })' in action_helper
+    caption_export_actions = [
+        ("downloadCaptionJsonl", "exporting caption audit JSONL"),
+        ("downloadCaptionGroupedJson", "exporting grouped captions"),
+        ("downloadCaptionVlmJsonl", "exporting VLM caption rows"),
+    ]
+    for function_name, action_label in caption_export_actions:
+        action_helper = _extract_js_function(js, function_name)
+        assert f'captionArchiveExportBusyMessage("{action_label}")' in action_helper
         assert 'setCaptionExportHealth(busyMessage, "warn")' in action_helper
         assert 'setSamStatus(busyMessage, { variant: "warn", duration: 5000 })' in action_helper
 
@@ -581,6 +595,9 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             "  captionCancelButton: button(),",
             "  captionBatchRun: button(),",
             "  captionBatchRunAll: button(),",
+            "  captionDownloadJsonl: button(),",
+            "  captionDownloadGroupedJson: button(),",
+            "  captionDownloadVlmJsonl: button(),",
             "  captionBuildInstructionDataset: button(),",
             "  captionDownloadInstructionJsonl: button(),",
             "  captionDownloadInstructionArchive: button(),",
@@ -597,6 +614,9 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             "assert(captionInstructionArtifactBusyMessage('exporting instruction rows').includes('instruction archive is changing'));",
             "updateQwenCaptionButton();",
             "assert.strictEqual(qwenElements.captionRunButton.disabled, true);",
+            "assert.strictEqual(qwenElements.captionDownloadJsonl.disabled, true);",
+            "assert.strictEqual(qwenElements.captionDownloadGroupedJson.disabled, true);",
+            "assert.strictEqual(qwenElements.captionDownloadVlmJsonl.disabled, true);",
             "assert.strictEqual(qwenElements.captionBuildInstructionDataset.disabled, true);",
             "assert.strictEqual(qwenElements.captionDownloadInstructionJsonl.disabled, true);",
             "assert.strictEqual(qwenElements.captionDownloadInstructionArchive.disabled, true);",
@@ -611,6 +631,9 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             "assert.strictEqual(captionInstructionArtifactBusyMessage('exporting instruction rows'), '');",
             "updateQwenCaptionButton();",
             "assert.strictEqual(qwenElements.captionRunButton.disabled, false);",
+            "assert.strictEqual(qwenElements.captionDownloadJsonl.disabled, false);",
+            "assert.strictEqual(qwenElements.captionDownloadGroupedJson.disabled, false);",
+            "assert.strictEqual(qwenElements.captionDownloadVlmJsonl.disabled, false);",
             "assert.strictEqual(qwenElements.captionBuildInstructionDataset.disabled, false);",
             "assert.strictEqual(qwenElements.captionDownloadInstructionJsonl.disabled, false);",
             "assert.strictEqual(qwenElements.captionDownloadInstructionArchive.disabled, false);",
@@ -623,6 +646,54 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
         ]
     )
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
+
+
+def test_qwen_caption_exports_block_while_backend_job_id_is_active():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            "let qwenCaptionActive = false;",
+            "let qwenCaptionBatchActive = false;",
+            "let qwenCaptionBatchBackendJobId = 'job-1';",
+            "let exportHealth = null;",
+            "let status = null;",
+            "let prepared = 0;",
+            "let saved = 0;",
+            "function setCaptionExportHealth(message, variant) { exportHealth = { message, variant }; }",
+            "function setSamStatus(message, options) { status = { message, options }; }",
+            "async function prepareCaptionExportRecords() { prepared += 1; throw new Error('prepare should not run while archive is mutating'); }",
+            "function saveBlobToDisk() { saved += 1; throw new Error('save should not run while archive is mutating'); }",
+            _extract_js_function(js, "qwenCaptionArchiveMutationActive"),
+            _extract_js_function(js, "captionArchiveExportBusyMessage"),
+            "async " + _extract_js_function(js, "downloadCaptionJsonl"),
+            "async " + _extract_js_function(js, "downloadCaptionGroupedJson"),
+            "async " + _extract_js_function(js, "downloadCaptionVlmJsonl"),
+            "await downloadCaptionJsonl();",
+            "assert.strictEqual(prepared, 0);",
+            "assert.strictEqual(saved, 0);",
+            "assert.strictEqual(exportHealth.variant, 'warn');",
+            "assert(exportHealth.message.includes('caption archive is changing'));",
+            "assert.strictEqual(status.options.variant, 'warn');",
+            "await downloadCaptionGroupedJson();",
+            "assert.strictEqual(prepared, 0);",
+            "assert.strictEqual(saved, 0);",
+            "assert(exportHealth.message.includes('caption archive is changing'));",
+            "await downloadCaptionVlmJsonl();",
+            "assert.strictEqual(prepared, 0);",
+            "assert.strictEqual(saved, 0);",
+            "assert(exportHealth.message.includes('caption archive is changing'));",
+        ]
+    )
+    subprocess.run(
+        [
+            "node",
+            "-e",
+            f"(async () => {{\n{script}\n}})().catch((error) => {{ console.error(error); process.exit(1); }});",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+    )
 
 
 def test_qwen_caption_instruction_review_import_parser_accepts_reviewer_file_shapes():

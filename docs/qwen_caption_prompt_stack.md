@@ -727,15 +727,17 @@ runner then skips completed cases from `results.jsonl` and continues the
 remaining images without overwriting the old job record. `GET /qwen/caption/jobs`
 includes persisted job records after a backend restart, marking formerly
 `queued` or `running` jobs as `interrupted` when no live in-memory job owns them.
-The caption UI's **Attach / recover now** button uses that list to attach to a
-still-running job or resume an interrupted, failed, or completed-with-failed-
-images job for the selected dataset. Cancelled jobs remain terminal and are not
-resumed by automatic or manual recovery. Live running jobs reject resume so two
-runners do not write into the same artifact directory concurrently. The page
-also performs an immediate quiet set-and-forget auto-attach check when a caption
-dataset is available and repeats that check while the panel is open, so the
-button is an immediate operator action rather than the normal unattended
-recovery path.
+The caption UI's **Attach / recover selected dataset** button uses that list to
+attach to a still-running job or resume an interrupted, failed, or completed-
+with-failed-images job for the selected dataset. The UI also exposes global
+**Refresh backend jobs** and **Cancel active backend jobs** controls so active
+startup-resumed work remains visible and stoppable even when it belongs to a
+different caption dataset. Cancelled jobs remain terminal and are not resumed by
+automatic or manual recovery. Live running jobs reject resume so two runners do
+not write into the same artifact directory concurrently. The page also performs
+an immediate quiet set-and-forget auto-attach check when a caption dataset is
+available and repeats that check while the panel is open, so the button is an
+immediate operator action rather than the normal unattended recovery path.
 
 Set-and-forget caption jobs are the unattended path, not just a manual recovery
 shortcut. Dataset-backed **Caption image**, next-N, and Caption all jobs opt in

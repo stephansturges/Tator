@@ -6825,6 +6825,51 @@ def test_caption_dataset_job_resume_rejects_live_running_job(monkeypatch) -> Non
     assert exc_info.value.detail == "qwen_caption_dataset_job_still_running"
 
 
+def test_caption_dataset_job_cancel_marks_persisted_interrupted_job_cancelled(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import localinferenceapi as api
+
+    jobs_root = tmp_path / "jobs"
+    job_dir = jobs_root / "qcap_interrupted"
+    job_dir.mkdir(parents=True)
+    (job_dir / "job.json").write_text(
+        json.dumps(
+            {
+                "job_id": "qcap_interrupted",
+                "status": "interrupted",
+                "request": {
+                    "dataset_id": "ds",
+                    "caption_request": {"user_prompt": "Describe it"},
+                    "set_and_forget": True,
+                    "auto_resume_count": 0,
+                    "max_auto_resumes": 3,
+                },
+                "result": {"processed": 2, "total_cases": 10},
+                "output_dir": str(job_dir),
+                "created_at": 10.0,
+                "updated_at": 20.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(api, "QWEN_CAPTION_DATASET_JOB_ROOT", jobs_root)
+    client = TestClient(api.app)
+
+    response = client.post("/qwen/caption/jobs/qcap_interrupted/cancel")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["job_id"] == "qcap_interrupted"
+    assert payload["status"] == "cancelled"
+    assert payload["message"] == "Cancellation requested"
+    persisted = json.loads((job_dir / "job.json").read_text(encoding="utf-8"))
+    assert persisted["status"] == "cancelled"
+    assert persisted["result"]["cancelled_at"] == payload["updated_at"]
+    assert api._qwen_caption_dataset_job_should_auto_resume(persisted) is False
+
+
 def test_caption_dataset_job_start_rejects_active_same_dataset(monkeypatch) -> None:
     import localinferenceapi as api
 
@@ -7698,6 +7743,82 @@ def test_caption_dataset_set_and_forget_auto_resume_skips_cancelled_and_limit(mo
     )
 
     assert api._auto_resume_qwen_caption_dataset_jobs() == []
+
+
+def test_caption_dataset_set_and_forget_auto_resume_skips_ephemeral_test_artifacts(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import localinferenceapi as api
+
+    jobs_root = tmp_path / "jobs"
+    mirrored_dir = jobs_root / "qcap_ephemeral"
+    mirrored_dir.mkdir(parents=True)
+    ephemeral_output = tmp_path / "ephemeral-output" / "qcap_ephemeral"
+    (mirrored_dir / "job.json").write_text(
+        json.dumps(
+            {
+                "job_id": "qcap_ephemeral",
+                "status": "failed",
+                "error": "caption_runner_exit_1",
+                "request": {
+                    "dataset_id": "ds",
+                    "caption_request": {"user_prompt": "Describe it"},
+                    "set_and_forget": True,
+                    "auto_resume_count": 0,
+                    "max_auto_resumes": 25,
+                    "output_dir": str(ephemeral_output),
+                },
+                "output_dir": str(mirrored_dir),
+                "updated_at": 20.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    metadata_only_dir = jobs_root / "qcap_ephemeral_metadata"
+    metadata_only_dir.mkdir(parents=True)
+    (metadata_only_dir / "job.json").write_text(
+        json.dumps(
+            {
+                "job_id": "qcap_ephemeral_metadata",
+                "status": "queued",
+                "request": {},
+                "result": {},
+                "output_dir": str(tmp_path / "ephemeral-output" / "qcap_ephemeral_metadata"),
+                "updated_at": 30.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(api, "QWEN_CAPTION_DATASET_JOB_ROOT", jobs_root)
+    monkeypatch.setattr(api, "QWEN_CAPTION_DATASET_JOBS", {})
+    monkeypatch.setattr(api, "QWEN_CAPTION_SET_AND_FORGET_AUTO_RESUME", True)
+    monkeypatch.setattr(
+        api,
+        "_qwen_caption_dataset_path_has_pytest_marker",
+        lambda value: "ephemeral-output" in str(value),
+    )
+    monkeypatch.setattr(
+        api,
+        "_start_qwen_caption_dataset_job",
+        lambda *_args, **_kwargs: pytest.fail("ephemeral test artifacts must not auto-resume"),
+    )
+    client = TestClient(api.app)
+
+    payload = api._load_qwen_caption_dataset_job_payload("qcap_ephemeral")
+    assert payload is not None
+    assert api._qwen_caption_dataset_job_hidden_reason(payload) == "ephemeral_test_output"
+    assert api._qwen_caption_dataset_job_should_auto_resume(payload) is False
+    metadata_payload = api._load_qwen_caption_dataset_job_payload("qcap_ephemeral_metadata")
+    assert metadata_payload is not None
+    assert api._qwen_caption_dataset_job_hidden_reason(metadata_payload) == "ephemeral_test_output"
+    assert api._auto_resume_qwen_caption_dataset_jobs() == []
+    assert client.get("/qwen/caption/jobs").json() == []
+    hidden_jobs = client.get("/qwen/caption/jobs?include_hidden=true").json()
+    hidden_by_id = {job["job_id"]: job for job in hidden_jobs}
+    assert set(hidden_by_id) == {"qcap_ephemeral", "qcap_ephemeral_metadata"}
+    assert hidden_by_id["qcap_ephemeral"]["hidden_reason"] == "ephemeral_test_output"
+    assert hidden_by_id["qcap_ephemeral_metadata"]["hidden_reason"] == "ephemeral_test_output"
 
 
 def test_caption_dataset_set_and_forget_auto_resume_skips_nonrecoverable_failures(

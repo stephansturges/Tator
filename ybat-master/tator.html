@@ -704,9 +704,12 @@
                                         <div class="training-help">Saved generated captions are appended as alternate caption records and included in caption exports. Flat JSONL is the audit record stream; grouped JSON keeps each image with all of its ordered alternate captions; VLM JSONL emits one normal image/question/answer training row per caption with JSON caption answers and unique per-image questions for downstream training validation. The selected primary is mirrored to dataset text labels for compatibility with older exports and skip-existing checks.</div>
                                         <div class="training-help">Set-and-forget is the default dataset-backed path for Caption image, next-N, and Caption all; it uses persisted backend jobs, isolated retries, health gates, and auto-resume after backend restarts when the backend launcher or another process supervisor is running. Large backend set-and-forget jobs require large-run-ready crash supervision and a 300-case confidence-backed certified pilot by default. Direct single-image captioning is only for deliberate non-set-and-forget diagnostics.</div>
                                         <div class="qwen-caption-row qwen-caption-resume-row">
-                                            <button type="button" id="qwenCaptionResumeBackendJob" class="training-button secondary">Attach / recover now</button>
+                                            <button type="button" id="qwenCaptionResumeBackendJob" class="training-button secondary">Attach / recover selected dataset</button>
+                                            <button type="button" id="qwenCaptionRefreshBackendJobs" class="training-button secondary">Refresh backend jobs</button>
+                                            <button type="button" id="qwenCaptionCancelBackendJobs" class="training-button training-button-danger" disabled>Cancel active backend jobs</button>
                                             <span id="qwenCaptionBackendJobStatus" class="training-help">Set-and-forget jobs auto-resume on backend startup and periodic sweeps, and this page auto-attaches immediately and periodically when backend state is available. Use this button for an immediate manual status check.</span>
                                         </div>
+                                        <div id="qwenCaptionBackendJobsSummary" class="training-help" aria-live="polite">Backend caption jobs have not been checked yet.</div>
                                     </div>
                                 <div class="qwen-caption-options">
                                     <label for="qwenCaptionBatchCount">Apply captions to next N images</label>

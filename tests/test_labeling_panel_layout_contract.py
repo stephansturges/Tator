@@ -3373,7 +3373,7 @@ def test_qwen_caption_ui_scenarios_document_set_and_forget_workflows():
     assert "local\nmodel options are white" in scenarios
     assert "Max output tokens" in scenarios
     assert "Max boxes" in scenarios
-    assert "Attach / recover now" in scenarios
+    assert "Attach / recover selected dataset" in scenarios
     assert "Download grouped JSON" in scenarios
     assert "Download VLM JSONL" in scenarios
     assert "Create VLM training dataset" in scenarios
@@ -3404,6 +3404,18 @@ def test_qwen_caption_ui_scenarios_document_set_and_forget_workflows():
     assert "qwenCaptionAllowModelDownload" in html
     assert "qwen-model-option--download" in js
     assert "qwenCaptionBackendJobAutoResumeId" in js
+    assert "qwenCaptionRefreshBackendJobs" in html
+    assert "qwenCaptionCancelBackendJobs" in html
+    assert "qwenCaptionBackendJobsSummary" in html
+    assert "Refresh backend jobs" in html
+    assert "Cancel active backend jobs" in html
+    assert "Attach / recover selected dataset" in html
+    assert "qwenElements.captionRefreshBackendJobs" in js
+    assert "qwenElements.captionCancelBackendJobs" in js
+    assert "qwenElements.captionBackendJobsSummary" in js
+    assert "function summarizeQwenCaptionBackendJobs" in js
+    assert "function cancelQwenCaptionBackendActiveJobs" in js
+    assert "await refreshQwenCaptionBackendJobsStatus({ silent: true })" in js
 
 
 def test_qwen_caption_backend_batch_explicitly_keeps_going_after_failures():
@@ -3548,7 +3560,7 @@ def test_qwen_caption_backend_batch_explicitly_keeps_going_after_failures():
     assert "auto_resumed_job_id" in js
     assert "Backend batch auto-resumed as ${autoResumeJobId}" in js
     assert "qwenCaptionResumeBackendJob" in html
-    assert "Attach / recover now" in html
+    assert "Attach / recover selected dataset" in html
     assert "this page auto-attaches immediately and periodically when backend state is available" in html
     assert "async function recoverLatestQwenCaptionBackendJob" in js
     assert "recoverLatestQwenCaptionBackendJob({ auto: true })" in js

@@ -23265,6 +23265,8 @@ def _qwen_caption_dataset_active_persisted_job(dataset_id: str) -> Optional[Dict
         return None
     candidates: List[Dict[str, Any]] = []
     for payload in _iter_persisted_qwen_caption_dataset_job_payloads():
+        if _qwen_caption_dataset_job_hidden_reason(payload):
+            continue
         request_data = payload.get("request") if isinstance(payload.get("request"), Mapping) else {}
         job_dataset_id = str(request_data.get("dataset_id") or "").strip()
         if job_dataset_id != target:
@@ -25573,6 +25575,44 @@ def _persist_qwen_caption_dataset_job(job: QwenCaptionDatasetJob) -> None:
         logger.debug("Failed to persist Qwen caption dataset job", exc_info=True)
 
 
+def _qwen_caption_dataset_can_write_job_payload_dir(path_value: Any) -> bool:
+    if not path_value:
+        return False
+    try:
+        resolved = Path(str(path_value)).expanduser().resolve(strict=False)
+    except Exception:
+        return False
+    try:
+        allowed_roots = [
+            Path.cwd().resolve(),
+            QWEN_CAPTION_DATASET_JOB_ROOT.resolve(),
+        ]
+    except Exception:
+        return False
+    return any(_path_is_within_root_impl(resolved, root) for root in allowed_roots)
+
+
+def _persist_qwen_caption_dataset_job_payload(payload: Mapping[str, Any]) -> None:
+    job_id = str(payload.get("job_id") or "").strip()
+    if not job_id:
+        return
+    destinations = [_qwen_caption_dataset_job_discovery_dir(job_id)]
+    output_dir = str(payload.get("output_dir") or "").strip()
+    if output_dir and _qwen_caption_dataset_can_write_job_payload_dir(output_dir):
+        output_path = Path(output_dir).expanduser().resolve(strict=False)
+        discovery_path = destinations[0].resolve(strict=False)
+        if output_path != discovery_path:
+            destinations.insert(0, output_path)
+    for destination in destinations:
+        try:
+            destination.mkdir(parents=True, exist_ok=True)
+            tmp_path = destination / "job.json.tmp"
+            tmp_path.write_text(json.dumps(dict(payload), indent=2, sort_keys=True))
+            tmp_path.replace(destination / "job.json")
+        except Exception:
+            logger.debug("Failed to persist Qwen caption dataset job payload", exc_info=True)
+
+
 def _load_qwen_caption_dataset_job_payload(job_id: str) -> Optional[Dict[str, Any]]:
     job_path = _qwen_caption_dataset_job_discovery_dir(job_id) / "job.json"
     if not job_path.exists():
@@ -27767,6 +27807,34 @@ def _qwen_caption_dataset_normalize_path_key(value: Any) -> str:
         return raw
 
 
+def _qwen_caption_dataset_path_has_pytest_marker(value: Any) -> bool:
+    raw = str(value or "").strip().replace("\\", "/").lower()
+    return bool(raw) and (
+        "/pytest-of-" in raw
+        or "/pytest-" in raw
+        or raw.startswith("pytest-")
+    )
+
+
+def _qwen_caption_dataset_job_hidden_reason(payload: Mapping[str, Any]) -> str:
+    # Pytest artifacts can be mirrored into the normal discovery root if a test
+    # process points output_dir at a temp tree. Do not let those stale records
+    # auto-resume in a real app session, but keep tests with monkeypatched temp
+    # roots unaffected.
+    if _qwen_caption_dataset_path_has_pytest_marker(QWEN_CAPTION_DATASET_JOB_ROOT):
+        return ""
+    request_data = payload.get("request") if isinstance(payload.get("request"), Mapping) else {}
+    result_data = payload.get("result") if isinstance(payload.get("result"), Mapping) else {}
+    for output_value in (
+        request_data.get("output_dir") if isinstance(request_data, Mapping) else None,
+        result_data.get("output_dir") if isinstance(result_data, Mapping) else None,
+        payload.get("output_dir"),
+    ):
+        if output_value and _qwen_caption_dataset_path_has_pytest_marker(output_value):
+            return "ephemeral_test_output"
+    return ""
+
+
 def _qwen_caption_dataset_job_artifact_key(payload: Mapping[str, Any]) -> str:
     request_data = payload.get("request") if isinstance(payload.get("request"), Mapping) else {}
     result_data = payload.get("result") if isinstance(payload.get("result"), Mapping) else {}
@@ -27936,8 +28004,14 @@ def _qwen_caption_dataset_reconcile_completed_artifact(
     return _serialize_qwen_caption_dataset_job(job)
 
 
-def _qwen_caption_dataset_job_should_auto_resume(payload: Mapping[str, Any]) -> bool:
+def _qwen_caption_dataset_job_should_auto_resume(
+    payload: Mapping[str, Any],
+    *,
+    suppress_hidden: bool = True,
+) -> bool:
     if not bool(QWEN_CAPTION_SET_AND_FORGET_AUTO_RESUME):
+        return False
+    if suppress_hidden and _qwen_caption_dataset_job_hidden_reason(payload):
         return False
     request_data = payload.get("request") if isinstance(payload.get("request"), Mapping) else {}
     if not request_data:
@@ -27985,7 +28059,10 @@ def _qwen_caption_dataset_job_should_live_auto_resume(job: QwenCaptionDatasetJob
         and not error.startswith("caption_runner_exit_")
     ):
         return False
-    return _qwen_caption_dataset_job_should_auto_resume(_serialize_qwen_caption_dataset_job(job))
+    return _qwen_caption_dataset_job_should_auto_resume(
+        _serialize_qwen_caption_dataset_job(job),
+        suppress_hidden=False,
+    )
 
 
 def _resume_qwen_caption_dataset_job(
@@ -28315,6 +28392,8 @@ def _auto_resume_qwen_caption_dataset_jobs() -> List[Dict[str, Any]]:
         live_artifacts.discard("")
         latest_by_artifact: Dict[str, Dict[str, Any]] = {}
         for payload in _iter_persisted_qwen_caption_dataset_job_payloads():
+            if _qwen_caption_dataset_job_hidden_reason(payload):
+                continue
             artifact_key = _qwen_caption_dataset_job_artifact_key(payload)
             if not artifact_key or artifact_key in live_artifacts:
                 continue
@@ -67463,7 +67542,7 @@ def start_qwen_caption_dataset_job(payload: QwenCaptionDatasetJobRequest = Body(
 
 
 @app.get("/qwen/caption/jobs")
-def list_qwen_caption_dataset_jobs():
+def list_qwen_caption_dataset_jobs(include_hidden: bool = False):
     with QWEN_CAPTION_DATASET_JOBS_LOCK:
         live_jobs = {
             job_id: _serialize_qwen_caption_dataset_job(job)
@@ -67476,6 +67555,12 @@ def list_qwen_caption_dataset_jobs():
                 continue
             payload = _load_qwen_caption_dataset_job_payload(child.name)
             if payload:
+                hidden_reason = _qwen_caption_dataset_job_hidden_reason(payload)
+                if hidden_reason:
+                    if not include_hidden:
+                        continue
+                    payload = dict(payload)
+                    payload["hidden_reason"] = hidden_reason
                 jobs_by_id[str(payload.get("job_id") or child.name)] = payload
     except Exception:
         pass
@@ -67498,7 +67583,22 @@ def resume_qwen_caption_dataset_job(job_id: str):
 
 @app.post("/qwen/caption/jobs/{job_id}/cancel")
 def cancel_qwen_caption_dataset_job(job_id: str):
-    job = _get_qwen_caption_dataset_job(job_id)
+    with QWEN_CAPTION_DATASET_JOBS_LOCK:
+        job = QWEN_CAPTION_DATASET_JOBS.get(job_id)
+    if job is None:
+        payload = _qwen_caption_dataset_serialized_job(job_id)
+        status = str(payload.get("status") or "").strip().lower()
+        if status in {"completed", "failed", "cancelled"}:
+            return payload
+        payload = dict(payload)
+        payload["status"] = "cancelled"
+        payload["message"] = "Cancellation requested"
+        payload["updated_at"] = time.time()
+        result_data = dict(payload.get("result") if isinstance(payload.get("result"), Mapping) else {})
+        result_data["cancelled_at"] = payload["updated_at"]
+        payload["result"] = result_data
+        _persist_qwen_caption_dataset_job_payload(payload)
+        return payload
     if job.status in {"completed", "failed", "cancelled"}:
         return _serialize_qwen_caption_dataset_job(job)
     job.cancel_event.set()

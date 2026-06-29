@@ -2496,6 +2496,9 @@ const AUTOMATION_LOCKED_TABS = new Set([
         captionExportHealth: null,
         captionResumeBackendJob: null,
         captionBackendJobStatus: null,
+        captionRefreshBackendJobs: null,
+        captionCancelBackendJobs: null,
+        captionBackendJobsSummary: null,
         captionStatus: null,
         captionBatchCount: null,
         captionBatchIncludeCurrent: null,
@@ -3279,6 +3282,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
     let qwenCaptionBatchAbortController = null;
     let qwenCaptionBatchBackendJobId = null;
     let qwenCaptionBatchRunToken = 0;
+    let qwenCaptionBackendActiveJobs = [];
     let qwenCaptionSetAndForgetWatchTimer = null;
     let qwenCaptionSetAndForgetWatchBusy = false;
     let qwenCaptionSetAndForgetWatchImmediatePending = false;
@@ -21985,6 +21989,9 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenElements.captionExportHealth = document.getElementById("qwenCaptionExportHealth");
         qwenElements.captionResumeBackendJob = document.getElementById("qwenCaptionResumeBackendJob");
         qwenElements.captionBackendJobStatus = document.getElementById("qwenCaptionBackendJobStatus");
+        qwenElements.captionRefreshBackendJobs = document.getElementById("qwenCaptionRefreshBackendJobs");
+        qwenElements.captionCancelBackendJobs = document.getElementById("qwenCaptionCancelBackendJobs");
+        qwenElements.captionBackendJobsSummary = document.getElementById("qwenCaptionBackendJobsSummary");
         qwenElements.captionStatus = document.getElementById("qwenCaptionStatus");
         qwenElements.captionBatchCount = document.getElementById("qwenCaptionBatchCount");
         qwenElements.captionBatchIncludeCurrent = document.getElementById("qwenCaptionBatchIncludeCurrent");
@@ -22658,6 +22665,29 @@ async function cancelRfDetrTrainingJobRequest() {
                         qwenElements.captionBackendJobStatus.textContent = `Backend recovery failed: ${message}`;
                     }
                     setSamStatus(`Backend caption recovery failed: ${message}`, { variant: "error", duration: 5000 });
+                });
+            });
+        }
+        if (qwenElements.captionRefreshBackendJobs) {
+            qwenElements.captionRefreshBackendJobs.addEventListener("click", () => {
+                refreshQwenCaptionBackendJobsStatus().catch((error) => {
+                    console.error("Caption backend job refresh failed", error);
+                    const message = error?.message || error;
+                    if (qwenElements.captionBackendJobsSummary) {
+                        qwenElements.captionBackendJobsSummary.textContent = `Backend caption job refresh failed: ${message}`;
+                    }
+                    setSamStatus(`Backend caption job refresh failed: ${message}`, { variant: "error", duration: 5000 });
+                });
+            });
+        }
+        if (qwenElements.captionCancelBackendJobs) {
+            qwenElements.captionCancelBackendJobs.addEventListener("click", () => {
+                cancelQwenCaptionBackendActiveJobs().catch((error) => {
+                    console.error("Caption backend job cancellation failed", error);
+                    const message = error?.message || error;
+                    setQwenCaptionBackendJobStatus(`Backend job cancellation failed: ${message}`);
+                    setSamStatus(`Backend job cancellation failed: ${message}`, { variant: "error", duration: 5000 });
+                    refreshQwenCaptionBackendJobsStatus({ silent: true }).catch(() => {});
                 });
             });
         }
@@ -25415,6 +25445,12 @@ async function cancelRfDetrTrainingJobRequest() {
         if (qwenElements.captionResumeBackendJob) {
             qwenElements.captionResumeBackendJob.disabled = locked || !qwenAvailable || busy || !hasCaptionDataset;
         }
+        if (qwenElements.captionRefreshBackendJobs) {
+            qwenElements.captionRefreshBackendJobs.disabled = locked;
+        }
+        if (qwenElements.captionCancelBackendJobs) {
+            qwenElements.captionCancelBackendJobs.disabled = locked || !qwenCaptionBackendActiveJobs.length || qwenCaptionBatchCancel;
+        }
         if (qwenElements.captionRecipeLoad) {
             qwenElements.captionRecipeLoad.disabled = busy;
         }
@@ -26942,6 +26978,9 @@ async function cancelRfDetrTrainingJobRequest() {
             ["captionDownloadInstructionReport", "Instruction report export"],
             ["captionExportHealth", "VLM export validation status"],
             ["captionBackendJobStatus", "Set-and-forget backend status"],
+            ["captionRefreshBackendJobs", "Backend job refresh control"],
+            ["captionCancelBackendJobs", "Backend job cancel control"],
+            ["captionBackendJobsSummary", "Backend job global monitor"],
         ].forEach(([key, label]) => requireControl(key, label));
 
         const setAndForgetOn = qwenElements.captionSetAndForget?.checked !== false;
@@ -32184,6 +32223,42 @@ async function cancelRfDetrTrainingJobRequest() {
         return status === "completed" && qwenCaptionBackendJobFailureCount(job) > 0;
     }
 
+    function isQwenCaptionBackendJobActive(job) {
+        return ["queued", "running", "cancelling", "interrupted"].includes(String(job?.status || "").toLowerCase());
+    }
+
+    function qwenCaptionBackendJobShortLabel(job) {
+        const jobId = String(job?.job_id || "unknown").trim() || "unknown";
+        const datasetId = qwenCaptionBackendJobDatasetId(job);
+        const status = String(job?.status || "unknown").trim() || "unknown";
+        const result = job?.result && typeof job.result === "object" ? job.result : {};
+        const processed = Number(result.processed || 0);
+        const total = Number(result.total_cases || 0);
+        const progress = total > 0 ? ` ${processed}/${total}` : "";
+        return `${jobId}${datasetId ? ` on ${datasetId}` : ""} (${status}${progress})`;
+    }
+
+    function summarizeQwenCaptionBackendJobs(jobs) {
+        const allJobs = Array.isArray(jobs) ? jobs.filter((job) => job && job.job_id) : [];
+        const activeJobs = allJobs
+            .filter(isQwenCaptionBackendJobActive)
+            .sort((a, b) => qwenCaptionBackendJobSortValue(b) - qwenCaptionBackendJobSortValue(a));
+        const latestJobs = allJobs
+            .slice()
+            .sort((a, b) => qwenCaptionBackendJobSortValue(b) - qwenCaptionBackendJobSortValue(a))
+            .slice(0, 3);
+        const activeText = activeJobs.length
+            ? `Active backend caption jobs: ${activeJobs.map(qwenCaptionBackendJobShortLabel).join("; ")}.`
+            : "No active backend caption jobs.";
+        const latestText = latestJobs.length
+            ? ` Latest: ${latestJobs.map(qwenCaptionBackendJobShortLabel).join("; ")}.`
+            : " No backend caption jobs reported.";
+        return {
+            activeJobs,
+            message: `${activeText}${latestText}`,
+        };
+    }
+
     function setQwenCaptionBackendJobStatus(message) {
         if (qwenElements.captionBackendJobStatus) {
             qwenElements.captionBackendJobStatus.textContent = message;
@@ -32198,6 +32273,84 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const jobs = await resp.json();
         return Array.isArray(jobs) ? jobs : [];
+    }
+
+    function updateQwenCaptionBackendJobsSummary(jobs) {
+        const summary = summarizeQwenCaptionBackendJobs(jobs);
+        qwenCaptionBackendActiveJobs = summary.activeJobs;
+        if (qwenElements.captionBackendJobsSummary) {
+            qwenElements.captionBackendJobsSummary.textContent = summary.message;
+        }
+        updateQwenCaptionButton();
+        return summary;
+    }
+
+    async function refreshQwenCaptionBackendJobsStatus(options = {}) {
+        try {
+            const jobs = await fetchQwenCaptionBackendJobs();
+            const summary = updateQwenCaptionBackendJobsSummary(jobs);
+            if (!options.silent) {
+                setQwenCaptionBackendJobStatus(summary.activeJobs.length
+                    ? "Backend caption jobs refreshed; active jobs are listed below."
+                    : "Backend caption jobs refreshed; no active jobs are running.");
+                setSamStatus(summary.activeJobs.length
+                    ? `${summary.activeJobs.length} active backend caption job${summary.activeJobs.length === 1 ? "" : "s"} found.`
+                    : "No active backend caption jobs found.",
+                    { variant: summary.activeJobs.length ? "warn" : "success", duration: 3500 });
+            }
+            return jobs;
+        } catch (error) {
+            qwenCaptionBackendActiveJobs = [];
+            if (qwenElements.captionBackendJobsSummary) {
+                qwenElements.captionBackendJobsSummary.textContent = `Backend caption job refresh failed: ${error?.message || error}`;
+            }
+            updateQwenCaptionButton();
+            if (!options.silent) {
+                throw error;
+            }
+            return [];
+        }
+    }
+
+    async function cancelQwenCaptionBackendActiveJobs() {
+        const jobs = await fetchQwenCaptionBackendJobs();
+        const activeJobs = summarizeQwenCaptionBackendJobs(jobs).activeJobs;
+        qwenCaptionBackendActiveJobs = activeJobs;
+        updateQwenCaptionButton();
+        if (!activeJobs.length) {
+            updateQwenCaptionBackendJobsSummary(jobs);
+            setQwenCaptionBackendJobStatus("No active backend caption jobs to cancel.");
+            setSamStatus("No active backend caption jobs to cancel.", { variant: "warn", duration: 3000 });
+            return;
+        }
+        const preview = activeJobs.slice(0, 5).map(qwenCaptionBackendJobShortLabel).join("\n");
+        const suffix = activeJobs.length > 5 ? `\n...and ${activeJobs.length - 5} more.` : "";
+        if (!window.confirm(`Cancel ${activeJobs.length} active backend caption job${activeJobs.length === 1 ? "" : "s"}?\n\n${preview}${suffix}`)) {
+            return;
+        }
+        qwenCaptionBatchCancel = true;
+        setQwenCaptionBackendJobStatus(`Cancelling ${activeJobs.length} active backend caption job${activeJobs.length === 1 ? "" : "s"}...`);
+        try {
+            await Promise.all(activeJobs.map(async (job) => {
+                const jobId = String(job?.job_id || "").trim();
+                if (!jobId) {
+                    return;
+                }
+                const resp = await fetch(`${API_ROOT}/qwen/caption/jobs/${encodeURIComponent(jobId)}/cancel`, {
+                    method: "POST",
+                });
+                if (!resp.ok) {
+                    const detail = await resp.text();
+                    throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+                }
+            }));
+        } finally {
+            qwenCaptionBatchCancel = false;
+            updateQwenCaptionButton();
+        }
+        await refreshQwenCaptionBackendJobsStatus({ silent: true });
+        setQwenCaptionBackendJobStatus("Active backend caption job cancellation requested.");
+        setSamStatus("Active backend caption jobs were cancelled.", { variant: "warn", duration: 4000 });
     }
 
     function selectRecoverableQwenCaptionBackendJob(jobs, datasetId, options = {}) {
@@ -32295,13 +32448,16 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (currentJob?.status === "completed") {
             await finishQwenCaptionBackendJob(currentJob, datasetId);
+            await refreshQwenCaptionBackendJobsStatus({ silent: true }).catch((error) => console.warn("Backend caption job summary refresh failed", error));
         } else if (currentJob?.status === "cancelled" || qwenCaptionBatchCancel) {
             setQwenCaptionStatus("Backend batch cancelled");
             setQwenCaptionBackendJobStatus("Backend batch cancelled");
             setSamStatus("Backend caption batch cancelled.", { variant: "warn", duration: 4000 });
+            await refreshQwenCaptionBackendJobsStatus({ silent: true }).catch((error) => console.warn("Backend caption job summary refresh failed", error));
         } else if (currentJob?.status === "failed" || currentJob?.status === "interrupted") {
             const message = qwenCaptionBackendJobDisplayError(currentJob);
             setQwenCaptionBackendJobStatus(`Backend job needs resume: ${message}`);
+            await refreshQwenCaptionBackendJobsStatus({ silent: true }).catch((error) => console.warn("Backend caption job summary refresh failed", error));
             throw new Error(message);
         }
         return currentJob;
@@ -32327,6 +32483,7 @@ async function cancelRfDetrTrainingJobRequest() {
             setQwenCaptionBackendJobStatus("Checking backend caption jobs…");
         }
         const jobs = await fetchQwenCaptionBackendJobs();
+        updateQwenCaptionBackendJobsSummary(jobs);
         let job = selectRecoverableQwenCaptionBackendJob(jobs, datasetId, { auto });
         if (!job) {
             if (!auto) {
@@ -32392,21 +32549,25 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
-    function runQwenSetAndForgetAutoAttachCheck() {
-        if (qwenElements.captionSetAndForget?.checked === false || !getCaptionDatasetId()) {
+    async function runQwenSetAndForgetAutoAttachCheck() {
+        if (qwenElements.captionSetAndForget?.checked === false) {
             return;
         }
-        if (qwenCaptionSetAndForgetWatchBusy || qwenCaptionBatchActive || qwenCaptionActive) {
+        if (qwenCaptionSetAndForgetWatchBusy) {
             return;
         }
         qwenCaptionSetAndForgetWatchBusy = true;
-        recoverLatestQwenCaptionBackendJob({ auto: true })
-            .catch((error) => {
-                console.debug("Set-and-forget auto-attach check failed", error);
-            })
-            .finally(() => {
-                qwenCaptionSetAndForgetWatchBusy = false;
-            });
+        try {
+            await refreshQwenCaptionBackendJobsStatus({ silent: true });
+            if (!getCaptionDatasetId() || qwenCaptionBatchActive || qwenCaptionActive) {
+                return;
+            }
+            await recoverLatestQwenCaptionBackendJob({ auto: true });
+        } catch (error) {
+            console.debug("Set-and-forget auto-attach check failed", error);
+        } finally {
+            qwenCaptionSetAndForgetWatchBusy = false;
+        }
     }
 
     function scheduleQwenSetAndForgetAutoAttachCheck() {
@@ -32422,7 +32583,7 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function updateQwenSetAndForgetAutoAttachWatcher() {
         const enabled = qwenElements.captionSetAndForget?.checked !== false;
-        if (!enabled || !getCaptionDatasetId()) {
+        if (!enabled) {
             if (qwenCaptionSetAndForgetWatchTimer) {
                 clearInterval(qwenCaptionSetAndForgetWatchTimer);
                 qwenCaptionSetAndForgetWatchTimer = null;
@@ -32510,6 +32671,7 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             let job = await resp.json();
             qwenCaptionBatchBackendJobId = job?.job_id || null;
+            updateQwenCaptionBackendJobsSummary([job]);
             await monitorQwenCaptionBackendJob(job, {
                 datasetId,
                 runToken,

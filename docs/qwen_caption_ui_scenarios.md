@@ -113,8 +113,11 @@ preview must make clear that omitted boxes are not absent objects.
 The user returns after a backend restart or browser reload. Set-and-forget jobs
 auto-resume on backend startup and periodic sweeps when supervision is running;
 the page also auto-attaches to relevant active work when it sees backend state.
-The **Attach / recover now** button remains available for immediate manual
-inspection without making manual recovery the normal path.
+The **Attach / recover selected dataset** button remains available for immediate
+manual inspection without making manual recovery the normal path. The global
+**Refresh backend jobs** and **Cancel active backend jobs** controls show and
+stop active backend caption work even when it does not belong to the currently
+selected caption dataset.
 
 ## 11. Export Alternate Captions For Training
 

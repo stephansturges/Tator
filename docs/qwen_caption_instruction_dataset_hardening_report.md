@@ -231,7 +231,9 @@ row before training.
   trainer JSONL, archive JSONL, review JSONL, reviewed-row import, and report
   downloads. Backend or validation failures update both the caption export
   health row and the toast/status message, and already formatted blocked
-  messages are not double-prefixed.
+  messages are not double-prefixed. Live-job busy responses stay worded as
+  blocked operator states instead of being wrapped as generic export/import
+  failures.
 - Browser and backend artifact-consistency validation now require caption0 and
   generated-QA review rows to carry dataset identity before export/import, even
   while `review_decision` is blank. Review packets therefore fail before

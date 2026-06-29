@@ -26799,6 +26799,10 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!raw) {
             return `${label} failed.`;
         }
+        const backendBlocked = /^(Caption export is blocked|Review import is blocked|Caption and text-label edits are blocked|Caption and text-label reads are blocked|Dataset download is blocked|Dataset glossary changes are blocked|A caption dataset job is already active|Dataset deletion is blocked)/.test(raw);
+        if (backendBlocked) {
+            return raw;
+        }
         const normalizedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
         if (new RegExp(`^${normalizedLabel} failed:`).test(raw)) {
             return raw;
@@ -35179,6 +35183,10 @@ async function cancelRfDetrTrainingJobRequest() {
         const raw = String(error?.message || error || fallback || "").trim();
         if (!raw) {
             return `${label} failed.`;
+        }
+        const backendBlocked = /^(Caption export is blocked|Review import is blocked|Caption and text-label edits are blocked|Caption and text-label reads are blocked|Dataset download is blocked|Dataset glossary changes are blocked|A caption dataset job is already active|Dataset deletion is blocked)/.test(raw);
+        if (backendBlocked) {
+            return raw;
         }
         const normalizedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
         const alreadyFormatted = new RegExp(`^${normalizedLabel} (?:failed|blocked):`).test(raw);

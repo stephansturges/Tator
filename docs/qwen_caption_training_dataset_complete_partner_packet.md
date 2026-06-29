@@ -603,7 +603,8 @@ surfaces.
 Instruction artifact actions share one failure reporter so trainer JSONL,
 archive, review JSONL, reviewed-row import, and report failures update the
 caption export health row and the toast/status message consistently without
-double-prefixing already formatted blocked messages.
+double-prefixing already formatted blocked messages. Live-job busy responses
+remain blocked messages rather than generic instruction export/import failures.
 Manual caption archive actions also report success only after the underlying
 save, update, primary-selection, or delete operation returns a real mutation.
 Stale clicks or scripted disabled-control bypasses therefore do not produce

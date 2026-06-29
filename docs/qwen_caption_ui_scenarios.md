@@ -200,7 +200,9 @@ UI calls that bypass the disabled button state. Any backend, validation, or
 busy-state failure from instruction JSONL, archive, review, report, or review
 import actions must update the caption export health row and the status toast
 with the same formatted message, without double-prefixing already formatted
-blocked messages.
+blocked messages. Busy responses from a live caption dataset job remain
+"blocked" operator messages rather than being relabeled as generic
+export/import failures.
 **Download instruction archive** exports one per-image construction archive
 record per JSONL line, keeping caption0, generated QA, optional deterministic
 metadata QA, source annotation provenance, and per-image export metadata separate

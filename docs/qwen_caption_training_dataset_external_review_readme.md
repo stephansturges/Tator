@@ -219,6 +219,8 @@ The external reviewer should expect these operator-facing behaviors:
 - long status text wraps without squeezing action buttons;
 - download failures report actionable validation messages, not raw internal
   codes;
+- live-job busy responses are shown as blocked operator states, not generic
+  export/import failures;
 - read routes and text-label mirror routes fail closed while a same-dataset
   caption job owns the archive.
 

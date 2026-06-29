@@ -22,13 +22,39 @@ def test_caption_instruction_strict_export_gate_requires_ready_proofs() -> None:
         "ok": True,
         "error_count": 0,
         "errors": [],
-        "counts": {"training_row_count": 1, "archive_row_count": 1, "review_row_count": 1},
+        "counts": {
+            "training_row_count": 1,
+            "archive_row_count": 1,
+            "review_row_count": 1,
+            "selected_review_row_count": 1,
+            "manual_review_required_count": 0,
+            "report_image_count": 1,
+            "report_selected_flattened_row_count": 1,
+            "report_instruction_review_row_count": 1,
+            "report_manual_review_required_count": 0,
+            "instruction_export_validation_row_count": 1,
+        },
     }
     report = {
-        "training_readiness": {"status": "ready"},
+        "format": "tator_caption_instruction_report_v1",
         "selected_flattened_row_count": 1,
         "image_count": 1,
         "instruction_review_row_count": 1,
+        "manual_review_required_count": 0,
+        "corpus_quality_metrics": {"selected_flattened_row_count": 1, "image_count": 1},
+        "training_readiness": {
+            "status": "ready",
+            "ready_for_training": True,
+            "blocking_reasons": [],
+            "required_actions": [],
+            "quality_warnings": [],
+            "selected_training_row_count": 1,
+            "selected_review_row_count": 1,
+            "selected_manual_review_row_count": 0,
+            "pending_manual_review_row_count": 0,
+            "rejected_manual_review_row_count": 0,
+            "needs_revision_manual_review_row_count": 0,
+        },
         "instruction_export_validation": dict(export_validation),
         "instruction_artifact_consistency": dict(artifact_consistency),
     }
@@ -38,6 +64,8 @@ def test_caption_instruction_strict_export_gate_requires_ready_proofs() -> None:
         "format": "tator_caption_instruction_review_rows_v1",
         "image_path": "frame.jpg",
         "qa_id": "qa-1",
+        "selected_for_training": True,
+        "requires_manual_review": False,
     }
     payload = {
         "instruction_report": report,
@@ -55,10 +83,55 @@ def test_caption_instruction_strict_export_gate_requires_ready_proofs() -> None:
             **payload,
             "instruction_report": {
                 **report,
-                "training_readiness": {"status": "needs_review"},
+                "training_readiness": {**report["training_readiness"], "status": "needs_review"},
             },
         }
     ) == "needs_review"
+    assert _instruction_export_not_ready_reason(
+        {
+            **payload,
+            "instruction_report": {
+                **report,
+                "format": "wrong_format",
+            },
+        }
+    ) == "instruction_report"
+    assert _instruction_export_not_ready_reason(
+        {
+            **payload,
+            "instruction_report": {
+                **report,
+                "training_readiness": {**report["training_readiness"], "ready_for_training": False},
+            },
+        }
+    ) == "training_readiness"
+    assert _instruction_export_not_ready_reason(
+        {
+            **payload,
+            "instruction_report": {
+                **report,
+                "training_readiness": {**report["training_readiness"], "quality_warnings": ["review first"]},
+            },
+        }
+    ) == "training_readiness"
+    assert _instruction_export_not_ready_reason(
+        {
+            **payload,
+            "instruction_report": {
+                **report,
+                "corpus_quality_metrics": {},
+            },
+        }
+    ) == "corpus_quality_metrics"
+    assert _instruction_export_not_ready_reason(
+        {
+            **payload,
+            "instruction_report": {
+                **report,
+                "corpus_quality_metrics": {**report["corpus_quality_metrics"], "selected_flattened_row_count": 2},
+            },
+        }
+    ) == "corpus_quality_metrics"
     assert _instruction_export_not_ready_reason(
         {
             **payload,
@@ -130,6 +203,30 @@ def test_caption_instruction_strict_export_gate_requires_ready_proofs() -> None:
             "instruction_review_rows": [],
         }
     ) == "instruction_review_rows"
+    assert _instruction_export_not_ready_reason(
+        {
+            **payload,
+            "instruction_review_rows": [{**review_row, "selected_for_training": False}],
+        }
+    ) == "instruction_review_rows"
+    assert _instruction_export_not_ready_reason(
+        {
+            **payload,
+            "instruction_report": {
+                **report,
+                "manual_review_required_count": 1,
+            },
+        }
+    ) == "instruction_review_rows"
+    assert _instruction_export_not_ready_reason(
+        {
+            **payload,
+            "instruction_report": {
+                **report,
+                "training_readiness": {**report["training_readiness"], "pending_manual_review_row_count": 1},
+            },
+        }
+    ) == "training_readiness"
 
 
 def test_delete_linked_dataset_only_removes_registry_record(tmp_path, monkeypatch) -> None:

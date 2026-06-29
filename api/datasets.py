@@ -43,10 +43,18 @@ def _instruction_export_not_ready_reason(result: Any) -> str:
     if not isinstance(result, dict):
         return "unknown"
     report = result.get("instruction_report") if isinstance(result.get("instruction_report"), dict) else {}
+    if str(report.get("format") or "").strip() != "tator_caption_instruction_report_v1":
+        return "instruction_report"
     readiness = report.get("training_readiness") if isinstance(report.get("training_readiness"), dict) else {}
     readiness_status = str(readiness.get("status") or "unknown").strip() or "unknown"
     if readiness_status != "ready":
         return readiness_status
+    if readiness.get("ready_for_training") is not True:
+        return "training_readiness"
+    for field_name in ("blocking_reasons", "required_actions", "quality_warnings"):
+        values = readiness.get(field_name)
+        if not isinstance(values, list) or values:
+            return "training_readiness"
 
     payload_export_validation = result.get("instruction_export_validation")
     report_export_validation = report.get("instruction_export_validation")
@@ -82,34 +90,122 @@ def _instruction_export_not_ready_reason(result: Any) -> str:
         return "instruction_review_rows"
 
     consistency_counts = payload_consistency.get("counts") if isinstance(payload_consistency.get("counts"), dict) else {}
+    report_selected_count = _instruction_export_nonnegative_int(report.get("selected_flattened_row_count"))
+    if report_selected_count is None:
+        return "instruction_report"
+    report_image_count = _instruction_export_nonnegative_int(report.get("image_count"))
+    if report_image_count is None:
+        return "instruction_report"
+    report_review_count = _instruction_export_nonnegative_int(report.get("instruction_review_row_count"))
+    if report_review_count is None:
+        return "instruction_report"
+    report_manual_review_count = _instruction_export_nonnegative_int(report.get("manual_review_required_count"))
+    if report_manual_review_count is None:
+        return "instruction_report"
+    metrics = report.get("corpus_quality_metrics") if isinstance(report.get("corpus_quality_metrics"), dict) else {}
+    if not metrics:
+        return "corpus_quality_metrics"
+    metrics_selected_count = _instruction_export_nonnegative_int(metrics.get("selected_flattened_row_count"))
+    metrics_image_count = _instruction_export_nonnegative_int(metrics.get("image_count"))
+    if metrics_selected_count is None or metrics_image_count is None:
+        return "corpus_quality_metrics"
+    if metrics_selected_count != report_selected_count or metrics_image_count != report_image_count:
+        return "corpus_quality_metrics"
+
     training_row_count = len(training_rows)
     expected_training_count = _instruction_export_nonnegative_int(payload_export_validation.get("row_count"))
     if expected_training_count is None:
         return "instruction_export_validation"
     if training_row_count != expected_training_count:
         return "instruction_training_rows"
-    report_selected_count = _instruction_export_nonnegative_int(report.get("selected_flattened_row_count"))
-    if report_selected_count is not None and training_row_count != report_selected_count:
+    if training_row_count != report_selected_count:
         return "instruction_training_rows"
     consistency_training_count = _instruction_export_nonnegative_int(consistency_counts.get("training_row_count"))
     if consistency_training_count is not None and training_row_count != consistency_training_count:
         return "instruction_training_rows"
+    consistency_report_selected_count = _instruction_export_nonnegative_int(
+        consistency_counts.get("report_selected_flattened_row_count")
+    )
+    if consistency_report_selected_count is not None and training_row_count != consistency_report_selected_count:
+        return "instruction_training_rows"
+    consistency_export_row_count = _instruction_export_nonnegative_int(
+        consistency_counts.get("instruction_export_validation_row_count")
+    )
+    if consistency_export_row_count is not None and training_row_count != consistency_export_row_count:
+        return "instruction_training_rows"
+    readiness_training_count = _instruction_export_nonnegative_int(readiness.get("selected_training_row_count"))
+    if readiness_training_count is not None and training_row_count != readiness_training_count:
+        return "training_readiness"
 
     archive_row_count = len(archive_rows)
-    report_image_count = _instruction_export_nonnegative_int(report.get("image_count"))
-    if report_image_count is not None and archive_row_count != report_image_count:
+    if archive_row_count != report_image_count:
         return "instruction_archive_rows"
     consistency_archive_count = _instruction_export_nonnegative_int(consistency_counts.get("archive_row_count"))
     if consistency_archive_count is not None and archive_row_count != consistency_archive_count:
         return "instruction_archive_rows"
+    consistency_report_image_count = _instruction_export_nonnegative_int(consistency_counts.get("report_image_count"))
+    if consistency_report_image_count is not None and archive_row_count != consistency_report_image_count:
+        return "instruction_archive_rows"
 
     review_row_count = len(review_rows)
-    report_review_count = _instruction_export_nonnegative_int(report.get("instruction_review_row_count"))
-    if report_review_count is not None and review_row_count != report_review_count:
+    if review_row_count != report_review_count:
         return "instruction_review_rows"
     consistency_review_count = _instruction_export_nonnegative_int(consistency_counts.get("review_row_count"))
     if consistency_review_count is not None and review_row_count != consistency_review_count:
         return "instruction_review_rows"
+    consistency_report_review_count = _instruction_export_nonnegative_int(
+        consistency_counts.get("report_instruction_review_row_count")
+    )
+    if consistency_report_review_count is not None and review_row_count != consistency_report_review_count:
+        return "instruction_review_rows"
+    selected_review_row_count = sum(
+        1 for row in review_rows if isinstance(row, dict) and row.get("selected_for_training") is True
+    )
+    if selected_review_row_count != training_row_count:
+        return "instruction_review_rows"
+    consistency_selected_review_count = _instruction_export_nonnegative_int(
+        consistency_counts.get("selected_review_row_count")
+    )
+    if consistency_selected_review_count is not None and selected_review_row_count != consistency_selected_review_count:
+        return "instruction_review_rows"
+    readiness_selected_review_count = _instruction_export_nonnegative_int(readiness.get("selected_review_row_count"))
+    if readiness_selected_review_count is not None and selected_review_row_count != readiness_selected_review_count:
+        return "training_readiness"
+    manual_review_count = sum(
+        1 for row in review_rows if isinstance(row, dict) and row.get("requires_manual_review") is True
+    )
+    if manual_review_count != report_manual_review_count:
+        return "instruction_review_rows"
+    consistency_manual_review_count = _instruction_export_nonnegative_int(
+        consistency_counts.get("manual_review_required_count")
+    )
+    if consistency_manual_review_count is not None and manual_review_count != consistency_manual_review_count:
+        return "instruction_review_rows"
+    consistency_report_manual_review_count = _instruction_export_nonnegative_int(
+        consistency_counts.get("report_manual_review_required_count")
+    )
+    if consistency_report_manual_review_count is not None and manual_review_count != consistency_report_manual_review_count:
+        return "instruction_review_rows"
+    selected_manual_review_count = sum(
+        1
+        for row in review_rows
+        if isinstance(row, dict)
+        and row.get("selected_for_training") is True
+        and row.get("requires_manual_review") is True
+    )
+    readiness_selected_manual_count = _instruction_export_nonnegative_int(
+        readiness.get("selected_manual_review_row_count")
+    )
+    if readiness_selected_manual_count is not None and selected_manual_review_count != readiness_selected_manual_count:
+        return "training_readiness"
+    for readiness_count_name in (
+        "pending_manual_review_row_count",
+        "rejected_manual_review_row_count",
+        "needs_revision_manual_review_row_count",
+    ):
+        readiness_count = _instruction_export_nonnegative_int(readiness.get(readiness_count_name))
+        if readiness_count is not None and readiness_count != 0:
+            return "training_readiness"
     return ""
 
 

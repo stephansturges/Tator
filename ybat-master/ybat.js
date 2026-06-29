@@ -6800,7 +6800,7 @@ const sam3TrainState = {
 		        }
 		    }
 
-		    function handleDatasetDownload(entry) {
+		    async function handleDatasetDownload(entry) {
 		        if (!entry || !entry.id) return;
                 const actionKey = datasetActionKey(entry.id, "download");
                 if (datasetManagerState.actionInFlight.has(actionKey)) {
@@ -6808,20 +6808,29 @@ const sam3TrainState = {
                 }
                 datasetManagerState.actionInFlight.add(actionKey);
                 renderDatasetList(datasetManagerState.datasets);
-		        const url = `${API_ROOT}/datasets/${encodeURIComponent(entry.id)}/download`;
-		        const link = document.createElement("a");
-	        link.href = url;
-	        link.rel = "noopener";
-	        if (document.body) {
-	            document.body.appendChild(link);
-	        }
-	        link.click();
-	        if (link.parentNode) {
-	            link.parentNode.removeChild(link);
-	        }
-            // Download click is fire-and-forget; release lock immediately.
-            datasetManagerState.actionInFlight.delete(actionKey);
-            renderDatasetList(datasetManagerState.datasets);
+                const label = entry.label || entry.id;
+                setDatasetUploadMessage(`Preparing ${label} download...`, "info");
+                try {
+                    const url = `${API_ROOT}/datasets/${encodeURIComponent(entry.id)}/download`;
+                    const resp = await fetch(url);
+                    if (!resp.ok) {
+                        const detail = await resp.text();
+                        throw new Error(parseApiError(detail, `Download failed: HTTP ${resp.status}`));
+                    }
+                    const blob = await resp.blob();
+                    const fallback = `${entry.id || "dataset"}.zip`;
+                    const filename = typeof filenameFromResponse === "function"
+                        ? filenameFromResponse(resp, fallback)
+                        : fallback;
+                    saveBlobToDisk(blob, filename);
+                    setDatasetUploadMessage(`Downloaded ${label}.`, "success");
+                } catch (err) {
+                    console.error("Failed to download dataset", err);
+                    setDatasetUploadMessage(err.message || "Failed to download dataset", "error");
+                } finally {
+                    datasetManagerState.actionInFlight.delete(actionKey);
+                    renderDatasetList(datasetManagerState.datasets);
+                }
 	    }
 
     async function refreshDatasetList() {

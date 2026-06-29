@@ -19487,6 +19487,7 @@ def delete_dataset_entry(dataset_id: str):
 
 
 def download_dataset_entry(dataset_id: str):
+    _raise_if_qwen_caption_dataset_download_busy(dataset_id)
     entry = _resolve_dataset_entry(dataset_id)
     dataset_root = _dataset_effective_root_from_entry(entry)
     override_entries = _annotation_overlay_archive_entries(entry)
@@ -23072,6 +23073,18 @@ def _raise_if_qwen_caption_mutation_busy(dataset_id: str) -> None:
     raise HTTPException(
         status_code=HTTP_409_CONFLICT,
         detail=f"caption_mutation_busy:{job_id}:{status}",
+    )
+
+
+def _raise_if_qwen_caption_dataset_download_busy(dataset_id: str) -> None:
+    active = _qwen_caption_dataset_active_export_job(dataset_id)
+    if not active:
+        return
+    job_id = str(active.get("job_id") or "").strip() or "unknown"
+    status = str(active.get("status") or "").strip() or "active"
+    raise HTTPException(
+        status_code=HTTP_409_CONFLICT,
+        detail=f"dataset_download_busy:{job_id}:{status}",
     )
 
 

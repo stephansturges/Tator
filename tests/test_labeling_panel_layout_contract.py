@@ -696,6 +696,66 @@ def test_qwen_caption_exports_block_while_backend_job_id_is_active():
     )
 
 
+def test_dataset_manager_download_uses_fetch_and_surfaces_server_errors():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            "const API_ROOT = 'http://backend.test';",
+            "const datasetManagerState = { actionInFlight: new Set(), datasets: [] };",
+            "let renderCount = 0;",
+            "let fetchCalls = [];",
+            "let messages = [];",
+            "let saved = [];",
+            "function datasetActionKey(datasetId, action) { return `${datasetId}:${action}`; }",
+            "function renderDatasetList() { renderCount += 1; }",
+            "function setDatasetUploadMessage(text, tone) { messages.push({ text, tone }); }",
+            "function filenameFromResponse(_resp, _fallback) { return 'dataset_export.zip'; }",
+            "function saveBlobToDisk(blob, filename) { saved.push({ blob, filename }); }",
+            _extract_js_function(js, "parseApiError"),
+            "async " + _extract_js_function(js, "handleDatasetDownload"),
+            "global.fetch = async (url) => {",
+            "  fetchCalls.push(url);",
+            "  return {",
+            "    ok: false,",
+            "    status: 409,",
+            "    text: async () => JSON.stringify({ detail: 'dataset_download_busy:qcap_busy:running' }),",
+            "  };",
+            "};",
+            "await handleDatasetDownload({ id: 'ds', label: 'Demo dataset' });",
+            "assert.strictEqual(saved.length, 0);",
+            "assert.strictEqual(datasetManagerState.actionInFlight.size, 0);",
+            "assert(messages.some((entry) => entry.tone === 'error' && entry.text.includes('dataset_download_busy:qcap_busy:running')));",
+            "messages = [];",
+            "global.fetch = async (url) => {",
+            "  fetchCalls.push(url);",
+            "  return {",
+            "    ok: true,",
+            "    status: 200,",
+            "    headers: { get: () => 'attachment; filename=\"dataset.zip\"' },",
+            "    blob: async () => ({ bytes: 3 }),",
+            "  };",
+            "};",
+            "await handleDatasetDownload({ id: 'ds', label: 'Demo dataset' });",
+            "assert.strictEqual(saved.length, 1);",
+            "assert.strictEqual(saved[0].filename, 'dataset_export.zip');",
+            "assert(messages.some((entry) => entry.tone === 'success' && entry.text.includes('Downloaded Demo dataset.')));",
+            "assert.strictEqual(datasetManagerState.actionInFlight.size, 0);",
+            "assert(fetchCalls.every((url) => url === 'http://backend.test/datasets/ds/download'));",
+            "assert(renderCount >= 4);",
+        ]
+    )
+    subprocess.run(
+        [
+            "node",
+            "-e",
+            f"(async () => {{\n{script}\n}})().catch((error) => {{ console.error(error); process.exit(1); }});",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+    )
+
+
 def test_qwen_caption_instruction_review_import_parser_accepts_reviewer_file_shapes():
     js = _js()
     script = "\n".join(

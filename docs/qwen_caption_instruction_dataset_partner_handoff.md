@@ -53,6 +53,10 @@ The new work adds a separate instruction-dataset path:
   backend caption job is still mutating the selected caption archive.
 - The HTTP caption-export route opts into the same backend active-job guard, so
   API clients receive `caption_export_busy` instead of a mid-run snapshot.
+- The full dataset ZIP download route rejects with `dataset_download_busy`
+  before reading dataset or overlay files while the same dataset has an active
+  caption job, and the dataset manager UI surfaces that server error instead
+  of fire-and-forget downloading an error response.
 - The reviewed JSONL import route rejects with `caption_review_import_busy`
   before reading caption/archive state while the same dataset has an active
   caption job.
@@ -142,6 +146,9 @@ changed by an active backend caption job, so exported files are snapshots of a
 stable archive rather than mid-run partial state.
 The server-side caption export route enforces the same active-job rule for
 scripts and API clients.
+The full dataset ZIP download route enforces the same rule before reading
+dataset or overlay files, and the dataset manager downloads via fetch so busy
+responses are visible to the operator.
 The server-side review-import path enforces the same rule before it reads
 caption records or instruction records, so reviewed decisions cannot be applied
 against a moving archive.
@@ -639,6 +646,8 @@ Current combined caption/instruction/trainer/UI contract suite:
   tests/test_qwen_training_backend.py \
   tests/test_dataset_linked_annotation_flows.py::test_caption_export_route_blocks_when_backend_caption_job_is_active \
   tests/test_dataset_linked_annotation_flows.py::test_export_captions_blocks_active_backend_caption_job_before_dataset_read \
+  tests/test_dataset_linked_annotation_flows.py::test_download_dataset_entry_blocks_active_backend_caption_job_before_dataset_read \
+  tests/test_dataset_linked_annotation_flows.py::test_dataset_download_route_blocks_when_backend_caption_job_is_active \
   tests/test_dataset_linked_annotation_flows.py::test_instruction_review_import_blocks_active_backend_caption_job_before_dataset_read \
   tests/test_dataset_linked_annotation_flows.py::test_instruction_review_route_blocks_when_backend_caption_job_is_active \
   tests/test_dataset_linked_annotation_flows.py::test_caption_mutations_block_active_backend_caption_job_before_dataset_read \
@@ -655,7 +664,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-240 passed, 8 warnings
+243 passed, 8 warnings
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

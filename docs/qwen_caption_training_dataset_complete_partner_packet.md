@@ -419,7 +419,7 @@ below.
 | Dense prompt safety | prompt budget accounting and representative box subsets | Implemented |
 | Repetition or loop safety | streaming loop inspector, controlled retry, fallback, deterministic recovery | Implemented |
 | Model-download clarity | model dropdown colors missing/download-needed models red and local models normal | Implemented |
-| Safe artifact actions during long jobs | UI disabling plus action-time checks for ordinary caption exports, instruction exports, report downloads, and reviewed JSONL import | Implemented |
+| Safe artifact actions during long jobs | UI disabling plus action-time checks for ordinary caption exports, full dataset ZIP downloads, instruction exports, report downloads, and reviewed JSONL import | Implemented |
 | Safe caption mutations during long jobs | Text-label saves and caption add/update/delete refuse while the selected dataset has an active caption job | Implemented |
 | Safe dataset deletion during long jobs | Dataset deletion refuses while an active caption dataset job references the same dataset | Implemented |
 | Same-dataset job concurrency | Caption dataset job start refuses while another queued, running, or cancelling caption job owns the same dataset | Implemented |
@@ -433,18 +433,19 @@ enough for a real operator, not only a developer running one happy-path export.
 
 ### Caption And Instruction Artifact Actions Are Frozen While Captions Mutate
 
-Ordinary caption exports, instruction artifact downloads, instruction report
-downloads, and reviewed JSONL import are now disabled until both conditions are
-true:
+Ordinary caption exports, full dataset ZIP downloads, instruction artifact
+downloads, instruction report downloads, and reviewed JSONL import are now
+disabled until both conditions are true:
 
 - a caption dataset is selected;
 - no caption job or instruction-dataset job is actively mutating the selected
   dataset's caption archive.
 
 The ordinary caption exports covered by this guard are caption audit JSONL,
-grouped caption JSON, and caption-only VLM JSONL. The instruction artifacts
-covered by this guard are trainer JSONL, archive JSONL, review JSONL, report
-JSON, and reviewed JSONL import.
+grouped caption JSON, and caption-only VLM JSONL. The full dataset ZIP download
+is covered because it can include overlay files and other dataset metadata. The
+instruction artifacts covered by this guard are trainer JSONL, archive JSONL,
+review JSONL, report JSON, and reviewed JSONL import.
 
 The backend also refuses to start a second caption dataset job for a dataset
 that already has a queued, running, or cancelling caption dataset job. The
@@ -452,12 +453,15 @@ check and registry insertion happen under the same job-registry lock so two
 near-simultaneous API calls cannot both pass launch preflight for the same
 dataset.
 
-The HTTP caption-export route, reviewed JSONL import route, text-label save
-path, caption add/update/delete paths, and dataset deletion path also use
-backend active-job guards. A script or API caller that tries to export while an
-active caption dataset job is registered for the same dataset receives a `409`
-with a `caption_export_busy` detail instead of a partial archive snapshot. A
-script or API caller that tries to import review decisions during the same
+The HTTP caption-export route, dataset ZIP download route, reviewed JSONL
+import route, text-label save path, caption add/update/delete paths, and
+dataset deletion path also use backend active-job guards. A script or API
+caller that tries to export captions while an active caption dataset job is
+registered for the same dataset receives a `409` with a `caption_export_busy`
+detail instead of a partial archive snapshot. A script or API caller that tries
+to download the full dataset ZIP during the same active state receives
+`dataset_download_busy` before the backend reads the dataset or overlay files.
+A script or API caller that tries to import review decisions during the same
 active state receives `caption_review_import_busy` before the backend reads the
 mutating caption archive. A script or API caller that tries to save a text
 label or add, update, or delete caption records receives
@@ -465,6 +469,12 @@ label or add, update, or delete caption records receives
 caller, or operator that tries to delete a dataset while an active caption
 dataset job references it receives `dataset_delete_blocked_active_jobs` before
 the registry record or managed dataset tree can be removed.
+
+The dataset manager UI now downloads dataset ZIP files through an explicit
+fetch-and-save flow rather than a fire-and-forget anchor click. That means
+server-side busy responses and validation errors appear in the dataset status
+message area instead of producing a confusing downloaded error body or browser
+navigation.
 
 The same busy check also runs inside each action handler. That second check
 matters because UI state can go stale: a user may leave a file picker open, a
@@ -1300,6 +1310,8 @@ node --check ybat-master/ybat.js
   tests/test_qwen_training_backend.py \
   tests/test_dataset_linked_annotation_flows.py::test_caption_export_route_blocks_when_backend_caption_job_is_active \
   tests/test_dataset_linked_annotation_flows.py::test_export_captions_blocks_active_backend_caption_job_before_dataset_read \
+  tests/test_dataset_linked_annotation_flows.py::test_download_dataset_entry_blocks_active_backend_caption_job_before_dataset_read \
+  tests/test_dataset_linked_annotation_flows.py::test_dataset_download_route_blocks_when_backend_caption_job_is_active \
   tests/test_dataset_linked_annotation_flows.py::test_instruction_review_import_blocks_active_backend_caption_job_before_dataset_read \
   tests/test_dataset_linked_annotation_flows.py::test_instruction_review_route_blocks_when_backend_caption_job_is_active \
   tests/test_dataset_linked_annotation_flows.py::test_caption_mutations_block_active_backend_caption_job_before_dataset_read \
@@ -1316,7 +1328,7 @@ node --check ybat-master/ybat.js
 Result:
 
 ```text
-240 passed, 8 warnings
+243 passed, 8 warnings
 ```
 
 Additional focused validation recorded in the supporting hardening docs covers:
@@ -1344,6 +1356,11 @@ Additional focused validation recorded in the supporting hardening docs covers:
   while a backend caption job id is still active
 - the caption export HTTP route opting into the backend active-job guard and
   returning `caption_export_busy` for API clients while a dataset job is active
+- full dataset ZIP download rejecting with `dataset_download_busy` before
+  dataset or overlay reads while a dataset job is active, with the UI showing
+  the server-side failure instead of fire-and-forget downloading an error body
+- dataset-manager download UI contract proving busy responses do not save a
+  file and successful ZIP responses save through the shared blob path
 - reviewed JSONL import rejecting with `caption_review_import_busy` before
   dataset/archive reads while a dataset job is active
 - text-label save and caption add/update/delete rejecting with
@@ -1378,6 +1395,8 @@ node --check ybat-master/ybat.js
   tests/test_qwen_training_backend.py \
   tests/test_dataset_linked_annotation_flows.py::test_caption_export_route_blocks_when_backend_caption_job_is_active \
   tests/test_dataset_linked_annotation_flows.py::test_export_captions_blocks_active_backend_caption_job_before_dataset_read \
+  tests/test_dataset_linked_annotation_flows.py::test_download_dataset_entry_blocks_active_backend_caption_job_before_dataset_read \
+  tests/test_dataset_linked_annotation_flows.py::test_dataset_download_route_blocks_when_backend_caption_job_is_active \
   tests/test_dataset_linked_annotation_flows.py::test_instruction_review_import_blocks_active_backend_caption_job_before_dataset_read \
   tests/test_dataset_linked_annotation_flows.py::test_instruction_review_route_blocks_when_backend_caption_job_is_active \
   tests/test_dataset_linked_annotation_flows.py::test_caption_mutations_block_active_backend_caption_job_before_dataset_read \

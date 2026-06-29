@@ -14,7 +14,7 @@ from PIL import Image
 import localinferenceapi as api
 
 
-def _dataset_export_route_client(export_payload, apply_review_fn=None):
+def _dataset_export_route_client(export_payload, apply_review_fn=None, download_fn=None):
     from api.datasets import build_datasets_router
 
     def export_captions(dataset_id, options):
@@ -39,7 +39,7 @@ def _dataset_export_route_client(export_payload, apply_review_fn=None):
             upload_session_cancel_fn=noop,
             delete_fn=noop,
             restore_fn=noop,
-            download_fn=noop,
+            download_fn=download_fn or noop,
             build_qwen_fn=noop,
             check_fn=noop,
             get_glossary_fn=noop,
@@ -112,6 +112,40 @@ def test_export_captions_blocks_active_backend_caption_job_before_dataset_read(m
     assert exc_info.value.status_code == 409
     assert exc_info.value.detail == "caption_export_busy:qcap_busy:running"
     assert api._qwen_caption_dataset_active_export_job("other") is None
+
+
+def test_download_dataset_entry_blocks_active_backend_caption_job_before_dataset_read(
+    monkeypatch,
+) -> None:
+    job = api.QwenCaptionDatasetJob(job_id="qcap_busy", status="running")
+    job.request = {"dataset_id": "ds"}
+    monkeypatch.setattr(api, "QWEN_CAPTION_DATASET_JOBS", {job.job_id: job})
+
+    def fail_resolve(_dataset_id):
+        raise AssertionError("dataset download should block before reading a mutating dataset")
+
+    monkeypatch.setattr(api, "_resolve_dataset_entry", fail_resolve)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.download_dataset_entry("ds")
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "dataset_download_busy:qcap_busy:running"
+
+
+def test_dataset_download_route_blocks_when_backend_caption_job_is_active() -> None:
+    def download_dataset(_dataset_id):
+        raise api.HTTPException(
+            status_code=409,
+            detail="dataset_download_busy:qcap_busy:running",
+        )
+
+    client = _dataset_export_route_client({}, download_fn=download_dataset)
+
+    response = client.get("/datasets/ds/download")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "dataset_download_busy:qcap_busy:running"
 
 
 def test_instruction_review_import_blocks_active_backend_caption_job_before_dataset_read(monkeypatch) -> None:

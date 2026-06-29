@@ -41,6 +41,8 @@ The new work adds a separate instruction-dataset path:
 
 - A UI action, **Create VLM training dataset**, starts a dataset-backed
   instruction run.
+- The backend refuses to start a second active caption dataset job for the same
+  dataset.
 - Each image can produce one broad caption row, called `caption0`.
 - Each image can also produce configurable generated visual QA rows.
 - Optional deterministic metadata QA rows can be generated from trusted labels
@@ -142,6 +144,9 @@ caption records or instruction records, so reviewed decisions cannot be applied
 against a moving archive.
 The same active-job rule protects direct caption and text-label mutations, so
 manual/API edits cannot interleave with backend caption generation.
+The backend also applies the rule at job launch, with the active-job check and
+registry insertion under one lock, so two same-dataset caption workers cannot
+be launched concurrently by near-simultaneous API calls.
 
 ## Core Invariants
 
@@ -643,7 +648,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-236 passed, 8 warnings
+238 passed, 8 warnings
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

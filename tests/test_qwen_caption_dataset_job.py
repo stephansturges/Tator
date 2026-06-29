@@ -7,6 +7,7 @@ from pathlib import Path
 import threading
 import time
 
+from fastapi.testclient import TestClient
 from PIL import Image
 import pytest
 
@@ -5626,6 +5627,46 @@ def test_caption_dataset_job_resume_rejects_live_running_job(monkeypatch) -> Non
 
     assert exc_info.value.status_code == api.HTTP_409_CONFLICT
     assert exc_info.value.detail == "qwen_caption_dataset_job_still_running"
+
+
+def test_caption_dataset_job_start_rejects_active_same_dataset(monkeypatch) -> None:
+    import localinferenceapi as api
+
+    active = api.QwenCaptionDatasetJob(job_id="qcap_running", status="running")
+    active.request = {"dataset_id": "ds"}
+    monkeypatch.setattr(api, "QWEN_CAPTION_DATASET_JOBS", {active.job_id: active})
+    payload = QwenCaptionDatasetJobRequest(
+        dataset_id="ds",
+        caption_request={"user_prompt": "Describe it."},
+    )
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api._start_qwen_caption_dataset_job(payload)
+
+    assert exc_info.value.status_code == api.HTTP_409_CONFLICT
+    assert exc_info.value.detail == "qwen_caption_dataset_job_active:qcap_running:running"
+    assert set(api.QWEN_CAPTION_DATASET_JOBS) == {"qcap_running"}
+
+
+def test_caption_dataset_job_start_route_rejects_active_same_dataset(monkeypatch) -> None:
+    import localinferenceapi as api
+
+    active = api.QwenCaptionDatasetJob(job_id="qcap_running", status="running")
+    active.request = {"dataset_id": "ds"}
+    monkeypatch.setattr(api, "QWEN_CAPTION_DATASET_JOBS", {active.job_id: active})
+    client = TestClient(api.app)
+
+    response = client.post(
+        "/qwen/caption/jobs",
+        json={
+            "dataset_id": "ds",
+            "caption_request": {"user_prompt": "Describe it."},
+        },
+    )
+
+    assert response.status_code == api.HTTP_409_CONFLICT
+    assert response.json()["detail"] == "qwen_caption_dataset_job_active:qcap_running:running"
+    assert set(api.QWEN_CAPTION_DATASET_JOBS) == {"qcap_running"}
 
 
 def test_caption_dataset_job_resume_route_exists() -> None:

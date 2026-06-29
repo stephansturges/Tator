@@ -23002,13 +23002,14 @@ def _dataset_caption_grouped_archive(
     }
 
 
-def _qwen_caption_dataset_active_export_job(dataset_id: str) -> Optional[Dict[str, Any]]:
+def _qwen_caption_dataset_active_job_from_jobs(
+    dataset_id: str,
+    jobs: Iterable[QwenCaptionDatasetJob],
+) -> Optional[Dict[str, Any]]:
     target = str(dataset_id or "").strip()
     if not target:
         return None
     active_statuses = {"queued", "running", "cancelling"}
-    with QWEN_CAPTION_DATASET_JOBS_LOCK:
-        jobs = list(QWEN_CAPTION_DATASET_JOBS.values())
     candidates: List[Dict[str, Any]] = []
     for job in jobs:
         status = str(job.status or "").strip().lower()
@@ -23026,6 +23027,14 @@ def _qwen_caption_dataset_active_export_job(dataset_id: str) -> Optional[Dict[st
         reverse=True,
     )
     return candidates[0]
+
+
+def _qwen_caption_dataset_active_export_job(dataset_id: str) -> Optional[Dict[str, Any]]:
+    with QWEN_CAPTION_DATASET_JOBS_LOCK:
+        return _qwen_caption_dataset_active_job_from_jobs(
+            dataset_id,
+            list(QWEN_CAPTION_DATASET_JOBS.values()),
+        )
 
 
 def _raise_if_qwen_caption_export_busy(dataset_id: str) -> None:
@@ -26505,14 +26514,33 @@ def _start_qwen_caption_dataset_job(
         None if force_default_output_dir else payload.output_dir,
     )
     job = QwenCaptionDatasetJob(job_id=job_id, output_dir=str(output_dir))
-    _register_job_and_start_thread(
-        job=job,
-        registry=QWEN_CAPTION_DATASET_JOBS,
-        lock=QWEN_CAPTION_DATASET_JOBS_LOCK,
-        target=_run_qwen_caption_dataset_job,
-        args=(job, payload),
-        name=f"qwen-caption-dataset-{job_id}",
-    )
+    job.request = model_dump_compat(payload)
+    with QWEN_CAPTION_DATASET_JOBS_LOCK:
+        active = _qwen_caption_dataset_active_job_from_jobs(
+            payload.dataset_id,
+            list(QWEN_CAPTION_DATASET_JOBS.values()),
+        )
+        if active:
+            active_job_id = str(active.get("job_id") or "").strip() or "unknown"
+            active_status = str(active.get("status") or "").strip() or "active"
+            raise HTTPException(
+                status_code=HTTP_409_CONFLICT,
+                detail=f"qwen_caption_dataset_job_active:{active_job_id}:{active_status}",
+            )
+        QWEN_CAPTION_DATASET_JOBS[job.job_id] = job
+    try:
+        thread = threading.Thread(
+            target=_run_qwen_caption_dataset_job,
+            args=(job, payload),
+            daemon=True,
+            name=f"qwen-caption-dataset-{job_id}",
+        )
+        thread.start()
+    except Exception:
+        with QWEN_CAPTION_DATASET_JOBS_LOCK:
+            if QWEN_CAPTION_DATASET_JOBS.get(job.job_id) is job:
+                QWEN_CAPTION_DATASET_JOBS.pop(job.job_id, None)
+        raise
     return job
 
 

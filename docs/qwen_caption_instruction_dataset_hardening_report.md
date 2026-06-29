@@ -100,6 +100,11 @@ row before training.
   readable responsive columns instead of clipping in the sidebar.
 - Fixed readiness and attach/recover rows so long status text cannot squeeze the
   action buttons.
+- Manual caption archive controls now report success only after the underlying
+  save, update, primary-selection, or delete action returns a real mutation.
+  No-op paths from stale clicks or disabled-control bypasses stay quiet or show
+  warnings, and backend failures use the shared operator-facing caption archive
+  failure formatter.
 
 ## Backend And Runner Changes
 

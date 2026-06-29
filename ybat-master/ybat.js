@@ -22554,37 +22554,49 @@ async function cancelRfDetrTrainingJobRequest() {
                     })
                     .catch((error) => {
                         console.warn("Alternate caption save failed", error);
-                        setSamStatus(`Alternate caption save failed: ${error.message || error}`, { variant: "error", duration: 4000 });
+                        reportCaptionArchiveActionFailure("Alternate caption save", error, 5000);
                     });
             });
         }
         if (qwenElements.captionUpdateSelected) {
             qwenElements.captionUpdateSelected.addEventListener("click", () => {
                 updateSelectedCaptionFromTextarea()
-                    .then(() => setSamStatus("Selected caption updated.", { variant: "success", duration: 2500 }))
+                    .then((updated) => {
+                        if (updated) {
+                            setSamStatus("Selected caption updated.", { variant: "success", duration: 2500 });
+                        }
+                    })
                     .catch((error) => {
                         console.warn("Selected caption update failed", error);
-                        setSamStatus(`Caption update failed: ${error.message || error}`, { variant: "error", duration: 4000 });
+                        reportCaptionArchiveActionFailure("Caption update", error, 5000);
                     });
             });
         }
         if (qwenElements.captionSetPrimary) {
             qwenElements.captionSetPrimary.addEventListener("click", () => {
                 setSelectedCaptionAsPrimary()
-                    .then(() => setSamStatus("Primary caption updated.", { variant: "success", duration: 2500 }))
+                    .then((updated) => {
+                        if (updated) {
+                            setSamStatus("Primary caption updated.", { variant: "success", duration: 2500 });
+                        }
+                    })
                     .catch((error) => {
                         console.warn("Primary caption update failed", error);
-                        setSamStatus(`Primary caption update failed: ${error.message || error}`, { variant: "error", duration: 4000 });
+                        reportCaptionArchiveActionFailure("Primary caption update", error, 5000);
                     });
             });
         }
         if (qwenElements.captionDeleteSelected) {
             qwenElements.captionDeleteSelected.addEventListener("click", () => {
                 deleteSelectedCaption()
-                    .then(() => setSamStatus("Alternate caption deleted.", { variant: "success", duration: 2500 }))
+                    .then((deleted) => {
+                        if (deleted) {
+                            setSamStatus("Alternate caption deleted.", { variant: "success", duration: 2500 });
+                        }
+                    })
                     .catch((error) => {
                         console.warn("Alternate caption delete failed", error);
-                        setSamStatus(`Alternate caption delete failed: ${error.message || error}`, { variant: "error", duration: 4000 });
+                        reportCaptionArchiveActionFailure("Alternate caption delete", error, 5000);
                     });
             });
         }
@@ -26531,6 +26543,26 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenElements.captionStatus.textContent = message || "";
     }
 
+    function captionArchiveActionFailureMessage(actionLabel, error, fallback = "") {
+        const label = String(actionLabel || "Caption archive action").trim() || "Caption archive action";
+        const raw = String(error?.message || error || fallback || "").trim();
+        if (!raw) {
+            return `${label} failed.`;
+        }
+        const normalizedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        if (new RegExp(`^${normalizedLabel} failed:`).test(raw)) {
+            return raw;
+        }
+        return `${label} failed: ${raw}`;
+    }
+
+    function reportCaptionArchiveActionFailure(actionLabel, error, duration = 5000) {
+        const message = captionArchiveActionFailureMessage(actionLabel, error);
+        setQwenCaptionStatus(message);
+        setSamStatus(message, { variant: "error", duration });
+        return message;
+    }
+
     function qwenBackendCrashSupervisionReady() {
         if (!qwenBackendSupervision) {
             return false;
@@ -30475,13 +30507,16 @@ async function cancelRfDetrTrainingJobRequest() {
         const caption = String(qwenElements.captionOutput?.value || "").trim();
         if (!imageName || !selected || !caption) {
             setSamStatus("Select a saved caption and enter text first.", { variant: "warn", duration: 3000 });
-            return;
+            return false;
         }
         if (selected.id.startsWith("primary:")) {
-            await saveCaptionImmediate(imageName, caption);
+            const saved = await saveCaptionImmediate(imageName, caption);
+            if (!saved) {
+                return false;
+            }
             textLabels[imageName] = caption;
             renderCaptionAlternatesForCurrentImage();
-            return;
+            return true;
         }
         const datasetId = getCaptionRecordDatasetId();
         if (!datasetId || selected.metadata?.local_only) {
@@ -30493,7 +30528,7 @@ async function cancelRfDetrTrainingJobRequest() {
             captionRecordsByImage[imageName] = records;
             renderCaptionAlternatesForCurrentImage();
             setQwenCaptionStatus("Updated locally");
-            return;
+            return true;
         }
         const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/captions/by_id/${encodeURIComponent(selected.id)}`, {
             method: "PATCH",
@@ -30512,13 +30547,14 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         renderCaptionAlternatesForCurrentImage();
         setQwenCaptionStatus("Updated selected caption");
+        return true;
     }
 
     async function setSelectedCaptionAsPrimary() {
         const imageName = currentImage?.name || "";
         const selected = imageName ? getSelectedCaptionRecord(imageName) : null;
         if (!imageName || !selected || selected.id.startsWith("primary:")) {
-            return;
+            return false;
         }
         const datasetId = getCaptionRecordDatasetId();
         if (!datasetId || selected.metadata?.local_only) {
@@ -30528,7 +30564,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 is_primary: record.id === selected.id,
             }));
             renderCaptionAlternatesForCurrentImage();
-            return;
+            return true;
         }
         const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/captions/by_id/${encodeURIComponent(selected.id)}`, {
             method: "PATCH",
@@ -30545,20 +30581,21 @@ async function cancelRfDetrTrainingJobRequest() {
         captionAutoSaveState.lastSaved.set(imageName, selected.caption || "");
         await loadCaptionForCurrentImage();
         setQwenCaptionStatus("Primary caption updated");
+        return true;
     }
 
     async function deleteSelectedCaption() {
         const imageName = currentImage?.name || "";
         const selected = imageName ? getSelectedCaptionRecord(imageName) : null;
         if (!imageName || !selected || selected.id.startsWith("primary:")) {
-            return;
+            return false;
         }
         const datasetId = getCaptionRecordDatasetId();
         if (!datasetId || selected.metadata?.local_only) {
             captionRecordsByImage[imageName] = captionRecordsForImage(imageName).filter((record) => record.id !== selected.id);
             setSelectedCaptionId(imageName, "");
             renderCaptionAlternatesForCurrentImage();
-            return;
+            return true;
         }
         const resp = await fetch(withCaptionMutationSessionQuery(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/captions/by_id/${encodeURIComponent(selected.id)}`), {
             method: "DELETE",
@@ -30571,6 +30608,7 @@ async function cancelRfDetrTrainingJobRequest() {
         setSelectedCaptionId(imageName, "");
         renderCaptionAlternatesForCurrentImage();
         setQwenCaptionStatus("Deleted alternate caption");
+        return true;
     }
 
     async function loadCaptionForImage(imageName, datasetIdOverride = null) {
@@ -30935,11 +30973,11 @@ async function cancelRfDetrTrainingJobRequest() {
 
     async function saveCaptionImmediate(imageName, caption, options = {}) {
         if (!imageName) {
-            return;
+            return false;
         }
         if (isAnnotationMutationBlocked()) {
             annotationEditableGuard("Edit text label");
-            return;
+            return false;
         }
         const trimmed = String(caption || "").trim();
         if (captionAutoSaveState.timerId && captionAutoSaveState.pendingImage === imageName) {
@@ -30961,11 +30999,13 @@ async function cancelRfDetrTrainingJobRequest() {
                 `autosave_${Date.now()}`
             );
             setQwenCaptionStatus("Saved");
+            return true;
         } catch (error) {
             const message = formatBackendFetchError(error, "Caption save failed");
             setQwenCaptionStatus(message);
             setSamStatus(`Caption save failed: ${message}`, { variant: "error", duration: 5000 });
             console.warn("Caption autosave failed", error);
+            return false;
         }
     }
 

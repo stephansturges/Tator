@@ -892,7 +892,8 @@ def test_qwen_caption_text_label_save_formats_caption_mutation_busy_error():
             "    text: async () => JSON.stringify({ detail: 'caption_mutation_busy:qcap_busy:running' }),",
             "  };",
             "};",
-            "await saveCaptionImmediate('frame.jpg', 'caption text', { datasetId: 'ds' });",
+            "const saved = await saveCaptionImmediate('frame.jpg', 'caption text', { datasetId: 'ds' });",
+            "assert.strictEqual(saved, false);",
             "assert(statusMessages.some((message) => message.includes('Caption and text-label edits are blocked while caption dataset job qcap_busy is running.')));",
             "assert(samMessages.some((entry) => entry.message.includes('Caption save failed: Caption and text-label edits are blocked while caption dataset job qcap_busy is running.')));",
             "assert(!statusMessages.some((message) => message.includes('{\"detail\"')));",
@@ -908,6 +909,61 @@ def test_qwen_caption_text_label_save_formats_caption_mutation_busy_error():
         cwd=REPO_ROOT,
         check=True,
     )
+
+
+def test_qwen_caption_archive_action_failures_are_formatted_for_operator_status():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            "const qwenElements = { captionStatus: { textContent: '' } };",
+            "const samMessages = [];",
+            "function setSamStatus(message, options) { samMessages.push({ message, options }); }",
+            _extract_js_function(js, "setQwenCaptionStatus"),
+            _extract_js_function(js, "captionArchiveActionFailureMessage"),
+            _extract_js_function(js, "reportCaptionArchiveActionFailure"),
+            "assert.strictEqual(",
+            "  captionArchiveActionFailureMessage('Caption update', new Error('Caption update failed: stale row')),",
+            "  'Caption update failed: stale row'",
+            ");",
+            "assert.strictEqual(",
+            "  captionArchiveActionFailureMessage('Alternate caption delete', new Error('Caption and text-label edits are blocked while caption dataset job qcap_1 is running.')),",
+            "  'Alternate caption delete failed: Caption and text-label edits are blocked while caption dataset job qcap_1 is running.'",
+            ");",
+            "const reported = reportCaptionArchiveActionFailure('Primary caption update', new Error('backend unavailable'), 1234);",
+            "assert.strictEqual(reported, 'Primary caption update failed: backend unavailable');",
+            "assert.strictEqual(qwenElements.captionStatus.textContent, reported);",
+            "assert.strictEqual(samMessages[0].message, reported);",
+            "assert.strictEqual(samMessages[0].options.duration, 1234);",
+        ]
+    )
+    subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
+
+
+def test_qwen_caption_archive_action_listeners_do_not_report_noop_success():
+    js = _js()
+    listener_start = js.index("if (qwenElements.captionSaveAlternate)")
+    listener_end = js.index("if (qwenElements.captionCopyButton)", listener_start)
+    listener_block = js[listener_start:listener_end]
+    assert ".then((record) => {" in listener_block
+    assert ".then((updated) => {" in listener_block
+    assert ".then((deleted) => {" in listener_block
+    assert "if (record) {" in listener_block
+    assert "if (updated) {" in listener_block
+    assert "if (deleted) {" in listener_block
+    assert 'reportCaptionArchiveActionFailure("Alternate caption save", error' in listener_block
+    assert 'reportCaptionArchiveActionFailure("Caption update", error' in listener_block
+    assert 'reportCaptionArchiveActionFailure("Primary caption update", error' in listener_block
+    assert 'reportCaptionArchiveActionFailure("Alternate caption delete", error' in listener_block
+    assert "Alternate caption delete failed: ${error.message || error}" not in listener_block
+    update_fn = _extract_js_function_before(
+        js,
+        "updateSelectedCaptionFromTextarea",
+        "\n    async function setSelectedCaptionAsPrimary",
+    )
+    assert "const saved = await saveCaptionImmediate(imageName, caption);" in update_fn
+    assert "if (!saved)" in update_fn
+    assert update_fn.count("return false;") >= 2
 
 
 def test_qwen_caption_instruction_review_import_parser_accepts_reviewer_file_shapes():

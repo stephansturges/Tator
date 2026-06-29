@@ -18,7 +18,11 @@ caption mirrors to the legacy text-label file. The job runs as a persisted
 backend job with isolated attempts, health gates, and auto-resume status. If a
 caption/text-label save races an active dataset caption job or annotation lock,
 the caption status and toast show the parsed guard reason and retry guidance
-instead of raw backend JSON or a generic "Save failed" message.
+instead of raw backend JSON or a generic "Save failed" message. Manual caption
+archive controls such as **Save as new alternate**, **Update selected**,
+**Set primary**, and **Delete** only show success after the underlying action
+reports a real mutation, so stale clicks or disabled-control bypasses cannot
+claim that a caption record changed when nothing happened.
 
 ## 2. Run A Direct Diagnostic Caption
 

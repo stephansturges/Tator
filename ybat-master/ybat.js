@@ -31897,11 +31897,36 @@ async function cancelRfDetrTrainingJobRequest() {
             );
             return;
         }
-        const started = await runQwenCaptionBackendBatch(imageNames, { ...options, backend: true });
+        if (options.instructionDataset) {
+            const validation = validateCaptionInstructionLaunchSettings(getCaptionInstructionDatasetSettings(true));
+            if (!validation.ok) {
+                const message = validation.errors[0] || "Instruction dataset settings are invalid.";
+                setQwenCaptionStatus("Instruction dataset not started");
+                setQwenCaptionBackendJobStatus(message);
+                setSamStatus(message, { variant: "warn", duration: 7000 });
+                return;
+            }
+        }
+        let started = false;
+        try {
+            started = await runQwenCaptionBackendBatch(imageNames, { ...options, backend: true });
+        } catch (error) {
+            console.error("Backend caption job launch failed", error);
+            const jobKind = options.instructionDataset ? "VLM training dataset" : "caption batch";
+            const message = formatBackendFetchError(error, `Backend ${jobKind} job failed to start.`);
+            setQwenCaptionStatus(`${jobKind} failed to start`);
+            setQwenCaptionBackendJobStatus(message);
+            setSamStatus(`${jobKind} failed to start: ${message}`, {
+                variant: "error",
+                duration: 7000,
+            });
+            return;
+        }
         if (!started) {
-            setQwenCaptionStatus("Batch not started");
-            setQwenCaptionBackendJobStatus("Isolated backend caption job did not start.");
-            setSamStatus("Caption batch could not start an isolated backend job.", {
+            const jobKind = options.instructionDataset ? "VLM training dataset" : "caption batch";
+            setQwenCaptionStatus(`${jobKind} not started`);
+            setQwenCaptionBackendJobStatus(`Isolated backend ${jobKind} job did not start.`);
+            setSamStatus(`${jobKind} could not start an isolated backend job.`, {
                 variant: "error",
                 duration: 5000,
             });

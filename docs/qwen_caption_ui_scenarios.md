@@ -33,7 +33,10 @@ certification payload apply to the backend batch job.
 
 The user clicks **Caption all images** with set-and-forget enabled. The backend
 requires a selected caption dataset, keeps jobs resumable, and reports backend
-crash-supervision readiness before the user walks away.
+crash-supervision readiness before the user walks away. If the backend job
+cannot be created, the caption status, backend-job status, and toast must show
+the parsed launch failure instead of leaving the panel at a stale "Starting"
+state or relying on console output.
 
 ## 5. Launch A 10k-Scale Certified Run
 

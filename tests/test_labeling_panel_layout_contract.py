@@ -1105,7 +1105,14 @@ def test_qwen_next_n_caption_prefers_resumable_backend_job():
     batch = js[batch_start:batch_end]
     assert "Backend dataset required" in batch
     assert "batch captioning uses isolated backend jobs so Metal crashes cannot take down" in batch
+    assert "validateCaptionInstructionLaunchSettings(getCaptionInstructionDatasetSettings(true))" in batch
+    assert "Instruction dataset not started" in batch
+    assert "try {" in batch
     assert "runQwenCaptionBackendBatch(imageNames, { ...options, backend: true })" in batch
+    assert "formatBackendFetchError(error" in batch
+    assert "VLM training dataset" in batch
+    assert "failed to start" in batch
+    assert "setQwenCaptionBackendJobStatus(message)" in batch
     assert "invokeQwenCaptionForImage(" not in batch
 
 

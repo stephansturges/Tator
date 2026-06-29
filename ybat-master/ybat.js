@@ -31164,6 +31164,61 @@ async function cancelRfDetrTrainingJobRequest() {
         return raw || "Instruction export failed.";
     }
 
+    function formatCaptionInstructionBundleApiError(message) {
+        const raw = String(message || "").trim();
+        const readyMatch = raw.match(/^instruction_export_not_ready:(.+)$/);
+        if (readyMatch) {
+            const status = readyMatch[1] || "unknown";
+            return `Training bundle export blocked: training readiness is ${status}. Review or regenerate the instruction dataset, or disable Require ready report only for deliberate review-pending diagnostics.`;
+        }
+        if (raw === "instruction_bundle_export_unavailable") {
+            return "Training bundle export is not available from this backend.";
+        }
+        if (raw === "caption_instruction_bundle_no_archive_rows") {
+            return "Training bundle export blocked: no instruction archive rows are available. Create a VLM training dataset first.";
+        }
+        const imageUnavailable = raw.match(/^caption_instruction_bundle_image_unavailable:(.+)$/);
+        if (imageUnavailable) {
+            return `Training bundle export blocked: copied image source is unavailable for ${imageUnavailable[1]}. Refresh the dataset or restore the missing image, then retry.`;
+        }
+        const imageForbidden = raw.match(/^caption_instruction_bundle_image_forbidden:(.+)$/);
+        if (imageForbidden) {
+            return `Training bundle export blocked: image ${imageForbidden[1]} resolves outside the dataset image root. Refresh the dataset manifest before exporting.`;
+        }
+        const missingTrainingImage = raw.match(/^caption_instruction_bundle_training_image_missing:(.+)$/);
+        if (missingTrainingImage) {
+            return `Training bundle export blocked: trainer row image ${missingTrainingImage[1]} was not copied into the bundle. Regenerate the instruction dataset and retry.`;
+        }
+        const invalidTrainingRows = raw.match(/^caption_instruction_bundle_training_rows_invalid:(.+)$/);
+        if (invalidTrainingRows) {
+            return `Training bundle export blocked: bundled trainer rows failed validation (${invalidTrainingRows[1]}).`;
+        }
+        const inconsistentArtifacts = raw.match(/^caption_instruction_bundle_artifacts_inconsistent:(.+)$/);
+        if (inconsistentArtifacts) {
+            return `Training bundle export blocked: bundled trainer, archive, review, and report artifacts are inconsistent (${inconsistentArtifacts[1]}).`;
+        }
+        const manifestInvalid = raw.match(/^caption_instruction_bundle_manifest_invalid:(.+)$/);
+        if (manifestInvalid) {
+            return `Training bundle export blocked: checksum manifest validation failed (${manifestInvalid[1]}).`;
+        }
+        const zipMissing = raw.match(/^caption_instruction_bundle_zip_missing:(.+)$/);
+        if (zipMissing) {
+            return `Training bundle export blocked: ZIP is missing required member ${zipMissing[1]}.`;
+        }
+        const zipCorrupt = raw.match(/^caption_instruction_bundle_zip_corrupt:(.+)$/);
+        if (zipCorrupt) {
+            return `Training bundle export blocked: ZIP integrity check failed at ${zipCorrupt[1]}.`;
+        }
+        if (raw === "caption_instruction_bundle_zip_invalid") {
+            return "Training bundle export blocked: backend produced an invalid ZIP.";
+        }
+        const failed = raw.match(/^caption_instruction_bundle_export_failed:(.+)$/);
+        if (failed) {
+            return `Training bundle export failed: ${failed[1]}.`;
+        }
+        return raw || "Training bundle export failed.";
+    }
+
     async function loadCaptionExportPayload(datasetIdOverride = null, settings = null, options = null) {
         const datasetId = datasetIdOverride || getCaptionDatasetId();
         if (!datasetId) {
@@ -36360,7 +36415,7 @@ async function cancelRfDetrTrainingJobRequest() {
         const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/captions/instruction_bundle?${query}`);
         if (!resp.ok) {
             const detail = await resp.text();
-            throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+            throw new Error(formatCaptionInstructionBundleApiError(parseApiError(detail, `HTTP ${resp.status}`)));
         }
         const blob = await resp.blob();
         if (!blob || !Number.isFinite(Number(blob.size)) || Number(blob.size) <= 0) {

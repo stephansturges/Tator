@@ -382,6 +382,8 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     assert 'saveBlobToDisk(blob, "caption_instruction_report.json")' in js
     assert "/captions/instruction_review" in js
     assert "/captions/instruction_bundle" in js
+    assert "function formatCaptionInstructionBundleApiError" in js
+    assert "formatCaptionInstructionBundleApiError(parseApiError" in js
     assert "async function applyQwenCaptionBackendJobCaptions" not in js
     assert "function applyQwenCaptionBackendJobCaptions" in js
     assert "result.latest_caption" in js
@@ -1422,6 +1424,34 @@ def test_qwen_caption_instruction_export_formats_backend_readiness_failure():
             "assert(message.includes('disable Require ready report only for deliberate review-pending diagnostics'));",
             "assert.strictEqual(formatCaptionInstructionExportApiError('plain backend error'), 'plain backend error');",
             "assert.strictEqual(formatCaptionInstructionExportApiError(''), 'Instruction export failed.');",
+        ]
+    )
+    subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
+
+
+def test_qwen_caption_instruction_bundle_formats_backend_failures():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            _extract_js_function(js, "formatCaptionInstructionBundleApiError"),
+            "const ready = formatCaptionInstructionBundleApiError('instruction_export_not_ready:needs_review');",
+            "assert(ready.includes('Training bundle export blocked'));",
+            "assert(ready.includes('training readiness is needs_review'));",
+            "assert(ready.includes('disable Require ready report only for deliberate review-pending diagnostics'));",
+            "const missingImage = formatCaptionInstructionBundleApiError('caption_instruction_bundle_image_unavailable:train/frame.jpg');",
+            "assert(missingImage.includes('copied image source is unavailable'));",
+            "assert(missingImage.includes('train/frame.jpg'));",
+            "const inconsistent = formatCaptionInstructionBundleApiError('caption_instruction_bundle_artifacts_inconsistent:selected_review_row_count_mismatch');",
+            "assert(inconsistent.includes('artifacts are inconsistent'));",
+            "assert(inconsistent.includes('selected_review_row_count_mismatch'));",
+            "const manifest = formatCaptionInstructionBundleApiError('caption_instruction_bundle_manifest_invalid:manifest_file_sha256_mismatch:images/train/frame.jpg');",
+            "assert(manifest.includes('checksum manifest validation failed'));",
+            "assert(manifest.includes('manifest_file_sha256_mismatch:images/train/frame.jpg'));",
+            "const noRows = formatCaptionInstructionBundleApiError('caption_instruction_bundle_no_archive_rows');",
+            "assert(noRows.includes('Create a VLM training dataset first'));",
+            "assert.strictEqual(formatCaptionInstructionBundleApiError('plain backend error'), 'plain backend error');",
+            "assert.strictEqual(formatCaptionInstructionBundleApiError(''), 'Training bundle export failed.');",
         ]
     )
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)

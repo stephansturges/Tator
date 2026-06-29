@@ -42,28 +42,32 @@ Recommended reading order for a technical review:
    neutral shareable entry point: what changed, why it changed, how to operate
    the workflow, which artifacts matter, what has been validated, and what
    pilot proof is still required.
-2. Read `docs/qwen_caption_training_dataset_external_delivery_report.md` for
+2. Read `docs/qwen_caption_training_dataset_partner_technical_handoff.md` for a
+   complete standalone technical handoff covering what was built, why, how the
+   UI is operated, how artifacts are validated, what runtime failures were
+   hardened, and what pilot proof is still required.
+3. Read `docs/qwen_caption_training_dataset_external_delivery_report.md` for
    the complete delivery report: what was implemented, why each major design
    choice was made, what was hardened, and what remains to be proven before
    training use.
-3. Read `docs/qwen_caption_training_dataset_complete_external_handoff.md` for
+4. Read `docs/qwen_caption_training_dataset_complete_external_handoff.md` for
    the concise complete handoff: what was built, why, how to operate it, what
    is validated, and what still needs pilot proof.
-4. Read `docs/qwen_caption_training_dataset_external_consumer_dossier.md` for
+5. Read `docs/qwen_caption_training_dataset_external_consumer_dossier.md` for
    the complete external-consumer explanation of what was built, why each layer
    exists, how artifacts should be reviewed, and what pilot proof is still
    required.
-5. Read **One-Page Decision Summary** to understand the current readiness claim.
-6. Read **What Was Done And Why** and **Layer-By-Layer Implementation
+6. Read **One-Page Decision Summary** to understand the current readiness claim.
+7. Read **What Was Done And Why** and **Layer-By-Layer Implementation
    Narrative** to understand the design intent.
-7. Read **Requirement Mapping** to verify that the product behavior requested
+8. Read **Requirement Mapping** to verify that the product behavior requested
    by the multi-prompt training-data workflow has an implemented artifact,
    control, or guard.
-8. Read **Artifact Contract** and **How To Inspect A Generated Packet** before
+9. Read **Artifact Contract** and **How To Inspect A Generated Packet** before
    reviewing sample exports.
-9. Run **Reproducible Verification Commands** against the checked-out
+10. Run **Reproducible Verification Commands** against the checked-out
    repository.
-10. Use **Required Pilot Before Training Use** and **Open Decisions For The
+11. Use **Required Pilot Before Training Use** and **Open Decisions For The
    Review Team** to decide whether the implementation is ready to run on a
    real target corpus.
 
@@ -72,6 +76,10 @@ The companion documents are supporting references:
 - `docs/qwen_caption_training_dataset_external_review_readme.md` is the neutral
   external-review entry point that explains what was done, why it was done, how
   an operator runs it, and what pilot proof remains.
+- `docs/qwen_caption_training_dataset_partner_technical_handoff.md` is the
+  complete standalone technical handoff for external reviewers who need one
+  narrative covering implementation, rationale, operation, artifacts,
+  validation, hardening, and remaining pilot proof.
 - `docs/qwen_caption_training_dataset_external_delivery_report.md` is the
   standalone delivery report explaining what was implemented, why the design is
   structured this way, what was hardened, and what remains to be proven.
@@ -130,6 +138,7 @@ fine-tuning smoke validation.
 For external review, provide this file plus the following supporting files:
 
 - `docs/qwen_caption_training_dataset_external_review_readme.md`
+- `docs/qwen_caption_training_dataset_partner_technical_handoff.md`
 - `docs/qwen_caption_training_dataset_external_delivery_report.md`
 - `docs/qwen_caption_training_dataset_complete_external_handoff.md`
 - `docs/qwen_caption_training_dataset_external_consumer_dossier.md`
@@ -1689,7 +1698,8 @@ Additional focused validation recorded in the supporting hardening docs covers:
   `original_image_path`
 - UI contract for **Download training bundle**, including visible button text,
   help text, query construction, shared busy/disabled state, shared failure
-  reporter, and `caption_instruction_training_bundle.zip` save behavior
+  reporter, formatted readiness/packaging/manifest failures, and
+  `caption_instruction_training_bundle.zip` save behavior
 - ordinary caption exports and instruction artifact actions refusing to run
   while a backend caption job id is still active
 - the caption export HTTP route opting into the backend active-job guard and

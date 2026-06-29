@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import hashlib
 import json
 import shutil
 import time
@@ -3627,6 +3629,48 @@ def test_caption_alternate_routes_append_update_export_and_delete(
     strict_export_response = client.get("/datasets/ds/captions/export?require_ready_instruction_export=true")
     assert strict_export_response.status_code == 409
     assert "instruction_export_not_ready:needs_review" in strict_export_response.text
+    strict_bundle_response = client.get("/datasets/ds/captions/instruction_bundle")
+    assert strict_bundle_response.status_code == 409
+    assert "instruction_export_not_ready:needs_review" in strict_bundle_response.text
+    bundle_response = client.get(
+        "/datasets/ds/captions/instruction_bundle?require_ready_instruction_export=false"
+    )
+    assert bundle_response.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(bundle_response.content), "r") as zf:
+        names = set(zf.namelist())
+        assert "caption_instruction_training.jsonl" in names
+        assert "caption_instruction_archive.jsonl" in names
+        assert "caption_instruction_review.jsonl" in names
+        assert "caption_instruction_report.json" in names
+        assert "caption_instruction_bundle_manifest.json" in names
+        assert "labelmap.txt" in names
+        assert "images/train/sub/img.jpg" in names
+        assert "labels/train/sub/img.txt" in names
+        manifest = json.loads(zf.read("caption_instruction_bundle_manifest.json"))
+        assert manifest["format"] == "tator_caption_instruction_bundle_manifest_v1"
+        assert manifest["row_counts"]["training_rows"] == 1
+        assert manifest["row_counts"]["archive_rows"] == instruction_archive["image_count"]
+        assert manifest["row_counts"]["review_rows"] == 1
+        image_asset = next(item for item in manifest["images"] if item["original_image_path"] == "sub/img.jpg")
+        assert image_asset["bundle_image_path"] == "images/train/sub/img.jpg"
+        assert image_asset["sha256"] == hashlib.sha256(zf.read("images/train/sub/img.jpg")).hexdigest()
+        assert zf.read("labels/train/sub/img.txt") == b""
+        training_lines = [
+            json.loads(line)
+            for line in zf.read("caption_instruction_training.jsonl").decode("utf-8").splitlines()
+            if line.strip()
+        ]
+        assert training_lines[0]["image_path"] == "images/train/sub/img.jpg"
+        assert training_lines[0]["metadata"]["original_image_path"] == "sub/img.jpg"
+        assert training_lines[0]["metadata"]["bundle_image_sha256"] == image_asset["sha256"]
+        archive_lines = [
+            json.loads(line)
+            for line in zf.read("caption_instruction_archive.jsonl").decode("utf-8").splitlines()
+            if line.strip()
+        ]
+        archive_sub = next(item for item in archive_lines if item.get("original_image_path") == "sub/img.jpg")
+        assert archive_sub["image_path"] == "images/train/sub/img.jpg"
+        assert archive_sub["export_metadata"]["original_image_path"] == "sub/img.jpg"
     assert all(
         row["format"] == "tator_caption_instruction_review_rows_v1"
         and "review_decision" in row

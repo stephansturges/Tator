@@ -756,6 +756,7 @@
                                             </div>
                                             <div class="qwen-caption-row qwen-caption-actions-row qwen-caption-instruction-actions">
                                                 <button type="button" id="qwenCaptionBuildInstructionDataset" class="training-button secondary">Create VLM training dataset</button>
+                                                <button type="button" id="qwenCaptionDownloadInstructionBundle" class="training-button secondary">Download training bundle</button>
                                                 <button type="button" id="qwenCaptionDownloadInstructionJsonl" class="training-button secondary">Download instruction JSONL</button>
                                                 <button type="button" id="qwenCaptionDownloadInstructionArchive" class="training-button secondary">Download instruction archive</button>
                                                 <button type="button" id="qwenCaptionDownloadInstructionReview" class="training-button secondary">Download review JSONL</button>
@@ -763,7 +764,7 @@
                                                 <input type="file" id="qwenCaptionImportInstructionReviewFile" accept=".jsonl,.json,application/json,application/jsonl" hidden />
                                                 <button type="button" id="qwenCaptionDownloadInstructionReport" class="training-button secondary">Download instruction report</button>
                                             </div>
-                                            <div class="training-help">The training-dataset path writes caption0 plus optional generated QA rows into a separate instruction archive. Generated QA never becomes source annotations, deterministic metadata QA is included only when explicitly enabled, and review JSONL can be exported for audit then imported to apply accepted, rejected, or needs-revision decisions before training. Trainer JSONL download requires a ready instruction report by default; disable that gate only for deliberate review-pending diagnostics.</div>
+                                            <div class="training-help">The training-dataset path writes caption0 plus optional generated QA rows into a separate instruction archive. Generated QA never becomes source annotations, deterministic metadata QA is included only when explicitly enabled, and review JSONL can be exported for audit then imported to apply accepted, rejected, or needs-revision decisions before training. The training bundle is the self-contained handoff: it includes copied image bytes, effective labels, trainer JSONL, archive JSONL, review JSONL, report JSON, and a checksum manifest. Trainer JSONL and bundle downloads require a ready instruction report by default; disable that gate only for deliberate review-pending diagnostics.</div>
                                         </div>
                                     </div>
                                 </div>

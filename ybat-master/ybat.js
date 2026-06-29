@@ -1089,6 +1089,7 @@
         qwenCaptionAnswerFormat: "Choose whether generated QA answers should be natural text or parseable JSON.",
         qwenCaptionRequireReadyInstructionExport: "Require a ready instruction report before downloading trainer JSONL.",
         qwenCaptionBuildInstructionDataset: "Run caption0 plus generated QA creation for all loaded images.",
+        qwenCaptionDownloadInstructionBundle: "Download copied images, effective labels, trainer JSONL, archive JSONL, review JSONL, report JSON, and checksums.",
         qwenCaptionDownloadInstructionJsonl: "Download flattened instruction-training image/question/answer rows.",
         qwenCaptionDownloadInstructionArchive: "Download one per-image instruction archive row per line.",
         qwenCaptionDownloadInstructionReview: "Download candidate-level caption and QA review rows for manual audit before training.",
@@ -2515,6 +2516,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         captionStrictGrounding: null,
         captionRequireReadyInstructionExport: null,
         captionBuildInstructionDataset: null,
+        captionDownloadInstructionBundle: null,
         captionDownloadInstructionJsonl: null,
         captionDownloadInstructionArchive: null,
         captionDownloadInstructionReview: null,
@@ -22003,6 +22005,7 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenElements.captionStrictGrounding = document.getElementById("qwenCaptionStrictGrounding");
         qwenElements.captionRequireReadyInstructionExport = document.getElementById("qwenCaptionRequireReadyInstructionExport");
         qwenElements.captionBuildInstructionDataset = document.getElementById("qwenCaptionBuildInstructionDataset");
+        qwenElements.captionDownloadInstructionBundle = document.getElementById("qwenCaptionDownloadInstructionBundle");
         qwenElements.captionDownloadInstructionJsonl = document.getElementById("qwenCaptionDownloadInstructionJsonl");
         qwenElements.captionDownloadInstructionArchive = document.getElementById("qwenCaptionDownloadInstructionArchive");
         qwenElements.captionDownloadInstructionReview = document.getElementById("qwenCaptionDownloadInstructionReview");
@@ -22845,6 +22848,14 @@ async function cancelRfDetrTrainingJobRequest() {
                 downloadCaptionVlmJsonl().catch((error) => {
                     console.warn("VLM caption JSONL download failed", error);
                     reportCaptionArchiveExportFailure("VLM caption export", error, 4000);
+                });
+            });
+        }
+        if (qwenElements.captionDownloadInstructionBundle) {
+            qwenElements.captionDownloadInstructionBundle.addEventListener("click", () => {
+                downloadCaptionInstructionBundle().catch((error) => {
+                    console.warn("Instruction training bundle download failed", error);
+                    reportCaptionInstructionActionFailure("Training bundle export", error, 6000);
                 });
             });
         }
@@ -25379,6 +25390,9 @@ async function cancelRfDetrTrainingJobRequest() {
             qwenElements.captionDownloadVlmJsonl.disabled = captionExportDisabled;
         }
         const instructionExportDisabled = !hasCaptionDataset || busy;
+        if (qwenElements.captionDownloadInstructionBundle) {
+            qwenElements.captionDownloadInstructionBundle.disabled = instructionExportDisabled;
+        }
         if (qwenElements.captionDownloadInstructionJsonl) {
             qwenElements.captionDownloadInstructionJsonl.disabled = instructionExportDisabled;
         }
@@ -36325,6 +36339,39 @@ async function cancelRfDetrTrainingJobRequest() {
             return `Wait for the active caption or instruction job to finish before ${actionLabel}; the instruction archive is changing.`;
         }
         return "";
+    }
+
+    async function downloadCaptionInstructionBundle() {
+        const datasetId = getCaptionDatasetId();
+        if (!datasetId) {
+            setCaptionExportHealth("Select a caption dataset before exporting the training bundle.", "warn");
+            return;
+        }
+        const busyMessage = captionInstructionArtifactBusyMessage("exporting the training bundle");
+        if (busyMessage) {
+            setCaptionExportHealth(busyMessage, "warn");
+            setSamStatus(busyMessage, { variant: "warn", duration: 5000 });
+            return;
+        }
+        const settings = getCaptionInstructionDatasetSettings(true);
+        const query = captionInstructionExportQuery(settings, {
+            requireReadyInstructionExport: settings.require_ready_instruction_export === true,
+        });
+        const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/captions/instruction_bundle?${query}`);
+        if (!resp.ok) {
+            const detail = await resp.text();
+            throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+        }
+        const blob = await resp.blob();
+        if (!blob || !Number.isFinite(Number(blob.size)) || Number(blob.size) <= 0) {
+            throw new Error("training bundle response was empty");
+        }
+        saveBlobToDisk(blob, "caption_instruction_training_bundle.zip");
+        const readyText = settings.require_ready_instruction_export
+            ? "Ready report gate passed."
+            : "Ready report gate was disabled for this diagnostic bundle.";
+        setCaptionExportHealth(`Training bundle exported with copied images, effective labels, instruction artifacts, and checksum manifest. ${readyText}`, "pass");
+        setSamStatus("Training bundle download started.", { variant: "success", duration: 3500 });
     }
 
     async function downloadCaptionInstructionJsonl() {

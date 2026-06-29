@@ -121,11 +121,9 @@ when explicitly recorded.
    - require a ready report before trainer JSONL export.
 5. Click **Create VLM training dataset**.
 6. Monitor progress or attach/recover after a refresh.
-7. Download the complete artifact set from the same run:
-   - trainer JSONL;
-   - instruction archive JSONL;
-   - review JSONL;
-   - instruction report JSON.
+7. Download the training bundle from the same run. It contains copied images,
+   effective labels, trainer JSONL, instruction archive JSONL, review JSONL,
+   instruction report JSON, `labelmap.txt`, and a checksum manifest.
 8. Review generated-language rows externally.
 9. Import reviewed JSONL decisions.
 10. Re-export trainer JSONL with readiness gates enabled.
@@ -137,18 +135,21 @@ dataset workflow.
 
 ## Artifact Contract
 
-The workflow produces four coordinated artifact families from one run.
+The workflow produces one self-contained training bundle plus four coordinated
+artifact families from one run.
 
 | Artifact | Shape | Purpose |
 | --- | --- | --- |
+| Training bundle ZIP | Images, labels, JSONL/JSON artifacts, and checksum manifest | Preferred handoff and reproducibility package |
 | Trainer JSONL | One flat row per trainable `image_path` / `question` / `answer` | Model-visible training input |
 | Instruction archive JSONL | One construction record per image | Full provenance and audit history |
 | Review JSONL | One candidate-level row per reviewable item | Human acceptance/rejection workflow |
 | Instruction report JSON | One run-level report | Readiness, metrics, consistency, and blocking reasons |
 
 Do not evaluate trainer JSONL alone. The trainer file is the model input, but
-the archive, review file, and report explain whether those model-input rows are
-trustworthy.
+the bundle manifest, archive, review file, and report explain whether those
+model-input rows are trustworthy and whether their copied image bytes match the
+exported checksums.
 
 ## Data Ownership Model
 
@@ -296,8 +297,8 @@ Before using exported rows for fine-tuning, run a small reviewed pilot:
    missing labels, a multi-class image, an image with existing alternate
    captions, and an image with small objects near crop boundaries.
 2. Generate artifacts with set-and-forget enabled.
-3. Download trainer JSONL, archive JSONL, review JSONL, and report JSON from
-   the same run.
+3. Download the training bundle from the same run and verify the manifest image
+   checksums against the copied `images/...` files.
 4. Review generated-language rows for grounding, usefulness, and answer format.
 5. Import reviewed decisions.
 6. Re-export trainer JSONL with ready-report gating enabled.

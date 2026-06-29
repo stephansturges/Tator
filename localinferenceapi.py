@@ -20266,6 +20266,7 @@ CAPTION_INSTRUCTION_SOURCE_ANNOTATIONS_FORMAT = "tator_source_annotations_v1"
 CAPTION_INSTRUCTION_TRAINING_ROWS_FORMAT = "tator_caption_instruction_rows_v1"
 CAPTION_INSTRUCTION_REVIEW_ROWS_FORMAT = "tator_caption_instruction_review_rows_v1"
 CAPTION_INSTRUCTION_ARTIFACT_CONSISTENCY_FORMAT = "tator_caption_instruction_artifact_consistency_v1"
+CAPTION_INSTRUCTION_BUNDLE_MANIFEST_FORMAT = "tator_caption_instruction_bundle_manifest_v1"
 CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ROWS = 200000
 CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ID_CHARS = 512
 CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_PATH_CHARS = 4096
@@ -23181,6 +23182,398 @@ def _raise_if_qwen_caption_dataset_download_busy(dataset_id: str) -> None:
         status_code=HTTP_409_CONFLICT,
         detail=f"dataset_download_busy:{job_id}:{status}",
     )
+
+
+def _caption_instruction_bundle_safe_relpath(value: Any, *, detail: str) -> str:
+    raw = str(value or "").strip().replace("\\", "/")
+    raw = re.sub(r"/+", "/", raw)
+    while raw.startswith("./"):
+        raw = raw[2:]
+    parts = [part for part in raw.split("/") if part and part != "."]
+    if not parts or any(part == ".." for part in parts):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
+    return "/".join(parts)
+
+
+def _caption_instruction_bundle_asset_path(
+    image_path: Any,
+    split: Any,
+    *,
+    root: str,
+) -> str:
+    safe = _caption_instruction_bundle_safe_relpath(
+        image_path,
+        detail="caption_instruction_bundle_image_path_invalid",
+    )
+    split_norm = _annotation_normalise_split(split) if str(split or "").strip() else ""
+    if split_norm and not safe.startswith(f"{split_norm}/"):
+        safe = f"{split_norm}/{safe}"
+    return f"{root}/{safe}"
+
+
+def _caption_instruction_bundle_label_path(image_path: Any, split: Any) -> str:
+    image_asset = _caption_instruction_bundle_asset_path(image_path, split, root="labels")
+    label_path = Path(image_asset)
+    return str(label_path.with_suffix(".txt").as_posix())
+
+
+def _caption_instruction_file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _caption_instruction_bytes_sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _caption_instruction_bundle_rewrite_rows(
+    rows: Sequence[Any],
+    image_assets: Mapping[Tuple[str, str], Mapping[str, Any]],
+    *,
+    row_kind: str,
+) -> List[Dict[str, Any]]:
+    rewritten: List[Dict[str, Any]] = []
+    row_iterable = rows if isinstance(rows, Sequence) and not isinstance(rows, (str, bytes, bytearray)) else []
+    for row in row_iterable:
+        if not isinstance(row, Mapping):
+            continue
+        row_copy: Dict[str, Any] = copy.deepcopy(dict(row))
+        raw_image_path = str(
+            row_copy.get("image_path") or row_copy.get("image_name") or row_copy.get("image") or ""
+        ).strip()
+        metadata = row_copy.get("metadata") if isinstance(row_copy.get("metadata"), Mapping) else {}
+        export_metadata = (
+            row_copy.get("export_metadata") if isinstance(row_copy.get("export_metadata"), Mapping) else {}
+        )
+        split = (
+            row_copy.get("split")
+            or metadata.get("split")
+            or export_metadata.get("split")
+            or ""
+        )
+        image_key = (
+            _annotation_normalise_split(split) if str(split or "").strip() else "",
+            _caption_instruction_normalized_image_path(raw_image_path) or raw_image_path,
+        )
+        asset = image_assets.get(image_key) or image_assets.get(("", image_key[1]))
+        if asset:
+            bundle_path = str(asset.get("bundle_image_path") or "").strip()
+            original_path = str(asset.get("original_image_path") or raw_image_path).strip()
+            row_copy["image_path"] = bundle_path
+            if row_kind == "review":
+                row_copy["image_name"] = bundle_path
+                row_copy["image"] = bundle_path
+                row_copy["original_image_path"] = original_path
+                row_copy["bundle_image_sha256"] = str(asset.get("sha256") or "")
+            elif row_kind == "archive":
+                row_copy["image"] = bundle_path
+                row_copy["image_name"] = bundle_path
+                row_copy["original_image_path"] = original_path
+                row_copy["bundle_image_sha256"] = str(asset.get("sha256") or "")
+                export_copy = dict(export_metadata)
+                export_copy["original_image_path"] = original_path
+                export_copy["bundle_image_path"] = bundle_path
+                export_copy["bundle_image_sha256"] = str(asset.get("sha256") or "")
+                row_copy["export_metadata"] = export_copy
+            else:
+                metadata_copy = dict(metadata)
+                metadata_copy["original_image_path"] = original_path
+                metadata_copy["bundle_image_path"] = bundle_path
+                metadata_copy["bundle_image_sha256"] = str(asset.get("sha256") or "")
+                row_copy["metadata"] = metadata_copy
+        rewritten.append(row_copy)
+    return rewritten
+
+
+def download_caption_instruction_bundle(
+    dataset_id: str,
+    options: Optional[Mapping[str, Any]] = None,
+    export_payload: Optional[Mapping[str, Any]] = None,
+):
+    options_map = dict(options or {})
+    if options_map.get("block_active_caption_jobs"):
+        _raise_if_qwen_caption_export_busy(dataset_id)
+    entry = _resolve_dataset_entry(dataset_id)
+    dataset_root = _dataset_effective_root_from_entry(entry)
+    dataset_root_resolved = dataset_root.resolve(strict=False)
+    manifest = _annotation_manifest_for_entry(entry)
+    export_payload = dict(export_payload or export_captions(dataset_id, options_map))
+    archive_rows = list(export_payload.get("instruction_archive_rows") or [])
+    training_rows = list(export_payload.get("instruction_training_rows") or [])
+    review_rows = list(export_payload.get("instruction_review_rows") or [])
+    report = (
+        dict(export_payload.get("instruction_report"))
+        if isinstance(export_payload.get("instruction_report"), Mapping)
+        else {}
+    )
+    if not archive_rows:
+        raise HTTPException(status_code=HTTP_409_CONFLICT, detail="caption_instruction_bundle_no_archive_rows")
+
+    collect_rows: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for row in _annotation_collect_images(entry):
+        if not isinstance(row, Mapping):
+            continue
+        split = _annotation_normalise_split(row.get("split"))
+        rel = _annotation_normalise_image_relpath(row.get("image_relpath") or row.get("image_name"))
+        key = (split, _caption_instruction_normalized_image_path(rel.as_posix()) or rel.as_posix())
+        collect_rows[key] = dict(row)
+
+    manifest_rows: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for row in manifest.get("images") or []:
+        if not isinstance(row, Mapping):
+            continue
+        split = _annotation_normalise_split(row.get("split"))
+        rel = _annotation_normalise_image_relpath(row.get("image_relpath") or row.get("image_name"))
+        key = (split, _caption_instruction_normalized_image_path(rel.as_posix()) or rel.as_posix())
+        manifest_rows[key] = dict(row)
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="caption_instruction_bundle_"))
+    try:
+        safe_dataset_id = _sanitize_yolo_run_id_impl(str(dataset_id or "")) or "dataset"
+        zip_path = tmp_dir / f"{safe_dataset_id}_caption_instruction_bundle.zip"
+        written_arcnames: Set[str] = set()
+        file_entries: List[Dict[str, Any]] = []
+        image_assets: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        label_assets: List[Dict[str, Any]] = []
+
+        def _record_bytes(arcname: str, data: bytes, *, role: str) -> None:
+            written_arcnames.add(arcname)
+            file_entries.append(
+                {
+                    "path": arcname,
+                    "role": role,
+                    "bytes": len(data),
+                    "sha256": _caption_instruction_bytes_sha256(data),
+                }
+            )
+
+        def _record_file(arcname: str, path: Path, *, role: str) -> None:
+            stat_result = path.stat()
+            written_arcnames.add(arcname)
+            file_entries.append(
+                {
+                    "path": arcname,
+                    "role": role,
+                    "bytes": int(stat_result.st_size),
+                    "sha256": _caption_instruction_file_sha256(path),
+                }
+            )
+
+        for archive_row in archive_rows:
+            if not isinstance(archive_row, Mapping):
+                continue
+            original_image_path = str(archive_row.get("image_path") or "").strip()
+            if not original_image_path:
+                continue
+            split = _annotation_normalise_split(archive_row.get("split"))
+            normalized = _caption_instruction_normalized_image_path(original_image_path) or original_image_path
+            key = (split, normalized)
+            source_row = collect_rows.get(key)
+            manifest_row = manifest_rows.get(key) or {}
+            if source_row is None:
+                continue
+            image_path = Path(str(source_row.get("image_path") or ""))
+            try:
+                image_resolved = image_path.resolve(strict=True)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=HTTP_412_PRECONDITION_FAILED,
+                    detail=f"caption_instruction_bundle_image_unavailable:{original_image_path}",
+                ) from exc
+            if not image_resolved.is_file() or not _path_is_within_root_impl(image_resolved, dataset_root_resolved):
+                raise HTTPException(
+                    status_code=HTTP_412_PRECONDITION_FAILED,
+                    detail=f"caption_instruction_bundle_image_forbidden:{original_image_path}",
+                )
+            bundle_image_path = _caption_instruction_bundle_asset_path(original_image_path, split, root="images")
+            image_digest = _caption_instruction_file_sha256(image_resolved)
+            image_stat = image_resolved.stat()
+            image_asset = {
+                "original_image_path": original_image_path,
+                "split": split,
+                "bundle_image_path": bundle_image_path,
+                "sha256": image_digest,
+                "bytes": int(image_stat.st_size),
+                "width": manifest_row.get("image_width"),
+                "height": manifest_row.get("image_height"),
+            }
+            image_assets[key] = image_asset
+
+            label_payload = _annotation_effective_label_payload(
+                entry,
+                split,
+                _annotation_normalise_image_relpath(source_row.get("image_relpath") or original_image_path),
+            )
+            label_lines = [str(line).strip() for line in (label_payload.get("label_lines") or []) if str(line).strip()]
+            label_text = "\n".join(label_lines) + ("\n" if label_lines else "")
+            label_bytes = label_text.encode("utf-8")
+            label_asset = {
+                "original_image_path": original_image_path,
+                "split": split,
+                "bundle_label_path": _caption_instruction_bundle_label_path(original_image_path, split),
+                "sha256": _caption_instruction_bytes_sha256(label_bytes),
+                "bytes": len(label_bytes),
+                "line_count": len(label_lines),
+                "label_source": str(label_payload.get("label_source") or "").strip(),
+                "label_source_present": bool(label_payload.get("label_source_present")),
+            }
+            label_assets.append(label_asset)
+
+        rewritten_training_rows = _caption_instruction_bundle_rewrite_rows(
+            training_rows,
+            image_assets,
+            row_kind="training",
+        )
+        missing_training_images = [
+            str(row.get("image_path") or "").strip()
+            for row in rewritten_training_rows
+            if isinstance(row, Mapping)
+            and not str((row.get("metadata") or {}).get("bundle_image_path") or "").strip()
+        ]
+        if missing_training_images:
+            raise HTTPException(
+                status_code=HTTP_412_PRECONDITION_FAILED,
+                detail=f"caption_instruction_bundle_training_image_missing:{missing_training_images[0]}",
+            )
+        rewritten_archive_rows = _caption_instruction_bundle_rewrite_rows(
+            archive_rows,
+            image_assets,
+            row_kind="archive",
+        )
+        rewritten_review_rows = _caption_instruction_bundle_rewrite_rows(
+            review_rows,
+            image_assets,
+            row_kind="review",
+        )
+        training_validation = _caption_instruction_validate_training_rows(rewritten_training_rows)
+        if not training_validation.get("ok"):
+            raise HTTPException(
+                status_code=HTTP_412_PRECONDITION_FAILED,
+                detail=f"caption_instruction_bundle_training_rows_invalid:{training_validation.get('errors', ['unknown'])[0]}",
+            )
+        consistency_validation = _caption_instruction_artifact_consistency_validation(
+            training_rows=rewritten_training_rows,
+            archive_rows=rewritten_archive_rows,
+            review_rows=rewritten_review_rows,
+            report=report,
+            archive_image_count=len(rewritten_archive_rows),
+            settings=export_payload.get("instruction_settings"),
+            settings_fingerprint=str(export_payload.get("instruction_settings_fingerprint") or ""),
+        )
+        if not consistency_validation.get("ok"):
+            raise HTTPException(
+                status_code=HTTP_412_PRECONDITION_FAILED,
+                detail=(
+                    "caption_instruction_bundle_artifacts_inconsistent:"
+                    + str((consistency_validation.get("errors") or ["unknown"])[0])
+                ),
+            )
+
+        bundle_manifest = {
+            "format": CAPTION_INSTRUCTION_BUNDLE_MANIFEST_FORMAT,
+            "dataset_id": dataset_id,
+            "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "instruction_settings": dict(export_payload.get("instruction_settings") or {}),
+            "instruction_settings_fingerprint": str(export_payload.get("instruction_settings_fingerprint") or ""),
+            "row_counts": {
+                "training_rows": len(rewritten_training_rows),
+                "archive_rows": len(rewritten_archive_rows),
+                "review_rows": len(rewritten_review_rows),
+                "images": len(image_assets),
+                "labels": len(label_assets),
+            },
+            "artifacts": {
+                "training_jsonl": "caption_instruction_training.jsonl",
+                "archive_jsonl": "caption_instruction_archive.jsonl",
+                "review_jsonl": "caption_instruction_review.jsonl",
+                "report_json": "caption_instruction_report.json",
+            },
+            "images": sorted(image_assets.values(), key=lambda item: str(item.get("bundle_image_path") or "")),
+            "labels": sorted(label_assets, key=lambda item: str(item.get("bundle_label_path") or "")),
+            "files": file_entries,
+        }
+
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for asset in sorted(image_assets.values(), key=lambda item: str(item.get("bundle_image_path") or "")):
+                source_key = (
+                    _annotation_normalise_split(asset.get("split")),
+                    _caption_instruction_normalized_image_path(asset.get("original_image_path"))
+                    or str(asset.get("original_image_path") or ""),
+                )
+                source_row = collect_rows.get(source_key)
+                if source_row is None:
+                    continue
+                image_resolved = Path(str(source_row.get("image_path") or "")).resolve(strict=True)
+                arcname = str(asset.get("bundle_image_path") or "")
+                zf.write(image_resolved, arcname=arcname)
+                _record_file(arcname, image_resolved, role="image")
+            for label_asset in sorted(label_assets, key=lambda item: str(item.get("bundle_label_path") or "")):
+                source_key = (
+                    _annotation_normalise_split(label_asset.get("split")),
+                    _caption_instruction_normalized_image_path(label_asset.get("original_image_path"))
+                    or str(label_asset.get("original_image_path") or ""),
+                )
+                source_row = collect_rows.get(source_key)
+                if source_row is None:
+                    continue
+                label_payload = _annotation_effective_label_payload(
+                    entry,
+                    source_key[0],
+                    _annotation_normalise_image_relpath(
+                        source_row.get("image_relpath") or label_asset.get("original_image_path")
+                    ),
+                )
+                label_lines = [
+                    str(line).strip()
+                    for line in (label_payload.get("label_lines") or [])
+                    if str(line).strip()
+                ]
+                label_text = "\n".join(label_lines) + ("\n" if label_lines else "")
+                label_bytes = label_text.encode("utf-8")
+                arcname = str(label_asset.get("bundle_label_path") or "")
+                zf.writestr(arcname, label_bytes)
+                _record_bytes(arcname, label_bytes, role="label")
+            labelmap_bytes = ("\n".join(str(item).strip() for item in manifest.get("labelmap") or [] if str(item).strip()) + "\n").encode("utf-8")
+            zf.writestr("labelmap.txt", labelmap_bytes)
+            _record_bytes("labelmap.txt", labelmap_bytes, role="labelmap")
+            training_bytes = ("\n".join(json.dumps(row, ensure_ascii=False) for row in rewritten_training_rows) + ("\n" if rewritten_training_rows else "")).encode("utf-8")
+            zf.writestr("caption_instruction_training.jsonl", training_bytes)
+            _record_bytes("caption_instruction_training.jsonl", training_bytes, role="training_rows")
+            archive_bytes = ("\n".join(json.dumps(row, ensure_ascii=False) for row in rewritten_archive_rows) + ("\n" if rewritten_archive_rows else "")).encode("utf-8")
+            zf.writestr("caption_instruction_archive.jsonl", archive_bytes)
+            _record_bytes("caption_instruction_archive.jsonl", archive_bytes, role="archive_rows")
+            review_bytes = ("\n".join(json.dumps(row, ensure_ascii=False) for row in rewritten_review_rows) + ("\n" if rewritten_review_rows else "")).encode("utf-8")
+            zf.writestr("caption_instruction_review.jsonl", review_bytes)
+            _record_bytes("caption_instruction_review.jsonl", review_bytes, role="review_rows")
+            report_bytes = (json.dumps(report, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+            zf.writestr("caption_instruction_report.json", report_bytes)
+            _record_bytes("caption_instruction_report.json", report_bytes, role="report")
+            manifest_bytes = (json.dumps(bundle_manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+            zf.writestr("caption_instruction_bundle_manifest.json", manifest_bytes)
+            written_arcnames.add("caption_instruction_bundle_manifest.json")
+        _validate_created_zip(
+            zip_path,
+            required_names=written_arcnames,
+            detail_prefix="caption_instruction_bundle",
+        )
+        return FileResponse(
+            path=str(zip_path),
+            media_type="application/zip",
+            filename=f"{safe_dataset_id}_caption_instruction_bundle.zip",
+            background=BackgroundTask(shutil.rmtree, tmp_dir, ignore_errors=True),
+        )
+    except HTTPException:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+    except Exception as exc:  # noqa: BLE001
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"caption_instruction_bundle_export_failed:{exc}",
+        ) from exc
 
 
 def _raise_if_qwen_caption_metadata_busy(dataset_id: str) -> None:
@@ -67258,6 +67651,7 @@ app.include_router(
         delete_caption_fn=delete_caption,
         export_captions_fn=export_captions,
         apply_caption_instruction_review_fn=apply_caption_instruction_review,
+        export_caption_instruction_bundle_fn=download_caption_instruction_bundle,
         register_path_fn=register_dataset_path,
         open_path_fn=open_dataset_path,
         save_transient_fn=save_transient_dataset,

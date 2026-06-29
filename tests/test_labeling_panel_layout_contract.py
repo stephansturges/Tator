@@ -304,6 +304,7 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     assert "qwenCaptionRequireReadyInstructionExport" in html
     assert 'id="qwenCaptionRequireReadyInstructionExport" checked' in html
     assert "qwenCaptionBuildInstructionDataset" in html
+    assert "qwenCaptionDownloadInstructionBundle" in html
     assert "qwenCaptionDownloadInstructionJsonl" in html
     assert "qwenCaptionDownloadInstructionArchive" in html
     assert "qwenCaptionDownloadInstructionReview" in html
@@ -311,11 +312,14 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     assert "qwenCaptionImportInstructionReviewFile" in html
     assert "qwenCaptionDownloadInstructionReport" in html
     assert "Create VLM training dataset" in html
+    assert "Download training bundle" in html
     assert "Import reviewed JSONL" in html
     assert "Generated QA never becomes source annotations" in html
     assert "review JSONL can be exported for audit then imported" in html
     assert "deterministic metadata QA is included only when explicitly enabled" in html
-    assert "Trainer JSONL download requires a ready instruction report by default" in html
+    assert "The training bundle is the self-contained handoff" in html
+    assert "copied image bytes, effective labels, trainer JSONL, archive JSONL, review JSONL, report JSON, and a checksum manifest" in html
+    assert "Trainer JSONL and bundle downloads require a ready instruction report by default" in html
     assert "qwenCaptionExportHealth" in html
     assert "qwenCaptionReadinessRun" in html
     assert "qwenCaptionReadinessStatus" in html
@@ -357,6 +361,7 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     assert "backend artifact consistency failed" in js
     assert "instruction_artifact_consistency objects disagree" in js
     assert "does not match report selected row count" in js
+    assert "function downloadCaptionInstructionBundle" in js
     assert "function downloadCaptionInstructionJsonl" in js
     assert "function downloadCaptionInstructionArchive" in js
     assert "function downloadCaptionInstructionReview" in js
@@ -371,10 +376,12 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     assert "captionInstructionReadinessSummary" in js
     assert "require_ready_instruction_export" in js
     assert 'saveBlobToDisk(blob, "caption_instruction_training.jsonl")' in js
+    assert 'saveBlobToDisk(blob, "caption_instruction_training_bundle.zip")' in js
     assert 'saveBlobToDisk(blob, "caption_instruction_archive.jsonl")' in js
     assert 'saveBlobToDisk(blob, "caption_instruction_review.jsonl")' in js
     assert 'saveBlobToDisk(blob, "caption_instruction_report.json")' in js
     assert "/captions/instruction_review" in js
+    assert "/captions/instruction_bundle" in js
     assert "async function applyQwenCaptionBackendJobCaptions" not in js
     assert "function applyQwenCaptionBackendJobCaptions" in js
     assert "result.latest_caption" in js
@@ -546,6 +553,7 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "qwenElements.captionDownloadGroupedJson.disabled = captionExportDisabled" in update_caption_helper
     assert "qwenElements.captionDownloadVlmJsonl.disabled = captionExportDisabled" in update_caption_helper
     assert "const instructionExportDisabled = !hasCaptionDataset || busy;" in update_caption_helper
+    assert "qwenElements.captionDownloadInstructionBundle.disabled = instructionExportDisabled" in update_caption_helper
     assert "qwenElements.captionDownloadInstructionJsonl.disabled = instructionExportDisabled" in update_caption_helper
     assert "qwenElements.captionDownloadInstructionArchive.disabled = instructionExportDisabled" in update_caption_helper
     assert "qwenElements.captionDownloadInstructionReview.disabled = instructionExportDisabled" in update_caption_helper
@@ -609,6 +617,7 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "function captionInstructionArtifactBusyMessage" in js
     assert "the instruction archive is changing" in js
     instruction_artifact_actions = [
+        ("downloadCaptionInstructionBundle", "exporting the training bundle"),
         ("downloadCaptionInstructionJsonl", "exporting instruction trainer JSONL"),
         ("downloadCaptionInstructionArchive", "exporting the instruction archive"),
         ("downloadCaptionInstructionReview", "exporting instruction review rows"),
@@ -661,6 +670,7 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             "  captionDownloadGroupedJson: button(),",
             "  captionDownloadVlmJsonl: button(),",
             "  captionBuildInstructionDataset: button(),",
+            "  captionDownloadInstructionBundle: button(),",
             "  captionDownloadInstructionJsonl: button(),",
             "  captionDownloadInstructionArchive: button(),",
             "  captionDownloadInstructionReview: button(),",
@@ -717,6 +727,7 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             "assert.strictEqual(qwenElements.captionDownloadGroupedJson.disabled, true);",
             "assert.strictEqual(qwenElements.captionDownloadVlmJsonl.disabled, true);",
             "assert.strictEqual(qwenElements.captionBuildInstructionDataset.disabled, true);",
+            "assert.strictEqual(qwenElements.captionDownloadInstructionBundle.disabled, true);",
             "assert.strictEqual(qwenElements.captionDownloadInstructionJsonl.disabled, true);",
             "assert.strictEqual(qwenElements.captionDownloadInstructionArchive.disabled, true);",
             "assert.strictEqual(qwenElements.captionDownloadInstructionReview.disabled, true);",
@@ -761,6 +772,7 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             "assert.strictEqual(qwenElements.captionDownloadGroupedJson.disabled, false);",
             "assert.strictEqual(qwenElements.captionDownloadVlmJsonl.disabled, false);",
             "assert.strictEqual(qwenElements.captionBuildInstructionDataset.disabled, false);",
+            "assert.strictEqual(qwenElements.captionDownloadInstructionBundle.disabled, false);",
             "assert.strictEqual(qwenElements.captionDownloadInstructionJsonl.disabled, false);",
             "assert.strictEqual(qwenElements.captionDownloadInstructionArchive.disabled, false);",
             "assert.strictEqual(qwenElements.captionDownloadInstructionReview.disabled, false);",
@@ -1448,10 +1460,11 @@ def test_qwen_caption_instruction_action_failures_update_export_health_without_d
 
 def test_qwen_caption_instruction_action_listeners_share_failure_reporter():
     js = _js()
-    listener_start = js.index("if (qwenElements.captionDownloadInstructionJsonl)")
+    listener_start = js.index("if (qwenElements.captionDownloadInstructionBundle)")
     listener_end = js.index("renderCaptionAlternatesForCurrentImage();", listener_start)
     listener_block = js[listener_start:listener_end]
     expected_actions = [
+        "Training bundle export",
         "Instruction JSONL export",
         "Instruction archive export",
         "Instruction review export",

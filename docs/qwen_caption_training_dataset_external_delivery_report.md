@@ -120,21 +120,25 @@ Examples include:
 These rows are not VLM-generated. They are code-generated from labels and are
 kept as their own row origin.
 
-### 4. Four Coordinated Artifacts
+### 4. Self-Contained Bundle Plus Coordinated Artifacts
 
-Every complete instruction-dataset run can produce four coordinated artifact
-families:
+Every complete instruction-dataset run can produce one self-contained training
+bundle and four coordinated artifact families:
 
 | Artifact | Purpose |
 | --- | --- |
+| Training bundle ZIP | Copied image bytes, effective labels, trainer JSONL, archive JSONL, review JSONL, report JSON, `labelmap.txt`, and checksum manifest |
 | Trainer JSONL | Flat `image_path` / `question` / `answer` rows consumed by training |
 | Instruction archive JSONL | Per-image construction records with provenance, candidates, selected rows, rejected rows, and consistency metadata |
 | Review JSONL | Candidate-level rows for human review and metadata-only review import |
 | Instruction report JSON | Run-level metrics, validation state, readiness state, and blocking reasons |
 
-Trainer JSONL is the model-visible file, but it is not enough to audit the
-corpus. The archive, review file, and report explain why rows exist, what they
-were derived from, and whether they should be trusted.
+The training bundle is the preferred handoff because its trainer rows point to
+copied `images/...` paths inside the zip and carry original-image path plus
+SHA-256 metadata. Trainer JSONL is the model-visible file, but it is not enough
+to audit the corpus. The archive, review file, report, and manifest explain why
+rows exist, what they were derived from, and whether the referenced pixels are
+the expected bytes.
 
 ### 5. Closed Human Review Loop
 
@@ -408,6 +412,7 @@ Before a generated corpus is used for fine-tuning, run a pilot and record:
 - image count;
 - images with source labels;
 - images with empty or missing labels;
+- training bundle image checksum verification;
 - `caption0` selected and rejected counts;
 - generated QA candidate count;
 - generated QA selected count;

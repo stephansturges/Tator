@@ -462,6 +462,7 @@ def build_datasets_router(
     transient_annotation_session_start_fn: Callable[[str, dict], Any],
     transient_annotation_session_heartbeat_fn: Callable[[str, dict], Any],
     transient_annotation_session_stop_fn: Callable[[str, dict], Any],
+    export_caption_instruction_bundle_fn: Optional[Callable[[str, dict, Any], Any]] = None,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -584,6 +585,36 @@ def build_datasets_router(
                 detail=f"instruction_export_not_ready:{not_ready_reason}",
             )
         return result
+
+    @router.get("/datasets/{dataset_id}/captions/instruction_bundle")
+    def export_caption_instruction_bundle(
+        dataset_id: str,
+        include_caption0_in_training: bool = Query(True),
+        include_generated_qa_in_training: bool = Query(True),
+        include_deterministic_metadata_qa: bool = Query(False),
+        qa_mix: str = Query("balanced"),
+        answer_format: str = Query("natural"),
+        require_ready_instruction_export: bool = Query(True),
+    ):
+        if export_caption_instruction_bundle_fn is None:
+            raise HTTPException(status_code=404, detail="instruction_bundle_export_unavailable")
+        options = {
+            "include_caption0_in_training": include_caption0_in_training,
+            "include_generated_qa_in_training": include_generated_qa_in_training,
+            "include_deterministic_metadata_qa": include_deterministic_metadata_qa,
+            "qa_mix": qa_mix,
+            "answer_format": answer_format,
+            "block_active_caption_jobs": True,
+            "require_ready_instruction_export": require_ready_instruction_export,
+        }
+        result = export_captions_fn(dataset_id, options)
+        not_ready_reason = _instruction_export_not_ready_reason(result)
+        if require_ready_instruction_export and not_ready_reason:
+            raise HTTPException(
+                status_code=409,
+                detail=f"instruction_export_not_ready:{not_ready_reason}",
+            )
+        return export_caption_instruction_bundle_fn(dataset_id, options, result)
 
     @router.post("/datasets/{dataset_id}/captions/instruction_review")
     def apply_caption_instruction_review(dataset_id: str, payload: Any = Body(...)):  # noqa: B008

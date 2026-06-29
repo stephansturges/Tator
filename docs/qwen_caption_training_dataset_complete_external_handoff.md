@@ -158,6 +158,7 @@ Implemented controls:
 - **Give generator read-only label context**
 - **Strict QA grounding**
 - **Require ready report for trainer JSONL**
+- **Download training bundle**
 - **Download instruction JSONL**
 - **Download instruction archive**
 - **Download review JSONL**
@@ -168,6 +169,13 @@ The UI refuses to launch a training-dataset job if all row families are
 disabled. Generated QA can be configured as archive/review-only, and the
 confirmation text distinguishes those candidates from rows that will be
 flattened into trainer JSONL.
+
+The preferred handoff action is **Download training bundle**. It creates one zip
+containing copied image bytes, effective labels, trainer JSONL, archive JSONL,
+review JSONL, report JSON, `labelmap.txt`, and
+`caption_instruction_bundle_manifest.json`. The bundle rewrites training,
+archive, and review row `image_path` values to the copied `images/...` paths and
+preserves the original relative path and image SHA-256 in row metadata.
 
 ### 2. Added Caption0 Plus Multi-Prompt QA
 
@@ -339,11 +347,11 @@ Important behavior:
   visual QA, but source-grounded count/class/spatial claims cannot be flattened
   unless source annotations support them.
 
-For external sample packets, image payloads should be packaged with the review
-artifacts rather than referenced only by an absolute local path. A review packet
-should include the same images, labels, trainer JSONL, archive JSONL, review
-JSONL, and report JSON from one run so the reviewer can reproduce image-row
-resolution without relying on a mutable local image root.
+For external sample packets, image payloads are packaged with the review
+artifacts instead of referenced only by an absolute local path. The training
+bundle includes the same images, effective labels, trainer JSONL, archive JSONL,
+review JSONL, and report JSON from one run so the reviewer can reproduce
+image-row resolution without relying on a mutable local image root.
 
 ## Runtime Hardening
 
@@ -613,11 +621,11 @@ Required pilot steps:
 
 1. Select a representative dataset slice.
 2. Run **Create VLM training dataset** with set-and-forget enabled.
-3. Package images, labels, trainer JSONL, archive JSONL, review JSONL, report
-   JSON, and progress/run trace summary from the same run.
+3. Download the training bundle, then keep progress/run trace summary from the
+   same run beside it.
 4. Manually review generated-language rows.
 5. Import review decisions.
-6. Re-export trainer JSONL with ready-report enforcement.
+6. Re-export the training bundle or trainer JSONL with ready-report enforcement.
 7. Run trainer-loader validation.
 8. Run a small fine-tuning or loader-plus-batch dry run.
 9. Inspect degraded recovery rate, rejected-row distribution, manual-review

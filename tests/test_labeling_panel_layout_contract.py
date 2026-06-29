@@ -852,6 +852,64 @@ def test_dataset_manager_glossary_save_formats_caption_metadata_busy_error():
     )
 
 
+def test_qwen_caption_text_label_save_formats_caption_mutation_busy_error():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            "const API_ROOT = 'http://backend.test';",
+            "let textLabels = {};",
+            "const annotationSourceState = { dirtyRecordsByKey: new Map() };",
+            "const captionAutoSaveState = { timerId: null, pendingImage: null, lastAttempted: new Map(), lastSaved: new Map() };",
+            "const statusMessages = [];",
+            "const samMessages = [];",
+            "function resolveCaptionPersistenceContext(datasetIdOverride = null) { return { mode: 'dataset', datasetId: datasetIdOverride || 'ds' }; }",
+            "function isAnnotationMutationBlocked() { return false; }",
+            "function isAnnotationDatasetModeActive() { return false; }",
+            "function annotationEditableGuard() { return true; }",
+            "function captureAnnotationDirtyStateForImage() {}",
+            "async function flushAnnotationSnapshot() { return true; }",
+            "function ensureCaptionLabelStoreForDataset() {}",
+            "function storeCaptionRecord() { throw new Error('storeCaptionRecord should not run after failed save'); }",
+            "function setQwenCaptionStatus(message) { statusMessages.push(message); }",
+            "function setSamStatus(message, options) { samMessages.push({ message, options }); }",
+            _extract_js_function(js, "parseApiError"),
+            _extract_js_function(js, "formatBackendFetchError"),
+            "async " + _extract_js_function(js, "persistCaptionLabel"),
+            "async " + _extract_js_function_before(
+                js,
+                "saveCaptionImmediate",
+                "\n    function scheduleCaptionAutosave",
+            ),
+            "global.fetch = async (url, options) => {",
+            "  assert.strictEqual(url, 'http://backend.test/datasets/ds/text_labels/frame.jpg');",
+            "  assert.strictEqual(options.method, 'POST');",
+            "  assert.deepStrictEqual(JSON.parse(options.body), { caption: 'caption text' });",
+            "  return {",
+            "    ok: false,",
+            "    status: 409,",
+            "    statusText: 'Conflict',",
+            "    text: async () => JSON.stringify({ detail: 'caption_mutation_busy:qcap_busy:running' }),",
+            "  };",
+            "};",
+            "await saveCaptionImmediate('frame.jpg', 'caption text', { datasetId: 'ds' });",
+            "assert(statusMessages.some((message) => message.includes('Caption and text-label edits are blocked while caption dataset job qcap_busy is running.')));",
+            "assert(samMessages.some((entry) => entry.message.includes('Caption save failed: Caption and text-label edits are blocked while caption dataset job qcap_busy is running.')));",
+            "assert(!statusMessages.some((message) => message.includes('{\"detail\"')));",
+            "assert(!samMessages.some((entry) => entry.message.includes('caption_mutation_busy:qcap_busy:running')));",
+        ]
+    )
+    subprocess.run(
+        [
+            "node",
+            "-e",
+            f"(async () => {{\n{script}\n}})().catch((error) => {{ console.error(error); process.exit(1); }});",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+    )
+
+
 def test_qwen_caption_instruction_review_import_parser_accepts_reviewer_file_shapes():
     js = _js()
     script = "\n".join(

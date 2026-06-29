@@ -15,7 +15,10 @@ enabled, generated captions append as saved alternate caption records, and
 **Make generated caption primary** is off unless the user deliberately wants a
 new generated variant to replace the selected primary. The selected primary
 caption mirrors to the legacy text-label file. The job runs as a persisted
-backend job with isolated attempts, health gates, and auto-resume status.
+backend job with isolated attempts, health gates, and auto-resume status. If a
+caption/text-label save races an active dataset caption job or annotation lock,
+the caption status and toast show the parsed guard reason and retry guidance
+instead of raw backend JSON or a generic "Save failed" message.
 
 ## 2. Run A Direct Diagnostic Caption
 

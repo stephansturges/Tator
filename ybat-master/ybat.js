@@ -30596,7 +30596,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (!resp.ok) {
             const detail = await resp.text();
-            throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
+            throw new Error(parseApiError(detail, resp.statusText || `HTTP ${resp.status}`));
         }
         const data = await resp.json();
         return String(data?.caption || "").trim();
@@ -30934,7 +30934,7 @@ async function cancelRfDetrTrainingJobRequest() {
         });
         if (!resp.ok) {
             const detail = await resp.text();
-            throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
+            throw new Error(parseApiError(detail, resp.statusText || `HTTP ${resp.status}`));
         }
         return resp.json();
     }
@@ -30968,7 +30968,9 @@ async function cancelRfDetrTrainingJobRequest() {
             );
             setQwenCaptionStatus("Saved");
         } catch (error) {
-            setQwenCaptionStatus("Save failed");
+            const message = formatBackendFetchError(error, "Caption save failed");
+            setQwenCaptionStatus(message);
+            setSamStatus(`Caption save failed: ${message}`, { variant: "error", duration: 5000 });
             console.warn("Caption autosave failed", error);
         }
     }

@@ -488,7 +488,8 @@ Guard responses are also formatted for operators. Caption-job busy details,
 metadata-busy details, active same-dataset job details, and annotation-lock
 details are converted from internal `detail` strings into actionable UI text.
 This prevents guarded failures from appearing as raw JSON in the dataset
-manager, caption panel, or review/import surfaces.
+manager, caption panel, direct caption/text-label save path, or review/import
+surfaces.
 Failed backend caption jobs receive the same treatment when structured failure
 reports are available. Pilot-certification, backend-supervision, and runner
 preflight reports are summarized from their first failed check, so the operator
@@ -1396,7 +1397,7 @@ Additional focused validation recorded in the supporting hardening docs covers:
   reads or writes while a dataset job is active
 - UI error formatting for caption-job busy, metadata-busy, same-dataset active
   job, and annotation-lock guard details, including dataset-manager glossary
-  save failures
+  save failures and direct caption/text-label save failures
 - UI backend-job failure formatting for pilot-certification,
   backend-supervision, and runner-preflight report failures
 - caption dataset job launch rejecting active annotation locks before job

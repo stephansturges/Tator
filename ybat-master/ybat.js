@@ -2451,6 +2451,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         captionLoopRecovery: null,
         captionAttempts: null,
         captionArtifactLogMb: null,
+        captionMaxFailures: null,
         captionMaxFailedCaseRate: null,
         captionMaxQualityFailureRate: null,
         captionMaxRecoveryRate: null,
@@ -3243,6 +3244,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
     const DEFAULT_CAPTION_ARTIFACT_LOG_MB = 1;
     const DEFAULT_CAPTION_BACKEND_ATTEMPTS = 2;
     const DEFAULT_CAPTION_SET_AND_FORGET_ATTEMPTS = 3;
+    const DEFAULT_CAPTION_INSTRUCTION_MAX_FAILURES = 1;
     const DEFAULT_CAPTION_HEALTH_MAX_FAILED_CASE_RATE = 0;
     const DEFAULT_CAPTION_HEALTH_MAX_QUALITY_FAILURE_RATE = 0;
     const DEFAULT_CAPTION_HEALTH_MAX_RECOVERY_RATE = 0.25;
@@ -21937,6 +21939,7 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenElements.captionLoopRecovery = document.getElementById("qwenCaptionLoopRecovery");
         qwenElements.captionAttempts = document.getElementById("qwenCaptionAttempts");
         qwenElements.captionArtifactLogMb = document.getElementById("qwenCaptionArtifactLogMb");
+        qwenElements.captionMaxFailures = document.getElementById("qwenCaptionMaxFailures");
         qwenElements.captionMaxFailedCaseRate = document.getElementById("qwenCaptionMaxFailedCaseRate");
         qwenElements.captionMaxQualityFailureRate = document.getElementById("qwenCaptionMaxQualityFailureRate");
         qwenElements.captionMaxRecoveryRate = document.getElementById("qwenCaptionMaxRecoveryRate");
@@ -22349,6 +22352,7 @@ async function cancelRfDetrTrainingJobRequest() {
             qwenElements.captionPresencePenalty,
             qwenElements.captionAttempts,
             qwenElements.captionArtifactLogMb,
+            qwenElements.captionMaxFailures,
             qwenElements.captionMaxFailedCaseRate,
             qwenElements.captionMaxQualityFailureRate,
             qwenElements.captionMaxRecoveryRate,
@@ -25349,6 +25353,7 @@ async function cancelRfDetrTrainingJobRequest() {
             qwenElements.captionPresencePenalty,
             qwenElements.captionAttempts,
             qwenElements.captionArtifactLogMb,
+            qwenElements.captionMaxFailures,
             qwenElements.captionMaxFailedCaseRate,
             qwenElements.captionMaxQualityFailureRate,
             qwenElements.captionMaxRecoveryRate,
@@ -25595,6 +25600,23 @@ async function cancelRfDetrTrainingJobRequest() {
             return Math.min(Math.max(parsed, 1), 5);
         }
         return setAndForget ? DEFAULT_CAPTION_SET_AND_FORGET_ATTEMPTS : DEFAULT_CAPTION_BACKEND_ATTEMPTS;
+    }
+
+    function getCaptionBackendMaxFailures(setAndForget = false, instructionSettings = null) {
+        const raw = String(qwenElements.captionMaxFailures?.value || "").trim();
+        if (raw) {
+            const parsed = parseInt(raw, 10);
+            if (Number.isFinite(parsed)) {
+                return Math.min(Math.max(parsed, 0), 1000000);
+            }
+        }
+        const settings = instructionSettings && typeof instructionSettings === "object" ? instructionSettings : {};
+        const requestedSubcaptions = Math.max(
+            0,
+            Math.min(Number.parseInt(settings.subcaptions_per_image || "0", 10) || 0, 20),
+        );
+        const generatedQaRequested = !!settings.instruction_dataset && requestedSubcaptions > 0;
+        return setAndForget && generatedQaRequested ? DEFAULT_CAPTION_INSTRUCTION_MAX_FAILURES : 0;
     }
 
     function getCaptionHealthGateSettings() {
@@ -26040,6 +26062,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 loop_recovery_mode: qwenElements.captionLoopRecovery?.value || "safe_retry_fallback",
                 attempts: String(qwenElements.captionAttempts?.value || "").trim() || null,
                 artifact_log_mb: String(qwenElements.captionArtifactLogMb?.value || DEFAULT_CAPTION_ARTIFACT_LOG_MB),
+                max_failures: String(qwenElements.captionMaxFailures?.value || "").trim() || null,
                 max_failed_case_rate: String(
                     qwenElements.captionMaxFailedCaseRate?.value ?? DEFAULT_CAPTION_HEALTH_MAX_FAILED_CASE_RATE,
                 ),
@@ -26231,6 +26254,9 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (qwenElements.captionArtifactLogMb && typeof generation.artifact_log_mb !== "undefined") {
             qwenElements.captionArtifactLogMb.value = String(generation.artifact_log_mb || DEFAULT_CAPTION_ARTIFACT_LOG_MB);
+        }
+        if (qwenElements.captionMaxFailures && typeof generation.max_failures !== "undefined") {
+            qwenElements.captionMaxFailures.value = generation.max_failures ? String(generation.max_failures) : "";
         }
         if (qwenElements.captionMaxFailedCaseRate && typeof generation.max_failed_case_rate !== "undefined") {
             qwenElements.captionMaxFailedCaseRate.value = String(
@@ -31989,6 +32015,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const healthGates = getCaptionHealthGateSettings();
         const pilotCertification = getCaptionPilotCertificationSettings(setAndForget);
+        const instructionSettings = getCaptionInstructionDatasetSettings(!!options.instructionDataset);
         if (options.signal?.aborted) {
             throw makeCaptionAbortError();
         }
@@ -32022,9 +32049,9 @@ async function cancelRfDetrTrainingJobRequest() {
                 attempts: getCaptionBackendAttempts(setAndForget),
                 per_image_timeout_seconds: 900,
                 runner_artifact_log_bytes: getCaptionRunnerArtifactLogBytes(),
-                max_failures: 0,
+                max_failures: getCaptionBackendMaxFailures(setAndForget, instructionSettings),
                 continue_on_quality_failures: false,
-                ...getCaptionInstructionDatasetSettings(!!options.instructionDataset),
+                ...instructionSettings,
                 ...healthGates,
                 ...pilotCertification,
                 run_name: `single_${Date.now()}`,
@@ -32862,7 +32889,7 @@ async function cancelRfDetrTrainingJobRequest() {
                     attempts: getCaptionBackendAttempts(setAndForget),
                     per_image_timeout_seconds: 900,
                     runner_artifact_log_bytes: getCaptionRunnerArtifactLogBytes(),
-                    max_failures: 0,
+                    max_failures: getCaptionBackendMaxFailures(setAndForget, instructionSettings),
                     continue_on_quality_failures: false,
                     ...instructionSettings,
                     ...healthGates,

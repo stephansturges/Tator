@@ -82,6 +82,7 @@ row before training.
   - generated QA rows per image
   - generated QA mix
   - generated answer format
+  - stop-after failed case count for backend jobs
   - include caption0
   - include generated QA
   - include deterministic metadata QA
@@ -96,6 +97,11 @@ row before training.
 - Added instruction launch preflight so the UI refuses an instruction job with
   all trainable row families disabled and makes archive/review-only generated
   QA candidates explicit in the confirmation text.
+- The backend failure-stop control now has an Auto default, enforced in both
+  the UI and request schema: set-and-forget generated-QA training jobs stop
+  after one terminal failed image, while caption-only diagnostics keep
+  processing unless the operator enters a stop count. Entering `0` explicitly
+  means process all cases and rely on the final health gates.
 - Instruction row-family and generated-QA setup controls now disable while a
   caption or instruction job is mutating the caption archive, so mid-run edits
   do not appear to affect the backend job that has already captured its
@@ -166,6 +172,14 @@ row before training.
 - Dataset jobs pass instruction settings to the caption runner.
 - The runner performs an extra image-grounded generated-QA pass only when
   instruction dataset mode is enabled and `subcaptions_per_image > 0`.
+- The worker resolves the case image path before the generated-QA pass and has a
+  regression test for that path. This prevents generated-QA jobs from failing
+  with an undefined image-path variable after a successful caption pass.
+- If generated QA is requested and no valid generated QA pairs are produced, the
+  worker marks the case `instruction_qa_failed` instead of returning an `ok`
+  caption-only result. The parent runner also skips deterministic count/layout
+  recovery for generated-QA instruction jobs, because that fallback cannot
+  create the requested training rows.
 - Generated QA rows are parsed from JSON, structurally validated, deduplicated by
   question within the image, and persisted as instruction records.
 - Generated-QA provenance fields such as answer format, source fields,

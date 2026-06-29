@@ -85,18 +85,21 @@ keep the captioning product path usable without hiding model/runtime failures.
    composes a text-only caption from authoritative counts, class inventory,
    representative spatial layout, and the user request. This is marked in
    `recovery_events`.
-7. If every model-based recovery path loops, fails, or is unavailable, `Safe
-   retry + fallback` can still finish with a deterministic count/layout caption.
-   This is a degraded set-and-forget fallback, not the normal captioning path,
-   and it is recorded as `deterministic_recovery_succeeded`.
-8. The unattended parent runner has one final set-and-forget fallback outside
-   the child process. If all child attempts are exhausted and the case has
-   authoritative object counts, the parent writes a deterministic count/layout
-   caption row with `parent_deterministic_recovery=true`, a
+7. For caption-only jobs, if every model-based recovery path loops, fails, or is
+   unavailable, `Safe retry + fallback` can still finish with a deterministic
+   count/layout caption. This is a degraded set-and-forget fallback, not the
+   normal captioning path, and it is recorded as
+   `deterministic_recovery_succeeded`.
+8. The unattended parent runner has one final caption-only set-and-forget
+   fallback outside the child process. If all child attempts are exhausted and
+   the case has authoritative object counts, the parent writes a deterministic
+   count/layout caption row with `parent_deterministic_recovery=true`, a
    `deterministic_recovery_succeeded` event, and a normal `captions.jsonl`
    record. If no counts are available, the case remains a terminal failed case
    for manual review because the parent has no reliable visual content to
-   summarize.
+   summarize. Generated-QA instruction dataset jobs do not use this fallback:
+   a count/layout caption cannot create the requested generated training rows,
+   so a case with no valid generated QA remains a terminal failed case.
 9. `Off` reports the controlled loop failure after unloading the runtime.
 10. When cooldown is enabled, an exact stage/model/prompt/decode combination that
    already looped skips the risky primary attempt during the cooldown window and

@@ -549,7 +549,7 @@
                                                     </select>
                                                 </div>
                                                 <div class="qwen-caption-settings__field">
-                                                    <label for="qwenCaptionAttempts">VLM attempts<span class="help-icon" title="Number of isolated child attempts before count/layout deterministic fallback. Leave blank for Auto: set-and-forget uses 3 attempts, while manual diagnostics use 2. Enter 1-5 to override.">?</span></label>
+                                                    <label for="qwenCaptionAttempts">VLM attempts<span class="help-icon" title="Number of isolated child attempts before a case is failed or, for caption-only jobs with labels, recovered by count/layout fallback. Leave blank for Auto: set-and-forget uses 3 attempts, while manual diagnostics use 2. Enter 1-5 to override.">?</span></label>
                                                     <input type="number" id="qwenCaptionAttempts" min="1" max="5" step="1" placeholder="Auto (set-and-forget 3)" />
                                                 </div>
                                                 <div class="qwen-caption-settings__field">
@@ -559,6 +559,10 @@
                                                 <div class="qwen-caption-settings__field">
                                                     <label for="qwenCaptionMaxFailedCaseRate">Max failed case rate<span class="help-icon" title="Set-and-forget health gate. Completed backend runs above this failed-case rate are marked unhealthy and can auto-resume. Use -1 to disable this gate.">?</span></label>
                                                     <input type="number" id="qwenCaptionMaxFailedCaseRate" min="-1" max="1" step="0.01" value="0" />
+                                                </div>
+                                                <div class="qwen-caption-settings__field">
+                                                    <label for="qwenCaptionMaxFailures">Stop after failed cases<span class="help-icon" title="Backend runner stop gate. Leave blank for Auto: generated-QA training jobs stop after 1 terminal failed image, while caption-only diagnostics keep going. Enter 0 to process all cases and rely on final health gates.">?</span></label>
+                                                    <input type="number" id="qwenCaptionMaxFailures" min="0" max="1000000" step="1" placeholder="Auto (training 1)" />
                                                 </div>
                                                 <div class="qwen-caption-settings__field">
                                                     <label for="qwenCaptionMaxQualityFailureRate">Max quality warning rate<span class="help-icon" title="Set-and-forget health gate for captions with guard quality warnings. Use -1 to disable this gate.">?</span></label>
@@ -573,7 +577,7 @@
                                                     <input type="number" id="qwenCaptionMaxLoopRecoveryRate" min="-1" max="1" step="0.01" value="0.05" />
                                                 </div>
                                                 <div class="qwen-caption-settings__field">
-                                                    <label for="qwenCaptionMaxDeterministicRecoveryRate">Max deterministic fallback rate<span class="help-icon" title="Set-and-forget health gate for generic count/layout captions written only after model attempts are exhausted. Default 0.01 allows rare degraded completion while keeping the run auditable; use 0 to require none, or -1 to disable.">?</span></label>
+                                                    <label for="qwenCaptionMaxDeterministicRecoveryRate">Max deterministic fallback rate<span class="help-icon" title="Set-and-forget health gate for generic count/layout captions written only after caption-only model attempts are exhausted. Generated-QA training jobs do not use this fallback because it cannot create QA rows. Default 0.01 allows rare degraded caption completion while keeping the run auditable; use 0 to require none, or -1 to disable.">?</span></label>
                                                     <input type="number" id="qwenCaptionMaxDeterministicRecoveryRate" min="-1" max="1" step="0.01" value="0.01" />
                                                 </div>
                                                 <div class="qwen-caption-settings__field">

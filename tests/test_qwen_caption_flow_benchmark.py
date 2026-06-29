@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from types import SimpleNamespace
 from pathlib import Path
@@ -48,6 +49,13 @@ def _parent_args(dataset: Path, output_dir: Path, **overrides):
         "artifact_lock_poll_seconds": 0.01,
         "max_artifact_log_bytes": bench.DEFAULT_ARTIFACT_LOG_BYTES,
         "summary_row_limit": bench.DEFAULT_SUMMARY_ROW_LIMIT,
+        "instruction_dataset": False,
+        "subcaptions_per_image": 0,
+        "instruction_max_new_tokens": None,
+        "include_source_annotations_in_generator_context": True,
+        "strict_grounding": True,
+        "qa_mix": "balanced",
+        "answer_format": "natural",
         "model_id": "model",
         "refinement_model_id": "same",
         "fallback_model_id": "auto",
@@ -1445,6 +1453,215 @@ def test_parent_recovers_exhausted_attempts_with_deterministic_count_caption(
     heartbeat = json.loads((output_dir / "heartbeat.json").read_text())
     assert heartbeat["status"] == "completed"
     assert heartbeat["failed_cases"] == 0
+
+
+def test_parent_does_not_recover_generated_qa_training_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    dataset = tmp_path / "dataset"
+    (dataset / "labelmap.txt").parent.mkdir(parents=True, exist_ok=True)
+    (dataset / "labelmap.txt").write_text("Building\n")
+    _write_image(dataset / "images" / "frame.jpg")
+    label_dir = dataset / "labels"
+    label_dir.mkdir(parents=True, exist_ok=True)
+    (label_dir / "frame.txt").write_text("0 0.5 0.5 0.25 0.25\n")
+    output_dir = tmp_path / "run"
+
+    def fake_run(cmd, **_kwargs):
+        attempt_dir = Path(cmd[cmd.index("--output-dir") + 1])
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        result = {
+            "status": "instruction_qa_failed",
+            "exception": {
+                "type": "InstructionQaGenerationError",
+                "message": "generated QA was requested, but no valid generated QA pairs were produced",
+            },
+            "response": {
+                "caption": "The image shows one building.",
+                "used_counts": {"Building": 1},
+                "generated_qa_pair_count": 0,
+            },
+            "caption_quality": {},
+        }
+        (attempt_dir / "result.json").write_text(json.dumps(result))
+        return SimpleNamespace(returncode=1, stdout="failure stdout", stderr="failure stderr")
+
+    monkeypatch.setattr(bench.subprocess, "run", fake_run)
+
+    args = _parent_args(
+        dataset,
+        output_dir,
+        attempts=1,
+        instruction_dataset=True,
+        subcaptions_per_image=8,
+        max_failures=1,
+    )
+    assert bench.run_parent(args) == 1
+
+    rows = [
+        json.loads(line)
+        for line in (output_dir / "results.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert [row["final_status"] for row in rows] == ["failed_attempt", "failed"]
+    terminal = rows[-1]
+    assert terminal["terminal_failure"] is True
+    assert terminal["status"] == "instruction_qa_failed"
+    assert terminal["parent_deterministic_recovery_skipped"]["reason"] == "generated_qa_required"
+    assert "parent_deterministic_recovery" not in terminal
+    summary = json.loads((output_dir / "summary.json").read_text())
+    assert summary["totals"] == {"failed": 1}
+    heartbeat = json.loads((output_dir / "heartbeat.json").read_text())
+    assert heartbeat["status"] == "failed"
+    assert heartbeat["failed_cases"] == 1
+
+
+def test_worker_generates_instruction_qa_pairs_without_image_path_name_error(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    dataset = tmp_path / "dataset"
+    (dataset / "labelmap.txt").parent.mkdir(parents=True, exist_ok=True)
+    (dataset / "labelmap.txt").write_text("Building\n")
+    image_path = dataset / "images" / "frame.jpg"
+    _write_image(image_path)
+    label_dir = dataset / "labels"
+    label_dir.mkdir(parents=True, exist_ok=True)
+    label_path = label_dir / "frame.txt"
+    label_path.write_text("0 0.5 0.5 0.25 0.25\n")
+    case = {
+        "case_id": "image:frame:full",
+        "case": "frame",
+        "stem": "frame",
+        "name": "frame",
+        "image_name": "frame.jpg",
+        "image_path": str(image_path),
+        "label_path": str(label_path),
+        "caption_mode": "full",
+        "label_count": 1,
+        "class_counts": {"Building": 1},
+    }
+    case_path = tmp_path / "case.json"
+    case_path.write_text(json.dumps(case))
+    output_dir = tmp_path / "attempt"
+    qa_images: list[tuple[int, int]] = []
+
+    def fake_run_qwen_inference(*_args, **_kwargs):
+        pil_img = _args[1]
+        qa_images.append(tuple(pil_img.size))
+        return (
+            json.dumps(
+                {
+                    "qa_pairs": [
+                        {
+                            "question": "How many buildings are present?",
+                            "answer": "1 building is present.",
+                        },
+                        {
+                            "question": "What is the main visible object?",
+                            "answer": "The main visible object is a building.",
+                        },
+                    ]
+                }
+            ),
+            pil_img.size[0],
+            pil_img.size[1],
+        )
+
+    fake_api = SimpleNamespace(
+        qwen_caption_prompt_preview=lambda _request: {"full_text": "preview"},
+        qwen_caption=lambda _request: {
+            "caption": "The image shows one building.",
+            "used_counts": {"Building": 1},
+            "used_boxes": 1,
+            "truncated": False,
+        },
+        qwen_progress=lambda: {},
+        _run_qwen_inference=fake_run_qwen_inference,
+    )
+    monkeypatch.setitem(sys.modules, "localinferenceapi", fake_api)
+
+    args = _parent_args(
+        dataset,
+        output_dir,
+        instruction_dataset=True,
+        subcaptions_per_image=2,
+        instruction_max_new_tokens=512,
+    )
+    assert bench.run_worker(case_path, output_dir, dataset, args) == 0
+
+    result = json.loads((output_dir / "result.json").read_text())
+    assert result["status"] == "ok"
+    assert qa_images == [(32, 24)]
+    assert result["instruction_qa"]["status"] == "ok"
+    assert result["response"]["generated_qa_pair_count"] == 2
+    assert [pair["row_type"] for pair in result["response"]["generated_qa_pairs"]] == [
+        "generated_qa",
+        "generated_qa",
+    ]
+
+
+def test_worker_fails_generated_qa_training_case_when_pairs_are_empty(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    dataset = tmp_path / "dataset"
+    (dataset / "labelmap.txt").parent.mkdir(parents=True, exist_ok=True)
+    (dataset / "labelmap.txt").write_text("Building\n")
+    image_path = dataset / "images" / "frame.jpg"
+    _write_image(image_path)
+    label_dir = dataset / "labels"
+    label_dir.mkdir(parents=True, exist_ok=True)
+    label_path = label_dir / "frame.txt"
+    label_path.write_text("0 0.5 0.5 0.25 0.25\n")
+    case = {
+        "case_id": "image:frame:full",
+        "case": "frame",
+        "stem": "frame",
+        "name": "frame",
+        "image_name": "frame.jpg",
+        "image_path": str(image_path),
+        "label_path": str(label_path),
+        "caption_mode": "full",
+        "label_count": 1,
+        "class_counts": {"Building": 1},
+    }
+    case_path = tmp_path / "case.json"
+    case_path.write_text(json.dumps(case))
+    output_dir = tmp_path / "attempt"
+
+    fake_api = SimpleNamespace(
+        qwen_caption_prompt_preview=lambda _request: {"full_text": "preview"},
+        qwen_caption=lambda _request: {
+            "caption": "The image shows one building.",
+            "used_counts": {"Building": 1},
+            "used_boxes": 1,
+            "truncated": False,
+        },
+        qwen_progress=lambda: {},
+        _run_qwen_inference=lambda *_args, **_kwargs: (
+            json.dumps({"qa_pairs": []}),
+            32,
+            24,
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "localinferenceapi", fake_api)
+
+    args = _parent_args(
+        dataset,
+        output_dir,
+        instruction_dataset=True,
+        subcaptions_per_image=2,
+        instruction_max_new_tokens=512,
+    )
+    assert bench.run_worker(case_path, output_dir, dataset, args) == 1
+
+    result = json.loads((output_dir / "result.json").read_text())
+    assert result["status"] == "instruction_qa_failed"
+    assert result["instruction_qa"]["status"] == "empty"
+    assert result["response"]["generated_qa_pair_count"] == 0
+    assert result["exception"]["type"] == "InstructionQaGenerationError"
 
 
 def test_parent_honors_restart_request_between_cases(monkeypatch, tmp_path: Path) -> None:

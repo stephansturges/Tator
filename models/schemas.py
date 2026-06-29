@@ -14,6 +14,7 @@ QWEN_CAPTION_SET_AND_FORGET_MAX_LOOP_RECOVERY_RATE = 0.05
 QWEN_CAPTION_SET_AND_FORGET_MAX_DETERMINISTIC_RECOVERY_RATE = 0.01
 QWEN_CAPTION_SET_AND_FORGET_MAX_SIGNAL_EXIT_ATTEMPT_RATE = 0.05
 QWEN_CAPTION_SET_AND_FORGET_ATTEMPTS = 3
+QWEN_CAPTION_SET_AND_FORGET_INSTRUCTION_MAX_FAILURES = 1
 QWEN_CAPTION_DEFAULT_PILOT_MIN_CASES = 300
 QWEN_CAPTION_DEFAULT_PILOT_DETERMINISTIC_RECOVERY_CONFIDENCE = 0.95
 
@@ -766,6 +767,27 @@ class QwenCaptionDatasetJobRequest(BaseModel):
         )
         if set_and_forget_requested and not attempts_was_provided:
             data["attempts"] = QWEN_CAPTION_SET_AND_FORGET_ATTEMPTS
+        max_failures_was_provided = (
+            "max_failures" in data
+            and data.get("max_failures") is not None
+            and str(data.get("max_failures")).strip() != ""
+        )
+        instruction_dataset_raw = data.get("instruction_dataset")
+        instruction_dataset_requested = (
+            instruction_dataset_raw is True
+            or str(instruction_dataset_raw or "").strip().lower() in {"1", "true", "yes", "on"}
+        )
+        try:
+            requested_subcaptions = int(data.get("subcaptions_per_image") or 0)
+        except (TypeError, ValueError, OverflowError):
+            requested_subcaptions = 0
+        if (
+            set_and_forget_requested
+            and instruction_dataset_requested
+            and requested_subcaptions > 0
+            and not max_failures_was_provided
+        ):
+            data["max_failures"] = QWEN_CAPTION_SET_AND_FORGET_INSTRUCTION_MAX_FAILURES
         data["dataset_id"] = str(data.get("dataset_id") or "").strip()
         data["annotation_session_id"] = str(data.get("annotation_session_id") or "").strip() or None
         raw_request = data.get("caption_request")

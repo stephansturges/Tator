@@ -112,6 +112,35 @@ def test_caption_dataset_job_request_normalizes_set_and_forget_controls() -> Non
     assert payload.pilot_deterministic_recovery_confidence == 0.999999
 
 
+def test_caption_dataset_job_request_defaults_generated_qa_set_and_forget_to_fail_fast() -> None:
+    payload = QwenCaptionDatasetJobRequest(
+        dataset_id="ds",
+        caption_request={"user_prompt": "Describe it"},
+        set_and_forget=True,
+        instruction_dataset=True,
+        subcaptions_per_image=8,
+    )
+    explicit_keep_going = QwenCaptionDatasetJobRequest(
+        dataset_id="ds",
+        caption_request={"user_prompt": "Describe it"},
+        set_and_forget=True,
+        instruction_dataset=True,
+        subcaptions_per_image=8,
+        max_failures=0,
+    )
+    caption_only = QwenCaptionDatasetJobRequest(
+        dataset_id="ds",
+        caption_request={"user_prompt": "Describe it"},
+        set_and_forget=True,
+        instruction_dataset=False,
+        subcaptions_per_image=8,
+    )
+
+    assert payload.max_failures == 1
+    assert explicit_keep_going.max_failures == 0
+    assert caption_only.max_failures == 0
+
+
 def test_caption_dataset_job_request_uses_set_and_forget_loop_recovery_default() -> None:
     payload = QwenCaptionDatasetJobRequest(
         dataset_id="ds",

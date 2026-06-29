@@ -2149,6 +2149,7 @@ def generate_instruction_qa_pairs(
 def run_worker(case_path: Path, output_dir: Path, dataset_root: Path, args: argparse.Namespace) -> int:
     case = json.loads(case_path.read_text())
     payload_data = case_payload(case, dataset_root, args)
+    image_path = Path(str(case.get("image_path") or ""))
     output_dir.mkdir(parents=True, exist_ok=True)
     artifact_log_bytes = normalize_artifact_log_bytes(
         getattr(args, "max_artifact_log_bytes", DEFAULT_ARTIFACT_LOG_BYTES)
@@ -2193,7 +2194,8 @@ def run_worker(case_path: Path, output_dir: Path, dataset_root: Path, args: argp
             response = api.qwen_caption(request)
             response_data = response.dict() if hasattr(response, "dict") else dict(response)
             caption_text = str(response_data.get("caption") or "").strip()
-            if bool(getattr(args, "instruction_dataset", False)) and int(getattr(args, "subcaptions_per_image", 0) or 0) > 0:
+            requested_subcaptions = int(getattr(args, "subcaptions_per_image", 0) or 0)
+            if bool(getattr(args, "instruction_dataset", False)) and requested_subcaptions > 0:
                 instruction_qa = generate_instruction_qa_pairs(
                     api,
                     case,
@@ -2209,6 +2211,25 @@ def run_worker(case_path: Path, output_dir: Path, dataset_root: Path, args: argp
                 caption_text,
                 {str(k): int(v) for k, v in response_data.get("used_counts", {}).items()},
             )
+            if (
+                bool(getattr(args, "instruction_dataset", False))
+                and requested_subcaptions > 0
+                and int(response_data.get("generated_qa_pair_count") or 0) <= 0
+            ):
+                instruction_status = (
+                    result.get("instruction_qa", {}).get("status")
+                    if isinstance(result.get("instruction_qa"), Mapping)
+                    else "missing"
+                )
+                result["status"] = "instruction_qa_failed"
+                result["exception"] = {
+                    "type": "InstructionQaGenerationError",
+                    "message": (
+                        "generated QA was requested, but no valid generated QA pairs "
+                        f"were produced; status={instruction_status}"
+                    ),
+                }
+                return 1
             result["status"] = "ok"
     except BaseException as exc:  # noqa: BLE001
         result["status"] = "exception"
@@ -2733,8 +2754,33 @@ def _run_parent_locked(args: argparse.Namespace, runner_lock: ArtifactRunnerLock
         if final_row is None:
             continue
         if final_row.get("final_status") != "ok":
-            deterministic_recovery = parent_deterministic_recovery_caption(case)
-            if deterministic_recovery is not None:
+            allow_parent_deterministic_recovery = not (
+                bool(getattr(args, "instruction_dataset", False))
+                and int(getattr(args, "subcaptions_per_image", 0) or 0) > 0
+            )
+            deterministic_recovery = (
+                parent_deterministic_recovery_caption(case)
+                if allow_parent_deterministic_recovery
+                else None
+            )
+            if deterministic_recovery is None:
+                final_row = dict(final_row)
+                final_row["final_status"] = "failed"
+                final_row["terminal_failure"] = True
+                if not allow_parent_deterministic_recovery:
+                    final_row["parent_deterministic_recovery_skipped"] = {
+                        "reason": "generated_qa_required",
+                        "detail": (
+                            "Parent deterministic count/layout recovery cannot satisfy "
+                            "a generated-QA instruction dataset case."
+                        ),
+                    }
+                append_jsonl(results_jsonl, final_row)
+                print(json.dumps(final_row, sort_keys=True), flush=True)
+                failed_cases += 1
+                if args.max_failures:
+                    exit_code = 1
+            else:
                 caption, recovered_counts = deterministic_recovery
                 recovery_event = {
                     "action": "deterministic_recovery_succeeded",
@@ -2801,15 +2847,6 @@ def _run_parent_locked(args: argparse.Namespace, runner_lock: ArtifactRunnerLock
                     failed_cases += 1
                     if args.max_failures:
                         exit_code = 1
-            else:
-                final_row = dict(final_row)
-                final_row["final_status"] = "failed"
-                final_row["terminal_failure"] = True
-                append_jsonl(results_jsonl, final_row)
-                print(json.dumps(final_row, sort_keys=True), flush=True)
-                failed_cases += 1
-                if args.max_failures:
-                    exit_code = 1
         summary.append(final_row)
         write_summary(output_root, summary, row_limit=summary_row_limit)
         emit_heartbeat(

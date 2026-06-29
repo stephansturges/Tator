@@ -1926,6 +1926,29 @@ def test_qwen_caption_instruction_launch_settings_block_empty_training_family():
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
 
 
+def test_qwen_caption_generated_qa_backend_failures_stop_by_default():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            "const DEFAULT_CAPTION_INSTRUCTION_MAX_FAILURES = 1;",
+            "let qwenElements = { captionMaxFailures: { value: '' } };",
+            _extract_js_function(js, "getCaptionBackendMaxFailures"),
+            "assert.strictEqual(getCaptionBackendMaxFailures(true, { instruction_dataset: true, subcaptions_per_image: 8 }), 1);",
+            "assert.strictEqual(getCaptionBackendMaxFailures(false, { instruction_dataset: true, subcaptions_per_image: 8 }), 0);",
+            "assert.strictEqual(getCaptionBackendMaxFailures(true, { instruction_dataset: true, subcaptions_per_image: 0 }), 0);",
+            "assert.strictEqual(getCaptionBackendMaxFailures(true, { instruction_dataset: false, subcaptions_per_image: 8 }), 0);",
+            "qwenElements.captionMaxFailures.value = '3';",
+            "assert.strictEqual(getCaptionBackendMaxFailures(true, { instruction_dataset: true, subcaptions_per_image: 8 }), 3);",
+            "qwenElements.captionMaxFailures.value = '0';",
+            "assert.strictEqual(getCaptionBackendMaxFailures(true, { instruction_dataset: true, subcaptions_per_image: 8 }), 0);",
+            "qwenElements.captionMaxFailures.value = '10000000';",
+            "assert.strictEqual(getCaptionBackendMaxFailures(true, { instruction_dataset: true, subcaptions_per_image: 8 }), 1000000);",
+        ]
+    )
+    subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
+
+
 def test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports():
     js = _js()
     script = "\n".join(
@@ -3494,7 +3517,7 @@ def test_qwen_caption_ui_scenarios_document_set_and_forget_workflows():
     assert "await refreshQwenCaptionBackendJobsStatus({ silent: true })" in js
 
 
-def test_qwen_caption_backend_batch_explicitly_keeps_going_after_failures():
+def test_qwen_caption_backend_batch_uses_visible_failure_stop_gate():
     html = _html()
     js = _js()
 
@@ -3508,8 +3531,8 @@ def test_qwen_caption_backend_batch_explicitly_keeps_going_after_failures():
     finish_end = js.index("async function monitorQwenCaptionBackendJob", finish_start)
     finish_helper = js[finish_start:finish_end]
 
-    assert "max_failures: 0" in single_helper
-    assert "max_failures: 0" in batch_helper
+    assert "max_failures: getCaptionBackendMaxFailures(setAndForget, instructionSettings)" in single_helper
+    assert "max_failures: getCaptionBackendMaxFailures(setAndForget, instructionSettings)" in batch_helper
     assert "Backend batch complete • ${finalFailed} failed" in finish_helper
     assert "Backend caption batch complete with ${finalFailed} failed image" in finish_helper
     assert "qwenCaptionSetAndForget" in html
@@ -3523,6 +3546,9 @@ def test_qwen_caption_backend_batch_explicitly_keeps_going_after_failures():
     assert "Attempt log cap (MB)" in html
     assert "qwenCaptionMaxRecoveryRate" in html
     assert "Max recovery rate" in html
+    assert "qwenCaptionMaxFailures" in html
+    assert "Stop after failed cases" in html
+    assert "Generated-QA training jobs do not use this fallback" in html
     assert "qwenCaptionMaxLoopRecoveryRate" in html
     assert "Max loop recovery rate" in html
     assert "qwenCaptionMaxDeterministicRecoveryRate" in html

@@ -141,7 +141,10 @@ While a caption or instruction job is mutating the caption archive, the
 instruction row-family and generated-QA setup controls are disabled so the UI
 does not imply that mid-run edits will change the active backend job. They
 re-enable after the archive is stable and apply to the next launch/export
-cycle.
+cycle. Caption image, caption batch, caption-all, and training-dataset launch
+paths also repeat the same archive-idle check at action time, so stale buttons
+or scripted clicks do not start a second caption job while the first job is
+still mutating the archive.
 
 **Download instruction JSONL** exports normal `image_path` / `question` /
 `answer` rows. The trainer imports this flat shape directly and normalizes each

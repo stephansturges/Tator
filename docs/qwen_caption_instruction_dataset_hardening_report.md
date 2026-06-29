@@ -100,6 +100,10 @@ row before training.
   caption or instruction job is mutating the caption archive, so mid-run edits
   do not appear to affect the backend job that has already captured its
   settings.
+- Caption image, caption batch, caption-all, and training-dataset launch paths
+  now repeat the archive-idle guard at action time. Disabled buttons are
+  therefore backed by runtime checks, and stale or scripted clicks cannot start
+  overlapping caption jobs from the browser while the archive is changing.
 - Fixed caption action layout so export and instruction buttons wrap into
   readable responsive columns instead of clipping in the sidebar.
 - Fixed readiness and attach/recover rows so long status text cannot squeeze the

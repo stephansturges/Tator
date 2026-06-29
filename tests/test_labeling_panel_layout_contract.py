@@ -1811,6 +1811,7 @@ def test_qwen_single_caption_uses_isolated_backend_job_when_dataset_backed():
     handle_start = js.index("async function handleQwenCaption")
     handle_end = js.index("function getCaptionImageList", handle_start)
     handle = js[handle_start:handle_end]
+    assert "guardQwenCaptionArchiveIdle(\"starting another caption job\")" in handle
     assert "runQwenCaptionSingleBackendJob(" in handle
     assert "datasetBackedResult || await invokeQwenCaption" not in handle
     assert "if (!result)" in handle
@@ -1834,6 +1835,9 @@ def test_qwen_next_n_caption_prefers_resumable_backend_job():
     assert "Backend dataset required" in batch
     assert "batch captioning uses isolated backend jobs so Metal crashes cannot take down" in batch
     assert "validateCaptionInstructionLaunchSettings(getCaptionInstructionDatasetSettings(true))" in batch
+    assert "guardQwenCaptionArchiveIdle(" in batch
+    assert "starting a VLM training dataset job" in batch
+    assert "starting another caption batch" in batch
     assert "Instruction dataset not started" in batch
     assert "try {" in batch
     assert "runQwenCaptionBackendBatch(imageNames, { ...options, backend: true })" in batch
@@ -1842,6 +1846,63 @@ def test_qwen_next_n_caption_prefers_resumable_backend_job():
     assert "failed to start" in batch
     assert "setQwenCaptionBackendJobStatus(message)" in batch
     assert "invokeQwenCaptionForImage(" not in batch
+
+
+def test_qwen_caption_launches_block_while_archive_is_mutating():
+    js = _js()
+    handle_start = js.index("async function handleQwenCaption()")
+    handle_end = js.index("function getCaptionImageList", handle_start)
+    batch_start = js.index("async function runQwenCaptionBatch")
+    batch_end = js.index("function setQwenAgentStatus", batch_start)
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            "let qwenCaptionActive = false;",
+            "let qwenCaptionBatchActive = false;",
+            "let qwenCaptionBatchBackendJobId = 'job-1';",
+            "let qwenAvailable = true;",
+            "let automationChecked = 0;",
+            "let backendLaunches = 0;",
+            "let updateCalls = 0;",
+            "const captionStatuses = [];",
+            "const backendStatuses = [];",
+            "const samStatuses = [];",
+            "function setQwenCaptionStatus(message) { captionStatuses.push(message); }",
+            "function setQwenCaptionBackendJobStatus(message) { backendStatuses.push(message); }",
+            "function setSamStatus(message, options) { samStatuses.push({ message, options }); }",
+            "function updateQwenCaptionButton() { updateCalls += 1; }",
+            "function ensureAutomationAvailable() { automationChecked += 1; return true; }",
+            "function getCaptionDatasetId() { return 'ds'; }",
+            "async function runQwenCaptionBackendBatch() { backendLaunches += 1; throw new Error('backend launch should be blocked'); }",
+            _extract_js_function(js, "qwenCaptionArchiveMutationActive"),
+            _extract_js_function(js, "captionArchiveMutationBusyMessage"),
+            _extract_js_function(js, "guardQwenCaptionArchiveIdle"),
+            js[handle_start:handle_end],
+            js[batch_start:batch_end],
+            "await handleQwenCaption();",
+            "assert.strictEqual(automationChecked, 0);",
+            "assert.strictEqual(backendLaunches, 0);",
+            "assert(captionStatuses.includes('Caption archive busy'));",
+            "assert(backendStatuses.some((message) => message.includes('starting another caption job')));",
+            "assert(samStatuses.some((entry) => entry.message.includes('caption archive is changing')));",
+            "await runQwenCaptionBatch(['frame.jpg'], { backend: true });",
+            "assert.strictEqual(backendLaunches, 0);",
+            "assert(backendStatuses.some((message) => message.includes('starting another caption batch')));",
+            "await runQwenCaptionBatch(['frame.jpg'], { backend: true, instructionDataset: true });",
+            "assert.strictEqual(backendLaunches, 0);",
+            "assert(backendStatuses.some((message) => message.includes('starting a VLM training dataset job')));",
+            "assert(updateCalls >= 3);",
+        ]
+    )
+    subprocess.run(
+        [
+            "node",
+            "-e",
+            f"(async () => {{\n{script}\n}})().catch((error) => {{ console.error(error); process.exit(1); }});",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+    )
 
 
 def test_top_navigation_tabs_have_tooltips():

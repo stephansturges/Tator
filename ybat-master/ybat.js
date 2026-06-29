@@ -22707,6 +22707,9 @@ async function cancelRfDetrTrainingJobRequest() {
                     setSamStatus("No images loaded.", { variant: "warn", duration: 3000 });
                     return;
                 }
+                if (!guardQwenCaptionArchiveIdle("starting a caption-all job")) {
+                    return;
+                }
                 if (!confirm(`Caption all ${imageNames.length} images? This can take a while.`)) {
                     return;
                 }
@@ -22724,6 +22727,9 @@ async function cancelRfDetrTrainingJobRequest() {
                 const imageNames = getCaptionImageList();
                 if (!imageNames.length) {
                     setSamStatus("No images loaded.", { variant: "warn", duration: 3000 });
+                    return;
+                }
+                if (!guardQwenCaptionArchiveIdle("starting a VLM training dataset job")) {
                     return;
                 }
                 const settings = getCaptionInstructionDatasetSettings(true);
@@ -25126,6 +25132,25 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function qwenCaptionArchiveMutationActive() {
         return !!(qwenCaptionActive || qwenCaptionBatchActive || qwenCaptionBatchBackendJobId);
+    }
+
+    function captionArchiveMutationBusyMessage(actionLabel) {
+        if (!qwenCaptionArchiveMutationActive()) {
+            return "";
+        }
+        return `Wait for the active caption or instruction job to finish before ${actionLabel}; the caption archive is changing.`;
+    }
+
+    function guardQwenCaptionArchiveIdle(actionLabel) {
+        const message = captionArchiveMutationBusyMessage(actionLabel);
+        if (!message) {
+            return true;
+        }
+        setQwenCaptionStatus("Caption archive busy");
+        setQwenCaptionBackendJobStatus(message);
+        setSamStatus(message, { variant: "warn", duration: 5000 });
+        updateQwenCaptionButton();
+        return false;
     }
 
     function updateCaptionInstructionDatasetOptionControls() {
@@ -31210,7 +31235,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function handleQwenCaption() {
-        if (qwenCaptionActive) {
+        if (!guardQwenCaptionArchiveIdle("starting another caption job")) {
             return;
         }
         if (!ensureAutomationAvailable("Qwen captioning")) {
@@ -32081,6 +32106,11 @@ async function cancelRfDetrTrainingJobRequest() {
     async function runQwenCaptionBatch(imageNames, options = {}) {
         if (!Array.isArray(imageNames) || imageNames.length === 0) {
             setSamStatus("No images selected for captioning.", { variant: "warn", duration: 3000 });
+            return;
+        }
+        if (!guardQwenCaptionArchiveIdle(
+            options.instructionDataset ? "starting a VLM training dataset job" : "starting another caption batch",
+        )) {
             return;
         }
         if (!qwenAvailable) {

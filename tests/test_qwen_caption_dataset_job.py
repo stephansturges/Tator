@@ -2670,6 +2670,14 @@ def test_caption_instruction_artifact_consistency_validator_blocks_same_count_id
             "errors": [],
             "row_count": 1,
         },
+        "training_readiness": {
+            "status": "ready",
+            "ready_for_training": True,
+            "blocking_reasons": [],
+            "required_actions": [],
+            "quality_warnings": [],
+            "thresholds": {},
+        },
         "instruction_settings": settings,
         "instruction_settings_fingerprint": settings_fingerprint,
     }
@@ -2764,6 +2772,14 @@ def test_caption_instruction_artifact_consistency_validator_canonicalizes_image_
             "error_count": 0,
             "errors": [],
             "row_count": 1,
+        },
+        "training_readiness": {
+            "status": "ready",
+            "ready_for_training": True,
+            "blocking_reasons": [],
+            "required_actions": [],
+            "quality_warnings": [],
+            "thresholds": {},
         },
         "instruction_settings": settings,
         "instruction_settings_fingerprint": settings_fingerprint,
@@ -2902,6 +2918,14 @@ def test_caption_instruction_artifact_consistency_validator_requires_review_data
             "error_count": 0,
             "errors": [],
             "row_count": 0,
+        },
+        "training_readiness": {
+            "status": "needs_review",
+            "ready_for_training": False,
+            "blocking_reasons": [],
+            "required_actions": ["review_selected_language_rows"],
+            "quality_warnings": [],
+            "thresholds": {},
         },
         "instruction_settings": settings,
         "instruction_settings_fingerprint": settings_fingerprint,
@@ -3061,6 +3085,94 @@ def test_caption_instruction_artifact_consistency_validator_rejects_malformed_ar
     assert "archive row 1 missing export_metadata" in validation["errors"]
     assert "archive row train/frame.jpg export settings are missing" in validation["errors"]
     assert "archive row train/frame.jpg settings_fingerprint is missing" in validation["errors"]
+
+
+def test_caption_instruction_artifact_consistency_validator_rejects_invalid_readiness() -> None:
+    import localinferenceapi as api
+
+    settings = api._caption_instruction_export_settings({})
+    settings_fingerprint = api._caption_instruction_settings_fingerprint(settings)
+    base_report = {
+        "format": "tator_caption_instruction_report_v1",
+        "image_count": 1,
+        "selected_flattened_row_count": 0,
+        "instruction_review_row_count": 0,
+        "manual_review_required_count": 0,
+        "corpus_quality_metrics": {
+            "image_count": 1,
+            "selected_flattened_row_count": 0,
+        },
+        "instruction_export_validation": {
+            "ok": True,
+            "error_count": 0,
+            "errors": [],
+            "row_count": 0,
+        },
+        "instruction_settings": settings,
+        "instruction_settings_fingerprint": settings_fingerprint,
+    }
+
+    missing = api._caption_instruction_artifact_consistency_validation(
+        training_rows=[],
+        archive_rows=[],
+        review_rows=[],
+        report=base_report,
+        archive_image_count=0,
+        settings=settings,
+        settings_fingerprint=settings_fingerprint,
+    )
+    ready_with_warnings = api._caption_instruction_artifact_consistency_validation(
+        training_rows=[],
+        archive_rows=[],
+        review_rows=[],
+        report={
+            **base_report,
+            "training_readiness": {
+                "status": "ready",
+                "ready_for_training": False,
+                "blocking_reasons": ["stale_blocker"],
+                "required_actions": ["stale_action"],
+                "quality_warnings": ["stale_warning"],
+                "thresholds": {},
+            },
+        },
+        archive_image_count=0,
+        settings=settings,
+        settings_fingerprint=settings_fingerprint,
+    )
+    blocked_without_reasons = api._caption_instruction_artifact_consistency_validation(
+        training_rows=[],
+        archive_rows=[],
+        review_rows=[],
+        report={
+            **base_report,
+            "training_readiness": {
+                "status": "blocked",
+                "ready_for_training": True,
+                "blocking_reasons": [],
+                "required_actions": [],
+                "quality_warnings": [],
+                "thresholds": {},
+            },
+        },
+        archive_image_count=0,
+        settings=settings,
+        settings_fingerprint=settings_fingerprint,
+    )
+
+    assert missing["ok"] is False
+    assert "instruction_report.training_readiness is missing" in missing["errors"]
+    assert ready_with_warnings["ok"] is False
+    assert (
+        "instruction_report.training_readiness.ready_for_training must be true when status is ready"
+        in ready_with_warnings["errors"]
+    )
+    assert "instruction_report.training_readiness ready status cannot include blocking_reasons" in ready_with_warnings["errors"]
+    assert "instruction_report.training_readiness ready status cannot include required_actions" in ready_with_warnings["errors"]
+    assert "instruction_report.training_readiness ready status cannot include quality_warnings" in ready_with_warnings["errors"]
+    assert blocked_without_reasons["ok"] is False
+    assert "instruction_report.training_readiness.ready_for_training must be false unless status is ready" in blocked_without_reasons["errors"]
+    assert "instruction_report.training_readiness blocked status requires blocking_reasons" in blocked_without_reasons["errors"]
 
 
 def test_caption_instruction_training_validator_requires_complete_row_metadata() -> None:

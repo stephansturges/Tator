@@ -52,6 +52,54 @@ human review where required, reviewed-row import, strict re-export,
 trainer-loader validation, and at least a loader-plus-batch or fine-tuning dry
 run.
 
+## Reader Map
+
+Use this document as the primary handoff. It is organized around the questions
+an external training or data-engineering reviewer should ask:
+
+| Question | Where to look |
+| --- | --- |
+| What product path was added? | What Was Built, End-To-End Operator Path |
+| Why not just export captions? | Why The Design Looks This Way |
+| How are generated rows separated from trusted labels? | Source And Language Provenance, Artifact Contract |
+| How does the UI prevent unsafe launches? | UI And UX Contract, Archive And Concurrency Hardening |
+| What files are delivered to the trainer team? | Self-Contained Training Bundle, Artifact Contract |
+| How does review work? | Closed Human Review Loop, Review Import Contract |
+| What happens during long unattended jobs? | Runtime And Prompt Hardening, Set-And-Forget Behavior |
+| What validation protects the export? | Validation Boundaries, What Has Been Tested |
+| What still needs proof before fine-tuning? | Required Pilot Before Training Use, Current Readiness Position |
+
+The intended external review output is not simply "the button exists." The
+review should decide whether the artifact schema, row-family defaults,
+human-review loop, readiness gates, and bundle contents are sufficient for a
+real pilot corpus.
+
+## End-To-End Operator Path
+
+The expected operator path is:
+
+1. Open the dataset in the labeling UI.
+2. Select the caption model and confirm it is locally available.
+3. Configure captioning style, prompt limits, generated QA settings,
+   deterministic metadata QA settings, review requirements, and strict export
+   behavior.
+4. Click **Create VLM training dataset**.
+5. Let the backend job run with set-and-forget recovery enabled where
+   configured.
+6. Reattach to the running or completed job after browser refresh if needed.
+7. Inspect the readiness summary, report metrics, rejected rows, recovery
+   events, and generated row counts.
+8. Download the self-contained training bundle.
+9. Review generated-language candidates using the review JSONL.
+10. Import review decisions.
+11. Re-export trainer JSONL or a new bundle with strict readiness enabled.
+12. Run trainer-loader validation and a loader-plus-batch or fine-tuning dry
+    run before treating the corpus as ready.
+
+There are intentionally two export moments. The first bundle gives reviewers
+the raw candidate and evidence package. The second strict export is the
+candidate training input after review decisions have been applied.
+
 ## What Was Built
 
 ### Dedicated UI Workflow
@@ -174,7 +222,81 @@ path.
 
 This keeps trainer input simple while making the handoff fail closed.
 
+## Implementation Map
+
+The feature is split across browser UI, backend APIs, persisted archive state,
+export validators, bundle creation, and tests. The important implementation
+boundaries are:
+
+| Area | Responsibility |
+| --- | --- |
+| Labeling UI | Shows model availability, instruction settings, launch controls, readiness summaries, review import/export, and bundle downloads |
+| Caption job launcher | Normalizes settings, blocks unsafe row-family combinations, starts backend jobs, and preserves active-job state |
+| Backend caption job | Runs image captioning, generated QA creation, deterministic metadata QA generation, retries, recovery, and progress recording |
+| Caption archive | Stores per-image caption and instruction records without mutating source annotations |
+| Instruction archive builder | Produces per-image source/language/provenance records from caption records and source labels |
+| Trainer exporter | Flattens selected rows into simple image/question/answer JSONL |
+| Review exporter/importer | Exposes generated-language candidates and imports metadata-only review decisions |
+| Report builder | Records metrics, settings fingerprint, validation, readiness, blockers, and row-family counts |
+| Bundle exporter | Copies images and labels, rewrites paths, writes all artifacts, and validates manifest integrity |
+| Trainer loader | Rejects malformed, duplicate, unresolved, rejected, or unsupported rows before training |
+| Test suite | Covers row construction, validation, review, bundle packaging, UI contract, and failure formatting |
+
+This split is deliberate. The UI can explain and block unsafe operations, but
+the backend and trainer loader still validate independently because artifacts
+can be moved, edited, or generated through API/script paths.
+
+## What Changed During Hardening
+
+The hardening work focused on specific failures observed during local use and
+on expected dataset-scale failure modes:
+
+- **Output token confusion**: prompt preview, logs, and runtime now distinguish
+  user-requested caps from effective runtime budgets. Auto mode can choose
+  larger defaults for thinking-capable models, while explicit numeric user
+  overrides remain hard caps.
+- **Excessive prompt size**: authoritative counts are retained, but dense box
+  context is represented rather than blindly dumping every box into every
+  full-image prompt. Prompt budget telemetry makes the effective prompt size
+  visible.
+- **Repeated-token stalls**: streaming loop detection watches live output,
+  trims repeated surfaces for display, raises controlled loop failures, and can
+  retry with safer decode settings.
+- **Fragile full-image composition**: detailed/windowed runs can compose from
+  completed crop evidence instead of forcing one more full-image visual call in
+  the most fragile stage.
+- **Runtime state after loops**: repeated-loop recovery can unload the model
+  before a safe retry so a bad generation state is not silently reused.
+- **GPU or worker aborts**: long dataset jobs are tracked as backend jobs with
+  persisted state and process-level recovery surfaces, so an aborted ML worker
+  becomes an observable failed or recoverable job state instead of a silent UI
+  hang.
+- **Manual recovery burden**: set-and-forget behavior was made explicit. The
+  user can still override settings, but large runs are designed to resume,
+  recover, and report without requiring manual intervention after every bad
+  model call.
+- **Model availability ambiguity**: model selectors distinguish locally
+  available models from models that need downloading.
+- **Archive races**: caption generation, instruction generation, review import,
+  export, bundle download, edit/autosave, and archive deletion now share busy
+  guards so active jobs cannot be mixed with stale reads or competing writes.
+- **Incomplete bundles**: bundle export now fails closed when trainer, archive,
+  or review rows cannot be rewritten to copied images inside the ZIP.
+- **Weak report parity**: backend artifact validation now checks readiness
+  schema and state, matching the browser preflight expectation instead of
+  trusting a malformed or contradictory report.
+- **Raw error messages**: UI failure formatting turns backend export and bundle
+  errors into operator-facing readiness, image, manifest, corruption, and
+  consistency messages.
+
 ## Why The Design Looks This Way
+
+### Product Goal
+
+The goal is not "generate captions." The goal is to create a traceable training
+dataset from images, source annotations, generated language, and review
+decisions without corrupting annotation state. The generated corpus must be
+useful to a VLM trainer, but also auditable by a data owner.
 
 ### Generated Text Must Not Become Source Truth
 
@@ -211,6 +333,42 @@ review metadata
 
 If a fact should train the model, it must appear in the trainer row's
 `question` or `answer`, not only in metadata.
+
+### Source And Language Provenance
+
+The archive keeps source-derived and language-derived data in different
+families:
+
+| Family | Source | Training use |
+| --- | --- | --- |
+| Source annotations | Existing labels and geometry | Audit evidence and deterministic QA input |
+| `caption0` | VLM broad caption | Optional broad trainer row |
+| Generated QA | VLM-created question/answer candidates | Optional trainer rows after validation and review policy |
+| Deterministic metadata QA | Code-generated from trusted labels | Optional trainer rows when source evidence supports them |
+| Review metadata | Human decisions and notes | Selection/rejection gate, not hidden model signal |
+
+This means a trainer row can be traced back to one of three row origins:
+`caption0`, `generated_qa`, or `deterministic_metadata_qa`. The origin matters
+because each row family has different trust and review requirements.
+
+### What This Does Not Do
+
+The implementation intentionally does not:
+
+- mutate boxes, labels, or final annotations during dataset generation;
+- infer source object counts from generated captions;
+- train on hidden metadata fields;
+- treat an empty label file as a reason to invent label-derived facts;
+- certify a full fine-tuning corpus without a reviewed pilot and trainer dry
+  run;
+- guarantee that every generated visual QA candidate is true without review;
+- bypass backend or trainer-loader validation just because the browser preflight
+  passed;
+- make direct one-off captioning the default path for unattended dataset-scale
+  work.
+
+Those constraints protect the data owner and keep the output usable for
+training without silently changing the meaning of the source dataset.
 
 ### Flat Trainer Rows Need Rich Evidence Beside Them
 
@@ -265,6 +423,24 @@ logs, progress output, and reports. A final caption or training row should not
 look identical whether it came from a clean visual model call, a safe retry, a
 fallback model, text-only window-evidence composition, or deterministic
 count/layout recovery.
+
+## Set-And-Forget Behavior
+
+Set-and-forget mode is the correct default for dataset-scale generation. It is
+not the same thing as ignoring failures. It means:
+
+- active jobs are backend-owned and visible after refresh;
+- progress and health are polled from the backend;
+- failed model calls can be retried under bounded policies;
+- loop recovery and safe decode retries are automatic when enabled;
+- large launches can require pilot certification and backend crash supervision;
+- completion is accompanied by explicit health, readiness, and validation
+  summaries;
+- blocked jobs preserve the reason rather than pretending to have succeeded.
+
+For small diagnostics, direct single-image captioning remains available, but it
+is treated as deliberate interactive use rather than the primary training data
+path.
 
 ## Runtime And Prompt Hardening
 
@@ -336,6 +512,32 @@ dataset job, walk away, come back, inspect status, download a bundle, review
 rows, import decisions, and re-export trainer JSONL without babysitting each
 model call.
 
+## Review Import Contract
+
+Review import is deliberately narrow. A reviewer may submit decisions and
+notes, but may not use review JSONL as an editing backdoor for generated text,
+image paths, source annotations, or deterministic rows.
+
+Supported decisions are applied only when the row can be matched to the current
+dataset archive and the submitted text still matches the current candidate.
+The import path rejects:
+
+- wrong dataset identity;
+- malformed rows;
+- unsupported row origins;
+- duplicate actionable targets;
+- stale `caption0` text;
+- stale generated QA question or answer text;
+- generated QA rows that no longer exist;
+- generated QA rows with missing current text;
+- deterministic metadata QA review attempts that would imply mutation;
+- review files that are too large to read safely in the browser.
+
+This is what makes the loop closed rather than just export-only. A reviewer can
+mark candidates accepted, rejected, or needs-revision, and the next strict
+export reflects that metadata without giving the review file authority over
+source data.
+
 ## Artifact Contract
 
 ### Trainer Row
@@ -402,6 +604,27 @@ The report records:
 - instruction settings and settings fingerprint;
 - archive/review/trainer consistency.
 
+### Bundle Manifest
+
+The bundle manifest records enough information for an external receiver to
+verify the handoff without relying on the original machine:
+
+- manifest format;
+- declared artifact paths;
+- ZIP member list excluding the manifest itself;
+- role for each artifact;
+- byte count for each artifact;
+- SHA-256 digest for each artifact;
+- copied image asset inventory;
+- copied label asset inventory;
+- original image path and copied bundle path mapping;
+- original image SHA-256 when available;
+- checksum scope and manifest self-description.
+
+The bundle is rejected if these claims do not match the actual ZIP contents.
+This is intentionally stricter than simply creating a ZIP because the bundle is
+the handoff boundary to the training team.
+
 ## Validation Boundaries
 
 The workflow validates at multiple layers because training artifacts can be
@@ -410,7 +633,7 @@ copied, edited, mixed, or shared outside the UI.
 | Layer | What it protects |
 | --- | --- |
 | Browser preflight | Row shape, metadata, readiness, review state, duplicates, settings fingerprint, and consistency before writing downloads |
-| Backend export validation | Flat trainer rows, report readiness, artifact consistency, settings fingerprint, archive-row shape, review-row shape, image alias resolution, and strict API/script export |
+| Backend export validation | Flat trainer rows, report readiness schema and state, artifact consistency, settings fingerprint, archive-row shape, review-row shape, image alias resolution, and strict API/script export |
 | Bundle validation | Copied image/label assets, rewritten trainer/archive/review paths, trainer rows, artifact consistency, ZIP integrity, manifest inventory, byte counts, and SHA-256 digests |
 | Review import validation | Wrong dataset, stale text, duplicate targets, unsupported origins, malformed rows, and metadata-only mutation |
 | Trainer loader validation | Missing images, malformed rows, duplicate canonical image/question pairs, rejected or needs-revision rows, invalid answer format, missing provenance |
@@ -430,6 +653,7 @@ The repository has focused coverage for:
 - training-row flattening;
 - artifact consistency validation;
 - readiness report blocking;
+- backend rejection of invalid readiness state;
 - review JSONL export and metadata-only review import;
 - stale, duplicate, wrong-dataset, malformed, and unsupported review rows;
 - trainer import of flat question/answer rows;
@@ -455,6 +679,35 @@ git diff --check
 Before sharing or committing partner-facing docs, also run the repository's
 restricted-name scan over code and docs to ensure the handoff remains neutral.
 The expected result is no matches.
+
+## Evidence Package For Review
+
+For an external review, provide:
+
+- the committed code revision;
+- this handoff document;
+- the focused test command output;
+- one small generated bundle from a pilot subset;
+- the bundle manifest;
+- the instruction report;
+- the trainer loader validation output;
+- the review JSONL before and after review decisions are imported;
+- any recovery or fallback events from the pilot run;
+- a short manual audit note for a sampled set of images and rows.
+
+The reviewer should check that every selected row can be traced through:
+
+```text
+trainer row
+  -> row metadata
+  -> archive row
+  -> source annotations or generated-language record
+  -> copied bundle image
+  -> original image path and digest
+```
+
+For generated QA, the reviewer should additionally confirm that accepted rows
+are useful training examples rather than repetitive rewordings of `caption0`.
 
 ## Required Pilot Before Training Use
 

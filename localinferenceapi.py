@@ -21942,6 +21942,41 @@ def _caption_instruction_artifact_consistency_validation(
     export_validation_mapping = export_validation if isinstance(export_validation, Mapping) else {}
     if not export_validation_mapping:
         errors.append("instruction_report.instruction_export_validation is missing")
+    readiness = report_mapping.get("training_readiness")
+    readiness_mapping = readiness if isinstance(readiness, Mapping) else {}
+    if not readiness_mapping:
+        errors.append("instruction_report.training_readiness is missing")
+    else:
+        readiness_status = str(readiness_mapping.get("status") or "").strip()
+        if readiness_status not in {"ready", "needs_review", "blocked"}:
+            errors.append("instruction_report.training_readiness.status is invalid")
+        readiness_flag = readiness_mapping.get("ready_for_training")
+        if not isinstance(readiness_flag, bool):
+            errors.append("instruction_report.training_readiness.ready_for_training is invalid")
+        blocking_reasons = readiness_mapping.get("blocking_reasons")
+        required_actions = readiness_mapping.get("required_actions")
+        quality_warnings = readiness_mapping.get("quality_warnings")
+        if not isinstance(blocking_reasons, list):
+            errors.append("instruction_report.training_readiness.blocking_reasons is invalid")
+        if not isinstance(required_actions, list):
+            errors.append("instruction_report.training_readiness.required_actions is invalid")
+        if not isinstance(quality_warnings, list):
+            errors.append("instruction_report.training_readiness.quality_warnings is invalid")
+        if not isinstance(readiness_mapping.get("thresholds"), Mapping):
+            errors.append("instruction_report.training_readiness.thresholds is missing")
+        if readiness_status == "ready":
+            if readiness_flag is not True:
+                errors.append("instruction_report.training_readiness.ready_for_training must be true when status is ready")
+            if isinstance(blocking_reasons, list) and blocking_reasons:
+                errors.append("instruction_report.training_readiness ready status cannot include blocking_reasons")
+            if isinstance(required_actions, list) and required_actions:
+                errors.append("instruction_report.training_readiness ready status cannot include required_actions")
+            if isinstance(quality_warnings, list) and quality_warnings:
+                errors.append("instruction_report.training_readiness ready status cannot include quality_warnings")
+        elif readiness_status in {"needs_review", "blocked"} and readiness_flag is True:
+            errors.append("instruction_report.training_readiness.ready_for_training must be false unless status is ready")
+        if readiness_status == "blocked" and isinstance(blocking_reasons, list) and not blocking_reasons:
+            errors.append("instruction_report.training_readiness blocked status requires blocking_reasons")
 
     expected_settings = _caption_instruction_export_settings(settings or {})
     expected_settings_signature = _settings_signature(expected_settings)

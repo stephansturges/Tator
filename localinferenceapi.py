@@ -19885,6 +19885,7 @@ def get_dataset_glossary(dataset_id: str):
 
 
 def set_dataset_glossary(dataset_id: str, glossary: str):
+    _raise_if_qwen_caption_metadata_busy(dataset_id)
     entry = _resolve_dataset_entry(dataset_id)
     storage_root = _dataset_guarded_meta_storage_root_from_entry(
         entry,
@@ -23088,6 +23089,18 @@ def _raise_if_qwen_caption_dataset_download_busy(dataset_id: str) -> None:
     )
 
 
+def _raise_if_qwen_caption_metadata_busy(dataset_id: str) -> None:
+    active = _qwen_caption_dataset_active_export_job(dataset_id)
+    if not active:
+        return
+    job_id = str(active.get("job_id") or "").strip() or "unknown"
+    status = str(active.get("status") or "").strip() or "active"
+    raise HTTPException(
+        status_code=HTTP_409_CONFLICT,
+        detail=f"caption_metadata_busy:{job_id}:{status}",
+    )
+
+
 def export_captions(dataset_id: str, options: Optional[Mapping[str, Any]] = None):
     options_map = dict(options or {})
     if options_map.get("block_active_caption_jobs"):
@@ -25864,12 +25877,11 @@ def _run_qwen_caption_dataset_job(job: QwenCaptionDatasetJob, payload: QwenCapti
         )
         runner_output_dir.mkdir(parents=True, exist_ok=True)
         dataset_entry = _resolve_dataset_entry(payload.dataset_id)
-        if bool(payload.save_text_labels) or bool(payload.instruction_dataset):
-            lock_payload = {}
-            session_id = str(payload.annotation_session_id or "").strip()
-            if session_id:
-                lock_payload["session_id"] = session_id
-            _require_dataset_annotation_lock_owner_if_active(dataset_entry, lock_payload)
+        if _qwen_caption_dataset_requires_annotation_write(payload):
+            _require_dataset_annotation_lock_owner_if_active(
+                dataset_entry,
+                _qwen_caption_dataset_annotation_lock_payload(payload),
+            )
         manifest, cases = _qwen_caption_dataset_cases(payload, output_dir=runner_output_dir)
         if not cases:
             job.status = "completed"
@@ -26518,11 +26530,40 @@ def _run_qwen_caption_dataset_job(job: QwenCaptionDatasetJob, payload: QwenCapti
         _qwen_caption_dataset_live_auto_resume_after_failure(job)
 
 
+def _qwen_caption_dataset_requires_annotation_write(
+    payload: QwenCaptionDatasetJobRequest,
+) -> bool:
+    return bool(payload.save_text_labels) or bool(payload.instruction_dataset)
+
+
+def _qwen_caption_dataset_annotation_lock_payload(
+    payload: QwenCaptionDatasetJobRequest,
+) -> Dict[str, str]:
+    lock_payload: Dict[str, str] = {}
+    session_id = str(payload.annotation_session_id or "").strip()
+    if session_id:
+        lock_payload["session_id"] = session_id
+    return lock_payload
+
+
+def _preflight_qwen_caption_dataset_annotation_lock(
+    payload: QwenCaptionDatasetJobRequest,
+) -> None:
+    if not _qwen_caption_dataset_requires_annotation_write(payload):
+        return
+    dataset_entry = _resolve_dataset_entry(payload.dataset_id)
+    _require_dataset_annotation_lock_owner_if_active(
+        dataset_entry,
+        _qwen_caption_dataset_annotation_lock_payload(payload),
+    )
+
+
 def _start_qwen_caption_dataset_job(
     payload: QwenCaptionDatasetJobRequest,
     *,
     force_default_output_dir: bool = False,
 ) -> QwenCaptionDatasetJob:
+    _preflight_qwen_caption_dataset_annotation_lock(payload)
     job_id = f"qcap_{uuid.uuid4().hex[:8]}"
     output_dir = _qwen_caption_dataset_job_dir(
         job_id,

@@ -5669,6 +5669,164 @@ def test_caption_dataset_job_start_route_rejects_active_same_dataset(monkeypatch
     assert set(api.QWEN_CAPTION_DATASET_JOBS) == {"qcap_running"}
 
 
+def test_caption_dataset_job_start_rejects_active_annotation_lock_before_registering(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import localinferenceapi as api
+
+    dataset_root = tmp_path / "dataset"
+    dataset_root.mkdir()
+    record_root = tmp_path / "registry" / "ds"
+    record_root.mkdir(parents=True)
+    (record_root / api.DATASET_META_NAME).write_text(
+        json.dumps(
+            {
+                "id": "ds",
+                "annotation_lock": {
+                    "holder": "annotator",
+                    "session_id": "sess-lock",
+                    "expires_at": time.time() + 300.0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(api, "QWEN_CAPTION_DATASET_JOBS", {})
+    monkeypatch.setattr(
+        api,
+        "_resolve_dataset_entry",
+        lambda _dataset_id: {
+            "id": "ds",
+            "dataset_root": str(dataset_root),
+            "registry_root": str(record_root),
+            "storage_mode": "linked",
+        },
+    )
+    payload = QwenCaptionDatasetJobRequest(
+        dataset_id="ds",
+        caption_request={"user_prompt": "Describe it."},
+        save_text_labels=True,
+    )
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api._start_qwen_caption_dataset_job(payload)
+
+    assert exc_info.value.status_code == api.HTTP_409_CONFLICT
+    assert exc_info.value.detail == "annotation_lock_session_required"
+    assert api.QWEN_CAPTION_DATASET_JOBS == {}
+
+
+def test_caption_dataset_job_start_route_rejects_active_annotation_lock(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import localinferenceapi as api
+
+    dataset_root = tmp_path / "dataset"
+    dataset_root.mkdir()
+    record_root = tmp_path / "registry" / "ds"
+    record_root.mkdir(parents=True)
+    (record_root / api.DATASET_META_NAME).write_text(
+        json.dumps(
+            {
+                "id": "ds",
+                "annotation_lock": {
+                    "holder": "annotator",
+                    "session_id": "sess-lock",
+                    "expires_at": time.time() + 300.0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(api, "QWEN_CAPTION_DATASET_JOBS", {})
+    monkeypatch.setattr(
+        api,
+        "_resolve_dataset_entry",
+        lambda _dataset_id: {
+            "id": "ds",
+            "dataset_root": str(dataset_root),
+            "registry_root": str(record_root),
+            "storage_mode": "linked",
+        },
+    )
+    client = TestClient(api.app)
+
+    response = client.post(
+        "/qwen/caption/jobs",
+        json={
+            "dataset_id": "ds",
+            "caption_request": {"user_prompt": "Describe it."},
+            "save_text_labels": True,
+        },
+    )
+
+    assert response.status_code == api.HTTP_409_CONFLICT
+    assert response.json()["detail"] == "annotation_lock_session_required"
+    assert api.QWEN_CAPTION_DATASET_JOBS == {}
+
+
+def test_caption_dataset_job_start_allows_matching_annotation_lock_session(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import localinferenceapi as api
+
+    dataset_root = tmp_path / "dataset"
+    dataset_root.mkdir()
+    record_root = tmp_path / "registry" / "ds"
+    record_root.mkdir(parents=True)
+    (record_root / api.DATASET_META_NAME).write_text(
+        json.dumps(
+            {
+                "id": "ds",
+                "annotation_lock": {
+                    "holder": "annotator",
+                    "session_id": "sess-lock",
+                    "expires_at": time.time() + 300.0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(api, "QWEN_CAPTION_DATASET_JOBS", {})
+    monkeypatch.setattr(
+        api,
+        "_resolve_dataset_entry",
+        lambda _dataset_id: {
+            "id": "ds",
+            "dataset_root": str(dataset_root),
+            "registry_root": str(record_root),
+            "storage_mode": "linked",
+        },
+    )
+    started = []
+
+    class DummyThread:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def start(self):
+            started.append(self.kwargs)
+
+    monkeypatch.setattr(api.threading, "Thread", DummyThread)
+    payload = QwenCaptionDatasetJobRequest(
+        dataset_id="ds",
+        annotation_session_id="sess-lock",
+        caption_request={"user_prompt": "Describe it."},
+        save_text_labels=True,
+    )
+
+    job = api._start_qwen_caption_dataset_job(payload)
+
+    try:
+        assert job.job_id in api.QWEN_CAPTION_DATASET_JOBS
+        assert started and started[0]["target"] is api._run_qwen_caption_dataset_job
+    finally:
+        api.QWEN_CAPTION_DATASET_JOBS.pop(job.job_id, None)
+
+
 def test_caption_dataset_job_resume_route_exists() -> None:
     import localinferenceapi as api
 

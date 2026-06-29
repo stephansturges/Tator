@@ -14,7 +14,12 @@ from PIL import Image
 import localinferenceapi as api
 
 
-def _dataset_export_route_client(export_payload, apply_review_fn=None, download_fn=None):
+def _dataset_export_route_client(
+    export_payload,
+    apply_review_fn=None,
+    download_fn=None,
+    set_glossary_fn=None,
+):
     from api.datasets import build_datasets_router
 
     def export_captions(dataset_id, options):
@@ -43,7 +48,7 @@ def _dataset_export_route_client(export_payload, apply_review_fn=None, download_
             build_qwen_fn=noop,
             check_fn=noop,
             get_glossary_fn=noop,
-            set_glossary_fn=noop,
+            set_glossary_fn=set_glossary_fn or noop,
             get_text_label_fn=noop,
             get_text_labels_fn=noop,
             set_text_label_fn=noop,
@@ -146,6 +151,40 @@ def test_dataset_download_route_blocks_when_backend_caption_job_is_active() -> N
 
     assert response.status_code == 409
     assert response.json()["detail"] == "dataset_download_busy:qcap_busy:running"
+
+
+def test_set_dataset_glossary_blocks_active_backend_caption_job_before_dataset_read(
+    monkeypatch,
+) -> None:
+    job = api.QwenCaptionDatasetJob(job_id="qcap_busy", status="running")
+    job.request = {"dataset_id": "ds"}
+    monkeypatch.setattr(api, "QWEN_CAPTION_DATASET_JOBS", {job.job_id: job})
+
+    def fail_resolve(_dataset_id):
+        raise AssertionError("glossary save should block before reading a mutating dataset")
+
+    monkeypatch.setattr(api, "_resolve_dataset_entry", fail_resolve)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.set_dataset_glossary("ds", '{"car": ["vehicle"]}')
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "caption_metadata_busy:qcap_busy:running"
+
+
+def test_dataset_glossary_route_blocks_when_backend_caption_job_is_active() -> None:
+    def set_glossary(_dataset_id, _glossary):
+        raise api.HTTPException(
+            status_code=409,
+            detail="caption_metadata_busy:qcap_busy:running",
+        )
+
+    client = _dataset_export_route_client({}, set_glossary_fn=set_glossary)
+
+    response = client.post("/datasets/ds/glossary", json={"glossary": "{}"})
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "caption_metadata_busy:qcap_busy:running"
 
 
 def test_instruction_review_import_blocks_active_backend_caption_job_before_dataset_read(monkeypatch) -> None:

@@ -63,9 +63,13 @@ The new work adds a separate instruction-dataset path:
 - Text-label saves and caption add/update/delete paths reject with
   `caption_mutation_busy` before dataset reads while the same dataset has an
   active caption job.
+- Dataset glossary saves reject with `caption_metadata_busy` before metadata
+  reads or writes while the same dataset has an active caption job.
 - Dataset deletion rejects with `dataset_delete_blocked_active_jobs` while an
   active caption dataset job references the same dataset, preventing a running
   generator from losing its registry record or managed dataset tree.
+- Caption dataset job launch rejects active annotation locks synchronously for
+  write-owning jobs, while accepting a matching `annotation_session_id`.
 - The browser validates instruction JSONL before download, including required
   row metadata, instruction archive provenance, known validation/review states,
   rejected/failed/invalid validation state, non-trainable review state,
@@ -154,11 +158,17 @@ caption records or instruction records, so reviewed decisions cannot be applied
 against a moving archive.
 The same active-job rule protects direct caption and text-label mutations, so
 manual/API edits cannot interleave with backend caption generation.
+Dataset glossary saves are protected for the same reason: changing prompt
+metadata during a run can make one job use mixed class meanings.
 The dataset deletion path participates in the same protection: active caption
 dataset jobs block deletion, while terminal caption jobs do not.
 The backend also applies the rule at job launch, with the active-job check and
 registry insertion under one lock, so two same-dataset caption workers cannot
 be launched concurrently by near-simultaneous API calls.
+For write-owning jobs, launch also checks the current annotation lock before
+registering the job, so a lock conflict is reported immediately instead of as a
+later asynchronous job failure. The worker repeats the lock check after launch
+to close races.
 
 ## Core Invariants
 
@@ -648,6 +658,8 @@ Current combined caption/instruction/trainer/UI contract suite:
   tests/test_dataset_linked_annotation_flows.py::test_export_captions_blocks_active_backend_caption_job_before_dataset_read \
   tests/test_dataset_linked_annotation_flows.py::test_download_dataset_entry_blocks_active_backend_caption_job_before_dataset_read \
   tests/test_dataset_linked_annotation_flows.py::test_dataset_download_route_blocks_when_backend_caption_job_is_active \
+  tests/test_dataset_linked_annotation_flows.py::test_set_dataset_glossary_blocks_active_backend_caption_job_before_dataset_read \
+  tests/test_dataset_linked_annotation_flows.py::test_dataset_glossary_route_blocks_when_backend_caption_job_is_active \
   tests/test_dataset_linked_annotation_flows.py::test_instruction_review_import_blocks_active_backend_caption_job_before_dataset_read \
   tests/test_dataset_linked_annotation_flows.py::test_instruction_review_route_blocks_when_backend_caption_job_is_active \
   tests/test_dataset_linked_annotation_flows.py::test_caption_mutations_block_active_backend_caption_job_before_dataset_read \
@@ -664,7 +676,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-243 passed, 8 warnings
+248 passed, 8 warnings
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

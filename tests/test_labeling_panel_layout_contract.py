@@ -536,6 +536,8 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     update_caption_end = js.index("function getCaptionPresetText", update_caption_start)
     update_caption_helper = js[update_caption_start:update_caption_end]
     assert "const hasCaptionDataset = !!getCaptionDatasetId();" in update_caption_helper
+    assert "function qwenCaptionArchiveMutationActive" in js
+    assert "const busy = qwenCaptionArchiveMutationActive();" in update_caption_helper
     assert "const instructionExportDisabled = !hasCaptionDataset || busy;" in update_caption_helper
     assert "qwenElements.captionDownloadInstructionJsonl.disabled = instructionExportDisabled" in update_caption_helper
     assert "qwenElements.captionDownloadInstructionArchive.disabled = instructionExportDisabled" in update_caption_helper
@@ -558,6 +560,69 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
         assert f'captionInstructionArtifactBusyMessage("{action_label}")' in action_helper
         assert 'setCaptionExportHealth(busyMessage, "warn")' in action_helper
         assert 'setSamStatus(busyMessage, { variant: "warn", duration: 5000 })' in action_helper
+
+
+def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            "let qwenCaptionActive = false;",
+            "let qwenCaptionBatchActive = false;",
+            "let qwenCaptionBatchBackendJobId = 'job-1';",
+            "let qwenCaptionCancelRequested = false;",
+            "let qwenCaptionBatchCancel = false;",
+            "let qwenAvailable = true;",
+            "function getCaptionDatasetId() { return 'ds'; }",
+            "function isGpuHeavyLockActive() { return false; }",
+            "function button() { return { disabled: false, textContent: '' }; }",
+            "const qwenElements = {",
+            "  captionRunButton: button(),",
+            "  captionCancelButton: button(),",
+            "  captionBatchRun: button(),",
+            "  captionBatchRunAll: button(),",
+            "  captionBuildInstructionDataset: button(),",
+            "  captionDownloadInstructionJsonl: button(),",
+            "  captionDownloadInstructionArchive: button(),",
+            "  captionDownloadInstructionReview: button(),",
+            "  captionImportInstructionReview: button(),",
+            "  captionDownloadInstructionReport: button(),",
+            "  captionBatchCancel: button(),",
+            "  captionResumeBackendJob: button(),",
+            "};",
+            _extract_js_function(js, "qwenCaptionArchiveMutationActive"),
+            _extract_js_function(js, "captionInstructionArtifactBusyMessage"),
+            _extract_js_function(js, "updateQwenCaptionButton"),
+            "assert.strictEqual(qwenCaptionArchiveMutationActive(), true);",
+            "assert(captionInstructionArtifactBusyMessage('exporting instruction rows').includes('instruction archive is changing'));",
+            "updateQwenCaptionButton();",
+            "assert.strictEqual(qwenElements.captionRunButton.disabled, true);",
+            "assert.strictEqual(qwenElements.captionBuildInstructionDataset.disabled, true);",
+            "assert.strictEqual(qwenElements.captionDownloadInstructionJsonl.disabled, true);",
+            "assert.strictEqual(qwenElements.captionDownloadInstructionArchive.disabled, true);",
+            "assert.strictEqual(qwenElements.captionDownloadInstructionReview.disabled, true);",
+            "assert.strictEqual(qwenElements.captionImportInstructionReview.disabled, true);",
+            "assert.strictEqual(qwenElements.captionDownloadInstructionReport.disabled, true);",
+            "assert.strictEqual(qwenElements.captionResumeBackendJob.disabled, true);",
+            "assert.strictEqual(qwenElements.captionCancelButton.disabled, false);",
+            "assert.strictEqual(qwenElements.captionBatchCancel.disabled, false);",
+            "qwenCaptionBatchBackendJobId = '';",
+            "assert.strictEqual(qwenCaptionArchiveMutationActive(), false);",
+            "assert.strictEqual(captionInstructionArtifactBusyMessage('exporting instruction rows'), '');",
+            "updateQwenCaptionButton();",
+            "assert.strictEqual(qwenElements.captionRunButton.disabled, false);",
+            "assert.strictEqual(qwenElements.captionBuildInstructionDataset.disabled, false);",
+            "assert.strictEqual(qwenElements.captionDownloadInstructionJsonl.disabled, false);",
+            "assert.strictEqual(qwenElements.captionDownloadInstructionArchive.disabled, false);",
+            "assert.strictEqual(qwenElements.captionDownloadInstructionReview.disabled, false);",
+            "assert.strictEqual(qwenElements.captionImportInstructionReview.disabled, false);",
+            "assert.strictEqual(qwenElements.captionDownloadInstructionReport.disabled, false);",
+            "assert.strictEqual(qwenElements.captionResumeBackendJob.disabled, false);",
+            "assert.strictEqual(qwenElements.captionCancelButton.disabled, true);",
+            "assert.strictEqual(qwenElements.captionBatchCancel.disabled, true);",
+        ]
+    )
+    subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
 
 
 def test_qwen_caption_instruction_review_import_parser_accepts_reviewer_file_shapes():
@@ -617,10 +682,12 @@ def test_qwen_caption_instruction_review_import_rejects_oversized_file_before_re
             "let readCalled = false;",
             "let qwenCaptionActive = false;",
             "let qwenCaptionBatchActive = false;",
+            "let qwenCaptionBatchBackendJobId = '';",
             "function getCaptionDatasetId() { return 'dataset-a'; }",
             "function setCaptionExportHealth(message, severity) { health = { message, severity }; }",
             "function setSamStatus(message, options) { status = { message, options }; }",
             _extract_js_function(js, "formatBytesLabel"),
+            _extract_js_function(js, "qwenCaptionArchiveMutationActive"),
             _extract_js_function(js, "captionInstructionArtifactBusyMessage"),
             "async " + _extract_js_function(js, "importCaptionInstructionReviewFile"),
             "const hugeFile = {",

@@ -22703,7 +22703,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (qwenElements.captionBatchCancel) {
             qwenElements.captionBatchCancel.addEventListener("click", () => {
-                if (!qwenCaptionBatchActive) {
+                if (!qwenCaptionBatchActive && !qwenCaptionBatchBackendJobId) {
                     return;
                 }
                 qwenCaptionBatchCancel = true;
@@ -25079,17 +25079,21 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenElements.runButton.textContent = qwenRequestActive ? "Running…" : "Run detection engine";
     }
 
+    function qwenCaptionArchiveMutationActive() {
+        return !!(qwenCaptionActive || qwenCaptionBatchActive || qwenCaptionBatchBackendJobId);
+    }
+
     function updateQwenCaptionButton() {
         if (!qwenElements.captionRunButton) {
             return;
         }
         const locked = isGpuHeavyLockActive();
-        const busy = qwenCaptionActive || qwenCaptionBatchActive;
+        const busy = qwenCaptionArchiveMutationActive();
         const hasCaptionDataset = !!getCaptionDatasetId();
         qwenElements.captionRunButton.disabled = locked || !qwenAvailable || busy;
         qwenElements.captionRunButton.textContent = qwenCaptionActive ? "Captioning…" : "Caption image";
         if (qwenElements.captionCancelButton) {
-            const cancelActive = qwenCaptionActive || qwenCaptionBatchActive;
+            const cancelActive = qwenCaptionArchiveMutationActive();
             const cancelRequested = qwenCaptionCancelRequested || qwenCaptionBatchCancel;
             qwenElements.captionCancelButton.disabled = !cancelActive || cancelRequested;
             qwenElements.captionCancelButton.textContent = cancelRequested ? "Cancelling…" : "Cancel caption";
@@ -25121,7 +25125,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (qwenElements.captionBatchCancel) {
             // Once cancellation is requested, keep cancel button disabled until the batch fully unwinds.
-            qwenElements.captionBatchCancel.disabled = !qwenCaptionBatchActive || qwenCaptionBatchCancel;
+            qwenElements.captionBatchCancel.disabled = !(qwenCaptionBatchActive || qwenCaptionBatchBackendJobId) || qwenCaptionBatchCancel;
         }
         if (qwenElements.captionResumeBackendJob) {
             qwenElements.captionResumeBackendJob.disabled = locked || !qwenAvailable || busy || !hasCaptionDataset;
@@ -35731,7 +35735,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function captionInstructionArtifactBusyMessage(actionLabel) {
-        if (qwenCaptionActive || qwenCaptionBatchActive) {
+        if (qwenCaptionArchiveMutationActive()) {
             return `Wait for the active caption or instruction job to finish before ${actionLabel}; the instruction archive is changing.`;
         }
         return "";

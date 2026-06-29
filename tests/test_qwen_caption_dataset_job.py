@@ -2685,6 +2685,7 @@ def test_caption_instruction_artifact_consistency_validator_blocks_same_count_id
         archive_rows=[
             {
                 "image_path": "frame.jpg",
+                "source_annotations": {},
                 "language_annotations": {
                     "caption0": {
                         "qa_id": "caption0",
@@ -2779,6 +2780,7 @@ def test_caption_instruction_artifact_consistency_validator_canonicalizes_image_
         archive_rows=[
             {
                 "image_path": "train/frame.jpg",
+                "source_annotations": {},
                 "language_annotations": {
                     "generated_qa_pairs": [
                         {
@@ -2858,6 +2860,7 @@ def test_caption_instruction_artifact_consistency_validator_blocks_settings_mism
         archive_rows=[
             {
                 "image_path": "frame.jpg",
+                "source_annotations": {},
                 "language_annotations": {},
                 "deterministic_metadata_qa_pairs": [],
                 "export_metadata": {
@@ -2909,6 +2912,7 @@ def test_caption_instruction_artifact_consistency_validator_requires_review_data
         archive_rows=[
             {
                 "image_path": "train/frame.jpg",
+                "source_annotations": {},
                 "language_annotations": {},
                 "deterministic_metadata_qa_pairs": [],
                 "export_metadata": {
@@ -2971,6 +2975,7 @@ def test_caption_instruction_artifact_consistency_validator_rejects_malformed_re
         archive_rows=[
             {
                 "image_path": "train/frame.jpg",
+                "source_annotations": {},
                 "language_annotations": {},
                 "deterministic_metadata_qa_pairs": [],
                 "export_metadata": {"selected_training_row_count": 0},
@@ -3008,6 +3013,54 @@ def test_caption_instruction_artifact_consistency_validator_rejects_malformed_re
     assert "review row 1 rejection_reasons must be an array" in validation["errors"]
     assert "review row 1 missing review_notes field" in validation["errors"]
     assert "review row 1 has unsupported actionable row_origin" in validation["errors"]
+
+
+def test_caption_instruction_artifact_consistency_validator_rejects_malformed_archive_rows() -> None:
+    import localinferenceapi as api
+
+    settings = api._caption_instruction_export_settings({})
+    settings_fingerprint = api._caption_instruction_settings_fingerprint(settings)
+    report = {
+        "format": "tator_caption_instruction_report_v1",
+        "image_count": 1,
+        "selected_flattened_row_count": 0,
+        "instruction_review_row_count": 0,
+        "manual_review_required_count": 0,
+        "corpus_quality_metrics": {
+            "image_count": 1,
+            "selected_flattened_row_count": 0,
+        },
+        "instruction_export_validation": {
+            "ok": True,
+            "error_count": 0,
+            "errors": [],
+            "row_count": 0,
+        },
+        "instruction_settings": settings,
+        "instruction_settings_fingerprint": settings_fingerprint,
+    }
+
+    validation = api._caption_instruction_artifact_consistency_validation(
+        training_rows=[],
+        archive_rows=[
+            {
+                "image_path": "train/frame.jpg",
+            }
+        ],
+        review_rows=[],
+        report=report,
+        archive_image_count=1,
+        settings=settings,
+        settings_fingerprint=settings_fingerprint,
+    )
+
+    assert validation["ok"] is False
+    assert "archive row 1 missing source_annotations" in validation["errors"]
+    assert "archive row 1 missing language_annotations" in validation["errors"]
+    assert "archive row 1 missing deterministic_metadata_qa_pairs" in validation["errors"]
+    assert "archive row 1 missing export_metadata" in validation["errors"]
+    assert "archive row train/frame.jpg export settings are missing" in validation["errors"]
+    assert "archive row train/frame.jpg settings_fingerprint is missing" in validation["errors"]
 
 
 def test_caption_instruction_training_validator_requires_complete_row_metadata() -> None:

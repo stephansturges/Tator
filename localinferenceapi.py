@@ -22138,6 +22138,14 @@ def _caption_instruction_artifact_consistency_validation(
         if image_key in image_paths:
             duplicate_image_paths.add(image_key)
         image_paths.add(image_key)
+        if not isinstance(row.get("source_annotations"), Mapping):
+            errors.append(f"archive row {index} missing source_annotations")
+        if not isinstance(row.get("language_annotations"), Mapping):
+            errors.append(f"archive row {index} missing language_annotations")
+        if not isinstance(row.get("deterministic_metadata_qa_pairs"), list):
+            errors.append(f"archive row {index} missing deterministic_metadata_qa_pairs")
+        if not isinstance(row.get("export_metadata"), Mapping):
+            errors.append(f"archive row {index} missing export_metadata")
     for image_path in sorted(duplicate_image_paths):
         errors.append(f"duplicate archive image_path {image_path}")
 

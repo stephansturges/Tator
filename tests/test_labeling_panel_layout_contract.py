@@ -530,6 +530,16 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     init_end = js.index("function refreshQwenStatus", init_start)
     init_helper = js[init_start:init_end]
     assert init_helper.count("renderCaptionAlternatesForCurrentImage();") >= 2
+    update_caption_start = js.index("function updateQwenCaptionButton")
+    update_caption_end = js.index("function getCaptionPresetText", update_caption_start)
+    update_caption_helper = js[update_caption_start:update_caption_end]
+    assert "const hasCaptionDataset = !!getCaptionDatasetId();" in update_caption_helper
+    assert "const instructionExportDisabled = !hasCaptionDataset || busy;" in update_caption_helper
+    assert "qwenElements.captionDownloadInstructionJsonl.disabled = instructionExportDisabled" in update_caption_helper
+    assert "qwenElements.captionDownloadInstructionArchive.disabled = instructionExportDisabled" in update_caption_helper
+    assert "qwenElements.captionDownloadInstructionReview.disabled = instructionExportDisabled" in update_caption_helper
+    assert "qwenElements.captionImportInstructionReview.disabled = instructionExportDisabled" in update_caption_helper
+    assert "qwenElements.captionDownloadInstructionReport.disabled = instructionExportDisabled" in update_caption_helper
     assert "const datasetId = getCaptionRecordDatasetId();" in load_helper
     assert "isAnnotationDatasetModeActive()" not in load_helper
 

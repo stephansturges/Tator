@@ -141,6 +141,10 @@ do not send the ready gate because those diagnostic artifacts are needed to fix
 a not-ready corpus. A selected row that a reviewer marks rejected or
 needs-revision moves readiness to `blocked` until the row is removed,
 regenerated, or accepted.
+Instruction artifact downloads and reviewed-JSONL import stay disabled until a
+caption dataset is selected and no caption or instruction job is actively
+mutating the caption archive, so operators do not export or import against a
+missing dataset or a moving target.
 **Download instruction archive** exports one per-image construction archive
 record per JSONL line, keeping caption0, generated QA, optional deterministic
 metadata QA, source annotation provenance, and per-image export metadata separate

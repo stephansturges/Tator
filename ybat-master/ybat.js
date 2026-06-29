@@ -25079,6 +25079,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const locked = isGpuHeavyLockActive();
         const busy = qwenCaptionActive || qwenCaptionBatchActive;
+        const hasCaptionDataset = !!getCaptionDatasetId();
         qwenElements.captionRunButton.disabled = locked || !qwenAvailable || busy;
         qwenElements.captionRunButton.textContent = qwenCaptionActive ? "Captioning…" : "Caption image";
         if (qwenElements.captionCancelButton) {
@@ -25094,14 +25095,30 @@ async function cancelRfDetrTrainingJobRequest() {
             qwenElements.captionBatchRunAll.disabled = locked || !qwenAvailable || busy;
         }
         if (qwenElements.captionBuildInstructionDataset) {
-            qwenElements.captionBuildInstructionDataset.disabled = locked || !qwenAvailable || busy || !getCaptionDatasetId();
+            qwenElements.captionBuildInstructionDataset.disabled = locked || !qwenAvailable || busy || !hasCaptionDataset;
+        }
+        const instructionExportDisabled = !hasCaptionDataset || busy;
+        if (qwenElements.captionDownloadInstructionJsonl) {
+            qwenElements.captionDownloadInstructionJsonl.disabled = instructionExportDisabled;
+        }
+        if (qwenElements.captionDownloadInstructionArchive) {
+            qwenElements.captionDownloadInstructionArchive.disabled = instructionExportDisabled;
+        }
+        if (qwenElements.captionDownloadInstructionReview) {
+            qwenElements.captionDownloadInstructionReview.disabled = instructionExportDisabled;
+        }
+        if (qwenElements.captionImportInstructionReview) {
+            qwenElements.captionImportInstructionReview.disabled = instructionExportDisabled;
+        }
+        if (qwenElements.captionDownloadInstructionReport) {
+            qwenElements.captionDownloadInstructionReport.disabled = instructionExportDisabled;
         }
         if (qwenElements.captionBatchCancel) {
             // Once cancellation is requested, keep cancel button disabled until the batch fully unwinds.
             qwenElements.captionBatchCancel.disabled = !qwenCaptionBatchActive || qwenCaptionBatchCancel;
         }
         if (qwenElements.captionResumeBackendJob) {
-            qwenElements.captionResumeBackendJob.disabled = locked || !qwenAvailable || busy || !getCaptionDatasetId();
+            qwenElements.captionResumeBackendJob.disabled = locked || !qwenAvailable || busy || !hasCaptionDataset;
         }
     }
 

@@ -22783,12 +22783,7 @@ async function cancelRfDetrTrainingJobRequest() {
             qwenElements.captionDownloadInstructionJsonl.addEventListener("click", () => {
                 downloadCaptionInstructionJsonl().catch((error) => {
                     console.warn("Instruction JSONL download failed", error);
-                    const message = String(error?.message || error || "Instruction JSONL export failed.").trim();
-                    const exportMessage = message.startsWith("Instruction JSONL export blocked:")
-                        ? message
-                        : `Instruction JSONL export failed: ${message}`;
-                    setCaptionExportHealth(exportMessage, "fail");
-                    setSamStatus(exportMessage, { variant: "error", duration: 6000 });
+                    reportCaptionInstructionActionFailure("Instruction JSONL export", error, 6000);
                 });
             });
         }
@@ -22796,7 +22791,7 @@ async function cancelRfDetrTrainingJobRequest() {
             qwenElements.captionDownloadInstructionArchive.addEventListener("click", () => {
                 downloadCaptionInstructionArchive().catch((error) => {
                     console.warn("Instruction archive download failed", error);
-                    setSamStatus(`Instruction archive export failed: ${error.message || error}`, { variant: "error", duration: 4000 });
+                    reportCaptionInstructionActionFailure("Instruction archive export", error, 5000);
                 });
             });
         }
@@ -22804,7 +22799,7 @@ async function cancelRfDetrTrainingJobRequest() {
             qwenElements.captionDownloadInstructionReview.addEventListener("click", () => {
                 downloadCaptionInstructionReview().catch((error) => {
                     console.warn("Instruction review download failed", error);
-                    setSamStatus(`Instruction review export failed: ${error.message || error}`, { variant: "error", duration: 4000 });
+                    reportCaptionInstructionActionFailure("Instruction review export", error, 5000);
                 });
             });
         }
@@ -22820,8 +22815,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 }
                 importCaptionInstructionReviewFile(file).catch((error) => {
                     console.warn("Instruction review import failed", error);
-                    setSamStatus(`Instruction review import failed: ${error.message || error}`, { variant: "error", duration: 5000 });
-                    setCaptionExportHealth(`Instruction review import failed: ${error.message || error}`, "fail");
+                    reportCaptionInstructionActionFailure("Instruction review import", error, 6000);
                 });
             });
         }
@@ -22829,7 +22823,7 @@ async function cancelRfDetrTrainingJobRequest() {
             qwenElements.captionDownloadInstructionReport.addEventListener("click", () => {
                 downloadCaptionInstructionReport().catch((error) => {
                     console.warn("Instruction report download failed", error);
-                    setSamStatus(`Instruction report export failed: ${error.message || error}`, { variant: "error", duration: 4000 });
+                    reportCaptionInstructionActionFailure("Instruction report export", error, 5000);
                 });
             });
         }
@@ -34806,6 +34800,27 @@ async function cancelRfDetrTrainingJobRequest() {
         if (["pass", "warn", "fail"].includes(status)) {
             qwenElements.captionExportHealth.classList.add(`is-${status}`);
         }
+    }
+
+    function captionInstructionActionFailureMessage(actionLabel, error, fallback = "") {
+        const label = String(actionLabel || "Instruction action").trim() || "Instruction action";
+        const raw = String(error?.message || error || fallback || "").trim();
+        if (!raw) {
+            return `${label} failed.`;
+        }
+        const normalizedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const alreadyFormatted = new RegExp(`^${normalizedLabel} (?:failed|blocked):`).test(raw);
+        if (alreadyFormatted) {
+            return raw;
+        }
+        return `${label} failed: ${raw}`;
+    }
+
+    function reportCaptionInstructionActionFailure(actionLabel, error, duration = 5000) {
+        const message = captionInstructionActionFailureMessage(actionLabel, error);
+        setCaptionExportHealth(message, "fail");
+        setSamStatus(message, { variant: "error", duration });
+        return message;
     }
 
     function validateCaptionVlmTrainingRows(rows) {

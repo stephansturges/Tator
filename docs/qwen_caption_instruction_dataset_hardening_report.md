@@ -169,6 +169,11 @@ row before training.
   actionable row origins and duplicate or conflicting actionable review targets
   before calling the backend, giving operators immediate feedback on review
   packets that would fail the server-side transactional import.
+- Browser-side instruction artifact actions now share one failure reporter for
+  trainer JSONL, archive JSONL, review JSONL, reviewed-row import, and report
+  downloads. Backend or validation failures update both the caption export
+  health row and the toast/status message, and already formatted blocked
+  messages are not double-prefixed.
 - Browser and backend artifact-consistency validation now require caption0 and
   generated-QA review rows to carry dataset identity before export/import, even
   while `review_decision` is blank. Review packets therefore fail before

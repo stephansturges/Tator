@@ -490,6 +490,10 @@ details are converted from internal `detail` strings into actionable UI text.
 This prevents guarded failures from appearing as raw JSON in the dataset
 manager, caption panel, direct caption/text-label save path, or review/import
 surfaces.
+Instruction artifact actions share one failure reporter so trainer JSONL,
+archive, review JSONL, reviewed-row import, and report failures update the
+caption export health row and the toast/status message consistently without
+double-prefixing already formatted blocked messages.
 Failed backend caption jobs receive the same treatment when structured failure
 reports are available. Pilot-certification, backend-supervision, and runner
 preflight reports are summarized from their first failed check, so the operator
@@ -1398,6 +1402,9 @@ Additional focused validation recorded in the supporting hardening docs covers:
 - UI error formatting for caption-job busy, metadata-busy, same-dataset active
   job, and annotation-lock guard details, including dataset-manager glossary
   save failures and direct caption/text-label save failures
+- shared instruction artifact failure reporting for trainer JSONL, archive,
+  review JSONL, reviewed-row import, and report actions, including
+  already-formatted blocked messages that must not be double-prefixed
 - UI backend-job failure formatting for pilot-certification,
   backend-supervision, and runner-preflight report failures
 - caption dataset job launch rejecting active annotation locks before job

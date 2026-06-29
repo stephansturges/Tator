@@ -13,6 +13,78 @@ from PIL import Image
 import localinferenceapi as api
 
 
+def test_caption_instruction_strict_export_gate_requires_ready_proofs() -> None:
+    from api.datasets import _instruction_export_not_ready_reason
+
+    export_validation = {"ok": True, "error_count": 0, "errors": [], "row_count": 1}
+    artifact_consistency = {
+        "format": "tator_caption_instruction_artifact_consistency_v1",
+        "ok": True,
+        "error_count": 0,
+        "errors": [],
+        "counts": {"training_row_count": 1},
+    }
+    report = {
+        "training_readiness": {"status": "ready"},
+        "instruction_export_validation": dict(export_validation),
+        "instruction_artifact_consistency": dict(artifact_consistency),
+    }
+    payload = {
+        "instruction_report": report,
+        "instruction_export_validation": dict(export_validation),
+        "instruction_artifact_consistency": dict(artifact_consistency),
+        "instruction_archive": {"instruction_artifact_consistency": dict(artifact_consistency)},
+    }
+
+    assert _instruction_export_not_ready_reason(payload) == ""
+    assert _instruction_export_not_ready_reason(
+        {
+            **payload,
+            "instruction_report": {
+                **report,
+                "training_readiness": {"status": "needs_review"},
+            },
+        }
+    ) == "needs_review"
+    assert _instruction_export_not_ready_reason(
+        {
+            **payload,
+            "instruction_export_validation": {
+                **export_validation,
+                "ok": False,
+                "error_count": 1,
+                "errors": ["bad row"],
+            },
+        }
+    ) == "instruction_export_validation"
+    assert _instruction_export_not_ready_reason(
+        {
+            **payload,
+            "instruction_export_validation": {
+                **export_validation,
+                "row_count": 2,
+            },
+        }
+    ) == "instruction_export_validation_mismatch"
+    assert _instruction_export_not_ready_reason(
+        {
+            **payload,
+            "instruction_archive": {},
+        }
+    ) == "instruction_artifact_consistency"
+    assert _instruction_export_not_ready_reason(
+        {
+            **payload,
+            "instruction_archive": {
+                "instruction_artifact_consistency": {
+                    **artifact_consistency,
+                    "counts": {"training_row_count": 2},
+                },
+            },
+        }
+    ) == "instruction_artifact_consistency_mismatch"
+
+
 def test_delete_linked_dataset_only_removes_registry_record(tmp_path, monkeypatch) -> None:
     source_root = tmp_path / "linked_source"
     source_root.mkdir(parents=True, exist_ok=True)

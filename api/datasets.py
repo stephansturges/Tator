@@ -5,6 +5,57 @@ from typing import Any, Callable, Optional
 from fastapi import APIRouter, UploadFile, File, Form, Body, HTTPException, Query
 
 
+def _instruction_export_proof_is_ok(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if value.get("ok") is not True:
+        return False
+    error_count = value.get("error_count")
+    if isinstance(error_count, bool):
+        return False
+    try:
+        parsed_error_count = int(error_count)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if parsed_error_count != 0:
+        return False
+    errors = value.get("errors")
+    return isinstance(errors, list) and not errors
+
+
+def _instruction_export_not_ready_reason(result: Any) -> str:
+    if not isinstance(result, dict):
+        return "unknown"
+    report = result.get("instruction_report") if isinstance(result.get("instruction_report"), dict) else {}
+    readiness = report.get("training_readiness") if isinstance(report.get("training_readiness"), dict) else {}
+    readiness_status = str(readiness.get("status") or "unknown").strip() or "unknown"
+    if readiness_status != "ready":
+        return readiness_status
+
+    payload_export_validation = result.get("instruction_export_validation")
+    report_export_validation = report.get("instruction_export_validation")
+    if not _instruction_export_proof_is_ok(payload_export_validation):
+        return "instruction_export_validation"
+    if not _instruction_export_proof_is_ok(report_export_validation):
+        return "instruction_export_validation"
+    if payload_export_validation != report_export_validation:
+        return "instruction_export_validation_mismatch"
+
+    payload_consistency = result.get("instruction_artifact_consistency")
+    report_consistency = report.get("instruction_artifact_consistency")
+    archive = result.get("instruction_archive") if isinstance(result.get("instruction_archive"), dict) else {}
+    archive_consistency = archive.get("instruction_artifact_consistency")
+    if not _instruction_export_proof_is_ok(payload_consistency):
+        return "instruction_artifact_consistency"
+    if not _instruction_export_proof_is_ok(report_consistency):
+        return "instruction_artifact_consistency"
+    if not _instruction_export_proof_is_ok(archive_consistency):
+        return "instruction_artifact_consistency"
+    if payload_consistency != report_consistency or payload_consistency != archive_consistency:
+        return "instruction_artifact_consistency_mismatch"
+    return ""
+
+
 def build_datasets_router(
     *,
     list_fn: Callable[[], Any],
@@ -178,16 +229,11 @@ def build_datasets_router(
                 "answer_format": answer_format,
             },
         )
-        readiness = (
-            ((result.get("instruction_report") or {}).get("training_readiness") or {})
-            if isinstance(result, dict)
-            else {}
-        )
-        readiness_status = str(readiness.get("status") or "unknown").strip() or "unknown"
-        if require_ready_instruction_export and readiness_status != "ready":
+        not_ready_reason = _instruction_export_not_ready_reason(result)
+        if require_ready_instruction_export and not_ready_reason:
             raise HTTPException(
                 status_code=409,
-                detail=f"instruction_export_not_ready:{readiness_status}",
+                detail=f"instruction_export_not_ready:{not_ready_reason}",
             )
         return result
 

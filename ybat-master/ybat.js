@@ -5634,11 +5634,34 @@ const sam3TrainState = {
             const msg = parsed?.detail || parsed?.message || parsed?.error;
             if (typeof msg === "string" && msg.trim()) {
                 const normalized = msg.trim();
+                const captionBusyMatch = /^(caption_export_busy|caption_review_import_busy|caption_mutation_busy|dataset_download_busy|caption_metadata_busy|qwen_caption_dataset_job_active):([^:]+):([^:]+)$/.exec(normalized);
+                if (captionBusyMatch) {
+                    const jobId = captionBusyMatch[2] || "unknown";
+                    const status = captionBusyMatch[3] || "active";
+                    const actionMessages = {
+                        caption_export_busy: "Caption export is blocked",
+                        caption_review_import_busy: "Review import is blocked",
+                        caption_mutation_busy: "Caption and text-label edits are blocked",
+                        dataset_download_busy: "Dataset download is blocked",
+                        caption_metadata_busy: "Dataset glossary changes are blocked",
+                        qwen_caption_dataset_job_active: "A caption dataset job is already active",
+                    };
+                    return `${actionMessages[captionBusyMatch[1]] || "This action is blocked"} while caption dataset job ${jobId} is ${status}. Wait for that job to finish, then retry.`;
+                }
                 if (normalized === "data_ingestion_too_many_uploaded_files_use_backend_reference") {
                     return "Too many reference files were uploaded. Refresh datasets/profiles and use the backend-backed reference dataset path.";
                 }
                 if (normalized === "transient_session_not_found" || normalized === "transient_session_expired") {
                     return "The active local-path dataset session is no longer available after the backend restart. Reopen the dataset in Label Images, then retry.";
+                }
+                if (normalized === "annotation_lock_session_required") {
+                    return "This dataset is locked by an active annotation session. Reopen that annotation session or wait for the lock to expire before starting a write-owning job.";
+                }
+                if (normalized === "annotation_lock_active") {
+                    return "This dataset is locked by another annotation session. Use the matching session or wait for the lock to expire.";
+                }
+                if (normalized === "dataset_delete_blocked_active_jobs:qwen_caption_dataset") {
+                    return "Dataset deletion is blocked while a caption dataset job is active. Wait for the job to finish, then retry.";
                 }
                 return normalized;
             }
@@ -6339,7 +6362,8 @@ const sam3TrainState = {
                 body: JSON.stringify({ glossary }),
             });
             if (!resp.ok) {
-                throw new Error(await resp.text());
+                const detail = await resp.text();
+                throw new Error(parseApiError(detail, resp.statusText || `HTTP ${resp.status}`));
             }
             setGlossaryMessage(datasetManagerElements.glossaryDatasetMessage, "Saved dataset glossary.", "success");
         } catch (err) {

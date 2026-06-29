@@ -725,7 +725,11 @@ def test_dataset_manager_download_uses_fetch_and_surfaces_server_errors():
             "await handleDatasetDownload({ id: 'ds', label: 'Demo dataset' });",
             "assert.strictEqual(saved.length, 0);",
             "assert.strictEqual(datasetManagerState.actionInFlight.size, 0);",
-            "assert(messages.some((entry) => entry.tone === 'error' && entry.text.includes('dataset_download_busy:qcap_busy:running')));",
+            "const downloadError = messages.find((entry) => entry.tone === 'error');",
+            "assert(downloadError);",
+            "assert(downloadError.text.includes('Dataset download is blocked while caption dataset job qcap_busy is running.'));",
+            "assert(!downloadError.text.includes('dataset_download_busy:qcap_busy:running'));",
+            "assert(!downloadError.text.includes('{\"detail\"'));",
             "messages = [];",
             "global.fetch = async (url) => {",
             "  fetchCalls.push(url);",
@@ -743,6 +747,98 @@ def test_dataset_manager_download_uses_fetch_and_surfaces_server_errors():
             "assert.strictEqual(datasetManagerState.actionInFlight.size, 0);",
             "assert(fetchCalls.every((url) => url === 'http://backend.test/datasets/ds/download'));",
             "assert(renderCount >= 4);",
+        ]
+    )
+    subprocess.run(
+        [
+            "node",
+            "-e",
+            f"(async () => {{\n{script}\n}})().catch((error) => {{ console.error(error); process.exit(1); }});",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+    )
+
+
+def test_parse_api_error_formats_caption_job_guards_for_operators():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            _extract_js_function(js, "parseApiError"),
+            "const cases = [",
+            "  ['caption_export_busy:qcap_1:running', 'Caption export is blocked while caption dataset job qcap_1 is running. Wait for that job to finish, then retry.'],",
+            "  ['caption_review_import_busy:qcap_2:queued', 'Review import is blocked while caption dataset job qcap_2 is queued. Wait for that job to finish, then retry.'],",
+            "  ['caption_mutation_busy:qcap_3:cancelling', 'Caption and text-label edits are blocked while caption dataset job qcap_3 is cancelling. Wait for that job to finish, then retry.'],",
+            "  ['dataset_download_busy:qcap_4:running', 'Dataset download is blocked while caption dataset job qcap_4 is running. Wait for that job to finish, then retry.'],",
+            "  ['caption_metadata_busy:qcap_5:running', 'Dataset glossary changes are blocked while caption dataset job qcap_5 is running. Wait for that job to finish, then retry.'],",
+            "  ['qwen_caption_dataset_job_active:qcap_6:queued', 'A caption dataset job is already active while caption dataset job qcap_6 is queued. Wait for that job to finish, then retry.'],",
+            "];",
+            "for (const [detail, expected] of cases) {",
+            "  assert.strictEqual(parseApiError(JSON.stringify({ detail }), 'fallback'), expected);",
+            "}",
+            "assert.strictEqual(",
+            "  parseApiError(JSON.stringify({ detail: 'annotation_lock_session_required' }), 'fallback'),",
+            "  'This dataset is locked by an active annotation session. Reopen that annotation session or wait for the lock to expire before starting a write-owning job.'",
+            ");",
+            "assert.strictEqual(",
+            "  parseApiError(JSON.stringify({ detail: 'annotation_lock_active' }), 'fallback'),",
+            "  'This dataset is locked by another annotation session. Use the matching session or wait for the lock to expire.'",
+            ");",
+        ]
+    )
+    subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
+
+
+def test_dataset_manager_glossary_save_formats_caption_metadata_busy_error():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            "const API_ROOT = 'http://backend.test';",
+            "const datasetManagerState = { glossaryDatasetSaveInFlight: false, glossaryDatasetLoadInFlight: false, glossaryDatasetSaveAsInFlight: false, glossaryLibraryLoadInFlight: false, glossaryLibrarySaveInFlight: false, glossaryLibraryDeleteInFlight: false };",
+            "const glossaryLibraryState = { inFlight: false };",
+            "let messages = [];",
+            "let buttonUpdates = 0;",
+            "const datasetManagerElements = {",
+            "  glossaryDatasetSelect: { value: 'ds' },",
+            "  glossaryDatasetEditor: { value: '{\"car\":[\"vehicle\"]}' },",
+            "  glossaryDatasetMessage: {},",
+            "  glossaryDatasetLoad: {},",
+            "  glossaryDatasetSave: {},",
+            "  glossaryDatasetSaveAs: {},",
+            "  glossaryLibrarySelect: { value: '' },",
+            "  glossaryLibraryName: { value: '' },",
+            "  glossaryLibraryRefresh: {},",
+            "  glossaryLibrarySave: {},",
+            "  glossaryLibraryDelete: {},",
+            "  glossaryLibraryDownload: {},",
+            "};",
+            "function setGlossaryMessage(_element, text, tone) { messages.push({ text, tone }); }",
+            "function updateGlossaryDatasetSummary() {}",
+            "function updateGlossaryLibrarySelect() {}",
+            _extract_js_function(js, "parseApiError"),
+            _extract_js_function(js, "updateGlossaryActionButtons").replace(
+                "function updateGlossaryActionButtons",
+                "function originalUpdateGlossaryActionButtons",
+            ),
+            "function updateGlossaryActionButtons() { buttonUpdates += 1; originalUpdateGlossaryActionButtons(); }",
+            "async " + _extract_js_function(js, "saveDatasetGlossary"),
+            "global.fetch = async (url, options) => {",
+            "  assert.strictEqual(url, 'http://backend.test/datasets/ds/glossary');",
+            "  assert.strictEqual(options.method, 'POST');",
+            "  return {",
+            "    ok: false,",
+            "    status: 409,",
+            "    statusText: 'Conflict',",
+            "    text: async () => JSON.stringify({ detail: 'caption_metadata_busy:qcap_busy:running' }),",
+            "  };",
+            "};",
+            "await saveDatasetGlossary();",
+            "assert.strictEqual(datasetManagerState.glossaryDatasetSaveInFlight, false);",
+            "assert(buttonUpdates >= 2);",
+            "assert(messages.some((entry) => entry.tone === 'error' && entry.text.includes('Dataset glossary changes are blocked while caption dataset job qcap_busy is running.')));",
+            "assert(!messages.some((entry) => entry.text.includes('{\"detail\"')));",
         ]
     )
     subprocess.run(

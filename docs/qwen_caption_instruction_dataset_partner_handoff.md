@@ -153,6 +153,9 @@ scripts and API clients.
 The full dataset ZIP download route enforces the same rule before reading
 dataset or overlay files, and the dataset manager downloads via fetch so busy
 responses are visible to the operator.
+Caption-job busy details, metadata-busy details, active same-dataset job
+details, and annotation-lock details are formatted into operator-facing text
+instead of raw JSON.
 The server-side review-import path enforces the same rule before it reads
 caption records or instruction records, so reviewed decisions cannot be applied
 against a moving archive.
@@ -678,7 +681,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-249 passed, 8 warnings
+251 passed, 8 warnings
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

@@ -481,6 +481,12 @@ server-side busy responses and validation errors appear in the dataset status
 message area instead of producing a confusing downloaded error body or browser
 navigation.
 
+Guard responses are also formatted for operators. Caption-job busy details,
+metadata-busy details, active same-dataset job details, and annotation-lock
+details are converted from internal `detail` strings into actionable UI text.
+This prevents guarded failures from appearing as raw JSON in the dataset
+manager, caption panel, or review/import surfaces.
+
 The same busy check also runs inside each action handler. That second check
 matters because UI state can go stale: a user may leave a file picker open, a
 scripted click can bypass a disabled button, or a backend job can start after
@@ -1346,7 +1352,7 @@ node --check ybat-master/ybat.js
 Result:
 
 ```text
-249 passed, 8 warnings
+251 passed, 8 warnings
 ```
 
 Additional focused validation recorded in the supporting hardening docs covers:
@@ -1381,6 +1387,9 @@ Additional focused validation recorded in the supporting hardening docs covers:
   file and successful ZIP responses save through the shared blob path
 - dataset glossary save rejecting with `caption_metadata_busy` before metadata
   reads or writes while a dataset job is active
+- UI error formatting for caption-job busy, metadata-busy, same-dataset active
+  job, and annotation-lock guard details, including dataset-manager glossary
+  save failures
 - caption dataset job launch rejecting active annotation locks before job
   execution, rolling back failed reservations, reserving before write preflight
   to close delete/export races, and still allowing a matching

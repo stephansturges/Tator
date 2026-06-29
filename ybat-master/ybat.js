@@ -25228,6 +25228,15 @@ async function cancelRfDetrTrainingJobRequest() {
         if (qwenElements.captionResumeBackendJob) {
             qwenElements.captionResumeBackendJob.disabled = locked || !qwenAvailable || busy || !hasCaptionDataset;
         }
+        if (qwenElements.captionRecipeLoad) {
+            qwenElements.captionRecipeLoad.disabled = busy;
+        }
+        if (qwenElements.captionRecipeUploadButton) {
+            qwenElements.captionRecipeUploadButton.disabled = busy;
+        }
+        if (qwenElements.captionRecipeUpload) {
+            qwenElements.captionRecipeUpload.disabled = busy;
+        }
         updateCaptionInstructionDatasetOptionControls();
         updateCaptionArchiveActionControls();
     }
@@ -25860,7 +25869,16 @@ async function cancelRfDetrTrainingJobRequest() {
         };
     }
 
-    function applyCaptionRecipeToUi(item) {
+    function applyCaptionRecipeToUi(item, { actionLabel = "loading a caption recipe" } = {}) {
+        const busyMessage = captionArchiveMutationBusyMessage(actionLabel);
+        if (busyMessage) {
+            setCaptionRecipeStatus(busyMessage);
+            setQwenCaptionStatus("Caption archive busy");
+            setQwenCaptionBackendJobStatus(busyMessage);
+            setSamStatus(busyMessage, { variant: "warn", duration: 5000 });
+            updateQwenCaptionButton();
+            return false;
+        }
         const normalized = normalizeCaptionRecipeItem(item);
         const recipe = normalized?.recipe;
         if (!recipe) {
@@ -26102,6 +26120,7 @@ async function cancelRfDetrTrainingJobRequest() {
         applyCaptionDecodeDefaults();
         updateCaptionWindowMode();
         updateQwenCaptionWorkflow();
+        return true;
     }
 
     function saveCurrentCaptionRecipe() {
@@ -26127,7 +26146,9 @@ async function cancelRfDetrTrainingJobRequest() {
             setCaptionRecipeStatus("Choose a saved caption recipe to load.");
             return;
         }
-        applyCaptionRecipeToUi(item);
+        if (!applyCaptionRecipeToUi(item, { actionLabel: "loading a caption recipe" })) {
+            return;
+        }
         setCaptionRecipeStatus(`Loaded caption recipe "${item.name}".`);
         setSamStatus(`Loaded caption recipe "${item.name}".`, { variant: "success", duration: 2500 });
     }
@@ -26163,6 +26184,10 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!file) {
             return;
         }
+        if (!guardQwenCaptionArchiveIdle("uploading a caption recipe")) {
+            setCaptionRecipeStatus(captionArchiveMutationBusyMessage("uploading a caption recipe"));
+            return;
+        }
         const text = await readFileAsTextPromise(file);
         let parsed = null;
         try {
@@ -26174,7 +26199,9 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!item) {
             throw new Error("Recipe JSON is not a caption recipe.");
         }
-        applyCaptionRecipeToUi(item);
+        if (!applyCaptionRecipeToUi(item, { actionLabel: "uploading a caption recipe" })) {
+            return;
+        }
         const recipes = readCaptionRecipeStore();
         const next = recipes.filter((existing) => existing.id !== item.id);
         next.push({ ...item, updated_at: new Date().toISOString() });

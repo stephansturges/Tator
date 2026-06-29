@@ -133,6 +133,12 @@ Recipes must not contain image payloads, per-image boxes, label hints, used
 counts, generated captions, prompt-preview placeholders, or backend image tokens.
 Uploaded recipe JSON is applied to the current controls and saved locally only
 after it passes this reusable-setup shape check.
+Recipe load and upload are blocked while a caption or instruction job is
+mutating the caption archive. This keeps a long-running job's captured settings
+from being visually replaced by a different recipe before the active archive is
+stable. Operators can still save, delete, or download browser-local recipes
+while a job is running because those actions do not rewrite the active caption
+controls.
 
 The complete prompt-flow preview remains the source of truth for a specific
 image. It combines recipe-controlled prompt layers with generated per-image

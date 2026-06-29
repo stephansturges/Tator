@@ -63,7 +63,11 @@ detail, not only an internal runner error code.
 The user saves or loads a caption recipe. Recipes carry style, prompt stack,
 model, windowing, token, health-gate, set-and-forget, and pilot certification
 settings, including deterministic-recovery confidence, without storing image
-pixels, boxes, or generated captions.
+pixels, boxes, or generated captions. Loading or uploading a recipe is blocked
+while a caption or instruction job is mutating the caption archive, because a
+recipe can rewrite the same controls that describe the active training-dataset
+run. Saving, deleting, or downloading browser-local recipes remains separate
+from the active backend job.
 
 ## 7. Select A Missing Model Intentionally
 

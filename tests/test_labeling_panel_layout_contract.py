@@ -550,6 +550,9 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "qwenElements.captionDownloadInstructionReview.disabled = instructionExportDisabled" in update_caption_helper
     assert "qwenElements.captionImportInstructionReview.disabled = instructionExportDisabled" in update_caption_helper
     assert "qwenElements.captionDownloadInstructionReport.disabled = instructionExportDisabled" in update_caption_helper
+    assert "qwenElements.captionRecipeLoad.disabled = busy" in update_caption_helper
+    assert "qwenElements.captionRecipeUploadButton.disabled = busy" in update_caption_helper
+    assert "qwenElements.captionRecipeUpload.disabled = busy" in update_caption_helper
     assert "updateCaptionInstructionDatasetOptionControls();" in update_caption_helper
     assert "updateCaptionArchiveActionControls();" in update_caption_helper
     instruction_option_helper = _extract_js_function(js, "updateCaptionInstructionDatasetOptionControls")
@@ -628,6 +631,9 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             "  captionDownloadInstructionReport: button(),",
             "  captionBatchCancel: button(),",
             "  captionResumeBackendJob: button(),",
+            "  captionRecipeLoad: button(),",
+            "  captionRecipeUploadButton: button(),",
+            "  captionRecipeUpload: button(),",
             "  captionSubcaptionsPerImage: button(),",
             "  captionQaMix: button(),",
             "  captionAnswerFormat: button(),",
@@ -668,6 +674,9 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             "assert.strictEqual(qwenElements.captionSetPrimary.disabled, true);",
             "assert.strictEqual(qwenElements.captionDeleteSelected.disabled, true);",
             "assert.strictEqual(qwenElements.captionSubcaptionsPerImage.disabled, true);",
+            "assert.strictEqual(qwenElements.captionRecipeLoad.disabled, true);",
+            "assert.strictEqual(qwenElements.captionRecipeUploadButton.disabled, true);",
+            "assert.strictEqual(qwenElements.captionRecipeUpload.disabled, true);",
             "assert.strictEqual(qwenElements.captionQaMix.disabled, true);",
             "assert.strictEqual(qwenElements.captionAnswerFormat.disabled, true);",
             "assert.strictEqual(qwenElements.captionIncludeCaption0Training.disabled, true);",
@@ -697,6 +706,9 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             "assert.strictEqual(qwenElements.captionSetPrimary.disabled, false);",
             "assert.strictEqual(qwenElements.captionDeleteSelected.disabled, false);",
             "assert.strictEqual(qwenElements.captionSubcaptionsPerImage.disabled, false);",
+            "assert.strictEqual(qwenElements.captionRecipeLoad.disabled, false);",
+            "assert.strictEqual(qwenElements.captionRecipeUploadButton.disabled, false);",
+            "assert.strictEqual(qwenElements.captionRecipeUpload.disabled, false);",
             "assert.strictEqual(qwenElements.captionQaMix.disabled, false);",
             "assert.strictEqual(qwenElements.captionAnswerFormat.disabled, false);",
             "assert.strictEqual(qwenElements.captionIncludeCaption0Training.disabled, false);",
@@ -1892,6 +1904,59 @@ def test_qwen_caption_launches_block_while_archive_is_mutating():
             "assert.strictEqual(backendLaunches, 0);",
             "assert(backendStatuses.some((message) => message.includes('starting a VLM training dataset job')));",
             "assert(updateCalls >= 3);",
+        ]
+    )
+    subprocess.run(
+        [
+            "node",
+            "-e",
+            f"(async () => {{\n{script}\n}})().catch((error) => {{ console.error(error); process.exit(1); }});",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+    )
+
+
+def test_qwen_caption_recipe_load_and_upload_block_while_archive_is_mutating():
+    js = _js()
+    apply_start = js.index("function applyCaptionRecipeToUi")
+    apply_end = js.index("function saveCurrentCaptionRecipe", apply_start)
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            "let qwenCaptionActive = false;",
+            "let qwenCaptionBatchActive = false;",
+            "let qwenCaptionBatchBackendJobId = 'job-1';",
+            "let updateCalls = 0;",
+            "let fileReads = 0;",
+            "let recipeStatus = '';",
+            "const captionStatuses = [];",
+            "const backendStatuses = [];",
+            "const samStatuses = [];",
+            "const qwenElements = { captionRecipeName: { value: 'unchanged' } };",
+            "function setCaptionRecipeStatus(message) { recipeStatus = message; }",
+            "function setQwenCaptionStatus(message) { captionStatuses.push(message); }",
+            "function setQwenCaptionBackendJobStatus(message) { backendStatuses.push(message); }",
+            "function setSamStatus(message, options) { samStatuses.push({ message, options }); }",
+            "function updateQwenCaptionButton() { updateCalls += 1; }",
+            "function readFileAsTextPromise() { fileReads += 1; throw new Error('recipe upload should be blocked before file read'); }",
+            _extract_js_function(js, "qwenCaptionArchiveMutationActive"),
+            _extract_js_function(js, "captionArchiveMutationBusyMessage"),
+            _extract_js_function(js, "guardQwenCaptionArchiveIdle"),
+            js[apply_start:apply_end],
+            "async " + _extract_js_function(js, "uploadCaptionRecipeFromFile"),
+            "const applied = applyCaptionRecipeToUi({ recipe: { name: 'new recipe' } }, { actionLabel: 'loading a caption recipe' });",
+            "assert.strictEqual(applied, false);",
+            "assert.strictEqual(qwenElements.captionRecipeName.value, 'unchanged');",
+            "assert(recipeStatus.includes('loading a caption recipe'));",
+            "assert(recipeStatus.includes('caption archive is changing'));",
+            "assert(captionStatuses.includes('Caption archive busy'));",
+            "await uploadCaptionRecipeFromFile({ name: 'blocked.caption-recipe.json' });",
+            "assert.strictEqual(fileReads, 0);",
+            "assert(recipeStatus.includes('uploading a caption recipe'));",
+            "assert(backendStatuses.some((message) => message.includes('caption archive is changing')));",
+            "assert(samStatuses.some((entry) => entry.message.includes('caption archive is changing')));",
+            "assert(updateCalls >= 2);",
         ]
     )
     subprocess.run(

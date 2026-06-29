@@ -104,6 +104,11 @@ row before training.
   now repeat the archive-idle guard at action time. Disabled buttons are
   therefore backed by runtime checks, and stale or scripted clicks cannot start
   overlapping caption jobs from the browser while the archive is changing.
+- Caption recipe load and upload now use the same archive-idle guard. A recipe
+  can rewrite prompt, model, generation, glossary, and instruction-row controls,
+  so recipe application is blocked until the active archive mutation finishes;
+  recipe save, delete, and download remain available because they do not change
+  the active run settings.
 - Fixed caption action layout so export and instruction buttons wrap into
   readable responsive columns instead of clipping in the sidebar.
 - Fixed readiness and attach/recover rows so long status text cannot squeeze the

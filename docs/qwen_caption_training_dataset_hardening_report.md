@@ -21,6 +21,9 @@ job stopped.
 There were also observability gaps:
 
 - Live progress could display synthetic case IDs instead of the real image name.
+- The backend case builder filtered requested image names with a set and then
+  processed the dataset manifest order, so a UI-sent batch could start on a
+  different frame than the current/requested one.
 - The active image in the viewer did not follow backend progress.
 - The cancel button could miss an auto-resumed replacement job if the UI only
   knew the original job ID.
@@ -41,6 +44,8 @@ There were also observability gaps:
   jobs can switch the viewer to the image currently being processed.
 - Propagated `image_name` through runner heartbeats, result rows, backend live
   progress, and UI progress summaries.
+- Preserved the UI's requested image order when building backend cases, including
+  sequential case naming after ordering and `max_images` trimming.
 - Changed cancel handling to refresh active backend jobs for the selected
   dataset and cancel every active matching job, including auto-resumed
   replacements.

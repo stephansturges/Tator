@@ -25499,15 +25499,21 @@ def _qwen_caption_dataset_cases(
     if caption_mode not in {"full", "windowed"}:
         caption_mode = "full"
     split_filter = str(payload.split or "all").strip().lower()
-    wanted_names = {
+    requested_names = [
         str(name or "").strip()
         for name in (payload.image_names or [])
         if str(name or "").strip()
-    }
+    ]
+    wanted_order: Dict[str, int] = {}
+    for order_index, requested_name in enumerate(requested_names):
+        wanted_order.setdefault(requested_name, order_index)
+        wanted_order.setdefault(Path(requested_name).name, order_index)
+        wanted_order.setdefault(Path(requested_name).stem, order_index)
+    wanted_names = set(wanted_order)
     max_images = int(payload.max_images or 0)
     label_root = output_dir / "case_labels"
     cases: List[Dict[str, Any]] = []
-    for index, row in enumerate(manifest.get("images") or [], start=1):
+    for manifest_index, row in enumerate(manifest.get("images") or [], start=1):
         split = _annotation_normalise_split(row.get("split"))
         if split_filter in {"train", "val"} and split != split_filter:
             continue
@@ -25521,8 +25527,12 @@ def _qwen_caption_dataset_cases(
             f"{split}/{image_relpath.as_posix()}",
             Path(image_name).stem,
         }
-        if wanted_names and not (selectors & wanted_names):
-            continue
+        request_order_index: Optional[int] = None
+        if wanted_names:
+            matching_orders = [wanted_order[selector] for selector in selectors if selector in wanted_order]
+            if not matching_orders:
+                continue
+            request_order_index = min(matching_orders)
         if not bool(payload.overwrite) and str(row.get("text_label") or "").strip():
             continue
         image_path = _resolve_annotation_image_path(
@@ -25534,13 +25544,14 @@ def _qwen_caption_dataset_cases(
         label_lines = [str(line or "").strip() for line in (row.get("label_lines") or []) if str(line or "").strip()]
         label_path = label_root / split / image_relpath.with_suffix(".txt")
         label_path.parent.mkdir(parents=True, exist_ok=True)
-        label_path.write_text("\n".join(label_lines) + ("\n" if label_lines else ""))
         class_counts = _qwen_caption_label_counts_from_lines(label_lines, labelmap)
         case_key = f"image:{split}/{image_relpath.as_posix()}:{caption_mode}"
         cases.append(
             {
+                "_label_lines": label_lines,
+                "_manifest_index": manifest_index,
+                "_request_order_index": request_order_index if request_order_index is not None else manifest_index,
                 "case_id": case_key,
-                "name": f"image_{len(cases) + 1:06d}",
                 "stem": image_path.stem,
                 "image_name": image_name,
                 "split": split,
@@ -25552,8 +25563,29 @@ def _qwen_caption_dataset_cases(
                 "caption_mode": caption_mode,
             }
         )
-        if max_images and len(cases) >= max_images:
+        if not wanted_names and max_images and len(cases) >= max_images:
             break
+    if wanted_names:
+        cases.sort(
+            key=lambda case: (
+                int(case.get("_request_order_index") or 0),
+                int(case.get("_manifest_index") or 0),
+            )
+        )
+        if max_images:
+            cases = cases[:max_images]
+    for case_index, case in enumerate(cases, start=1):
+        label_lines = [
+            str(line or "").strip()
+            for line in case.pop("_label_lines", [])
+            if str(line or "").strip()
+        ]
+        case.pop("_manifest_index", None)
+        case.pop("_request_order_index", None)
+        case["name"] = f"image_{case_index:06d}"
+        label_path = Path(str(case.get("label_path") or ""))
+        label_path.parent.mkdir(parents=True, exist_ok=True)
+        label_path.write_text("\n".join(label_lines) + ("\n" if label_lines else ""))
     return manifest, cases
 
 

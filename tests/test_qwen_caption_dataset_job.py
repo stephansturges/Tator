@@ -298,6 +298,53 @@ def test_caption_dataset_cases_use_effective_labels_and_skip_existing(monkeypatc
     ]
 
 
+def test_caption_dataset_cases_preserve_requested_image_order(monkeypatch, tmp_path: Path) -> None:
+    import localinferenceapi as api
+
+    dataset_root = tmp_path / "dataset"
+    image_dir = dataset_root / "train" / "images"
+    image_dir.mkdir(parents=True)
+    for name in ("first.jpg", "middle.jpg", "last.jpg"):
+        Image.new("RGB", (16, 16)).save(image_dir / name)
+    entry = {
+        "id": "ds",
+        "label": "Dataset",
+        "yolo_layout": "split",
+        "classes": ["Building"],
+        "linked_root": str(dataset_root),
+    }
+    manifest = {
+        "dataset_id": "ds",
+        "dataset_label": "Dataset",
+        "yolo_layout": "split",
+        "labelmap": ["Building"],
+        "images": [
+            {"split": "train", "image_relpath": "first.jpg", "image_name": "first.jpg", "label_lines": []},
+            {"split": "train", "image_relpath": "middle.jpg", "image_name": "middle.jpg", "label_lines": []},
+            {"split": "train", "image_relpath": "last.jpg", "image_name": "last.jpg", "label_lines": []},
+        ],
+    }
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: entry)
+    monkeypatch.setattr(api, "_annotation_manifest_for_entry", lambda _entry: manifest)
+    monkeypatch.setattr(api, "_dataset_effective_root_from_entry", lambda _entry: dataset_root)
+
+    payload = QwenCaptionDatasetJobRequest(
+        dataset_id="ds",
+        caption_request={"caption_mode": "full"},
+        image_names=["last.jpg", "first.jpg"],
+        max_images=2,
+        overwrite=True,
+    )
+    _manifest, cases = api._qwen_caption_dataset_cases(payload, output_dir=tmp_path / "job")
+
+    assert [case["image_name"] for case in cases] == ["last.jpg", "first.jpg"]
+    assert [case["name"] for case in cases] == ["image_000001", "image_000002"]
+    assert [case["case_id"] for case in cases] == [
+        "image:train/last.jpg:full",
+        "image:train/first.jpg:full",
+    ]
+
+
 def test_caption_dataset_save_appends_caption_record_and_primary_text_label(monkeypatch, tmp_path: Path) -> None:
     import localinferenceapi as api
 

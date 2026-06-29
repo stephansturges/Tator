@@ -97,7 +97,9 @@ preserve caption identifiers, image-local caption indexes, primary flags,
 sources, timestamps, and metadata.
 Before writing VLM JSONL, the UI validates that each row has an image path,
 question, parseable caption JSON answer, and a unique canonical image-path/question pair; bad
-rows are blocked instead of downloaded.
+rows are blocked instead of downloaded. If a malformed backend or cached payload
+returns no row array, the validator reports that the VLM rows must be an array
+instead of throwing a browser exception.
 Generated caption jobs append variants by default. Users promote one variant to
 primary with **Set primary** or by enabling **Make generated caption primary**
 before generation.
@@ -131,7 +133,9 @@ paths, blank questions, blank answers, required row metadata,
 instruction archive provenance, missing or unknown validation/review state,
 rejected/failed/invalid validation state, non-trainable review state, invalid
 JSON for JSON row types, and duplicate canonical image-path/question pairs before writing the
-file. It also validates the instruction report's training-readiness block:
+file. If the returned trainer-row payload is missing or not an array, the
+validator reports the malformed artifact and blocks export instead of throwing.
+It also validates the instruction report's training-readiness block:
 `blocked` readiness refuses the download, while `needs_review` readiness is
 blocked by default by **Require
 ready report for trainer JSONL**. Operators can disable that gate only for
@@ -154,7 +158,9 @@ record per JSONL line, keeping caption0, generated QA, optional deterministic
 metadata QA, source annotation provenance, and per-image export metadata separate
 from trainer rows. The archive download is blocked if row-level validation
 passes but the archive row count no longer matches the report image count or
-archive image count, or if the archive contains duplicate image paths. The
+archive image count, or if the archive contains duplicate image paths. A missing
+or non-array archive payload is reported as a validation error rather than a UI
+exception. The
 backend also emits `instruction_artifact_consistency`; when it is not OK, the
 report readiness is blocked and the browser refuses the related download.
 This guard compares artifact row identities as well as counts, so trainer rows,
@@ -209,7 +215,9 @@ resolved image key, and current text-label caption.
 Rejected or needs-revision language candidates stay auditable in the archive and
 review JSONL but are excluded from flattened trainer rows. Review downloads are
 also blocked when the review-row count, selected review-row count, or
-manual-review row count disagrees with the instruction report.
+manual-review row count disagrees with the instruction report. Missing or
+non-array review-row payloads are surfaced as validation failures with zero row
+count rather than crashing the export action.
 **Download instruction report** exports run-level counts, rejection reasons,
 source-field provenance, split image counts, split row counts, QA count per
 image, selected flattened-row counts, duplicate-question/diversity metrics,

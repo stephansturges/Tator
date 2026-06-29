@@ -34718,7 +34718,11 @@ async function cancelRfDetrTrainingJobRequest() {
         const warnings = [];
         const imagePaths = new Set();
         const imageQuestionPairs = new Set();
-        (Array.isArray(rows) ? rows : []).forEach((row, index) => {
+        const rowList = Array.isArray(rows) ? rows : [];
+        if (!Array.isArray(rows)) {
+            errors.push("VLM rows must be an array");
+        }
+        rowList.forEach((row, index) => {
             const rowNumber = index + 1;
             const imagePath = String(row?.image_path || "").trim();
             const normalizedImagePath = imagePath
@@ -34770,14 +34774,14 @@ async function cancelRfDetrTrainingJobRequest() {
                 imageQuestionPairs.add(pairKey);
             }
         });
-        if (!rows.length) {
+        if (!rowList.length) {
             warnings.push("no VLM rows to export");
         }
         return {
             ok: errors.length === 0,
             errors,
             warnings,
-            rowCount: Array.isArray(rows) ? rows.length : 0,
+            rowCount: rowList.length,
             imageCount: imagePaths.size,
         };
     }
@@ -34800,7 +34804,11 @@ async function cancelRfDetrTrainingJobRequest() {
         const nonTrainableValidationStatuses = new Set(["rejected", "failed", "invalid"]);
         const trainableReviewStatuses = new Set(["accepted", "unreviewed", "machine_validated"]);
         const nonTrainableReviewStatuses = new Set(["rejected", "needs_revision"]);
-        (Array.isArray(rows) ? rows : []).forEach((row, index) => {
+        const rowList = Array.isArray(rows) ? rows : [];
+        if (!Array.isArray(rows)) {
+            errors.push("instruction rows must be an array");
+        }
+        rowList.forEach((row, index) => {
             const rowNumber = index + 1;
             const imagePath = String(row?.image_path || "").trim();
             const normalizedImagePath = imagePath
@@ -34886,14 +34894,14 @@ async function cancelRfDetrTrainingJobRequest() {
                 imageQuestionPairs.add(pairKey);
             }
         });
-        if (!rows.length) {
+        if (!rowList.length) {
             warnings.push("no instruction rows to export");
         }
         return {
             ok: errors.length === 0,
             errors,
             warnings,
-            rowCount: Array.isArray(rows) ? rows.length : 0,
+            rowCount: rowList.length,
             imageCount: imagePaths.size,
         };
     }
@@ -34919,7 +34927,11 @@ async function cancelRfDetrTrainingJobRequest() {
             .split("/")
             .filter((part) => part && part !== ".")
             .join("/");
-        (Array.isArray(rows) ? rows : []).forEach((row, index) => {
+        const rowList = Array.isArray(rows) ? rows : [];
+        if (!Array.isArray(rows)) {
+            errors.push("instruction archive rows must be an array");
+        }
+        rowList.forEach((row, index) => {
             const rowNumber = index + 1;
             const imagePath = String(row?.image_path || "").trim();
             const normalizedImagePath = normalizeArchiveImagePath(imagePath);
@@ -34944,14 +34956,14 @@ async function cancelRfDetrTrainingJobRequest() {
                 errors.push(`archive row ${rowNumber} missing export_metadata`);
             }
         });
-        if (!rows.length) {
+        if (!rowList.length) {
             warnings.push("no instruction archive rows to export");
         }
         return {
             ok: errors.length === 0,
             errors,
             warnings,
-            rowCount: Array.isArray(rows) ? rows.length : 0,
+            rowCount: rowList.length,
             imageCount: imagePaths.size,
         };
     }
@@ -34979,7 +34991,11 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             return normalized;
         };
-        (Array.isArray(rows) ? rows : []).forEach((row, index) => {
+        const rowList = Array.isArray(rows) ? rows : [];
+        if (!Array.isArray(rows)) {
+            errors.push("instruction review rows must be an array");
+        }
+        rowList.forEach((row, index) => {
             const rowNumber = index + 1;
             if (!row || typeof row !== "object") {
                 errors.push(`review row ${rowNumber} is not an object`);
@@ -35108,14 +35124,14 @@ async function cancelRfDetrTrainingJobRequest() {
                 imageQaIds.add(pairKey);
             }
         });
-        if (!rows.length) {
+        if (!rowList.length) {
             warnings.push("no instruction review rows to export");
         }
         return {
             ok: errors.length === 0,
             errors,
             warnings,
-            rowCount: Array.isArray(rows) ? rows.length : 0,
+            rowCount: rowList.length,
             imageCount: imagePaths.size,
             selectedTrainingCount,
             manualReviewCount,

@@ -776,6 +776,11 @@ def test_qwen_caption_vlm_training_validator_rejects_canonical_image_path_duplic
             "assert.strictEqual(duplicate.ok, false);",
             "assert.strictEqual(duplicate.imageCount, 1);",
             "assert(duplicate.errors.some((error) => error.includes('duplicate image_path + question')));",
+            "const missingRows = validateCaptionVlmTrainingRows(undefined);",
+            "assert.strictEqual(missingRows.ok, false);",
+            "assert.strictEqual(missingRows.rowCount, 0);",
+            "assert(missingRows.errors.some((error) => error.includes('VLM rows must be an array')));",
+            "assert(missingRows.warnings.some((warning) => warning.includes('no VLM rows')));",
         ]
     )
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
@@ -831,6 +836,11 @@ def test_qwen_caption_instruction_training_validator_blocks_non_trainable_rows()
             "assert.strictEqual(canonicalImageDuplicate.ok, false);",
             "assert.strictEqual(canonicalImageDuplicate.imageCount, 1);",
             "assert(canonicalImageDuplicate.errors.some((error) => error.includes('duplicate image_path + question')));",
+            "const missingRows = validateCaptionInstructionTrainingRows(null);",
+            "assert.strictEqual(missingRows.ok, false);",
+            "assert.strictEqual(missingRows.rowCount, 0);",
+            "assert(missingRows.errors.some((error) => error.includes('instruction rows must be an array')));",
+            "assert(missingRows.warnings.some((warning) => warning.includes('no instruction rows')));",
         ]
     )
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
@@ -1038,6 +1048,11 @@ def test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports
             "assert.strictEqual(duplicateArchiveAlias.ok, false);",
             "assert.strictEqual(duplicateArchiveAlias.imageCount, 1);",
             "assert(duplicateArchiveAlias.errors.some((error) => error.includes('duplicate archive image_path')));",
+            "const missingArchiveRows = validateCaptionInstructionArchiveRows(undefined);",
+            "assert.strictEqual(missingArchiveRows.ok, false);",
+            "assert.strictEqual(missingArchiveRows.rowCount, 0);",
+            "assert(missingArchiveRows.errors.some((error) => error.includes('instruction archive rows must be an array')));",
+            "assert(missingArchiveRows.warnings.some((warning) => warning.includes('no instruction archive rows')));",
             "const canonicalAliasPayload = {",
             "  ...completePayload,",
             "  instruction_training_rows: [{ ...trainingRow, image_path: './frame.jpg' }],",
@@ -1051,6 +1066,11 @@ def test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports
             "const reviewValidation = validateCaptionInstructionReviewRows([reviewRow]);",
             "assert.strictEqual(reviewValidation.ok, true);",
             "assert.strictEqual(validateCaptionInstructionArtifactConsistency({ instruction_report: report }, 'review', reviewValidation).ok, true);",
+            "const missingReviewRows = validateCaptionInstructionReviewRows({ rows: [reviewRow] });",
+            "assert.strictEqual(missingReviewRows.ok, false);",
+            "assert.strictEqual(missingReviewRows.rowCount, 0);",
+            "assert(missingReviewRows.errors.some((error) => error.includes('instruction review rows must be an array')));",
+            "assert(missingReviewRows.warnings.some((warning) => warning.includes('no instruction review rows')));",
             "const reviewMismatch = validateCaptionInstructionArtifactConsistency({ instruction_report: { ...report, instruction_review_row_count: 2 } }, 'review', reviewValidation);",
             "assert.strictEqual(reviewMismatch.ok, false);",
             "assert(reviewMismatch.errors.some((error) => error.includes('review row count 1 does not match report review row count 2')));",

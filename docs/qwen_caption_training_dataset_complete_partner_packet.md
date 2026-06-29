@@ -194,7 +194,9 @@ source data or rewriting generated content through an import side channel.
 
 ### 9. Trainer JSONL Export Is Gated In Browser And API Paths
 
-The browser validates trainer JSONL before download. The API also supports
+The browser validates trainer JSONL before download and treats missing or
+non-array artifact row payloads as blocked validation results rather than
+runtime exceptions. The API also supports
 `require_ready_instruction_export=true`, which independently checks readiness,
 report shape, ready flags, corpus metrics, export-validation proof, versioned
 artifact-consistency proof, and the returned artifact arrays. Trainer, archive,
@@ -644,9 +646,10 @@ The main implementation responsibilities are split as follows.
 | Runtime hardening | `localinferenceapi.py`, runner tooling, and caption docs | Handles prompt pressure, representative box lists, output-loop detection, recovery, set-and-forget supervision, and progress artifacts |
 
 The implementation keeps UI checks and backend checks aligned intentionally.
-Browser validation gives immediate operator feedback; backend validation is the
-authority for API/script use; trainer validation is the final guard against
-hand-edited files.
+Browser validation gives immediate operator feedback and must fail closed with
+readable messages even when artifact payloads are missing or malformed; backend
+validation is the authority for API/script use; trainer validation is the final
+guard against hand-edited files.
 
 ## Artifact Contract
 

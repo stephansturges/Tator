@@ -337,8 +337,8 @@ Implemented guards include:
   dataset;
 - backend `caption_mutation_busy` gates for caption/text-label mutations while
   a job owns the same archive;
-- backend `caption_read_busy` gates for caption archive reads while a job owns
-  the same archive;
+- backend `caption_read_busy` gates for caption archive reads and text-label
+  mirror reads while a job owns the same archive;
 - backend gates for caption export, review import, metadata writes, dataset ZIP
   download, and linked-dataset deletion;
 - browser deferral of normal current-image archive reloads during active

@@ -19905,6 +19905,7 @@ def set_dataset_glossary(dataset_id: str, glossary: str):
 
 
 def get_text_label(dataset_id: str, image_name: str):
+    _raise_if_qwen_caption_read_busy(dataset_id)
     entry = _resolve_dataset_entry(dataset_id)
     split, image_relpath = _annotation_text_split_rel_from_name(entry, image_name)
     caption = _annotation_effective_text_label(entry, image_relpath, split)
@@ -19914,6 +19915,7 @@ def get_text_label(dataset_id: str, image_name: str):
 
 
 def get_text_labels(dataset_id: str, image_names: Sequence[str]):
+    _raise_if_qwen_caption_read_busy(dataset_id)
     entry = _resolve_dataset_entry(dataset_id)
     captions: Dict[str, str] = {}
     missing: List[str] = []

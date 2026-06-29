@@ -53,7 +53,8 @@ The new work adds a separate instruction-dataset path:
   backend caption job is still mutating the selected caption archive.
 - The HTTP caption-export route opts into the same backend active-job guard, so
   API clients receive `caption_export_busy` instead of a mid-run snapshot.
-- The single-image and batch caption archive read routes reject with
+- The single-image and batch caption archive read routes, plus the legacy
+  single-image and batch text-label mirror read routes, reject with
   `caption_read_busy` before resolving the dataset while the same dataset has
   an active caption job.
 - The full dataset ZIP download route rejects with `dataset_download_busy`

@@ -513,7 +513,7 @@ below.
 | Model-download clarity | model dropdown colors missing/download-needed models red and local models normal | Implemented |
 | Safe artifact actions during long jobs | UI disabling plus action-time checks for ordinary caption exports, full dataset ZIP downloads, instruction exports, report downloads, and reviewed JSONL import | Implemented |
 | Safe caption mutations during long jobs | Caption output editing, autosave, manual caption add/update/primary/delete controls, and alternate selection visibly disable or refuse during active archive mutation; text-label saves plus caption add/update/delete also refuse while the selected dataset has an active caption job | Implemented |
-| Safe caption archive reads during long jobs | Current-image archive reloads defer while the selected archive is mutating, in-flight responses are dropped if a job starts mid-read, and only explicit completed-job handoffs can force a reload | Implemented |
+| Safe caption archive and text-label reads during long jobs | Current-image archive reloads defer while the selected archive is mutating, in-flight responses are dropped if a job starts mid-read, only explicit completed-job handoffs can force a reload, and backend single/batch caption and text-label reads reject before dataset resolution while a same-dataset caption job is active | Implemented |
 | Safe prompt metadata during long jobs | Prompt-stack, style, glossary, model, token, decode, set-and-forget, pilot, health-gate, save/promote, and batch-scope controls visibly lock while the selected archive is mutating; glossary reset/save and stale input events also hit archive-idle guards, and backend glossary saves refuse active caption jobs | Implemented |
 | Safe dataset deletion during long jobs | Dataset deletion refuses while an active caption dataset job references the same dataset | Implemented |
 | Same-dataset job concurrency | Caption dataset job start refuses while another queued, running, or cancelling caption job owns the same dataset | Implemented |
@@ -554,9 +554,10 @@ glossary save path, and dataset deletion path also use backend active-job
 guards. A script or API caller that tries to export captions while an active
 caption dataset job is registered for the same dataset receives a `409` with a
 `caption_export_busy` detail instead of a partial archive snapshot. A script or
-API caller that tries to read a single-image or batch caption bundle during the
-same active state receives `caption_read_busy` before the backend resolves the
-dataset or reads caption records. A script or
+API caller that tries to read a single-image or batch caption bundle, or the
+legacy single-image or batch text-label mirror, during the same active state
+receives `caption_read_busy` before the backend resolves the dataset or reads
+caption/text-label records. A script or
 API caller that tries to download the full dataset ZIP during the same active
 state receives `dataset_download_busy` before the backend reads the dataset or
 overlay files. A script or API caller that tries to import review decisions
@@ -1498,8 +1499,8 @@ Additional focused validation recorded in the supporting hardening docs covers:
   while a backend caption job id is still active
 - the caption export HTTP route opting into the backend active-job guard and
   returning `caption_export_busy` for API clients while a dataset job is active
-- single-image and batch caption-read routes rejecting with `caption_read_busy`
-  before resolving the dataset while a dataset job is active
+- single-image and batch caption-read and text-label-read routes rejecting with
+  `caption_read_busy` before resolving the dataset while a dataset job is active
 - full dataset ZIP download rejecting with `dataset_download_busy` before
   dataset or overlay reads while a dataset job is active, with the UI showing
   the server-side failure instead of fire-and-forget downloading an error body

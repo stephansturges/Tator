@@ -129,13 +129,14 @@ row before training.
   selector changes are reverted to the stable dataset id and reported through
   the same archive-idle guard, preventing the panel from showing a different
   dataset context while the active job still owns the current archive.
-- Caption archive reads now follow the same consistency rule. Normal
+- Caption archive and text-label mirror reads now follow the same consistency rule. Normal
   current-image archive reloads are deferred while a caption or instruction job
   is mutating the archive, and a reload response is dropped if a backend job
   becomes active while the request is in flight. The panel keeps the last stable
   caption view instead of repainting from a half-updated archive. Explicit
   completion handoffs from the job that just finished can opt into a reload.
-  The backend single-image and batch caption-read routes now reject with
+  The backend single-image and batch caption-read routes, plus the legacy
+  single-image and batch text-label read routes, now reject with
   `caption_read_busy` before resolving the dataset when another active caption
   dataset job owns the same archive.
 - Fixed caption action layout so export and instruction buttons wrap into

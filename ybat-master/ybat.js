@@ -31207,7 +31207,67 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const manifestInvalid = raw.match(/^caption_instruction_bundle_manifest_invalid:(.+)$/);
         if (manifestInvalid) {
-            return `Training bundle export blocked: checksum manifest validation failed (${manifestInvalid[1]}).`;
+            const detail = manifestInvalid[1] || "unknown";
+            const rowCount = detail.match(/^manifest_row_count_mismatch:(training_rows|archive_rows|review_rows|images|labels)$/);
+            if (rowCount) {
+                const label = rowCount[1].replace(/_/g, " ");
+                return `Training bundle export blocked: manifest ${label} count does not match the bundled artifacts. Regenerate the bundle before sharing it.`;
+            }
+            const roleCount = detail.match(/^manifest_role_count_mismatch:(images|labels)$/);
+            if (roleCount) {
+                return `Training bundle export blocked: manifest ${roleCount[1]} count does not match the ZIP file roles. Regenerate the bundle before sharing it.`;
+            }
+            const artifactPath = detail.match(/^manifest_artifact_path_invalid:(training_jsonl|archive_jsonl|review_jsonl|report_json)$/);
+            if (artifactPath) {
+                return `Training bundle export blocked: manifest points ${artifactPath[1]} at the wrong artifact path. Regenerate the bundle before sharing it.`;
+            }
+            const missingAsset = detail.match(/^manifest_(image|label)_file_missing:(.+)$/);
+            if (missingAsset) {
+                return `Training bundle export blocked: manifest references copied ${missingAsset[1]} ${missingAsset[2]}, but that file is not in the ZIP. Regenerate the bundle before sharing it.`;
+            }
+            const duplicateAsset = detail.match(/^manifest_(image|label)_path_duplicate:(.+)$/);
+            if (duplicateAsset) {
+                return `Training bundle export blocked: manifest lists copied ${duplicateAsset[1]} ${duplicateAsset[2]} more than once. Regenerate the bundle before sharing it.`;
+            }
+            const assetSetMismatch = detail.match(/^manifest_(image|label)_file_set_mismatch$/);
+            if (assetSetMismatch) {
+                return `Training bundle export blocked: manifest ${assetSetMismatch[1]} inventory does not match the ZIP members. Regenerate the bundle before sharing it.`;
+            }
+            const assetDigest = detail.match(/^manifest_(image|label)_(sha256|bytes)_mismatch:(.+)$/);
+            if (assetDigest) {
+                const field = assetDigest[2] === "sha256" ? "checksum" : "byte count";
+                return `Training bundle export blocked: copied ${assetDigest[1]} ${assetDigest[3]} has a manifest ${field} mismatch. Regenerate the bundle before sharing it.`;
+            }
+            const fileRole = detail.match(/^manifest_file_role_mismatch:(.+)$/);
+            if (fileRole) {
+                return `Training bundle export blocked: manifest role for ${fileRole[1]} does not match the required bundle role. Regenerate the bundle before sharing it.`;
+            }
+            const jsonlRow = detail.match(/^manifest_jsonl_row_invalid:(.+):([0-9]+)$/);
+            if (jsonlRow) {
+                return `Training bundle export blocked: ${jsonlRow[1]} has a malformed JSONL row at line ${jsonlRow[2]}. Regenerate the instruction dataset and retry.`;
+            }
+            const jsonInvalid = detail.match(/^manifest_json_invalid:(.+)$/);
+            if (jsonInvalid) {
+                return `Training bundle export blocked: ${jsonInvalid[1]} is not a JSON object. Regenerate the instruction dataset and retry.`;
+            }
+            const fileSha = detail.match(/^manifest_file_sha256_mismatch:(.+)$/);
+            if (fileSha) {
+                return `Training bundle export blocked: ZIP member ${fileSha[1]} does not match its manifest checksum. Regenerate the bundle before sharing it.`;
+            }
+            const fileBytes = detail.match(/^manifest_file_bytes_mismatch:(.+)$/);
+            if (fileBytes) {
+                return `Training bundle export blocked: ZIP member ${fileBytes[1]} does not match its manifest byte count. Regenerate the bundle before sharing it.`;
+            }
+            if (detail === "manifest_file_count_invalid" || detail === "manifest_file_count_mismatch") {
+                return "Training bundle export blocked: manifest file count does not match the ZIP inventory. Regenerate the bundle before sharing it.";
+            }
+            if (detail === "manifest_file_set_mismatch") {
+                return "Training bundle export blocked: manifest file inventory does not match the ZIP members. Regenerate the bundle before sharing it.";
+            }
+            if (detail === "manifest_zip_duplicate_member") {
+                return "Training bundle export blocked: ZIP contains duplicate member names. Regenerate the bundle before sharing it.";
+            }
+            return `Training bundle export blocked: bundle manifest validation failed (${detail}).`;
         }
         const zipMissing = raw.match(/^caption_instruction_bundle_zip_missing:(.+)$/);
         if (zipMissing) {

@@ -243,6 +243,11 @@ row before training.
   messages are not double-prefixed. Live-job busy responses stay worded as
   blocked operator states instead of being wrapped as generic export/import
   failures.
+- Training-bundle manifest failures now format the semantic failure class for
+  operators. Row-count drift, missing copied images or labels, artifact-path
+  mistakes, file-role mismatches, malformed JSONL rows, duplicate ZIP members,
+  byte-count mismatches, and checksum mismatches produce actionable blocked
+  messages instead of a single generic manifest error.
 - The reviewed-JSONL import button now checks the archive-busy guard before
   opening the browser file picker, and the selected-file import path checks it
   again before parsing or posting rows. This prevents a stale enabled button or

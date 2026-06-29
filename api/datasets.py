@@ -5,8 +5,10 @@ from typing import Any, Callable, Optional
 from fastapi import APIRouter, UploadFile, File, Form, Body, HTTPException, Query
 
 
-def _instruction_export_proof_is_ok(value: Any) -> bool:
+def _instruction_export_proof_is_ok(value: Any, *, expected_format: Optional[str] = None) -> bool:
     if not isinstance(value, dict):
+        return False
+    if expected_format is not None and str(value.get("format") or "").strip() != expected_format:
         return False
     if value.get("ok") is not True:
         return False
@@ -45,11 +47,12 @@ def _instruction_export_not_ready_reason(result: Any) -> str:
     report_consistency = report.get("instruction_artifact_consistency")
     archive = result.get("instruction_archive") if isinstance(result.get("instruction_archive"), dict) else {}
     archive_consistency = archive.get("instruction_artifact_consistency")
-    if not _instruction_export_proof_is_ok(payload_consistency):
+    consistency_format = "tator_caption_instruction_artifact_consistency_v1"
+    if not _instruction_export_proof_is_ok(payload_consistency, expected_format=consistency_format):
         return "instruction_artifact_consistency"
-    if not _instruction_export_proof_is_ok(report_consistency):
+    if not _instruction_export_proof_is_ok(report_consistency, expected_format=consistency_format):
         return "instruction_artifact_consistency"
-    if not _instruction_export_proof_is_ok(archive_consistency):
+    if not _instruction_export_proof_is_ok(archive_consistency, expected_format=consistency_format):
         return "instruction_artifact_consistency"
     if payload_consistency != report_consistency or payload_consistency != archive_consistency:
         return "instruction_artifact_consistency_mismatch"

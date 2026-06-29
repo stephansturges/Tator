@@ -75,6 +75,15 @@ def test_caption_instruction_strict_export_gate_requires_ready_proofs() -> None:
     assert _instruction_export_not_ready_reason(
         {
             **payload,
+            "instruction_artifact_consistency": {
+                **artifact_consistency,
+                "format": "wrong_format",
+            },
+        }
+    ) == "instruction_artifact_consistency"
+    assert _instruction_export_not_ready_reason(
+        {
+            **payload,
             "instruction_archive": {
                 "instruction_artifact_consistency": {
                     **artifact_consistency,

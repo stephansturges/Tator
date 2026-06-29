@@ -72,7 +72,7 @@ caption-assistance path.
 | Repeated-token loops could appear as hangs | Added live output-loop detection, safe retry, runtime unload, and fallback/recovery paths | Repeated punctuation or token streams are not accepted as valid captions |
 | Missing model files were visually ambiguous | Styled download-needed model choices in red and local models in the normal local color | Operators can see model availability before launching a long job |
 | Review import payloads were accepted inconsistently by UI, route, and backend parser | Made the API route accept any JSON body and moved body-shape enforcement into the shared backend review parser | JSON arrays, wrapper objects, and single review-row objects now follow the same fail-closed validation path instead of being rejected by framework typing before parser checks |
-| Scripted trainer exports could rely too heavily on the readiness label | The server-side ready gate now independently requires export-validation and artifact-consistency proofs to be present, OK, error-free, and internally consistent | API clients get the same critical fail-closed behavior as the browser when proof state drifts from the readiness label |
+| Scripted trainer exports could rely too heavily on the readiness label | The server-side ready gate now independently requires export-validation and versioned artifact-consistency proofs to be present, OK, error-free, and internally consistent | API clients get the same critical fail-closed behavior as the browser when proof state drifts from the readiness label |
 
 The result is a conservative pipeline: generate candidates, archive evidence,
 validate aggressively, let humans review generated language, then export only
@@ -147,11 +147,12 @@ trainer JSONL is the artifact that can directly feed fine-tuning, so it is held
 to the stricter default.
 
 The server-side gate also checks the proof objects behind that readiness label.
-A `ready` report is not sufficient if `instruction_export_validation` or
-`instruction_artifact_consistency` is missing, not OK, has nonzero errors, or
-disagrees between the API payload, report, and archive. This prevents scripts
-from receiving trainer JSONL if a future bug or hand-edited payload makes the
-readiness label drift away from the actual validation evidence.
+A `ready` report is not sufficient if `instruction_export_validation` or the
+versioned `instruction_artifact_consistency` proof is missing, wrong-version,
+not OK, has nonzero errors, or disagrees between the API payload, report, and
+archive. This prevents scripts from receiving trainer JSONL if a future bug or
+hand-edited payload makes the readiness label drift away from the actual
+validation evidence.
 
 ### Backend Launch Failures Are Visible
 
@@ -906,8 +907,8 @@ Additional focused validation recorded in the supporting hardening docs covers:
 - route-level review import acceptance for JSON arrays and single review-row
   objects, plus parser-owned rejection of scalar bodies
 - strict server-side trainer-export refusal when readiness is not ready,
-  export-validation proof fails, or artifact-consistency proofs are missing or
-  inconsistent
+  export-validation proof fails, or versioned artifact-consistency proofs are
+  missing, wrong-version, or inconsistent
 - trainer import of flat rows
 - trainer rejection of non-trainable rows
 - rendered UI smoke for visible controls and unclipped caption actions

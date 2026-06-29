@@ -35046,6 +35046,14 @@ async function cancelRfDetrTrainingJobRequest() {
         if (String(report.format || "").trim() !== "tator_caption_instruction_report_v1") {
             errors.push("report format is invalid");
         }
+        const reportImageCount = Number(report.image_count);
+        if (!Number.isFinite(reportImageCount) || reportImageCount < 0) {
+            errors.push("report image_count is missing or invalid");
+        }
+        const reportSelectedCount = Number(report.selected_flattened_row_count);
+        if (!Number.isFinite(reportSelectedCount) || reportSelectedCount < 0) {
+            errors.push("report selected_flattened_row_count is missing or invalid");
+        }
         const metrics = report.corpus_quality_metrics;
         if (!metrics || typeof metrics !== "object") {
             errors.push("report missing corpus_quality_metrics");
@@ -35079,8 +35087,11 @@ async function cancelRfDetrTrainingJobRequest() {
             if (!metrics.training_answer_format_distribution || typeof metrics.training_answer_format_distribution !== "object") {
                 errors.push("corpus_quality_metrics.training_answer_format_distribution is missing");
             }
-            if (typeof report.image_count === "number" && typeof metrics.image_count === "number" && report.image_count !== metrics.image_count) {
+            if (Number.isFinite(reportImageCount) && typeof metrics.image_count === "number" && reportImageCount !== metrics.image_count) {
                 errors.push("corpus_quality_metrics.image_count does not match report image_count");
+            }
+            if (Number.isFinite(reportSelectedCount) && typeof metrics.selected_flattened_row_count === "number" && reportSelectedCount !== metrics.selected_flattened_row_count) {
+                errors.push("corpus_quality_metrics.selected_flattened_row_count does not match report selected_flattened_row_count");
             }
         }
         const readiness = report.training_readiness;
@@ -35105,6 +35116,26 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             if (!readiness.thresholds || typeof readiness.thresholds !== "object") {
                 errors.push("training_readiness.thresholds is missing");
+            }
+            if (status === "ready" && readiness.ready_for_training !== true) {
+                errors.push("training_readiness.ready_for_training must be true when status is ready");
+            }
+            if (["needs_review", "blocked"].includes(status) && readiness.ready_for_training === true) {
+                errors.push("training_readiness.ready_for_training must be false unless status is ready");
+            }
+            if (status === "ready") {
+                if (Array.isArray(readiness.blocking_reasons) && readiness.blocking_reasons.length) {
+                    errors.push("training_readiness ready status cannot include blocking_reasons");
+                }
+                if (Array.isArray(readiness.required_actions) && readiness.required_actions.length) {
+                    errors.push("training_readiness ready status cannot include required_actions");
+                }
+                if (Array.isArray(readiness.quality_warnings) && readiness.quality_warnings.length) {
+                    errors.push("training_readiness ready status cannot include quality_warnings");
+                }
+            }
+            if (status === "blocked" && Array.isArray(readiness.blocking_reasons) && !readiness.blocking_reasons.length) {
+                errors.push("training_readiness blocked status requires blocking_reasons");
             }
         }
         const exportValidation = report.instruction_export_validation;

@@ -441,9 +441,15 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "report missing training_readiness" in report_validator
     assert "training_readiness.status is invalid" in report_validator
     assert "training_readiness.ready_for_training must be boolean" in report_validator
+    assert "training_readiness.ready_for_training must be true when status is ready" in report_validator
+    assert "training_readiness.ready_for_training must be false unless status is ready" in report_validator
+    assert "training_readiness ready status cannot include quality_warnings" in report_validator
+    assert "training_readiness blocked status requires blocking_reasons" in report_validator
     assert "training_readiness.thresholds is missing" in report_validator
     assert "report missing instruction_export_validation" in report_validator
     assert "instruction_export_validation contains training-row errors" in report_validator
+    assert "report selected_flattened_row_count is missing or invalid" in report_validator
+    assert "corpus_quality_metrics.selected_flattened_row_count does not match report selected_flattened_row_count" in report_validator
     assert "instruction_export_validation.row_count does not match selected_flattened_row_count" in report_validator
     assert "report instruction_review_row_count is missing or invalid" in report_validator
     assert "report manual_review_required_count is missing or invalid" in report_validator
@@ -773,6 +779,21 @@ def test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports
             "const missingReportConsistency = validateCaptionInstructionReport({ ...report, instruction_artifact_consistency: undefined });",
             "assert.strictEqual(missingReportConsistency.ok, false);",
             "assert(missingReportConsistency.errors.some((error) => error.includes('report missing instruction_artifact_consistency')));",
+            "const mismatchedReportSelectedCount = validateCaptionInstructionReport({ ...report, selected_flattened_row_count: 2 });",
+            "assert.strictEqual(mismatchedReportSelectedCount.ok, false);",
+            "assert(mismatchedReportSelectedCount.errors.some((error) => error.includes('corpus_quality_metrics.selected_flattened_row_count does not match report selected_flattened_row_count')));",
+            "const readyFlagMismatch = validateCaptionInstructionReport({ ...report, training_readiness: { ...report.training_readiness, ready_for_training: false } });",
+            "assert.strictEqual(readyFlagMismatch.ok, false);",
+            "assert(readyFlagMismatch.errors.some((error) => error.includes('training_readiness.ready_for_training must be true when status is ready')));",
+            "const readyWithWarnings = validateCaptionInstructionReport({ ...report, training_readiness: { ...report.training_readiness, quality_warnings: ['needs review'] } });",
+            "assert.strictEqual(readyWithWarnings.ok, false);",
+            "assert(readyWithWarnings.errors.some((error) => error.includes('training_readiness ready status cannot include quality_warnings')));",
+            "const blockedFlagMismatch = validateCaptionInstructionReport({ ...report, training_readiness: { ...report.training_readiness, status: 'blocked', ready_for_training: true, blocking_reasons: ['no_selected_training_rows'] } });",
+            "assert.strictEqual(blockedFlagMismatch.ok, false);",
+            "assert(blockedFlagMismatch.errors.some((error) => error.includes('training_readiness.ready_for_training must be false unless status is ready')));",
+            "const blockedWithoutReasons = validateCaptionInstructionReport({ ...report, training_readiness: { ...report.training_readiness, status: 'blocked', ready_for_training: false, blocking_reasons: [] } });",
+            "assert.strictEqual(blockedWithoutReasons.ok, false);",
+            "assert(blockedWithoutReasons.errors.some((error) => error.includes('training_readiness blocked status requires blocking_reasons')));",
             "const invalidReportConsistency = validateCaptionInstructionReport({ ...report, instruction_artifact_consistency: { format: 'wrong', ok: true, error_count: 0, errors: [] } });",
             "assert.strictEqual(invalidReportConsistency.ok, false);",
             "assert(invalidReportConsistency.errors.some((error) => error.includes('instruction_artifact_consistency format is invalid')));",
@@ -850,7 +871,7 @@ def test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports
             "const reviewMismatch = validateCaptionInstructionArtifactConsistency({ instruction_report: { ...report, instruction_review_row_count: 2 } }, 'review', reviewValidation);",
             "assert.strictEqual(reviewMismatch.ok, false);",
             "assert(reviewMismatch.errors.some((error) => error.includes('review row count 1 does not match report review row count 2')));",
-            "const trainingMismatch = validateCaptionInstructionArtifactConsistency({ instruction_report: { ...report, corpus_quality_metrics: { ...report.corpus_quality_metrics, selected_flattened_row_count: 2 }, instruction_export_validation: { ok: true, error_count: 0, errors: [], row_count: 2 } } }, 'training', { rowCount: 1 });",
+            "const trainingMismatch = validateCaptionInstructionArtifactConsistency({ instruction_report: { ...report, selected_flattened_row_count: 2, corpus_quality_metrics: { ...report.corpus_quality_metrics, selected_flattened_row_count: 2 }, instruction_export_validation: { ok: true, error_count: 0, errors: [], row_count: 2 } } }, 'training', { rowCount: 1 });",
             "assert.strictEqual(trainingMismatch.ok, false);",
             "assert(trainingMismatch.errors.some((error) => error.includes('training row count 1 does not match report selected row count 2')));",
             "const identityMismatch = validateCaptionInstructionArtifactConsistency({ ...completePayload, instruction_review_rows: [{ ...reviewRow, qa_id: 'qa-other' }] }, 'training', { rowCount: 1 });",

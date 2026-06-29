@@ -459,6 +459,12 @@ warnings.
 `blocked` means the export should not be used for training. Examples include no
 selected rows, no images, or a selected row marked rejected or needs-revision.
 
+The browser report validator requires readiness to be self-consistent:
+`ready_for_training` must agree with `status`, `ready` reports cannot carry
+blocking reasons, required actions, or quality warnings, and `blocked` reports
+must name at least one blocking reason. Top-level report counts must also match
+the corresponding `corpus_quality_metrics` counts.
+
 The browser refuses blocked instruction JSONL downloads. It also refuses
 needs-review trainer JSONL by default through **Require ready report for trainer
 JSONL**. Operators can disable that gate only for deliberate review-pending

@@ -350,6 +350,12 @@ quality warnings.
 there are no selected rows, no images, selected rows are invalid, or selected
 language rows were rejected or marked needs-revision.
 
+The browser report validator treats readiness as a self-consistent decision:
+`ready_for_training` must agree with `status`, a `ready` report cannot carry
+blocking reasons, required actions, or quality warnings, and a `blocked` report
+must identify at least one blocking reason. Top-level report image and selected
+row counts must also agree with `corpus_quality_metrics`.
+
 The browser refuses blocked trainer JSONL downloads. By default it also refuses
 needs-review trainer JSONL through the **Require ready report for trainer
 JSONL** gate. Scripts can request the same server-side refusal with

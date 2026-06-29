@@ -612,6 +612,12 @@ same server-side behavior with
 `/captions/export?require_ready_instruction_export=true`, which returns HTTP
 409 unless readiness is `ready`.
 
+The browser also checks that readiness is self-consistent. `ready_for_training`
+must agree with `status`, a `ready` report cannot carry blocking reasons,
+required actions, or quality warnings, a `blocked` report must name at least one
+blocking reason, and top-level report counts must match the corresponding
+`corpus_quality_metrics` counts.
+
 The report also includes `instruction_export_validation`, which is the backend
 equivalent of the browser's trainer JSONL validator. It checks required fields,
 row metadata, instruction archive provenance, duplicate canonical image-path/question pairs,

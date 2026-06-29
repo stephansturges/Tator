@@ -150,6 +150,11 @@ row before training.
   error-free. Report downloads therefore fail closed instead of presenting a
   report as valid when the run-level artifact-consistency proof is absent or
   failed.
+- The browser-side instruction report validator now checks readiness
+  self-consistency. `ready_for_training` must agree with `status`, `ready`
+  reports cannot carry blocking reasons, required actions, or quality warnings,
+  `blocked` reports must name at least one blocking reason, and top-level image
+  and selected-row counts must match the corresponding corpus-quality metrics.
 - The browser-side artifact-consistency validator now validates every embedded
   consistency proof it receives in the payload, report, and archive, and blocks
   trainer, archive, or review downloads when those replicated proof objects

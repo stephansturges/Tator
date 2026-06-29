@@ -913,6 +913,17 @@ def test_caption_instruction_review_payload_rows_rejects_non_list_wrapper_rows()
     assert excinfo.value.detail == "review_rows_list_required"
 
 
+@pytest.mark.parametrize("payload", [{}, {"reviewer": "analyst"}, 123, "[]"])
+def test_caption_instruction_review_payload_rows_rejects_missing_row_container(payload) -> None:
+    import localinferenceapi as api
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api._caption_instruction_review_payload_rows(payload)
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "review_rows_list_required"
+
+
 def test_caption_instruction_review_import_rejects_unsupported_review_decision(
     monkeypatch,
     tmp_path,

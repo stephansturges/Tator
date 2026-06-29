@@ -23146,9 +23146,9 @@ def _caption_instruction_review_payload_rows(payload: Any) -> List[Any]:
         if raw_rows is missing and str(payload.get("format") or "").strip() == CAPTION_INSTRUCTION_REVIEW_ROWS_FORMAT:
             raw_rows = [payload]
         if raw_rows is missing:
-            raw_rows = []
+            raw_rows = None
     else:
-        raw_rows = []
+        raw_rows = None
     if not isinstance(raw_rows, list):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="review_rows_list_required")
     if len(raw_rows) > CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ROWS:

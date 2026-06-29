@@ -203,7 +203,8 @@ Review import accepts JSONL rows, a JSON array of rows, a wrapper object with
 `rows`, `review_rows`, or `instruction_review_rows`, or a single review-row
 object. Wrapper fields are resolved in that order, and an explicitly present
 field must be a list. An empty `rows: []` field therefore means "no rows" and
-does not fall through to another wrapper field.
+does not fall through to another wrapper field. A wrapper object with no row
+container is rejected instead of being treated as an empty review packet.
 
 ## Non-Negotiable Training Shape
 

@@ -175,7 +175,9 @@ containing copied image bytes, effective labels, trainer JSONL, archive JSONL,
 review JSONL, report JSON, `labelmap.txt`, and
 `caption_instruction_bundle_manifest.json`. The bundle rewrites training,
 archive, and review row `image_path` values to the copied `images/...` paths and
-preserves the original relative path and image SHA-256 in row metadata.
+preserves the original relative path and image SHA-256 in row metadata. The
+backend validates the bundle manifest before download so every non-manifest ZIP
+member is covered by a matching byte count and SHA-256 digest.
 
 ### 2. Added Caption0 Plus Multi-Prompt QA
 

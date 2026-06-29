@@ -20267,6 +20267,8 @@ CAPTION_INSTRUCTION_TRAINING_ROWS_FORMAT = "tator_caption_instruction_rows_v1"
 CAPTION_INSTRUCTION_REVIEW_ROWS_FORMAT = "tator_caption_instruction_review_rows_v1"
 CAPTION_INSTRUCTION_ARTIFACT_CONSISTENCY_FORMAT = "tator_caption_instruction_artifact_consistency_v1"
 CAPTION_INSTRUCTION_BUNDLE_MANIFEST_FORMAT = "tator_caption_instruction_bundle_manifest_v1"
+CAPTION_INSTRUCTION_BUNDLE_MANIFEST_PATH = "caption_instruction_bundle_manifest.json"
+CAPTION_INSTRUCTION_BUNDLE_CHECKSUM_SCOPE = "all_zip_members_except_manifest"
 CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ROWS = 200000
 CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ID_CHARS = 512
 CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_PATH_CHARS = 4096
@@ -23229,6 +23231,54 @@ def _caption_instruction_bytes_sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _caption_instruction_validate_bundle_manifest(zip_path: Path) -> None:
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            name_list = zf.namelist()
+            names = set(name_list)
+            if len(name_list) != len(names):
+                raise ValueError("manifest_zip_duplicate_member")
+            manifest_bytes = zf.read(CAPTION_INSTRUCTION_BUNDLE_MANIFEST_PATH)
+            manifest = json.loads(manifest_bytes.decode("utf-8"))
+            if not isinstance(manifest, Mapping):
+                raise ValueError("manifest_not_object")
+            if str(manifest.get("format") or "").strip() != CAPTION_INSTRUCTION_BUNDLE_MANIFEST_FORMAT:
+                raise ValueError("manifest_format_invalid")
+            manifest_path = str(manifest.get("manifest_path") or "").strip()
+            if manifest_path != CAPTION_INSTRUCTION_BUNDLE_MANIFEST_PATH:
+                raise ValueError("manifest_path_invalid")
+            if str(manifest.get("checksum_scope") or "").strip() != CAPTION_INSTRUCTION_BUNDLE_CHECKSUM_SCOPE:
+                raise ValueError("manifest_checksum_scope_invalid")
+            file_entries = manifest.get("files")
+            if not isinstance(file_entries, list):
+                raise ValueError("manifest_files_invalid")
+            entries_by_path: Dict[str, Mapping[str, Any]] = {}
+            for entry in file_entries:
+                if not isinstance(entry, Mapping):
+                    raise ValueError("manifest_file_entry_invalid")
+                path = str(entry.get("path") or "").strip()
+                if not path or path == CAPTION_INSTRUCTION_BUNDLE_MANIFEST_PATH or path in entries_by_path:
+                    raise ValueError("manifest_file_path_invalid")
+                entries_by_path[path] = entry
+            expected_paths = names - {CAPTION_INSTRUCTION_BUNDLE_MANIFEST_PATH}
+            if set(entries_by_path) != expected_paths:
+                raise ValueError("manifest_file_set_mismatch")
+            if int(manifest.get("file_count") or 0) != len(entries_by_path):
+                raise ValueError("manifest_file_count_mismatch")
+            for path, entry in entries_by_path.items():
+                data = zf.read(path)
+                expected_bytes = int(entry["bytes"]) if "bytes" in entry else -1
+                if expected_bytes != len(data):
+                    raise ValueError(f"manifest_file_bytes_mismatch:{path}")
+                if str(entry.get("sha256") or "").strip() != _caption_instruction_bytes_sha256(data):
+                    raise ValueError(f"manifest_file_sha256_mismatch:{path}")
+    except (zipfile.BadZipFile, KeyError, json.JSONDecodeError, OSError, ValueError) as exc:
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"caption_instruction_bundle_manifest_invalid:{exc}",
+        ) from exc
+
+
 def _caption_instruction_bundle_rewrite_rows(
     rows: Sequence[Any],
     image_assets: Mapping[Tuple[str, str], Mapping[str, Any]],
@@ -23472,29 +23522,34 @@ def download_caption_instruction_bundle(
                 ),
             )
 
-        bundle_manifest = {
-            "format": CAPTION_INSTRUCTION_BUNDLE_MANIFEST_FORMAT,
-            "dataset_id": dataset_id,
-            "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "instruction_settings": dict(export_payload.get("instruction_settings") or {}),
-            "instruction_settings_fingerprint": str(export_payload.get("instruction_settings_fingerprint") or ""),
-            "row_counts": {
-                "training_rows": len(rewritten_training_rows),
-                "archive_rows": len(rewritten_archive_rows),
-                "review_rows": len(rewritten_review_rows),
-                "images": len(image_assets),
-                "labels": len(label_assets),
-            },
-            "artifacts": {
-                "training_jsonl": "caption_instruction_training.jsonl",
-                "archive_jsonl": "caption_instruction_archive.jsonl",
-                "review_jsonl": "caption_instruction_review.jsonl",
-                "report_json": "caption_instruction_report.json",
-            },
-            "images": sorted(image_assets.values(), key=lambda item: str(item.get("bundle_image_path") or "")),
-            "labels": sorted(label_assets, key=lambda item: str(item.get("bundle_label_path") or "")),
-            "files": file_entries,
-        }
+        def _bundle_manifest() -> Dict[str, Any]:
+            files = sorted(file_entries, key=lambda item: str(item.get("path") or ""))
+            return {
+                "format": CAPTION_INSTRUCTION_BUNDLE_MANIFEST_FORMAT,
+                "manifest_path": CAPTION_INSTRUCTION_BUNDLE_MANIFEST_PATH,
+                "checksum_scope": CAPTION_INSTRUCTION_BUNDLE_CHECKSUM_SCOPE,
+                "dataset_id": dataset_id,
+                "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "instruction_settings": dict(export_payload.get("instruction_settings") or {}),
+                "instruction_settings_fingerprint": str(export_payload.get("instruction_settings_fingerprint") or ""),
+                "row_counts": {
+                    "training_rows": len(rewritten_training_rows),
+                    "archive_rows": len(rewritten_archive_rows),
+                    "review_rows": len(rewritten_review_rows),
+                    "images": len(image_assets),
+                    "labels": len(label_assets),
+                },
+                "artifacts": {
+                    "training_jsonl": "caption_instruction_training.jsonl",
+                    "archive_jsonl": "caption_instruction_archive.jsonl",
+                    "review_jsonl": "caption_instruction_review.jsonl",
+                    "report_json": "caption_instruction_report.json",
+                },
+                "images": sorted(image_assets.values(), key=lambda item: str(item.get("bundle_image_path") or "")),
+                "labels": sorted(label_assets, key=lambda item: str(item.get("bundle_label_path") or "")),
+                "file_count": len(files),
+                "files": files,
+            }
 
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             for asset in sorted(image_assets.values(), key=lambda item: str(item.get("bundle_image_path") or "")):
@@ -23551,14 +23606,15 @@ def download_caption_instruction_bundle(
             report_bytes = (json.dumps(report, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
             zf.writestr("caption_instruction_report.json", report_bytes)
             _record_bytes("caption_instruction_report.json", report_bytes, role="report")
-            manifest_bytes = (json.dumps(bundle_manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-            zf.writestr("caption_instruction_bundle_manifest.json", manifest_bytes)
-            written_arcnames.add("caption_instruction_bundle_manifest.json")
+            manifest_bytes = (json.dumps(_bundle_manifest(), ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+            zf.writestr(CAPTION_INSTRUCTION_BUNDLE_MANIFEST_PATH, manifest_bytes)
+            written_arcnames.add(CAPTION_INSTRUCTION_BUNDLE_MANIFEST_PATH)
         _validate_created_zip(
             zip_path,
             required_names=written_arcnames,
             detail_prefix="caption_instruction_bundle",
         )
+        _caption_instruction_validate_bundle_manifest(zip_path)
         return FileResponse(
             path=str(zip_path),
             media_type="application/zip",

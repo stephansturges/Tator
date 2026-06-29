@@ -297,8 +297,8 @@ Before using exported rows for fine-tuning, run a small reviewed pilot:
    missing labels, a multi-class image, an image with existing alternate
    captions, and an image with small objects near crop boundaries.
 2. Generate artifacts with set-and-forget enabled.
-3. Download the training bundle from the same run and verify the manifest image
-   checksums against the copied `images/...` files.
+3. Download the training bundle from the same run and verify the manifest file
+   inventory, byte counts, and checksums against the copied bundle contents.
 4. Review generated-language rows for grounding, usefulness, and answer format.
 5. Import reviewed decisions.
 6. Re-export trainer JSONL with ready-report gating enabled.

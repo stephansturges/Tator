@@ -153,9 +153,11 @@ the self-contained training bundle from the same run. That bundle contains:
 
 The bundle manifest records row counts, instruction settings, copied image
 assets, copied label assets, file sizes, and SHA-256 checksums for bundle
-contents. The manifest's `files` list covers payload files written before the
-manifest itself; the manifest is still present in the zip but is not
-self-checksummed by that list.
+contents. The manifest also declares `manifest_path`,
+`checksum_scope=all_zip_members_except_manifest`, and `file_count`. The backend
+verifies before returning the ZIP that every non-manifest ZIP member appears in
+the manifest and that each recorded byte count and SHA-256 digest matches the
+actual member bytes.
 
 If individual artifacts are shared instead of the bundle, include the complete
 artifact set from the same run:
@@ -1046,7 +1048,7 @@ The main implementation responsibilities are split as follows.
 | Source annotation and archive construction | `localinferenceapi.py` | Builds source summaries, generated-QA records, deterministic metadata QA, flattened rows, archive rows, review rows, report, export validation, artifact consistency, and readiness |
 | Review import | `localinferenceapi.py` and `api/datasets.py` | Accepts JSON arrays, wrapper objects, or single review-row objects; applies metadata-only review decisions to saved caption0/generated-QA records; and rejects malformed, stale, ambiguous, duplicate, scalar, or wrong-dataset packets |
 | Export API | `api/datasets.py` | Exposes caption exports, the optional `require_ready_instruction_export` server-side gate, and `/captions/instruction_bundle` for self-contained handoff ZIPs |
-| Bundle packaging | `localinferenceapi.py` | Copies image bytes and effective label files, rewrites bundled artifact image paths to `images/...`, preserves original image paths and image SHA-256 metadata, validates rows and artifact consistency, and writes a manifest |
+| Bundle packaging | `localinferenceapi.py` | Copies image bytes and effective label files, rewrites bundled artifact image paths to `images/...`, preserves original image paths and image SHA-256 metadata, validates rows, artifact consistency, and manifest checksums, and writes a manifest |
 | UI workflow | `ybat-master/ybat.js` and `ybat-master/ybat.css` | Exposes controls, validates exports before download, formats operator errors, imports reviewed JSONL, and keeps the panel usable at narrow widths |
 | Trainer import | `tools/qwen_training.py` | Imports flat image/question/answer rows, preserves metadata, resolves image paths, and rejects non-trainable rows |
 | Runtime hardening | `localinferenceapi.py`, runner tooling, and caption docs | Handles prompt pressure, representative box lists, output-loop detection, recovery, set-and-forget supervision, and progress artifacts |
@@ -1194,7 +1196,9 @@ The exporter validates the bundle before returning it:
 - rewritten trainer, archive, review, and report artifacts must satisfy the
   artifact-consistency validator;
 - copied image files must stay inside the resolved dataset image root;
-- the ZIP must contain every file the bundle writer declares required.
+- the ZIP must contain every file the bundle writer declares required;
+- the manifest's `files` entries must exactly match every non-manifest ZIP
+  member, including byte counts and SHA-256 digests.
 
 This bundle exists because external review and trainer dry runs should not
 depend on a mutable local image folder. The JSONL files remain useful on their
@@ -1205,7 +1209,8 @@ own for inspection, but the bundle is the reproducible handoff unit.
 An external reviewer should inspect the training bundle in this order:
 
 1. **Bundle manifest**: confirm the manifest format, row counts, instruction
-   settings, image count, label count, file inventory, and SHA-256 checksums.
+   settings, image count, label count, `checksum_scope`, file inventory, and
+   SHA-256 checksums.
    Verify that `caption_instruction_training.jsonl`,
    `caption_instruction_archive.jsonl`, `caption_instruction_review.jsonl`,
    `caption_instruction_report.json`, `labelmap.txt`, copied images, and copied
@@ -1609,7 +1614,8 @@ Result:
 262 passed, 8 warnings
 ```
 
-Current verification after the self-contained bundle review-import hardening:
+Current verification after the self-contained bundle manifest and review-import
+hardening:
 
 ```bash
 ./.venv-macos/bin/python -m py_compile \
@@ -1674,6 +1680,9 @@ Additional focused validation recorded in the supporting hardening docs covers:
   label state is empty, rewriting trainer/archive/review image paths to
   `images/...`, preserving original image paths, and recording image SHA-256
   metadata in both row metadata and the bundle manifest
+- backend manifest validation for the training bundle, including exact
+  non-manifest member coverage, duplicate ZIP member rejection, byte-count
+  checks, SHA-256 checks, and manifest `file_count` agreement
 - reviewed JSONL imported from the training bundle resolving bundled
   `images/...` paths back to the saved dataset image through
   `original_image_path`

@@ -3638,6 +3638,7 @@ def test_caption_alternate_routes_append_update_export_and_delete(
     assert bundle_response.status_code == 200
     with zipfile.ZipFile(io.BytesIO(bundle_response.content), "r") as zf:
         names = set(zf.namelist())
+        assert len(zf.namelist()) == len(names)
         assert "caption_instruction_training.jsonl" in names
         assert "caption_instruction_archive.jsonl" in names
         assert "caption_instruction_review.jsonl" in names
@@ -3648,9 +3649,18 @@ def test_caption_alternate_routes_append_update_export_and_delete(
         assert "labels/train/sub/img.txt" in names
         manifest = json.loads(zf.read("caption_instruction_bundle_manifest.json"))
         assert manifest["format"] == "tator_caption_instruction_bundle_manifest_v1"
+        assert manifest["manifest_path"] == "caption_instruction_bundle_manifest.json"
+        assert manifest["checksum_scope"] == "all_zip_members_except_manifest"
         assert manifest["row_counts"]["training_rows"] == 1
         assert manifest["row_counts"]["archive_rows"] == instruction_archive["image_count"]
         assert manifest["row_counts"]["review_rows"] == 1
+        files_by_path = {item["path"]: item for item in manifest["files"]}
+        assert manifest["file_count"] == len(files_by_path)
+        assert set(files_by_path) == names - {"caption_instruction_bundle_manifest.json"}
+        for arcname, file_entry in files_by_path.items():
+            payload = zf.read(arcname)
+            assert file_entry["bytes"] == len(payload)
+            assert file_entry["sha256"] == hashlib.sha256(payload).hexdigest()
         image_asset = next(item for item in manifest["images"] if item["original_image_path"] == "sub/img.jpg")
         assert image_asset["bundle_image_path"] == "images/train/sub/img.jpg"
         assert image_asset["sha256"] == hashlib.sha256(zf.read("images/train/sub/img.jpg")).hexdigest()

@@ -138,7 +138,8 @@ copied `images/...` paths inside the zip and carry original-image path plus
 SHA-256 metadata. Trainer JSONL is the model-visible file, but it is not enough
 to audit the corpus. The archive, review file, report, and manifest explain why
 rows exist, what they were derived from, and whether the referenced pixels are
-the expected bytes.
+the expected bytes. Bundle download also validates the manifest's file
+inventory, byte counts, and SHA-256 digests before returning the ZIP.
 
 ### 5. Closed Human Review Loop
 

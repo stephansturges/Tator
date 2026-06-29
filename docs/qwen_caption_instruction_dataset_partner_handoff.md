@@ -54,6 +54,9 @@ The new work adds a separate instruction-dataset path:
 - The reviewed JSONL import route rejects with `caption_review_import_busy`
   before reading caption/archive state while the same dataset has an active
   caption job.
+- Text-label saves and caption add/update/delete paths reject with
+  `caption_mutation_busy` before dataset reads while the same dataset has an
+  active caption job.
 - The browser validates instruction JSONL before download, including required
   row metadata, instruction archive provenance, known validation/review states,
   rejected/failed/invalid validation state, non-trainable review state,
@@ -137,6 +140,8 @@ scripts and API clients.
 The server-side review-import path enforces the same rule before it reads
 caption records or instruction records, so reviewed decisions cannot be applied
 against a moving archive.
+The same active-job rule protects direct caption and text-label mutations, so
+manual/API edits cannot interleave with backend caption generation.
 
 ## Core Invariants
 
@@ -626,6 +631,7 @@ Current combined caption/instruction/trainer/UI contract suite:
   tests/test_dataset_linked_annotation_flows.py::test_export_captions_blocks_active_backend_caption_job_before_dataset_read \
   tests/test_dataset_linked_annotation_flows.py::test_instruction_review_import_blocks_active_backend_caption_job_before_dataset_read \
   tests/test_dataset_linked_annotation_flows.py::test_instruction_review_route_blocks_when_backend_caption_job_is_active \
+  tests/test_dataset_linked_annotation_flows.py::test_caption_mutations_block_active_backend_caption_job_before_dataset_read \
   tests/test_dataset_linked_annotation_flows.py::test_caption_instruction_strict_export_gate_requires_ready_proofs \
   tests/test_dataset_linked_annotation_flows.py::test_caption_instruction_strict_export_route_blocks_malformed_rows_when_ready_required \
   tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete \
@@ -637,7 +643,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-232 passed, 8 warnings
+236 passed, 8 warnings
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

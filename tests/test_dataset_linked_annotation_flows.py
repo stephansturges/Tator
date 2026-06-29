@@ -146,6 +146,36 @@ def test_instruction_review_route_blocks_when_backend_caption_job_is_active() ->
     assert response.json()["detail"] == "caption_review_import_busy:qcap_busy:running"
 
 
+@pytest.mark.parametrize(
+    ("operation", "call"),
+    [
+        ("text_label", lambda: api.set_text_label("ds", "img.jpg", {"caption": "updated"})),
+        ("add_caption", lambda: api.add_caption("ds", "img.jpg", {"caption": "new"})),
+        ("update_caption", lambda: api.update_caption("ds", "cap_1", {"caption": "updated"})),
+        ("delete_caption", lambda: api.delete_caption("ds", "cap_1", {})),
+    ],
+)
+def test_caption_mutations_block_active_backend_caption_job_before_dataset_read(
+    monkeypatch,
+    operation,
+    call,
+) -> None:
+    job = api.QwenCaptionDatasetJob(job_id="qcap_busy", status="running")
+    job.request = {"dataset_id": "ds"}
+    monkeypatch.setattr(api, "QWEN_CAPTION_DATASET_JOBS", {job.job_id: job})
+
+    def fail_resolve(_dataset_id):
+        raise AssertionError(f"{operation} should block before reading a mutating dataset")
+
+    monkeypatch.setattr(api, "_resolve_dataset_entry", fail_resolve)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        call()
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "caption_mutation_busy:qcap_busy:running"
+
+
 def _ready_instruction_export_payload():
     export_validation = {"ok": True, "error_count": 0, "errors": [], "row_count": 1}
     artifact_consistency = {

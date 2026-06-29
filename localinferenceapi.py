@@ -19932,6 +19932,7 @@ def get_text_labels(dataset_id: str, image_names: Sequence[str]):
 
 def set_text_label(dataset_id: str, image_name: str, payload: Dict[str, Any]):
     payload = payload or {}
+    _raise_if_qwen_caption_mutation_busy(dataset_id)
     entry = _resolve_dataset_entry(dataset_id)
     _require_dataset_annotation_lock_owner_if_active(entry, payload)
     split, image_relpath = _annotation_text_split_rel_from_name(
@@ -20147,6 +20148,7 @@ def get_captions_batch(dataset_id: str, image_names: Sequence[str]):
 
 def add_caption(dataset_id: str, image_name: str, payload: Dict[str, Any]):
     payload = payload or {}
+    _raise_if_qwen_caption_mutation_busy(dataset_id)
     entry = _resolve_dataset_entry(dataset_id)
     _require_dataset_annotation_lock_owner_if_active(entry, payload)
     split, image_relpath, image_key = _dataset_caption_context(entry, image_name, payload)
@@ -20193,6 +20195,7 @@ def add_caption(dataset_id: str, image_name: str, payload: Dict[str, Any]):
 
 def update_caption(dataset_id: str, caption_id: str, payload: Dict[str, Any]):
     payload = payload or {}
+    _raise_if_qwen_caption_mutation_busy(dataset_id)
     entry = _resolve_dataset_entry(dataset_id)
     _require_dataset_annotation_lock_owner_if_active(entry, payload)
     records = _load_dataset_caption_records(entry)
@@ -20238,6 +20241,7 @@ def update_caption(dataset_id: str, caption_id: str, payload: Dict[str, Any]):
 
 def delete_caption(dataset_id: str, caption_id: str, payload: Optional[Dict[str, Any]] = None):
     payload = payload or {}
+    _raise_if_qwen_caption_mutation_busy(dataset_id)
     entry = _resolve_dataset_entry(dataset_id)
     _require_dataset_annotation_lock_owner_if_active(entry, payload)
     records = _load_dataset_caption_records(entry)
@@ -23045,6 +23049,18 @@ def _raise_if_qwen_caption_review_import_busy(dataset_id: str) -> None:
     raise HTTPException(
         status_code=HTTP_409_CONFLICT,
         detail=f"caption_review_import_busy:{job_id}:{status}",
+    )
+
+
+def _raise_if_qwen_caption_mutation_busy(dataset_id: str) -> None:
+    active = _qwen_caption_dataset_active_export_job(dataset_id)
+    if not active:
+        return
+    job_id = str(active.get("job_id") or "").strip() or "unknown"
+    status = str(active.get("status") or "").strip() or "active"
+    raise HTTPException(
+        status_code=HTTP_409_CONFLICT,
+        detail=f"caption_mutation_busy:{job_id}:{status}",
     )
 
 

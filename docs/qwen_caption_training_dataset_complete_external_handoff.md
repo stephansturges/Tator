@@ -333,6 +333,9 @@ job owns the same dataset. Single-image and batch caption archive reads return
 `caption_read_busy`; exports return `caption_export_busy`; reviewed-row imports
 return `caption_review_import_busy`; text-label and caption mutations return
 `caption_mutation_busy`; metadata writes return `caption_metadata_busy`.
+These guards consult both the current in-memory caption job registry and live
+persisted set-and-forget runner locks, so a backend restart does not open a
+short window where a still-running caption worker can be treated as idle.
 
 Read-side consistency is important too. If image navigation or a scheduled
 caption load tries to read the archive while a job is mutating it, the UI keeps

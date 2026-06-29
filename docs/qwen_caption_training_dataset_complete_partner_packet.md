@@ -516,7 +516,7 @@ below.
 | Safe caption archive and text-label reads during long jobs | Current-image archive reloads defer while the selected archive is mutating, in-flight responses are dropped if a job starts mid-read, only explicit completed-job handoffs can force a reload, and backend single/batch caption and text-label reads reject before dataset resolution while a same-dataset caption job is active | Implemented |
 | Safe prompt metadata during long jobs | Prompt-stack, style, glossary, model, token, decode, set-and-forget, pilot, health-gate, save/promote, and batch-scope controls visibly lock while the selected archive is mutating; glossary reset/save and stale input events also hit archive-idle guards, and backend glossary saves refuse active caption jobs | Implemented |
 | Safe dataset deletion during long jobs | Dataset deletion refuses while an active caption dataset job references the same dataset | Implemented |
-| Same-dataset job concurrency | Caption dataset job start refuses while another queued, running, or cancelling caption job owns the same dataset | Implemented |
+| Same-dataset job concurrency | Caption dataset job start refuses while another queued, running, or cancelling caption job owns the same dataset, including live persisted set-and-forget runners after a backend restart and before auto-adoption completes | Implemented |
 | Annotation-lock launch preflight | Caption dataset job start refuses synchronously when a write-owning job would violate an active annotation lock | Implemented |
 | Script/API parity with browser export gates | Caption job start, caption export, review-import, and direct caption mutation paths block active caption jobs; caption export also supports `require_ready_instruction_export=true` strict trainer readiness | Implemented |
 | Backend launch failure visibility | caption job creation failures are surfaced in caption status, backend-job status, and UI health text | Implemented |
@@ -571,6 +571,11 @@ mixed prompt semantics inside one job. A script, API caller, or operator that
 tries to delete a dataset while an active caption dataset job references it
 receives `dataset_delete_blocked_active_jobs` before the registry record or
 managed dataset tree can be removed.
+
+The active-job lookup covers both the current backend process and persisted
+set-and-forget runners with live runner locks. This closes the backend-restart
+window where a worker may still be mutating the archive before the new backend
+process has adopted that worker into its in-memory job registry.
 
 The dataset manager UI now downloads dataset ZIP files through an explicit
 fetch-and-save flow rather than a fire-and-forget anchor click. That means

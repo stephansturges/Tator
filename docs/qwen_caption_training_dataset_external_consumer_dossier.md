@@ -350,6 +350,11 @@ Implemented guards include:
   glossary, caption output, dataset selection, and recipe application while the
   active archive is mutating.
 
+The backend active-job lookup checks both in-memory jobs and persisted
+set-and-forget runner locks. If the backend restarts while a runner is still
+alive, API/script calls still receive busy responses until that live runner is
+adopted, resumed, completed, or otherwise no longer active.
+
 Completed-job handoff can explicitly opt into reloading the archive after the
 job finishes. Normal mid-run reads stay blocked or deferred.
 

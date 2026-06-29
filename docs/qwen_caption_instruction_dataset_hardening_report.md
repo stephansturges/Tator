@@ -119,6 +119,11 @@ row before training.
   now repeat the archive-idle guard at action time. Disabled buttons are
   therefore backed by runtime checks, and stale or scripted clicks cannot start
   overlapping caption jobs from the browser while the archive is changing.
+- Backend active-job lookup now includes live persisted set-and-forget runner
+  locks as well as in-memory caption dataset jobs. A backend restart therefore
+  does not create a window where archive reads, exports, mutations, or a second
+  same-dataset job launch can treat a still-running worker as idle before
+  auto-adoption completes.
 - Caption recipe load and upload now use the same archive-idle guard. A recipe
   can rewrite prompt, model, generation, glossary, and instruction-row controls,
   so recipe application is blocked until the active archive mutation finishes;

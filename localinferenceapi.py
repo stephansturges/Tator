@@ -23039,10 +23039,39 @@ def _qwen_caption_dataset_active_job_from_jobs(
 
 def _qwen_caption_dataset_active_export_job(dataset_id: str) -> Optional[Dict[str, Any]]:
     with QWEN_CAPTION_DATASET_JOBS_LOCK:
-        return _qwen_caption_dataset_active_job_from_jobs(
+        active = _qwen_caption_dataset_active_job_from_jobs(
             dataset_id,
             list(QWEN_CAPTION_DATASET_JOBS.values()),
         )
+    if active:
+        return active
+    return _qwen_caption_dataset_active_persisted_job(dataset_id)
+
+
+def _qwen_caption_dataset_active_persisted_job(dataset_id: str) -> Optional[Dict[str, Any]]:
+    target = str(dataset_id or "").strip()
+    if not target:
+        return None
+    candidates: List[Dict[str, Any]] = []
+    for payload in _iter_persisted_qwen_caption_dataset_job_payloads():
+        request_data = payload.get("request") if isinstance(payload.get("request"), Mapping) else {}
+        job_dataset_id = str(request_data.get("dataset_id") or "").strip()
+        if job_dataset_id != target:
+            continue
+        status = str(payload.get("status") or "").strip().lower()
+        artifact_key = _qwen_caption_dataset_job_artifact_key(payload)
+        runner_lock = _qwen_caption_dataset_artifact_runner_lock(artifact_key)
+        if not runner_lock.get("pid_alive") or status not in {"interrupted", "cancelling"}:
+            continue
+        active = dict(payload)
+        if status == "interrupted":
+            active["status"] = "running"
+        active["message"] = "Live set-and-forget caption runner is still active"
+        candidates.append(active)
+    if not candidates:
+        return None
+    candidates.sort(key=_qwen_caption_dataset_job_sort_value, reverse=True)
+    return candidates[0]
 
 
 def _raise_if_qwen_caption_export_busy(dataset_id: str) -> None:
@@ -26594,6 +26623,14 @@ def _start_qwen_caption_dataset_job(
         if active:
             active_job_id = str(active.get("job_id") or "").strip() or "unknown"
             active_status = str(active.get("status") or "").strip() or "active"
+            raise HTTPException(
+                status_code=HTTP_409_CONFLICT,
+                detail=f"qwen_caption_dataset_job_active:{active_job_id}:{active_status}",
+            )
+        persisted_active = _qwen_caption_dataset_active_persisted_job(payload.dataset_id)
+        if persisted_active:
+            active_job_id = str(persisted_active.get("job_id") or "").strip() or "unknown"
+            active_status = str(persisted_active.get("status") or "").strip() or "active"
             raise HTTPException(
                 status_code=HTTP_409_CONFLICT,
                 detail=f"qwen_caption_dataset_job_active:{active_job_id}:{active_status}",

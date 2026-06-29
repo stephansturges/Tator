@@ -123,6 +123,101 @@ def test_export_captions_blocks_active_backend_caption_job_before_dataset_read(m
     assert api._qwen_caption_dataset_active_export_job("other") is None
 
 
+def test_caption_export_blocks_live_persisted_runner_before_dataset_read(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    jobs_root = tmp_path / "jobs"
+    artifact_dir = tmp_path / "artifact"
+    job_dir = jobs_root / "qcap_persisted"
+    job_dir.mkdir(parents=True)
+    artifact_dir.mkdir()
+    (artifact_dir / ".runner.lock").write_text(json.dumps({"pid": 12345}), encoding="utf-8")
+    (job_dir / "job.json").write_text(
+        json.dumps(
+            {
+                "job_id": "qcap_persisted",
+                "status": "running",
+                "request": {"dataset_id": "ds", "output_dir": str(artifact_dir)},
+                "output_dir": str(artifact_dir),
+                "created_at": 10.0,
+                "updated_at": 20.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(api, "QWEN_CAPTION_DATASET_JOB_ROOT", jobs_root)
+    monkeypatch.setattr(api, "_qwen_caption_dataset_pid_is_alive", lambda _pid: True)
+    with api.QWEN_CAPTION_DATASET_JOBS_LOCK:
+        original_jobs = dict(api.QWEN_CAPTION_DATASET_JOBS)
+        api.QWEN_CAPTION_DATASET_JOBS.clear()
+
+    def fail_resolve(_dataset_id):
+        raise AssertionError("persisted live runner should block before dataset reads")
+
+    monkeypatch.setattr(api, "_resolve_dataset_entry", fail_resolve)
+
+    try:
+        with pytest.raises(api.HTTPException) as exc_info:
+            api.export_captions("ds", {"block_active_caption_jobs": True})
+    finally:
+        with api.QWEN_CAPTION_DATASET_JOBS_LOCK:
+            api.QWEN_CAPTION_DATASET_JOBS.clear()
+            api.QWEN_CAPTION_DATASET_JOBS.update(original_jobs)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "caption_export_busy:qcap_persisted:running"
+
+
+def test_caption_dataset_job_start_blocks_live_persisted_runner_before_registration(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    jobs_root = tmp_path / "jobs"
+    artifact_dir = tmp_path / "artifact"
+    job_dir = jobs_root / "qcap_persisted"
+    job_dir.mkdir(parents=True)
+    artifact_dir.mkdir()
+    (artifact_dir / ".runner.lock").write_text(json.dumps({"pid": 12345}), encoding="utf-8")
+    (job_dir / "job.json").write_text(
+        json.dumps(
+            {
+                "job_id": "qcap_persisted",
+                "status": "running",
+                "request": {"dataset_id": "ds", "output_dir": str(artifact_dir)},
+                "output_dir": str(artifact_dir),
+                "created_at": 10.0,
+                "updated_at": 20.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(api, "QWEN_CAPTION_DATASET_JOB_ROOT", jobs_root)
+    monkeypatch.setattr(api, "_qwen_caption_dataset_pid_is_alive", lambda _pid: True)
+    with api.QWEN_CAPTION_DATASET_JOBS_LOCK:
+        original_jobs = dict(api.QWEN_CAPTION_DATASET_JOBS)
+        api.QWEN_CAPTION_DATASET_JOBS.clear()
+
+    try:
+        with pytest.raises(api.HTTPException) as exc_info:
+            api._start_qwen_caption_dataset_job(
+                api.QwenCaptionDatasetJobRequest(
+                    dataset_id="ds",
+                    caption_request={"user_prompt": "Describe it"},
+                )
+            )
+        with api.QWEN_CAPTION_DATASET_JOBS_LOCK:
+            live_jobs = dict(api.QWEN_CAPTION_DATASET_JOBS)
+    finally:
+        with api.QWEN_CAPTION_DATASET_JOBS_LOCK:
+            api.QWEN_CAPTION_DATASET_JOBS.clear()
+            api.QWEN_CAPTION_DATASET_JOBS.update(original_jobs)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "qwen_caption_dataset_job_active:qcap_persisted:running"
+    assert live_jobs == {}
+
+
 def test_download_dataset_entry_blocks_active_backend_caption_job_before_dataset_read(
     monkeypatch,
 ) -> None:

@@ -42,7 +42,9 @@ The new work adds a separate instruction-dataset path:
 - A UI action, **Create VLM training dataset**, starts a dataset-backed
   instruction run.
 - The backend refuses to start a second active caption dataset job for the same
-  dataset.
+  dataset, including the restart window where a persisted set-and-forget runner
+  still has a live runner lock but has not yet been re-adopted into the current
+  backend's in-memory job registry.
 - Each image can produce one broad caption row, called `caption0`.
 - Each image can also produce configurable generated visual QA rows.
 - Optional deterministic metadata QA rows can be generated from trusted labels

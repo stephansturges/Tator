@@ -486,6 +486,10 @@ metadata-busy details, active same-dataset job details, and annotation-lock
 details are converted from internal `detail` strings into actionable UI text.
 This prevents guarded failures from appearing as raw JSON in the dataset
 manager, caption panel, or review/import surfaces.
+Failed backend caption jobs receive the same treatment when structured failure
+reports are available. Pilot-certification, backend-supervision, and runner
+preflight reports are summarized from their first failed check, so the operator
+sees the failed gate and remediation detail instead of a raw runner error code.
 
 The same busy check also runs inside each action handler. That second check
 matters because UI state can go stale: a user may leave a file picker open, a
@@ -1352,7 +1356,7 @@ node --check ybat-master/ybat.js
 Result:
 
 ```text
-251 passed, 8 warnings
+252 passed, 8 warnings
 ```
 
 Additional focused validation recorded in the supporting hardening docs covers:
@@ -1390,6 +1394,8 @@ Additional focused validation recorded in the supporting hardening docs covers:
 - UI error formatting for caption-job busy, metadata-busy, same-dataset active
   job, and annotation-lock guard details, including dataset-manager glossary
   save failures
+- UI backend-job failure formatting for pilot-certification,
+  backend-supervision, and runner-preflight report failures
 - caption dataset job launch rejecting active annotation locks before job
   execution, rolling back failed reservations, reserving before write preflight
   to close delete/export races, and still allowing a matching

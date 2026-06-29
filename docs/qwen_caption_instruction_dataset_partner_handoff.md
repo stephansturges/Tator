@@ -156,6 +156,9 @@ responses are visible to the operator.
 Caption-job busy details, metadata-busy details, active same-dataset job
 details, and annotation-lock details are formatted into operator-facing text
 instead of raw JSON.
+Failed backend caption jobs also summarize pilot-certification,
+backend-supervision, and runner-preflight reports from their first failed check
+instead of surfacing only raw runner error codes.
 The server-side review-import path enforces the same rule before it reads
 caption records or instruction records, so reviewed decisions cannot be applied
 against a moving archive.
@@ -681,7 +684,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-251 passed, 8 warnings
+252 passed, 8 warnings
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

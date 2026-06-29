@@ -44,7 +44,9 @@ The user enables **Require certified pilot**, enters a pilot artifact directory,
 keeps **Pilot min cases** at 300 or higher, keeps prompt-budget telemetry on,
 uses a positive prompt-token ceiling, and keeps deterministic-recovery
 confidence enabled. The backend fails closed before GPU work if any strict
-large-run gate is diagnostic-only.
+large-run gate is diagnostic-only. If the pilot, crash-supervision, or preflight
+gate fails, the backend-job status must show the failed gate's human-readable
+detail, not only an internal runner error code.
 
 ## 6. Reuse A Saved Caption Recipe
 

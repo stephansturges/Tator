@@ -2356,6 +2356,8 @@ def test_qwen_caption_ui_scenarios_document_set_and_forget_workflows():
     assert "Pilot min cases" in scenarios
     assert "300 or higher" in scenarios
     assert "deterministic-recovery confidence" in scenarios
+    assert "the failed gate's human-readable\ndetail" in scenarios
+    assert "internal runner error code" in scenarios
     assert "Download-needed model options are red" in scenarios
     assert "local\nmodel options are white" in scenarios
     assert "Max output tokens" in scenarios
@@ -2530,7 +2532,8 @@ def test_qwen_caption_backend_batch_explicitly_keeps_going_after_failures():
     assert "function qwenCaptionBackendJobAutoResumeId" in js
     assert "function updateQwenSetAndForgetAutoAttachWatcher" in js
     assert "function qwenCaptionBackendJobDisplayError" in js
-    assert "job?.message || job?.error" in js
+    assert "function qwenCaptionCheckReportFirstError" in js
+    assert "friendlyByCode" in js
     assert "auto_resumed_job_id" in js
     assert "Backend batch auto-resumed as ${autoResumeJobId}" in js
     assert "qwenCaptionResumeBackendJob" in html
@@ -2548,6 +2551,61 @@ def test_qwen_caption_backend_batch_explicitly_keeps_going_after_failures():
     assert "function scheduleQwenSetAndForgetAutoAttachCheck" in js
     assert "window.setInterval(runQwenSetAndForgetAutoAttachCheck, 5000)" in js
     assert "scheduleQwenSetAndForgetAutoAttachCheck();" in js
+
+
+def test_qwen_caption_backend_job_display_error_formats_structured_failures():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            _extract_js_function(js, "qwenCaptionCheckReportFirstError"),
+            _extract_js_function(js, "qwenCaptionBackendJobDisplayError"),
+            "let message = qwenCaptionBackendJobDisplayError({",
+            "  status: 'failed',",
+            "  error: 'caption_runner_pilot_required',",
+            "  result: {",
+            "    required_pilot_certification: {",
+            "      status: 'error',",
+            "      checks: [{ name: 'set_and_forget_pilot_required', status: 'error', detail: 'certified pilot is required before starting a set-and-forget caption job with 10000 cases' }],",
+            "    },",
+            "  },",
+            "});",
+            "assert(message.includes('Pilot certification failed: certified pilot is required before starting a set-and-forget caption job with 10000 cases'));",
+            "assert(!message.includes('caption_runner_pilot_required'));",
+            "message = qwenCaptionBackendJobDisplayError({",
+            "  status: 'failed',",
+            "  error: 'caption_runner_backend_supervision_required',",
+            "  result: {",
+            "    backend_supervision: {",
+            "      status: 'error',",
+            "      checks: [{ name: 'backend_crash_supervision', status: 'error', detail: 'large set-and-forget caption jobs require backend crash-restart supervision' }],",
+            "    },",
+            "  },",
+            "});",
+            "assert(message.includes('Backend supervision failed: large set-and-forget caption jobs require backend crash-restart supervision'));",
+            "assert(!message.includes('caption_runner_backend_supervision_required'));",
+            "message = qwenCaptionBackendJobDisplayError({",
+            "  status: 'failed',",
+            "  error: 'caption_runner_preflight_failed',",
+            "  result: {",
+            "    preflight: {",
+            "      status: 'error',",
+            "      checks: [{ name: 'model_available', status: 'error', detail: 'selected caption model is not local' }],",
+            "    },",
+            "  },",
+            "});",
+            "assert(message.includes('Caption runner preflight failed: selected caption model is not local'));",
+            "assert(!message.includes('caption_runner_preflight_failed'));",
+            "message = qwenCaptionBackendJobDisplayError({ status: 'failed', error: 'caption_runner_pilot_certification_failed' });",
+            "assert(message.includes('Pilot certification failed. Check the certified pilot artifact directory'));",
+            "assert(!message.includes('caption_runner_pilot_certification_failed'));",
+            "assert.strictEqual(",
+            "  qwenCaptionBackendJobDisplayError({ status: 'failed', message: 'Custom backend message', error: 'caption_runner_pilot_required' }),",
+            "  'Custom backend message'",
+            ");",
+        ]
+    )
+    subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
 
 
 def test_qwen_caption_model_defaults_to_active_runtime():

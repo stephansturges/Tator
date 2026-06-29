@@ -31607,8 +31607,54 @@ async function cancelRfDetrTrainingJobRequest() {
         return "";
     }
 
+    function qwenCaptionCheckReportFirstError(report) {
+        if (!report || typeof report !== "object") {
+            return "";
+        }
+        const checks = Array.isArray(report.checks) ? report.checks : [];
+        const failed = checks.find((check) => (
+            check && String(check.status || "").toLowerCase() !== "ok"
+        )) || null;
+        if (!failed) {
+            return "";
+        }
+        const detail = String(failed.detail || failed.message || "").trim();
+        const name = String(failed.name || "").trim();
+        return detail || name;
+    }
+
     function qwenCaptionBackendJobDisplayError(job) {
-        return String(job?.message || job?.error || `backend caption job ${job?.status || "failed"}`).trim();
+        const result = job?.result && typeof job.result === "object" ? job.result : {};
+        const structuredReports = [
+            [result.required_pilot_certification, "Pilot certification"],
+            [result.backend_supervision, "Backend supervision"],
+            [result.preflight, "Caption runner preflight"],
+        ];
+        for (const [report, label] of structuredReports) {
+            if (!report || typeof report !== "object") {
+                continue;
+            }
+            const status = String(report.status || "").toLowerCase();
+            const detail = qwenCaptionCheckReportFirstError(report);
+            if (status === "error" || detail) {
+                return detail ? `${label} failed: ${detail}` : `${label} failed.`;
+            }
+        }
+        const message = String(job?.message || "").trim();
+        if (message) {
+            return message;
+        }
+        const errorCode = String(job?.error || "").trim();
+        const friendlyByCode = {
+            caption_runner_pilot_required: "Certified pilot required before this large set-and-forget caption job can start. Enable Require certified pilot and choose a passing pilot artifact directory, or run a smaller pilot first.",
+            caption_runner_pilot_certification_failed: "Pilot certification failed. Check the certified pilot artifact directory and fix the failed certification gate before retrying.",
+            caption_runner_backend_supervision_required: "Backend crash supervision is required for this large set-and-forget caption job. Restart the backend with large-run-ready supervision, then retry.",
+            caption_runner_preflight_failed: "Caption runner preflight failed. Fix the reported model, disk, prompt, or dataset preflight issue, then retry.",
+        };
+        if (friendlyByCode[errorCode]) {
+            return friendlyByCode[errorCode];
+        }
+        return errorCode || `backend caption job ${job?.status || "failed"}`;
     }
 
     function qwenCaptionBackendJobSortValue(job) {

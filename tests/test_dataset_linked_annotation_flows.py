@@ -22,18 +22,31 @@ def test_caption_instruction_strict_export_gate_requires_ready_proofs() -> None:
         "ok": True,
         "error_count": 0,
         "errors": [],
-        "counts": {"training_row_count": 1},
+        "counts": {"training_row_count": 1, "archive_row_count": 1, "review_row_count": 1},
     }
     report = {
         "training_readiness": {"status": "ready"},
+        "selected_flattened_row_count": 1,
+        "image_count": 1,
+        "instruction_review_row_count": 1,
         "instruction_export_validation": dict(export_validation),
         "instruction_artifact_consistency": dict(artifact_consistency),
+    }
+    training_row = {"image_path": "frame.jpg", "question": "What is shown?", "answer": "A building."}
+    archive_row = {"image_path": "frame.jpg"}
+    review_row = {
+        "format": "tator_caption_instruction_review_rows_v1",
+        "image_path": "frame.jpg",
+        "qa_id": "qa-1",
     }
     payload = {
         "instruction_report": report,
         "instruction_export_validation": dict(export_validation),
         "instruction_artifact_consistency": dict(artifact_consistency),
         "instruction_archive": {"instruction_artifact_consistency": dict(artifact_consistency)},
+        "instruction_training_rows": [training_row],
+        "instruction_archive_rows": [archive_row],
+        "instruction_review_rows": [review_row],
     }
 
     assert _instruction_export_not_ready_reason(payload) == ""
@@ -92,6 +105,31 @@ def test_caption_instruction_strict_export_gate_requires_ready_proofs() -> None:
             },
         }
     ) == "instruction_artifact_consistency_mismatch"
+    assert _instruction_export_not_ready_reason(
+        {
+            key: value
+            for key, value in payload.items()
+            if key != "instruction_training_rows"
+        }
+    ) == "instruction_training_rows"
+    assert _instruction_export_not_ready_reason(
+        {
+            **payload,
+            "instruction_training_rows": [],
+        }
+    ) == "instruction_training_rows"
+    assert _instruction_export_not_ready_reason(
+        {
+            **payload,
+            "instruction_archive_rows": [],
+        }
+    ) == "instruction_archive_rows"
+    assert _instruction_export_not_ready_reason(
+        {
+            **payload,
+            "instruction_review_rows": [],
+        }
+    ) == "instruction_review_rows"
 
 
 def test_delete_linked_dataset_only_removes_registry_record(tmp_path, monkeypatch) -> None:

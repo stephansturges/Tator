@@ -72,11 +72,166 @@ caption-assistance path.
 | Repeated-token loops could appear as hangs | Added live output-loop detection, safe retry, runtime unload, and fallback/recovery paths | Repeated punctuation or token streams are not accepted as valid captions |
 | Missing model files were visually ambiguous | Styled download-needed model choices in red and local models in the normal local color | Operators can see model availability before launching a long job |
 | Review import payloads were accepted inconsistently by UI, route, and backend parser | Made the API route accept any JSON body and moved body-shape enforcement into the shared backend review parser | JSON arrays, wrapper objects, and single review-row objects now follow the same fail-closed validation path instead of being rejected by framework typing before parser checks |
-| Scripted trainer exports could rely too heavily on the readiness label | The server-side ready gate now independently requires export-validation and versioned artifact-consistency proofs to be present, OK, error-free, and internally consistent | API clients get the same critical fail-closed behavior as the browser when proof state drifts from the readiness label |
+| Scripted trainer exports could rely too heavily on the readiness label | The server-side ready gate now independently requires export-validation and versioned artifact-consistency proofs to be present, OK, error-free, internally consistent, and aligned with the returned artifact arrays | API clients get the same critical fail-closed behavior as the browser when proof state drifts from the readiness label or returned rows |
 
 The result is a conservative pipeline: generate candidates, archive evidence,
 validate aggressively, let humans review generated language, then export only
 trainable rows.
+
+## Layer-By-Layer Implementation Narrative
+
+This section summarizes what changed in each layer of the system and why each
+change exists. It is the fastest way for an external review team to understand
+the implementation before reading the lower-level contracts.
+
+### 1. The UI Now Has A Real Instruction-Dataset Product Path
+
+The caption panel no longer treats training-data creation as an incidental
+caption export. It exposes a distinct **Create VLM training dataset** action
+with controls for generated QA count, QA mix, answer format, caption0 inclusion,
+generated-QA inclusion, deterministic metadata QA, read-only source-label
+context, strict grounding, and ready-report enforcement.
+
+The reason for this split is product clarity. A normal captioning run answers
+"describe this image." A training-dataset run answers "construct an auditable
+set of image/question/answer rows and prove which ones are safe to train on."
+Those workflows share model infrastructure, but they have different artifacts,
+failure modes, and review requirements.
+
+### 2. Dataset Jobs Were Moved Toward Set-And-Forget Operation
+
+Dataset-scale captioning and instruction generation now use persisted backend
+jobs by default. The operator can start a run, monitor progress, attach or
+recover from the UI, and inspect health/status messages when the backend cannot
+launch or when generation recovery is triggered.
+
+This was necessary because browser-bound captioning is too fragile for long
+runs. A useful training corpus may require many images, repeated model calls,
+windowed observations, full-image composition, archive construction, and export
+validation. The durable path has to survive browser refreshes, model loops,
+runtime unloads, process restarts, and partial progress.
+
+### 3. Prompt Context Was Bounded Without Losing Authoritative Counts
+
+Dense scenes can contain enough boxes to make a full prompt unstable. The new
+prompt policy keeps full class counts authoritative while reducing large box
+lists to representative spatial subsets. Prompt wording explains that subset
+boxes are context examples, not a complete object inventory. Prompt-size
+telemetry then estimates rendered prompt pressure and adapts automatic output
+budgets when the prompt itself is already large.
+
+This was added because the model needs spatial examples, but a giant serialized
+box list can dominate the prompt, slow the full-image stage, and increase loop
+or GPU-risk behavior. Counts remain complete because counts are structured
+source evidence; detailed boxes are supporting context.
+
+### 4. Output Budgets Now Separate Defaults From User Caps
+
+Thinking-capable or verbose models may need much larger automatic generation
+budgets than a short caption model. The UI and backend now distinguish automatic
+model-aware defaults from explicit numeric user overrides. If the user sets a
+number, that number is the hard cap after schema validation. If Auto is used,
+the system can choose a larger default for models that need it and can reduce
+that budget when prompt-size pressure is high.
+
+This solves the confusing mismatch between UI values, rendered prompt logs, and
+runtime `max_new_tokens`. The operator should be able to reconcile what they
+set with what the backend actually used.
+
+### 5. Model Output Is Inspected While It Streams
+
+The caption runtime now treats repeated punctuation or repeated-token output as
+a recoverable model failure, not as a long caption. The stream inspector can
+detect loops, trim the repeated fragment for diagnostics, unload the runtime
+when needed, and retry through safer decoding or fallback paths. Recovery output
+is logged as recovery, not as a normal caption.
+
+This matters because repeated output can look like a stall while the process is
+still serving progress endpoints. Without live inspection, the backend may seem
+healthy while the model is spending the full token budget on unusable output.
+
+### 6. Training Artifacts Are Split By Responsibility
+
+The instruction-dataset export produces four different artifacts rather than
+one overloaded JSONL:
+
+- trainer JSONL for fine-tuning input;
+- archive JSONL for per-image construction evidence;
+- review JSONL for candidate-level human decisions;
+- report JSON for run-level readiness, consistency, and quality metrics.
+
+This split is deliberate. Trainer JSONL should be small, flat, and directly
+loadable. Archive JSONL should be rich enough to audit. Review JSONL should be
+easy to hand to a reviewer. Report JSON should explain whether the corpus is
+ready, needs review, or is blocked.
+
+### 7. Trusted Source Data And Generated Language Stay Separate
+
+The archive separates `source_annotations`, `language_annotations`,
+`deterministic_metadata_qa_pairs`, and `flattened_training_rows`. Source
+annotations come from labels and deterministic geometry. Caption0 and generated
+QA are language candidates. Deterministic metadata QA is code-generated from
+trusted labels. Flattened rows are selected training rows, not source truth.
+
+This boundary is the core training-data safety rule. A model-generated sentence
+may be useful, but it must not become a source count, source class list, source
+box, or final annotation. When a generated answer makes a source-checkable
+structured claim, the exporter either rewrites the final answer from trusted
+labels or rejects the row from flattened trainer output.
+
+### 8. Review Import Is Metadata-Only And Fail-Closed
+
+Review JSONL import applies reviewer decisions and notes to saved caption0 and
+generated-QA records. It does not edit image paths, labels, boxes, questions,
+answers, deterministic QA, or final annotations. The parser accepts practical
+input shapes, including JSONL-derived arrays and wrapper objects, but it rejects
+wrong datasets, stale text, unsupported row origins, duplicate targets,
+oversized fields, scalar bodies, and packets with no actionable decisions.
+
+This preserves the human-control contract. A reviewer can decide whether a
+generated language candidate is trainable without accidentally changing the
+source data or rewriting generated content through an import side channel.
+
+### 9. Trainer JSONL Export Is Gated In Browser And API Paths
+
+The browser validates trainer JSONL before download. The API also supports
+`require_ready_instruction_export=true`, which independently checks readiness,
+export-validation proof, versioned artifact-consistency proof, and the returned
+artifact arrays. Trainer, archive, and review rows must be lists, and their
+lengths must agree with report and consistency counts when those counts are
+present.
+
+This was added because the browser is not the only export client. Scripts and
+future automation must receive the same fail-closed behavior as the UI. A
+payload with a `ready` label but missing or mismatched proof/artifact arrays is
+not allowed to produce trainer JSONL under the strict gate.
+
+### 10. The Trainer Loader Is The Last Safety Boundary
+
+The Qwen trainer imports flat image/question/answer rows directly, preserves
+metadata, resolves image paths, and rejects non-trainable rows. It fails on
+missing instruction provenance, unknown validation or review states, rejected or
+needs-revision review state, invalid JSON answers for JSON-formatted rows,
+duplicate canonical image/question pairs, and unresolved image aliases.
+
+This protects actual fine-tuning from stale files, hand-edited JSONL, or
+artifacts that bypassed browser/API validation. Export validation should catch
+bad rows earlier, but the loader still needs to be defensive because it is the
+last boundary before training.
+
+### 11. The Documentation And Tests Track The Product Contract
+
+The implementation is accompanied by prompt-stack docs, UI scenario docs,
+hardening reports, partner-facing packets, and focused tests for the review
+loop, export gates, trainer import, prompt behavior, runtime supervision, and
+UI smoke behavior. The docs intentionally explain both what is implemented and
+what is not yet certified.
+
+The reason is operational: this path is meant to produce training data, so a
+reviewer needs more than a passing unit test. They need to see the intended data
+contract, the exact artifact shapes, the review workflow, the failure policy,
+and the pilot work still required before a generated corpus is treated as
+training-grade.
 
 ## Requirement Mapping
 
@@ -153,6 +308,13 @@ not OK, has nonzero errors, or disagrees between the API payload, report, and
 archive. This prevents scripts from receiving trainer JSONL if a future bug or
 hand-edited payload makes the readiness label drift away from the actual
 validation evidence.
+
+The same gate also checks the returned artifact arrays. Trainer, archive, and
+review rows must be lists, and their lengths must match the selected-row,
+image, review-row, export-validation, and artifact-consistency counts when
+those counts are present. This catches payload assembly bugs where valid proof
+objects are accidentally paired with missing, stale, or wrong-length artifact
+arrays.
 
 ### Backend Launch Failures Are Visible
 
@@ -879,6 +1041,7 @@ node --check ybat-master/ybat.js
 ./.venv-macos/bin/python -m pytest \
   tests/test_qwen_caption_dataset_job.py \
   tests/test_qwen_training_backend.py \
+  tests/test_dataset_linked_annotation_flows.py::test_caption_instruction_strict_export_gate_requires_ready_proofs \
   tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete \
   tests/test_labeling_panel_layout_contract.py \
   tests/test_qwen_caption_ui_smoke_tool.py \
@@ -888,7 +1051,7 @@ node --check ybat-master/ybat.js
 Result:
 
 ```text
-222 passed
+222 passed, 8 warnings
 ```
 
 Additional focused validation recorded in the supporting hardening docs covers:
@@ -908,7 +1071,8 @@ Additional focused validation recorded in the supporting hardening docs covers:
   objects, plus parser-owned rejection of scalar bodies
 - strict server-side trainer-export refusal when readiness is not ready,
   export-validation proof fails, or versioned artifact-consistency proofs are
-  missing, wrong-version, or inconsistent
+  missing, wrong-version, inconsistent, or paired with missing/mismatched
+  returned artifact arrays
 - trainer import of flat rows
 - trainer rejection of non-trainable rows
 - rendered UI smoke for visible controls and unclipped caption actions

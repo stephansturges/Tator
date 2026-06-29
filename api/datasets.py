@@ -25,6 +25,20 @@ def _instruction_export_proof_is_ok(value: Any, *, expected_format: Optional[str
     return isinstance(errors, list) and not errors
 
 
+def _instruction_export_nonnegative_int(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return None
+    if parsed < 0:
+        return None
+    return parsed
+
+
 def _instruction_export_not_ready_reason(result: Any) -> str:
     if not isinstance(result, dict):
         return "unknown"
@@ -56,6 +70,46 @@ def _instruction_export_not_ready_reason(result: Any) -> str:
         return "instruction_artifact_consistency"
     if payload_consistency != report_consistency or payload_consistency != archive_consistency:
         return "instruction_artifact_consistency_mismatch"
+
+    training_rows = result.get("instruction_training_rows")
+    archive_rows = result.get("instruction_archive_rows")
+    review_rows = result.get("instruction_review_rows")
+    if not isinstance(training_rows, list):
+        return "instruction_training_rows"
+    if not isinstance(archive_rows, list):
+        return "instruction_archive_rows"
+    if not isinstance(review_rows, list):
+        return "instruction_review_rows"
+
+    consistency_counts = payload_consistency.get("counts") if isinstance(payload_consistency.get("counts"), dict) else {}
+    training_row_count = len(training_rows)
+    expected_training_count = _instruction_export_nonnegative_int(payload_export_validation.get("row_count"))
+    if expected_training_count is None:
+        return "instruction_export_validation"
+    if training_row_count != expected_training_count:
+        return "instruction_training_rows"
+    report_selected_count = _instruction_export_nonnegative_int(report.get("selected_flattened_row_count"))
+    if report_selected_count is not None and training_row_count != report_selected_count:
+        return "instruction_training_rows"
+    consistency_training_count = _instruction_export_nonnegative_int(consistency_counts.get("training_row_count"))
+    if consistency_training_count is not None and training_row_count != consistency_training_count:
+        return "instruction_training_rows"
+
+    archive_row_count = len(archive_rows)
+    report_image_count = _instruction_export_nonnegative_int(report.get("image_count"))
+    if report_image_count is not None and archive_row_count != report_image_count:
+        return "instruction_archive_rows"
+    consistency_archive_count = _instruction_export_nonnegative_int(consistency_counts.get("archive_row_count"))
+    if consistency_archive_count is not None and archive_row_count != consistency_archive_count:
+        return "instruction_archive_rows"
+
+    review_row_count = len(review_rows)
+    report_review_count = _instruction_export_nonnegative_int(report.get("instruction_review_row_count"))
+    if report_review_count is not None and review_row_count != report_review_count:
+        return "instruction_review_rows"
+    consistency_review_count = _instruction_export_nonnegative_int(consistency_counts.get("review_row_count"))
+    if consistency_review_count is not None and review_row_count != consistency_review_count:
+        return "instruction_review_rows"
     return ""
 
 

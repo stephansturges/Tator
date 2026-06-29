@@ -22825,7 +22825,7 @@ async function cancelRfDetrTrainingJobRequest() {
             qwenElements.captionDownloadJsonl.addEventListener("click", () => {
                 downloadCaptionJsonl().catch((error) => {
                     console.warn("Caption JSONL download failed", error);
-                    setSamStatus(`Caption JSONL export failed: ${error.message || error}`, { variant: "error", duration: 4000 });
+                    reportCaptionArchiveExportFailure("Caption JSONL export", error, 4000);
                 });
             });
         }
@@ -22833,7 +22833,7 @@ async function cancelRfDetrTrainingJobRequest() {
             qwenElements.captionDownloadGroupedJson.addEventListener("click", () => {
                 downloadCaptionGroupedJson().catch((error) => {
                     console.warn("Grouped caption JSON download failed", error);
-                    setSamStatus(`Grouped caption export failed: ${error.message || error}`, { variant: "error", duration: 4000 });
+                    reportCaptionArchiveExportFailure("Grouped caption export", error, 4000);
                 });
             });
         }
@@ -22841,7 +22841,7 @@ async function cancelRfDetrTrainingJobRequest() {
             qwenElements.captionDownloadVlmJsonl.addEventListener("click", () => {
                 downloadCaptionVlmJsonl().catch((error) => {
                     console.warn("VLM caption JSONL download failed", error);
-                    setSamStatus(`VLM caption export failed: ${error.message || error}`, { variant: "error", duration: 4000 });
+                    reportCaptionArchiveExportFailure("VLM caption export", error, 4000);
                 });
             });
         }
@@ -36133,6 +36133,13 @@ async function cancelRfDetrTrainingJobRequest() {
             return `Wait for the active caption or instruction job to finish before ${actionLabel}; the caption archive is changing.`;
         }
         return "";
+    }
+
+    function reportCaptionArchiveExportFailure(actionLabel, error, duration = 5000) {
+        const message = captionArchiveActionFailureMessage(actionLabel, error);
+        setCaptionExportHealth(message, "fail");
+        setSamStatus(message, { variant: "error", duration });
+        return message;
     }
 
     async function downloadCaptionJsonl() {

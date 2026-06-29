@@ -217,8 +217,8 @@ The external reviewer should expect these operator-facing behaviors:
   controls lock while a caption or instruction job mutates the archive;
 - stale click or input events do not silently mutate the active run settings;
 - long status text wraps without squeezing action buttons;
-- download failures report actionable validation messages, not raw internal
-  codes;
+- caption and instruction download failures report actionable validation
+  messages in the export health row and status toast, not raw internal codes;
 - live-job busy responses are shown as blocked operator states, not generic
   export/import failures;
 - read routes and text-label mirror routes fail closed while a same-dataset

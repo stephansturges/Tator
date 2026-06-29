@@ -227,7 +227,8 @@ row before training.
   actionable row origins and duplicate or conflicting actionable review targets
   before calling the backend, giving operators immediate feedback on review
   packets that would fail the server-side transactional import.
-- Browser-side instruction artifact actions now share one failure reporter for
+- Browser-side caption and instruction artifact actions now share failure
+  reporters for caption audit JSONL, grouped caption JSON, VLM caption JSONL,
   trainer JSONL, archive JSONL, review JSONL, reviewed-row import, and report
   downloads. Backend or validation failures update both the caption export
   health row and the toast/status message, and already formatted blocked

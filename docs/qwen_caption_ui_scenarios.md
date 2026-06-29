@@ -197,12 +197,12 @@ mutating the caption archive, so operators do not export or import against a
 missing dataset or a moving target. The same active-job check runs again inside
 each export/import action, covering stale clicks, open file pickers, or scripted
 UI calls that bypass the disabled button state. Any backend, validation, or
-busy-state failure from instruction JSONL, archive, review, report, or review
-import actions must update the caption export health row and the status toast
-with the same formatted message, without double-prefixing already formatted
-blocked messages. Busy responses from a live caption dataset job remain
-"blocked" operator messages rather than being relabeled as generic
-export/import failures.
+busy-state failure from caption audit JSONL, grouped caption JSON, VLM caption
+JSONL, instruction JSONL, archive, review, report, or review import actions
+must update the caption export health row and the status toast with the same
+formatted message, without double-prefixing already formatted blocked messages.
+Busy responses from a live caption dataset job remain "blocked" operator
+messages rather than being relabeled as generic export/import failures.
 **Download instruction archive** exports one per-image construction archive
 record per JSONL line, keeping caption0, generated QA, optional deterministic
 metadata QA, source annotation provenance, and per-image export metadata separate

@@ -1155,12 +1155,18 @@ def test_qwen_caption_archive_action_failures_are_formatted_for_operator_status(
     script = "\n".join(
         [
             "const assert = require('assert');",
-            "const qwenElements = { captionStatus: { textContent: '' } };",
+            "const qwenElements = {",
+            "  captionStatus: { textContent: '' },",
+            "  captionExportHealth: { textContent: '', classes: [], classList: { remove(...names) { this.owner.classes = this.owner.classes.filter((name) => !names.includes(name)); }, add(name) { this.owner.classes.push(name); } } },",
+            "};",
+            "qwenElements.captionExportHealth.classList.owner = qwenElements.captionExportHealth;",
             "const samMessages = [];",
             "function setSamStatus(message, options) { samMessages.push({ message, options }); }",
             _extract_js_function(js, "setQwenCaptionStatus"),
+            _extract_js_function(js, "setCaptionExportHealth"),
             _extract_js_function(js, "captionArchiveActionFailureMessage"),
             _extract_js_function(js, "reportCaptionArchiveActionFailure"),
+            _extract_js_function(js, "reportCaptionArchiveExportFailure"),
             "assert.strictEqual(",
             "  captionArchiveActionFailureMessage('Caption update', new Error('Caption update failed: stale row')),",
             "  'Caption update failed: stale row'",
@@ -1174,6 +1180,12 @@ def test_qwen_caption_archive_action_failures_are_formatted_for_operator_status(
             "assert.strictEqual(qwenElements.captionStatus.textContent, reported);",
             "assert.strictEqual(samMessages[0].message, reported);",
             "assert.strictEqual(samMessages[0].options.duration, 1234);",
+            "const blocked = reportCaptionArchiveExportFailure('Caption JSONL export', new Error('Caption export is blocked while caption dataset job qcap_1 is running.'), 2345);",
+            "assert.strictEqual(blocked, 'Caption export is blocked while caption dataset job qcap_1 is running.');",
+            "assert.strictEqual(qwenElements.captionExportHealth.textContent, blocked);",
+            "assert(qwenElements.captionExportHealth.classes.includes('is-fail'));",
+            "assert.strictEqual(samMessages[1].message, blocked);",
+            "assert.strictEqual(samMessages[1].options.duration, 2345);",
         ]
     )
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
@@ -1451,6 +1463,23 @@ def test_qwen_caption_instruction_action_listeners_share_failure_reporter():
     assert "Instruction review import failed: ${error.message || error}" not in listener_block
     assert "Instruction archive export failed: ${error.message || error}" not in listener_block
     assert "Instruction report export failed: ${error.message || error}" not in listener_block
+
+
+def test_qwen_caption_export_action_listeners_share_failure_reporter():
+    js = _js()
+    listener_start = js.index("if (qwenElements.captionDownloadJsonl)")
+    listener_end = js.index("if (qwenElements.captionDownloadInstructionJsonl)", listener_start)
+    listener_block = js[listener_start:listener_end]
+    expected_actions = [
+        "Caption JSONL export",
+        "Grouped caption export",
+        "VLM caption export",
+    ]
+    for action in expected_actions:
+        assert f'reportCaptionArchiveExportFailure("{action}", error' in listener_block
+    assert "Caption JSONL export failed: ${error.message || error}" not in listener_block
+    assert "Grouped caption export failed: ${error.message || error}" not in listener_block
+    assert "VLM caption export failed: ${error.message || error}" not in listener_block
 
 
 def test_qwen_caption_instruction_export_actions_preserve_malformed_payload_errors():

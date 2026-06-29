@@ -22462,6 +22462,9 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (qwenElements.captionDatasetRefresh) {
             qwenElements.captionDatasetRefresh.addEventListener("click", () => {
+                if (!guardQwenCaptionArchiveIdle("refreshing caption datasets")) {
+                    return;
+                }
                 refreshQwenCaptionDatasets().catch((error) => {
                     console.error("Failed to refresh caption datasets", error);
                 });
@@ -22469,6 +22472,14 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (qwenElements.captionDatasetSelect) {
             qwenElements.captionDatasetSelect.addEventListener("change", () => {
+                if (qwenCaptionArchiveMutationActive()) {
+                    const stableDatasetId = isAnnotationDatasetModeActive()
+                        ? getActiveAnnotationDatasetIdForCaption()
+                        : qwenCaptionDatasetState.selectedId || "";
+                    qwenElements.captionDatasetSelect.value = stableDatasetId;
+                    guardQwenCaptionArchiveIdle("changing caption datasets");
+                    return;
+                }
                 if (isAnnotationDatasetModeActive()) {
                     syncCaptionDatasetSelectionWithAnnotationDataset();
                     refreshCaptionGlossaryForCurrentContext({ force: true }).catch((error) => {
@@ -25237,6 +25248,7 @@ async function cancelRfDetrTrainingJobRequest() {
         if (qwenElements.captionRecipeUpload) {
             qwenElements.captionRecipeUpload.disabled = busy;
         }
+        syncQwenCaptionDatasetControls();
         updateCaptionInstructionDatasetOptionControls();
         updateCaptionArchiveActionControls();
     }
@@ -29637,18 +29649,26 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function syncQwenCaptionDatasetControls() {
+        const busy = qwenCaptionArchiveMutationActive();
         if (qwenElements.captionDatasetSelect) {
             qwenElements.captionDatasetSelect.disabled =
-                qwenCaptionDatasetRefreshInFlight || isAnnotationDatasetModeActive();
+                qwenCaptionDatasetRefreshInFlight || isAnnotationDatasetModeActive() || busy;
         }
         if (qwenElements.captionDatasetRefresh) {
-            // Keep refresh disabled while a fetch is active to prevent overlap races.
-            qwenElements.captionDatasetRefresh.disabled = qwenCaptionDatasetRefreshInFlight;
+            // Keep refresh disabled while a fetch is active or the selected archive is mutating.
+            qwenElements.captionDatasetRefresh.disabled = qwenCaptionDatasetRefreshInFlight || busy;
         }
     }
 
     async function refreshQwenCaptionDatasets(options = {}) {
         if (!qwenElements.captionDatasetSelect) {
+            return;
+        }
+        if (qwenCaptionArchiveMutationActive()) {
+            if (!options.silent) {
+                guardQwenCaptionArchiveIdle("refreshing caption datasets");
+            }
+            syncQwenCaptionDatasetControls();
             return;
         }
         if (qwenCaptionDatasetRefreshInFlight) {

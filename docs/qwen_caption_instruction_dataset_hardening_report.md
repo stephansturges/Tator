@@ -109,6 +109,11 @@ row before training.
   so recipe application is blocked until the active archive mutation finishes;
   recipe save, delete, and download remain available because they do not change
   the active run settings.
+- Caption dataset selection and caption-dataset refresh now lock while a
+  caption or instruction job is mutating the archive. Stale or scripted dataset
+  selector changes are reverted to the stable dataset id and reported through
+  the same archive-idle guard, preventing the panel from showing a different
+  dataset context while the active job still owns the current archive.
 - Fixed caption action layout so export and instruction buttons wrap into
   readable responsive columns instead of clipping in the sidebar.
 - Fixed readiness and attach/recover rows so long status text cannot squeeze the

@@ -614,6 +614,7 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             "function getCaptionDatasetId() { return 'ds'; }",
             "function isGpuHeavyLockActive() { return false; }",
             "function getSelectedCaptionRecord(imageName) { return imageName ? selectedCaption : null; }",
+            "function syncQwenCaptionDatasetControls() {}",
             "function button() { return { disabled: false, textContent: '' }; }",
             "const qwenElements = {",
             "  captionRunButton: button(),",
@@ -2371,12 +2372,74 @@ def test_caption_dataset_picker_is_locked_to_annotation_dataset():
     js = _js()
 
     assert "function syncQwenCaptionDatasetControls()" in js
-    assert "qwenElements.captionDatasetSelect.disabled =\n                qwenCaptionDatasetRefreshInFlight || isAnnotationDatasetModeActive();" in js
+    assert "qwenCaptionDatasetRefreshInFlight || isAnnotationDatasetModeActive() || busy" in js
+    assert "qwenElements.captionDatasetRefresh.disabled = qwenCaptionDatasetRefreshInFlight || busy" in js
+    assert "guardQwenCaptionArchiveIdle(\"refreshing caption datasets\")" in js
+    assert "guardQwenCaptionArchiveIdle(\"changing caption datasets\")" in js
+    assert "qwenElements.captionDatasetSelect.value = stableDatasetId;" in js
     assert "if (isAnnotationDatasetModeActive()) {\n            return getActiveAnnotationDatasetIdForCaption();\n        }" in js
     assert "if (isAnnotationDatasetModeActive()) {\n                    syncCaptionDatasetSelectionWithAnnotationDataset();" in js
     assert "if (isAnnotationDatasetModeActive()) {\n                syncCaptionDatasetSelectionWithAnnotationDataset();\n            } else {" in js
     assert "qwenElements.captionDatasetSelect.disabled = false;" not in js
     assert "updateQwenCaptionDatasetRefreshButton" not in js
+
+
+def test_caption_dataset_controls_block_refresh_while_archive_is_mutating():
+    js = _js()
+    refresh_start = js.index("async function refreshQwenCaptionDatasets")
+    refresh_end = js.index("function getQwenAgentDatasetId", refresh_start)
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            "let qwenCaptionActive = false;",
+            "let qwenCaptionBatchActive = false;",
+            "let qwenCaptionBatchBackendJobId = 'job-1';",
+            "let qwenCaptionDatasetRefreshInFlight = false;",
+            "let qwenCaptionDatasetRefreshNeedsRefresh = false;",
+            "let fetchCalls = 0;",
+            "let updateCalls = 0;",
+            "const captionStatuses = [];",
+            "const backendStatuses = [];",
+            "const samStatuses = [];",
+            "const qwenElements = {",
+            "  captionDatasetSelect: { disabled: false, value: 'ds-current' },",
+            "  captionDatasetRefresh: { disabled: false },",
+            "};",
+            "function isAnnotationDatasetModeActive() { return false; }",
+            "function setQwenCaptionStatus(message) { captionStatuses.push(message); }",
+            "function setQwenCaptionBackendJobStatus(message) { backendStatuses.push(message); }",
+            "function setSamStatus(message, options) { samStatuses.push({ message, options }); }",
+            "function updateQwenCaptionButton() { updateCalls += 1; syncQwenCaptionDatasetControls(); }",
+            "async function fetch() { fetchCalls += 1; throw new Error('refresh should be blocked before fetch'); }",
+            _extract_js_function(js, "qwenCaptionArchiveMutationActive"),
+            _extract_js_function(js, "captionArchiveMutationBusyMessage"),
+            _extract_js_function(js, "guardQwenCaptionArchiveIdle"),
+            _extract_js_function(js, "syncQwenCaptionDatasetControls"),
+            js[refresh_start:refresh_end],
+            "syncQwenCaptionDatasetControls();",
+            "assert.strictEqual(qwenElements.captionDatasetSelect.disabled, true);",
+            "assert.strictEqual(qwenElements.captionDatasetRefresh.disabled, true);",
+            "await refreshQwenCaptionDatasets();",
+            "assert.strictEqual(fetchCalls, 0);",
+            "assert(captionStatuses.includes('Caption archive busy'));",
+            "assert(backendStatuses.some((message) => message.includes('refreshing caption datasets')));",
+            "assert(samStatuses.some((entry) => entry.message.includes('caption archive is changing')));",
+            "qwenCaptionBatchBackendJobId = '';",
+            "syncQwenCaptionDatasetControls();",
+            "assert.strictEqual(qwenElements.captionDatasetSelect.disabled, false);",
+            "assert.strictEqual(qwenElements.captionDatasetRefresh.disabled, false);",
+            "assert(updateCalls >= 1);",
+        ]
+    )
+    subprocess.run(
+        [
+            "node",
+            "-e",
+            f"(async () => {{\n{script}\n}})().catch((error) => {{ console.error(error); process.exit(1); }});",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+    )
 
 
 def test_annotation_snapshot_save_preserves_edits_made_during_inflight_save():

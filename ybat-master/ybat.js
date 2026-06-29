@@ -31221,6 +31221,10 @@ async function cancelRfDetrTrainingJobRequest() {
             if (artifactPath) {
                 return `Training bundle export blocked: manifest points ${artifactPath[1]} at the wrong artifact path. Regenerate the bundle before sharing it.`;
             }
+            const artifactsInconsistent = detail.match(/^manifest_artifacts_inconsistent:(.+)$/);
+            if (artifactsInconsistent) {
+                return `Training bundle export blocked: bundled artifacts do not agree with each other (${artifactsInconsistent[1]}). Regenerate the instruction dataset before sharing it.`;
+            }
             const missingAsset = detail.match(/^manifest_(image|label)_file_missing:(.+)$/);
             if (missingAsset) {
                 return `Training bundle export blocked: manifest references copied ${missingAsset[1]} ${missingAsset[2]}, but that file is not in the ZIP. Regenerate the bundle before sharing it.`;

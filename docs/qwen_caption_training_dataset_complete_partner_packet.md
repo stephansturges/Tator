@@ -67,7 +67,8 @@ Validation is layered rather than centralized in one place:
 - the bundle manifest validator verifies the non-manifest ZIP inventory,
   duplicate members, declared file count, required artifact paths, JSONL
   readability, row-count parity, image/label asset inventories, file roles,
-  byte counts, and SHA-256 digests;
+  byte counts, SHA-256 digests, and recomputed trainer/archive/review/report
+  consistency;
 - the trainer loader is the final boundary and rejects malformed, duplicate,
   unsupported, rejected, needs-revision, or unresolved rows.
 
@@ -257,7 +258,9 @@ the manifest, every required artifact path is present with the expected role,
 trainer/archive/review JSONL files parse as JSONL objects, manifest row counts
 match artifact line counts and image/label inventories, image/label manifest
 entries match their ZIP members, and each recorded byte count and SHA-256 digest
-matches the actual member bytes.
+matches the actual member bytes. It also recomputes artifact consistency from
+the bundled trainer, archive, review, and report files so a manifest-consistent
+ZIP still fails if those artifacts disagree with each other.
 
 If individual artifacts are shared instead of the bundle, include the complete
 artifact set from the same run:
@@ -1300,7 +1303,9 @@ The exporter validates the bundle before returning it:
 - the manifest's `files` entries must exactly match every non-manifest ZIP
   member, including roles, byte counts, and SHA-256 digests;
 - the manifest's required artifact paths, JSONL row counts, copied image
-  inventory, and copied label inventory must match the actual ZIP members.
+  inventory, and copied label inventory must match the actual ZIP members;
+- the bundled trainer, archive, review, and report files must pass recomputed
+  artifact-consistency validation after ZIP creation.
 
 This bundle exists because external review and trainer dry runs should not
 depend on a mutable local image folder. The JSONL files remain useful on their
@@ -1787,7 +1792,7 @@ Additional focused validation recorded in the supporting hardening docs covers:
   non-manifest member coverage, duplicate ZIP member rejection, byte-count
   checks, SHA-256 checks, manifest `file_count` agreement, required artifact
   paths, JSONL row-count parity, image/label inventory checks, and file-role
-  checks
+  checks, plus recomputed artifact-consistency validation from the ZIP contents
 - reviewed JSONL imported from the training bundle resolving bundled
   `images/...` paths back to the saved dataset image through
   `original_image_path`

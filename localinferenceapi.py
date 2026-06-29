@@ -23526,7 +23526,7 @@ def _caption_instruction_validate_bundle_manifest(zip_path: Path) -> None:
             training_rows = _read_jsonl_rows(artifact_paths["training_jsonl"])
             archive_rows = _read_jsonl_rows(artifact_paths["archive_jsonl"])
             review_rows = _read_jsonl_rows(artifact_paths["review_jsonl"])
-            _read_json_object(artifact_paths["report_json"])
+            report = _read_json_object(artifact_paths["report_json"])
 
             row_counts = manifest.get("row_counts")
             if not isinstance(row_counts, Mapping):
@@ -23624,6 +23624,20 @@ def _caption_instruction_validate_bundle_manifest(zip_path: Path) -> None:
                 path_prefix="labels/",
                 error_prefix="manifest_label",
             )
+            consistency_validation = _caption_instruction_artifact_consistency_validation(
+                training_rows=training_rows,
+                archive_rows=archive_rows,
+                review_rows=review_rows,
+                report=report,
+                archive_image_count=len(archive_rows),
+                settings=manifest.get("instruction_settings") if isinstance(manifest.get("instruction_settings"), Mapping) else {},
+                settings_fingerprint=str(manifest.get("instruction_settings_fingerprint") or ""),
+            )
+            if not consistency_validation.get("ok"):
+                raise ValueError(
+                    "manifest_artifacts_inconsistent:"
+                    + str((consistency_validation.get("errors") or ["unknown"])[0])
+                )
     except (zipfile.BadZipFile, KeyError, json.JSONDecodeError, OSError, ValueError) as exc:
         raise HTTPException(
             status_code=HTTP_500_INTERNAL_SERVER_ERROR,

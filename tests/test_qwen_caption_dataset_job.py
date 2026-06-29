@@ -4052,28 +4052,128 @@ def test_caption_instruction_bundle_rejects_uncopied_archive_or_review_images(
 def _write_minimal_caption_instruction_bundle(
     tmp_path: Path,
     *,
+    mutate_members=None,
     mutate_manifest=None,
 ) -> Path:
     import localinferenceapi as api
 
+    settings = api._caption_instruction_export_settings({})
+    settings_fingerprint = api._caption_instruction_settings_fingerprint(settings)
+    training_row = {
+        "image_path": "images/train/frame.jpg",
+        "question": "Describe this image in detail.",
+        "answer": "A boat is shown.",
+        "metadata": {
+            "qa_id": "caption0-frame",
+            "row_type": "caption0",
+            "answer_source": "caption0",
+            "answer_format": "natural",
+            "validation_status": "accepted",
+            "review_status": "accepted",
+            "source_archive": "tator_caption_instruction_archive_v1",
+        },
+    }
+    archive_row = {
+        "image_path": "images/train/frame.jpg",
+        "image_name": "images/train/frame.jpg",
+        "split": "train",
+        "source_annotations": {"status": "ok"},
+        "language_annotations": {
+            "caption0": {
+                "qa_id": "caption0-frame",
+                "question": "Describe this image in detail.",
+                "caption": "A boat is shown.",
+                "answer": "A boat is shown.",
+                "validation_status": "accepted",
+            },
+            "generated_qa_pairs": [],
+        },
+        "deterministic_metadata_qa_pairs": [],
+        "export_metadata": {
+            "settings": settings,
+            "settings_fingerprint": settings_fingerprint,
+            "selected_training_row_count": 1,
+        },
+    }
+    review_row = {
+        "format": api.CAPTION_INSTRUCTION_REVIEW_ROWS_FORMAT,
+        "dataset_id": "ds",
+        "image_path": "images/train/frame.jpg",
+        "image_name": "images/train/frame.jpg",
+        "image": "images/train/frame.jpg",
+        "split": "train",
+        "row_origin": "caption0",
+        "row_type": "caption0",
+        "qa_id": "caption0-frame",
+        "question": "Describe this image in detail.",
+        "candidate_answer": "A boat is shown.",
+        "training_answer": "A boat is shown.",
+        "selected_for_training": True,
+        "requires_manual_review": False,
+        "validation_status": "accepted",
+        "review_status": "accepted",
+        "source_summary": {},
+        "rejection_reasons": [],
+        "review_decision": "",
+        "review_notes": "",
+    }
+    report = {
+        "format": "tator_caption_instruction_report_v1",
+        "image_count": 1,
+        "selected_flattened_row_count": 1,
+        "instruction_review_row_count": 1,
+        "manual_review_required_count": 0,
+        "instruction_settings": settings,
+        "instruction_settings_fingerprint": settings_fingerprint,
+        "corpus_quality_metrics": {
+            "image_count": 1,
+            "selected_flattened_row_count": 1,
+        },
+        "instruction_export_validation": {
+            "ok": True,
+            "error_count": 0,
+            "row_count": 1,
+        },
+        "training_readiness": {
+            "status": "ready",
+            "ready_for_training": True,
+            "blocking_reasons": [],
+            "required_actions": [],
+            "quality_warnings": [],
+            "thresholds": {},
+            "selected_training_row_count": 1,
+            "selected_review_row_count": 1,
+            "selected_manual_review_row_count": 0,
+            "accepted_manual_review_row_count": 0,
+            "pending_manual_review_row_count": 0,
+            "rejected_manual_review_row_count": 0,
+            "needs_revision_manual_review_row_count": 0,
+            "instruction_export_validation_error_count": 0,
+        },
+    }
     members = {
         "images/train/frame.jpg": (b"image-bytes", "image"),
         "labels/train/frame.txt": (b"0 0.5 0.5 1 1\n", "label"),
         "labelmap.txt": (b"Boat\n", "labelmap"),
         "caption_instruction_training.jsonl": (
-            b'{"image_path":"images/train/frame.jpg","question":"Describe the image.","answer":"A boat is shown."}\n',
+            (json.dumps(training_row, ensure_ascii=False) + "\n").encode("utf-8"),
             "training_rows",
         ),
         "caption_instruction_archive.jsonl": (
-            b'{"image_path":"images/train/frame.jpg","split":"train"}\n',
+            (json.dumps(archive_row, ensure_ascii=False) + "\n").encode("utf-8"),
             "archive_rows",
         ),
         "caption_instruction_review.jsonl": (
-            b'{"image_path":"images/train/frame.jpg","qa_id":"caption0"}\n',
+            (json.dumps(review_row, ensure_ascii=False) + "\n").encode("utf-8"),
             "review_rows",
         ),
-        "caption_instruction_report.json": (b'{"format":"tator_caption_instruction_report_v1"}\n', "report"),
+        "caption_instruction_report.json": (
+            (json.dumps(report, ensure_ascii=False) + "\n").encode("utf-8"),
+            "report",
+        ),
     }
+    if mutate_members is not None:
+        mutate_members(members)
     file_entries = [
         {
             "path": path,
@@ -4091,8 +4191,8 @@ def _write_minimal_caption_instruction_bundle(
         "checksum_scope": api.CAPTION_INSTRUCTION_BUNDLE_CHECKSUM_SCOPE,
         "dataset_id": "ds",
         "exported_at": "2026-01-01T00:00:00Z",
-        "instruction_settings": {},
-        "instruction_settings_fingerprint": "settings-fingerprint",
+        "instruction_settings": settings,
+        "instruction_settings_fingerprint": settings_fingerprint,
         "row_counts": {
             "training_rows": 1,
             "archive_rows": 1,
@@ -4204,6 +4304,100 @@ def test_caption_instruction_bundle_manifest_rejects_semantic_drift(
 
     assert exc_info.value.status_code == 500
     assert exc_info.value.detail == expected_detail
+
+
+def _tamper_minimal_bundle_training_answer(members: dict) -> None:
+    training_row = {
+        "image_path": "images/train/frame.jpg",
+        "question": "Describe this image in detail.",
+        "answer": "A different answer.",
+        "metadata": {
+            "qa_id": "caption0-frame",
+            "row_type": "caption0",
+            "answer_source": "caption0",
+            "answer_format": "natural",
+            "validation_status": "accepted",
+            "review_status": "accepted",
+            "source_archive": "tator_caption_instruction_archive_v1",
+        },
+    }
+    members["caption_instruction_training.jsonl"] = (
+        (json.dumps(training_row, ensure_ascii=False) + "\n").encode("utf-8"),
+        "training_rows",
+    )
+
+
+def _tamper_minimal_bundle_report_selected_count(members: dict) -> None:
+    import localinferenceapi as api
+
+    settings = api._caption_instruction_export_settings({})
+    report = {
+        "format": "tator_caption_instruction_report_v1",
+        "image_count": 1,
+        "selected_flattened_row_count": 2,
+        "instruction_review_row_count": 1,
+        "manual_review_required_count": 0,
+        "instruction_settings": settings,
+        "instruction_settings_fingerprint": api._caption_instruction_settings_fingerprint(settings),
+        "corpus_quality_metrics": {
+            "image_count": 1,
+            "selected_flattened_row_count": 2,
+        },
+        "instruction_export_validation": {
+            "ok": True,
+            "error_count": 0,
+            "row_count": 2,
+        },
+        "training_readiness": {
+            "status": "ready",
+            "ready_for_training": True,
+            "blocking_reasons": [],
+            "required_actions": [],
+            "quality_warnings": [],
+            "thresholds": {},
+            "selected_training_row_count": 2,
+            "selected_review_row_count": 1,
+            "selected_manual_review_row_count": 0,
+            "accepted_manual_review_row_count": 0,
+            "pending_manual_review_row_count": 0,
+            "rejected_manual_review_row_count": 0,
+            "needs_revision_manual_review_row_count": 0,
+            "instruction_export_validation_error_count": 0,
+        },
+    }
+    members["caption_instruction_report.json"] = (
+        (json.dumps(report, ensure_ascii=False) + "\n").encode("utf-8"),
+        "report",
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutate_members", "expected_error"),
+    [
+        (
+            _tamper_minimal_bundle_training_answer,
+            "manifest_artifacts_inconsistent:archive candidate",
+        ),
+        (
+            _tamper_minimal_bundle_report_selected_count,
+            "manifest_artifacts_inconsistent:instruction_report.training_readiness.selected_training_row_count",
+        ),
+    ],
+)
+def test_caption_instruction_bundle_manifest_recomputes_artifact_consistency(
+    tmp_path: Path,
+    mutate_members,
+    expected_error: str,
+) -> None:
+    import localinferenceapi as api
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api._caption_instruction_validate_bundle_manifest(
+            _write_minimal_caption_instruction_bundle(tmp_path, mutate_members=mutate_members),
+        )
+
+    assert exc_info.value.status_code == 500
+    assert expected_error in exc_info.value.detail
 
 
 def test_caption_dataset_runner_summary_counts_completed_cases_not_attempts() -> None:

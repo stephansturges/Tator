@@ -65,7 +65,9 @@ Validation is layered rather than centralized in one place:
 - bundle creation verifies row rewrites to copied images before returning a
   ZIP;
 - the bundle manifest validator verifies the non-manifest ZIP inventory,
-  duplicate members, declared file count, byte counts, and SHA-256 digests;
+  duplicate members, declared file count, required artifact paths, JSONL
+  readability, row-count parity, image/label asset inventories, file roles,
+  byte counts, and SHA-256 digests;
 - the trainer loader is the final boundary and rejects malformed, duplicate,
   unsupported, rejected, needs-revision, or unresolved rows.
 
@@ -245,14 +247,17 @@ the self-contained training bundle from the same run. That bundle contains:
 - `caption_instruction_bundle_manifest.json`.
 
 The bundle manifest records row counts, instruction settings, copied image
-assets, copied label assets, file sizes, and SHA-256 checksums for bundle
-contents. Bundle creation fails closed when any trainer, archive, or review row
-cannot be rewritten to a copied image inside the ZIP. The manifest also declares
-`manifest_path`,
+assets, copied label assets, required artifact paths, file roles, file sizes,
+and SHA-256 checksums for bundle contents. Bundle creation fails closed when
+any trainer, archive, or review row cannot be rewritten to a copied image inside
+the ZIP. The manifest also declares `manifest_path`,
 `checksum_scope=all_zip_members_except_manifest`, and `file_count`. The backend
 verifies before returning the ZIP that every non-manifest ZIP member appears in
-the manifest and that each recorded byte count and SHA-256 digest matches the
-actual member bytes.
+the manifest, every required artifact path is present with the expected role,
+trainer/archive/review JSONL files parse as JSONL objects, manifest row counts
+match artifact line counts and image/label inventories, image/label manifest
+entries match their ZIP members, and each recorded byte count and SHA-256 digest
+matches the actual member bytes.
 
 If individual artifacts are shared instead of the bundle, include the complete
 artifact set from the same run:
@@ -1293,7 +1298,9 @@ The exporter validates the bundle before returning it:
 - copied image files must stay inside the resolved dataset image root;
 - the ZIP must contain every file the bundle writer declares required;
 - the manifest's `files` entries must exactly match every non-manifest ZIP
-  member, including byte counts and SHA-256 digests.
+  member, including roles, byte counts, and SHA-256 digests;
+- the manifest's required artifact paths, JSONL row counts, copied image
+  inventory, and copied label inventory must match the actual ZIP members.
 
 This bundle exists because external review and trainer dry runs should not
 depend on a mutable local image folder. The JSONL files remain useful on their
@@ -1778,7 +1785,9 @@ Additional focused validation recorded in the supporting hardening docs covers:
   metadata in both row metadata and the bundle manifest
 - backend manifest validation for the training bundle, including exact
   non-manifest member coverage, duplicate ZIP member rejection, byte-count
-  checks, SHA-256 checks, and manifest `file_count` agreement
+  checks, SHA-256 checks, manifest `file_count` agreement, required artifact
+  paths, JSONL row-count parity, image/label inventory checks, and file-role
+  checks
 - reviewed JSONL imported from the training bundle resolving bundled
   `images/...` paths back to the saved dataset image through
   `original_image_path`

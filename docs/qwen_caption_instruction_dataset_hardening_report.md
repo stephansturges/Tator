@@ -204,6 +204,12 @@ row before training.
   object in the instruction archive, instruction report, API export payload, and
   instruction summary. If this object is not OK, training readiness is forced to
   `blocked` with `instruction_artifacts_inconsistent`.
+- The self-contained training-bundle manifest validator now checks semantic
+  bundle contents, not only ZIP checksums. It requires the declared artifact
+  paths, expected file roles, valid trainer/archive/review JSONL object rows,
+  manifest row-count parity with JSONL line counts, copied image inventory
+  parity, copied label inventory parity, and image/label byte-count and SHA-256
+  agreement before the bundle can be returned.
 - The browser-side instruction report validator now requires the embedded
   `instruction_artifact_consistency` object to be present, versioned as
   `tator_caption_instruction_artifact_consistency_v1`, boolean-OK, and

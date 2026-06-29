@@ -23422,15 +23422,208 @@ def _caption_instruction_validate_bundle_manifest(zip_path: Path) -> None:
             expected_paths = names - {CAPTION_INSTRUCTION_BUNDLE_MANIFEST_PATH}
             if set(entries_by_path) != expected_paths:
                 raise ValueError("manifest_file_set_mismatch")
-            if int(manifest.get("file_count") or 0) != len(entries_by_path):
+            raw_file_count = manifest.get("file_count")
+            if isinstance(raw_file_count, bool):
+                raise ValueError("manifest_file_count_invalid")
+            try:
+                manifest_file_count = int(raw_file_count)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("manifest_file_count_invalid") from exc
+            if manifest_file_count < 0 or manifest_file_count != len(entries_by_path):
                 raise ValueError("manifest_file_count_mismatch")
+            member_bytes: Dict[str, bytes] = {}
             for path, entry in entries_by_path.items():
                 data = zf.read(path)
-                expected_bytes = int(entry["bytes"]) if "bytes" in entry else -1
+                member_bytes[path] = data
+                raw_entry_bytes = entry.get("bytes")
+                if isinstance(raw_entry_bytes, bool):
+                    raise ValueError(f"manifest_file_bytes_invalid:{path}")
+                try:
+                    expected_bytes = int(raw_entry_bytes)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"manifest_file_bytes_invalid:{path}") from exc
+                if expected_bytes < 0:
+                    raise ValueError(f"manifest_file_bytes_invalid:{path}")
                 if expected_bytes != len(data):
                     raise ValueError(f"manifest_file_bytes_mismatch:{path}")
                 if str(entry.get("sha256") or "").strip() != _caption_instruction_bytes_sha256(data):
                     raise ValueError(f"manifest_file_sha256_mismatch:{path}")
+
+            def _manifest_member_path(value: Any, *, detail: str) -> str:
+                path_value = str(value or "").strip().replace("\\", "/")
+                parts = path_value.split("/")
+                if (
+                    not path_value
+                    or path_value == CAPTION_INSTRUCTION_BUNDLE_MANIFEST_PATH
+                    or path_value.startswith("/")
+                    or any(part in ("", ".", "..") for part in parts)
+                ):
+                    raise ValueError(detail)
+                return path_value
+
+            def _manifest_nonnegative_int(mapping: Mapping[str, Any], key: str, *, detail: str) -> int:
+                raw_value = mapping.get(key)
+                if isinstance(raw_value, bool):
+                    raise ValueError(f"{detail}:{key}")
+                try:
+                    value = int(raw_value)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"{detail}:{key}") from exc
+                if value < 0:
+                    raise ValueError(f"{detail}:{key}")
+                return value
+
+            def _read_jsonl_rows(path: str) -> List[Mapping[str, Any]]:
+                rows: List[Mapping[str, Any]] = []
+                for row_number, line in enumerate(member_bytes[path].decode("utf-8").splitlines(), start=1):
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
+                    if not isinstance(row, Mapping):
+                        raise ValueError(f"manifest_jsonl_row_invalid:{path}:{row_number}")
+                    rows.append(row)
+                return rows
+
+            def _read_json_object(path: str) -> Mapping[str, Any]:
+                payload = json.loads(member_bytes[path].decode("utf-8"))
+                if not isinstance(payload, Mapping):
+                    raise ValueError(f"manifest_json_invalid:{path}")
+                return payload
+
+            def _entry_role(path: str) -> str:
+                return str(entries_by_path.get(path, {}).get("role") or "").strip()
+
+            def _require_role(path: str, role: str) -> None:
+                if path not in entries_by_path:
+                    raise ValueError(f"manifest_artifact_file_missing:{path}")
+                if _entry_role(path) != role:
+                    raise ValueError(f"manifest_file_role_mismatch:{path}")
+
+            artifacts = manifest.get("artifacts")
+            if not isinstance(artifacts, Mapping):
+                raise ValueError("manifest_artifacts_invalid")
+            expected_artifacts = {
+                "training_jsonl": ("caption_instruction_training.jsonl", "training_rows"),
+                "archive_jsonl": ("caption_instruction_archive.jsonl", "archive_rows"),
+                "review_jsonl": ("caption_instruction_review.jsonl", "review_rows"),
+                "report_json": ("caption_instruction_report.json", "report"),
+            }
+            artifact_paths: Dict[str, str] = {}
+            for key, (expected_path, role) in expected_artifacts.items():
+                artifact_path = _manifest_member_path(
+                    artifacts.get(key),
+                    detail=f"manifest_artifact_path_invalid:{key}",
+                )
+                if artifact_path != expected_path:
+                    raise ValueError(f"manifest_artifact_path_invalid:{key}")
+                _require_role(artifact_path, role)
+                artifact_paths[key] = artifact_path
+            if "labelmap.txt" not in entries_by_path:
+                raise ValueError("manifest_labelmap_missing")
+            if _entry_role("labelmap.txt") != "labelmap":
+                raise ValueError("manifest_file_role_mismatch:labelmap.txt")
+
+            training_rows = _read_jsonl_rows(artifact_paths["training_jsonl"])
+            archive_rows = _read_jsonl_rows(artifact_paths["archive_jsonl"])
+            review_rows = _read_jsonl_rows(artifact_paths["review_jsonl"])
+            _read_json_object(artifact_paths["report_json"])
+
+            row_counts = manifest.get("row_counts")
+            if not isinstance(row_counts, Mapping):
+                raise ValueError("manifest_row_counts_invalid")
+            expected_counts = {
+                "training_rows": _manifest_nonnegative_int(
+                    row_counts,
+                    "training_rows",
+                    detail="manifest_row_count_invalid",
+                ),
+                "archive_rows": _manifest_nonnegative_int(
+                    row_counts,
+                    "archive_rows",
+                    detail="manifest_row_count_invalid",
+                ),
+                "review_rows": _manifest_nonnegative_int(
+                    row_counts,
+                    "review_rows",
+                    detail="manifest_row_count_invalid",
+                ),
+                "images": _manifest_nonnegative_int(row_counts, "images", detail="manifest_row_count_invalid"),
+                "labels": _manifest_nonnegative_int(row_counts, "labels", detail="manifest_row_count_invalid"),
+            }
+            if expected_counts["training_rows"] != len(training_rows):
+                raise ValueError("manifest_row_count_mismatch:training_rows")
+            if expected_counts["archive_rows"] != len(archive_rows):
+                raise ValueError("manifest_row_count_mismatch:archive_rows")
+            if expected_counts["review_rows"] != len(review_rows):
+                raise ValueError("manifest_row_count_mismatch:review_rows")
+
+            role_counts = Counter(_entry_role(path) for path in entries_by_path)
+            if role_counts.get("image", 0) != expected_counts["images"]:
+                raise ValueError("manifest_role_count_mismatch:images")
+            if role_counts.get("label", 0) != expected_counts["labels"]:
+                raise ValueError("manifest_role_count_mismatch:labels")
+
+            def _validate_assets(
+                raw_assets: Any,
+                *,
+                count_key: str,
+                path_field: str,
+                expected_role: str,
+                path_prefix: str,
+                error_prefix: str,
+            ) -> Set[str]:
+                if not isinstance(raw_assets, list):
+                    raise ValueError(f"{error_prefix}_entries_invalid")
+                if len(raw_assets) != expected_counts[count_key]:
+                    raise ValueError(f"manifest_row_count_mismatch:{count_key}")
+                asset_paths: Set[str] = set()
+                for asset in raw_assets:
+                    if not isinstance(asset, Mapping):
+                        raise ValueError(f"{error_prefix}_entry_invalid")
+                    path = _manifest_member_path(
+                        asset.get(path_field),
+                        detail=f"{error_prefix}_path_invalid",
+                    )
+                    if not path.startswith(path_prefix):
+                        raise ValueError(f"{error_prefix}_path_invalid:{path}")
+                    if path in asset_paths:
+                        raise ValueError(f"{error_prefix}_path_duplicate:{path}")
+                    asset_paths.add(path)
+                    if path not in entries_by_path:
+                        raise ValueError(f"{error_prefix}_file_missing:{path}")
+                    if _entry_role(path) != expected_role:
+                        raise ValueError(f"manifest_file_role_mismatch:{path}")
+                    data = member_bytes[path]
+                    expected_asset_bytes = _manifest_nonnegative_int(
+                        asset,
+                        "bytes",
+                        detail=f"{error_prefix}_bytes_invalid",
+                    )
+                    if expected_asset_bytes != len(data):
+                        raise ValueError(f"{error_prefix}_bytes_mismatch:{path}")
+                    if str(asset.get("sha256") or "").strip() != _caption_instruction_bytes_sha256(data):
+                        raise ValueError(f"{error_prefix}_sha256_mismatch:{path}")
+                role_paths = {path for path, entry in entries_by_path.items() if str(entry.get("role") or "") == expected_role}
+                if asset_paths != role_paths:
+                    raise ValueError(f"{error_prefix}_file_set_mismatch")
+                return asset_paths
+
+            _validate_assets(
+                manifest.get("images"),
+                count_key="images",
+                path_field="bundle_image_path",
+                expected_role="image",
+                path_prefix="images/",
+                error_prefix="manifest_image",
+            )
+            _validate_assets(
+                manifest.get("labels"),
+                count_key="labels",
+                path_field="bundle_label_path",
+                expected_role="label",
+                path_prefix="labels/",
+                error_prefix="manifest_label",
+            )
     except (zipfile.BadZipFile, KeyError, json.JSONDecodeError, OSError, ValueError) as exc:
         raise HTTPException(
             status_code=HTTP_500_INTERNAL_SERVER_ERROR,

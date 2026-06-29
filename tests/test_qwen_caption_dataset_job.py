@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import threading
 import time
+import zipfile
 
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -4045,6 +4046,163 @@ def test_caption_instruction_bundle_rejects_uncopied_archive_or_review_images(
         )
 
     assert exc_info.value.status_code == 412
+    assert exc_info.value.detail == expected_detail
+
+
+def _write_minimal_caption_instruction_bundle(
+    tmp_path: Path,
+    *,
+    mutate_manifest=None,
+) -> Path:
+    import localinferenceapi as api
+
+    members = {
+        "images/train/frame.jpg": (b"image-bytes", "image"),
+        "labels/train/frame.txt": (b"0 0.5 0.5 1 1\n", "label"),
+        "labelmap.txt": (b"Boat\n", "labelmap"),
+        "caption_instruction_training.jsonl": (
+            b'{"image_path":"images/train/frame.jpg","question":"Describe the image.","answer":"A boat is shown."}\n',
+            "training_rows",
+        ),
+        "caption_instruction_archive.jsonl": (
+            b'{"image_path":"images/train/frame.jpg","split":"train"}\n',
+            "archive_rows",
+        ),
+        "caption_instruction_review.jsonl": (
+            b'{"image_path":"images/train/frame.jpg","qa_id":"caption0"}\n',
+            "review_rows",
+        ),
+        "caption_instruction_report.json": (b'{"format":"tator_caption_instruction_report_v1"}\n', "report"),
+    }
+    file_entries = [
+        {
+            "path": path,
+            "role": role,
+            "bytes": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+        for path, (payload, role) in sorted(members.items())
+    ]
+    image_payload = members["images/train/frame.jpg"][0]
+    label_payload = members["labels/train/frame.txt"][0]
+    manifest = {
+        "format": api.CAPTION_INSTRUCTION_BUNDLE_MANIFEST_FORMAT,
+        "manifest_path": api.CAPTION_INSTRUCTION_BUNDLE_MANIFEST_PATH,
+        "checksum_scope": api.CAPTION_INSTRUCTION_BUNDLE_CHECKSUM_SCOPE,
+        "dataset_id": "ds",
+        "exported_at": "2026-01-01T00:00:00Z",
+        "instruction_settings": {},
+        "instruction_settings_fingerprint": "settings-fingerprint",
+        "row_counts": {
+            "training_rows": 1,
+            "archive_rows": 1,
+            "review_rows": 1,
+            "images": 1,
+            "labels": 1,
+        },
+        "artifacts": {
+            "training_jsonl": "caption_instruction_training.jsonl",
+            "archive_jsonl": "caption_instruction_archive.jsonl",
+            "review_jsonl": "caption_instruction_review.jsonl",
+            "report_json": "caption_instruction_report.json",
+        },
+        "images": [
+            {
+                "original_image_path": "frame.jpg",
+                "split": "train",
+                "bundle_image_path": "images/train/frame.jpg",
+                "sha256": hashlib.sha256(image_payload).hexdigest(),
+                "bytes": len(image_payload),
+                "width": 10,
+                "height": 10,
+            }
+        ],
+        "labels": [
+            {
+                "original_image_path": "frame.jpg",
+                "split": "train",
+                "bundle_label_path": "labels/train/frame.txt",
+                "sha256": hashlib.sha256(label_payload).hexdigest(),
+                "bytes": len(label_payload),
+                "line_count": 1,
+                "label_source": "dataset_label_file",
+                "label_source_present": True,
+            }
+        ],
+        "file_count": len(file_entries),
+        "files": file_entries,
+    }
+    if mutate_manifest is not None:
+        mutate_manifest(manifest)
+    zip_path = tmp_path / "caption_instruction_bundle.zip"
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for path, (payload, _role) in members.items():
+            zf.writestr(path, payload)
+        zf.writestr(
+            api.CAPTION_INSTRUCTION_BUNDLE_MANIFEST_PATH,
+            json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"),
+        )
+    return zip_path
+
+
+def test_caption_instruction_bundle_manifest_validates_semantic_inventory(tmp_path: Path) -> None:
+    import localinferenceapi as api
+
+    api._caption_instruction_validate_bundle_manifest(
+        _write_minimal_caption_instruction_bundle(tmp_path),
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutate_manifest", "expected_detail"),
+    [
+        (
+            lambda manifest: manifest["row_counts"].__setitem__("training_rows", 2),
+            "caption_instruction_bundle_manifest_invalid:manifest_row_count_mismatch:training_rows",
+        ),
+        (
+            lambda manifest: manifest["images"][0].__setitem__(
+                "bundle_image_path",
+                "images/train/missing.jpg",
+            ),
+            "caption_instruction_bundle_manifest_invalid:manifest_image_file_missing:images/train/missing.jpg",
+        ),
+        (
+            lambda manifest: manifest["images"][0].__setitem__("sha256", "0" * 64),
+            "caption_instruction_bundle_manifest_invalid:manifest_image_sha256_mismatch:images/train/frame.jpg",
+        ),
+        (
+            lambda manifest: manifest["artifacts"].__setitem__(
+                "training_jsonl",
+                "caption_instruction_archive.jsonl",
+            ),
+            "caption_instruction_bundle_manifest_invalid:manifest_artifact_path_invalid:training_jsonl",
+        ),
+        (
+            lambda manifest: manifest.__setitem__("file_count", True),
+            "caption_instruction_bundle_manifest_invalid:manifest_file_count_invalid",
+        ),
+        (
+            lambda manifest: next(
+                item for item in manifest["files"] if item["path"] == "images/train/frame.jpg"
+            ).__setitem__("bytes", True),
+            "caption_instruction_bundle_manifest_invalid:manifest_file_bytes_invalid:images/train/frame.jpg",
+        ),
+    ],
+)
+def test_caption_instruction_bundle_manifest_rejects_semantic_drift(
+    tmp_path: Path,
+    mutate_manifest,
+    expected_detail: str,
+) -> None:
+    import localinferenceapi as api
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api._caption_instruction_validate_bundle_manifest(
+            _write_minimal_caption_instruction_bundle(tmp_path, mutate_manifest=mutate_manifest),
+        )
+
+    assert exc_info.value.status_code == 500
     assert exc_info.value.detail == expected_detail
 
 

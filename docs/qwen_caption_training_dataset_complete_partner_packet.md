@@ -13,6 +13,11 @@ corpus should be used for fine-tuning.
 
 The implementation is intentionally dataset-neutral. It does not rely on
 project-specific dataset names, class names, or private evaluation assumptions.
+It is also written as a neutral external-consumer packet: do not add customer,
+partner, dataset, or project code names to this document before sharing it.
+Those names are not needed to review the implementation, and keeping the packet
+neutral prevents product-specific assumptions from leaking into reusable
+training-data contracts.
 
 ## Reader Entry Point
 
@@ -30,6 +35,22 @@ history from commits:
    or unstable exports?
 6. What remains to be proven with real data before using a generated corpus for
    actual training?
+
+Recommended reading order for a technical review:
+
+1. Read **One-Page Decision Summary** to understand the current readiness claim.
+2. Read **What Was Done And Why** and **Layer-By-Layer Implementation
+   Narrative** to understand the design intent.
+3. Read **Requirement Mapping** to verify that the product behavior requested
+   by the multi-prompt training-data workflow has an implemented artifact,
+   control, or guard.
+4. Read **Artifact Contract** and **How To Inspect A Generated Packet** before
+   reviewing sample exports.
+5. Run **Reproducible Verification Commands** against the checked-out
+   repository.
+6. Use **Required Pilot Before Training Use** and **Open Decisions For The
+   Review Team** to decide whether the implementation is ready to run on a
+   real target corpus.
 
 The companion documents are supporting references:
 
@@ -50,6 +71,54 @@ The companion documents are supporting references:
   reviewer checklist.
 - `docs/qwen_caption_instruction_dataset_external_partner_packet.md` remains a
   supporting implementation packet; this file is the canonical overview.
+
+## External-Consumer Contract
+
+This packet is meant to let an external technical reviewer independently answer
+four questions:
+
+- **Can the UI start the right workflow?** The expected workflow is a distinct
+  **Create VLM training dataset** action, not a hidden reuse of ordinary
+  caption export.
+- **Can every trainer row be audited?** A trainable row must trace back to an
+  image, a question, an answer, source evidence or generated-language
+  provenance, validation state, review state, and a run report.
+- **Can unsafe rows be kept for review without entering training?** Rejected,
+  stale, unsupported, review-pending, or malformed candidates must remain in
+  audit/review artifacts but be excluded from flat trainer JSONL.
+- **Can long-running generation be operated without babysitting?** Dataset
+  jobs must expose progress, failure states, attach/recover behavior, model
+  availability, prompt-budget telemetry, loop recovery, and busy-state guards
+  around exports and archive mutations.
+
+The packet should not be read as a promise that any generated corpus is ready
+for fine-tuning. It documents the implemented workflow and hardening. A corpus
+becomes training-ready only after a real-data pilot, human review where
+required, reviewed-row import, strict re-export, and trainer-loader or
+fine-tuning smoke validation.
+
+## What To Hand Over
+
+For external review, provide this file plus the following supporting files:
+
+- `docs/qwen_caption_training_dataset_external_implementation_report.md`
+- `docs/qwen_caption_training_dataset_reviewer_dossier.md`
+- `docs/qwen_caption_instruction_dataset_hardening_report.md`
+- `docs/qwen_caption_prompt_stack.md`
+- `docs/qwen_caption_ui_scenarios.md`
+
+If sample artifacts are shared with the documentation, include the complete
+artifact set from the same run:
+
+- trainer JSONL
+- instruction archive JSONL
+- review JSONL
+- instruction report JSON
+- the run's caption/progress trace summary when available
+
+Do not share trainer JSONL alone as proof of correctness. The trainer file is
+the model-input artifact; the archive, review file, and report are the evidence
+that explain whether those model-input rows should be trusted.
 
 ## One-Page Decision Summary
 

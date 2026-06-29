@@ -108,9 +108,11 @@ The user clicks **Create VLM training dataset** after choosing a caption dataset
 The run creates caption0 rows and, by default, 8 generated visual QA rows per
 image. **Generated QA per image** is clamped to 0-20, so `0` creates a
 caption0-only instruction export and high values cannot explode the prompt or
-artifact size. **Include caption0** and **Include generated QA** control the
-flattened instruction JSONL, while **Include deterministic metadata QA** is off
-by default and adds code-generated rows from real source labels only when
+artifact size; if a typed value or loaded recipe is outside that range, the
+launch confirmation warns that the value was adjusted. **Include caption0** and
+**Include generated QA** control the flattened instruction JSONL, while
+**Include deterministic metadata QA** is off by default and adds code-generated
+rows from real source labels only when
 explicitly enabled. The UI refuses to launch an instruction run when all three
 trainable row families are disabled, and its confirmation text distinguishes
 trainer JSONL rows from generated QA candidates that are archive/review-only.

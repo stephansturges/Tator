@@ -29329,11 +29329,12 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function getCaptionInstructionDatasetSettings(forceInstructionDataset = false) {
-        let subcaptions = Number.parseInt(qwenElements.captionSubcaptionsPerImage?.value || "0", 10);
-        if (!Number.isFinite(subcaptions)) {
-            subcaptions = 0;
+        const rawSubcaptionsText = String(qwenElements.captionSubcaptionsPerImage?.value ?? "0").trim();
+        let requestedSubcaptions = Number.parseInt(rawSubcaptionsText || "0", 10);
+        if (!Number.isFinite(requestedSubcaptions)) {
+            requestedSubcaptions = 0;
         }
-        subcaptions = Math.min(Math.max(subcaptions, 0), 20);
+        const subcaptions = Math.min(Math.max(requestedSubcaptions, 0), 20);
         if (qwenElements.captionSubcaptionsPerImage && String(qwenElements.captionSubcaptionsPerImage.value) !== String(subcaptions)) {
             qwenElements.captionSubcaptionsPerImage.value = String(subcaptions);
         }
@@ -29346,6 +29347,8 @@ async function cancelRfDetrTrainingJobRequest() {
         return {
             instruction_dataset: !!forceInstructionDataset,
             subcaptions_per_image: subcaptions,
+            subcaptions_per_image_requested: requestedSubcaptions,
+            subcaptions_per_image_was_clamped: requestedSubcaptions !== subcaptions,
             include_caption0_in_training: qwenElements.captionIncludeCaption0Training?.checked !== false,
             include_generated_qa_in_training: qwenElements.captionIncludeGeneratedQaTraining?.checked !== false,
             include_deterministic_metadata_qa: qwenElements.captionIncludeDeterministicMetadataQa?.checked === true,
@@ -29367,9 +29370,17 @@ async function cancelRfDetrTrainingJobRequest() {
         const includeCaption0 = resolved.include_caption0_in_training !== false;
         const includeGeneratedQa = resolved.include_generated_qa_in_training !== false;
         const includeDeterministic = resolved.include_deterministic_metadata_qa === true;
+        const requestedSubcaptions = Number.parseInt(
+            resolved.subcaptions_per_image_requested ?? resolved.subcaptions_per_image ?? "0",
+            10,
+        );
+        const rawSubcaptions = Number.isFinite(requestedSubcaptions) ? requestedSubcaptions : 0;
         const subcaptions = Math.max(0, Math.min(Number.parseInt(resolved.subcaptions_per_image || "0", 10) || 0, 20));
         if (!includeCaption0 && !includeGeneratedQa && !includeDeterministic) {
             errors.push("Enable at least one instruction training row family: caption0, generated QA, or deterministic metadata QA.");
+        }
+        if (resolved.subcaptions_per_image_was_clamped === true || rawSubcaptions !== subcaptions) {
+            warnings.push(`Generated QA per image was adjusted from ${rawSubcaptions} to ${subcaptions}; allowed range is 0-20.`);
         }
         if (!includeGeneratedQa && subcaptions > 0) {
             warnings.push(`Generated QA count is ${subcaptions}, but generated QA is excluded from trainer JSONL.`);

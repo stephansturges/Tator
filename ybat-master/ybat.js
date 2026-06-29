@@ -5643,7 +5643,7 @@ const sam3TrainState = {
                         caption_export_busy: "Caption export is blocked",
                         caption_review_import_busy: "Review import is blocked",
                         caption_mutation_busy: "Caption and text-label edits are blocked",
-                        caption_read_busy: "Caption archive reads are blocked",
+                        caption_read_busy: "Caption and text-label reads are blocked",
                         dataset_download_busy: "Dataset download is blocked",
                         caption_metadata_busy: "Dataset glossary changes are blocked",
                         qwen_caption_dataset_job_active: "A caption dataset job is already active",

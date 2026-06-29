@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 from pathlib import Path
 
@@ -322,6 +323,95 @@ def test_qwen_conversation_dataset_rejects_incomplete_instruction_flat_metadata(
         "source_archive": "tator_caption_instruction_archive_v1",
         "validation_status": "accepted",
         "review_status": "unreviewed",
+        **metadata_update,
+    }
+    row = {
+        "image_path": "sample.png",
+        "question": "Describe this image in detail.",
+        "answer": "A compact scene is shown.",
+        "metadata": metadata,
+    }
+    (dataset_root / "train" / "annotations.jsonl").write_text(
+        json.dumps(row) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(training.TrainingError, match=error_pattern):
+        training.QwenConversationDataset(dataset_root, "train", processor=object())
+
+
+def test_qwen_conversation_dataset_accepts_bundled_instruction_image_checksum(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    image_dir = dataset_root / "train" / "images"
+    image_dir.mkdir(parents=True)
+    image_path = image_dir / "sample.png"
+    Image.new("RGB", (4, 4), (8, 16, 32)).save(image_path)
+    row = {
+        "image_path": "sample.png",
+        "question": "Describe this image in detail.",
+        "answer": "A compact scene is shown.",
+        "metadata": {
+            "qa_id": "qa-1",
+            "row_type": "generated_qa",
+            "answer_source": "vlm_generated",
+            "answer_format": "natural",
+            "source_archive": "tator_caption_instruction_archive_v1",
+            "validation_status": "accepted",
+            "review_status": "accepted",
+            "original_image_path": "source/sample.png",
+            "bundle_image_sha256": hashlib.sha256(image_path.read_bytes()).hexdigest(),
+        },
+    }
+    (dataset_root / "train" / "annotations.jsonl").write_text(
+        json.dumps(row) + "\n",
+        encoding="utf-8",
+    )
+
+    dataset = training.QwenConversationDataset(dataset_root, "train", processor=object())
+
+    assert len(dataset) == 1
+    assert dataset.entries[0]["metadata"]["bundle_image_sha256"] == hashlib.sha256(
+        image_path.read_bytes()
+    ).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("metadata_update", "error_pattern"),
+    [
+        (
+            {"original_image_path": ""},
+            "qwen_training_row_missing_original_image_path:line_1",
+        ),
+        (
+            {"bundle_image_sha256": "not-a-sha"},
+            "qwen_training_row_invalid_bundle_image_sha256:line_1",
+        ),
+        (
+            {"bundle_image_sha256": "0" * 64},
+            "qwen_training_row_bundle_image_sha256_mismatch:line_1",
+        ),
+    ],
+)
+def test_qwen_conversation_dataset_rejects_bundled_instruction_image_checksum_drift(
+    tmp_path,
+    metadata_update,
+    error_pattern,
+):
+    dataset_root = tmp_path / "dataset"
+    image_dir = dataset_root / "train" / "images"
+    image_dir.mkdir(parents=True)
+    image_path = image_dir / "sample.png"
+    Image.new("RGB", (4, 4), (8, 16, 32)).save(image_path)
+    metadata = {
+        "qa_id": "qa-1",
+        "row_type": "generated_qa",
+        "answer_source": "vlm_generated",
+        "answer_format": "natural",
+        "source_archive": "tator_caption_instruction_archive_v1",
+        "validation_status": "accepted",
+        "review_status": "accepted",
+        "original_image_path": "source/sample.png",
+        "bundle_image_sha256": hashlib.sha256(image_path.read_bytes()).hexdigest(),
         **metadata_update,
     }
     row = {

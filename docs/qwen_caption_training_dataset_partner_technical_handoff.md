@@ -265,6 +265,14 @@ marked rejected or needs-revision, invalid for their expected answer format,
 duplicated after canonical normalization, or unable to resolve their image
 path.
 
+For rows exported from a self-contained bundle, the trainer loader also treats
+`bundle_image_sha256` as a final byte-integrity guard. If the field is present,
+the loader requires `original_image_path`, verifies that the digest has a valid
+SHA-256 shape, resolves the training image, computes the actual image digest,
+and rejects the row if the bytes do not match. This protects the final training
+boundary even when a trainer JSONL file has been copied, edited, or separated
+from the original bundle manifest.
+
 This keeps trainer input simple while making the handoff fail closed.
 
 ## Implementation Map
@@ -703,7 +711,7 @@ copied, edited, mixed, or shared outside the UI.
 | Backend export validation | Flat trainer rows, report readiness schema, state, and count parity, embedded consistency count parity, settings fingerprint, archive-row shape, review-row shape, image alias resolution, and strict API/script export |
 | Bundle validation | Copied image/label assets, rewritten trainer/archive/review paths, trainer rows, artifact consistency, ZIP integrity, manifest inventory, required artifact paths, JSONL row-count parity, image/label inventory parity, file roles, byte counts, SHA-256 digests, trainer-row validation, and recomputed artifact consistency from the finished ZIP |
 | Review import validation | Wrong dataset, stale text, duplicate targets, unsupported origins, malformed rows, and metadata-only mutation |
-| Trainer loader validation | Missing images, malformed rows, duplicate canonical image/question pairs, rejected or needs-revision rows, invalid answer format, missing provenance |
+| Trainer loader validation | Missing images, malformed rows, duplicate canonical image/question pairs, rejected or needs-revision rows, invalid answer format, missing provenance, bundled-image checksum drift |
 
 This redundancy is intentional. The trainer loader remains the last defense
 even when the UI and backend have already validated the export.

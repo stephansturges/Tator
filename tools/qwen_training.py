@@ -7,8 +7,9 @@ Supports two training modes:
 
 from __future__ import annotations
 
-import json
+import hashlib
 import inspect
+import json
 import logging
 import os
 import random
@@ -410,6 +411,14 @@ def _flat_training_row_error_suffix(line_number: Optional[int]) -> str:
     return f":line_{line_number}" if line_number is not None else ""
 
 
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _validate_flat_training_row_metadata(
     payload: Dict[str, Any],
     *,
@@ -477,6 +486,45 @@ def _validate_flat_training_row_metadata(
             raise TrainingError(
                 f"qwen_training_row_invalid_json_answer{_flat_training_row_error_suffix(line_number)}"
             ) from exc
+
+
+def _validate_flat_training_row_image_metadata(
+    dataset_root: Path,
+    split: str,
+    image_name: str,
+    payload: Dict[str, Any],
+    *,
+    line_number: Optional[int] = None,
+) -> None:
+    metadata = payload.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    bundle_image_sha256 = str(metadata.get("bundle_image_sha256") or "").strip()
+    if not bundle_image_sha256:
+        return
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", bundle_image_sha256):
+        raise TrainingError(
+            f"qwen_training_row_invalid_bundle_image_sha256{_flat_training_row_error_suffix(line_number)}"
+        )
+    original_image_path = str(metadata.get("original_image_path") or "").strip()
+    if not original_image_path:
+        raise TrainingError(
+            f"qwen_training_row_missing_original_image_path{_flat_training_row_error_suffix(line_number)}"
+        )
+    image_path = _resolve_image_path(dataset_root, split, image_name)
+    if image_path is None:
+        raise TrainingError(
+            f"qwen_training_row_bundle_image_missing{_flat_training_row_error_suffix(line_number)}"
+        )
+    try:
+        actual_sha256 = _sha256_path(image_path)
+    except OSError as exc:
+        raise TrainingError(
+            f"qwen_training_row_bundle_image_hash_failed{_flat_training_row_error_suffix(line_number)}"
+        ) from exc
+    if actual_sha256.lower() != bundle_image_sha256.lower():
+        raise TrainingError(
+            f"qwen_training_row_bundle_image_sha256_mismatch{_flat_training_row_error_suffix(line_number)}"
+        )
 
 
 def _flat_training_row_to_conversation_entry(
@@ -569,6 +617,13 @@ class QwenConversationDataset(Dataset):
                         line_number=line_number,
                     )
                     if entry is not None:
+                        _validate_flat_training_row_image_metadata(
+                            dataset_root,
+                            split,
+                            image_name,
+                            payload,
+                            line_number=line_number,
+                        )
                         question = _normalise_flat_training_question(payload.get("question"))
                         image_key = _normalise_flat_training_image_key(dataset_root, split, image_name)
                         flat_key = (image_key, question)

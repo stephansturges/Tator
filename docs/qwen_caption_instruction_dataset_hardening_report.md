@@ -123,7 +123,10 @@ row before training.
   locks as well as in-memory caption dataset jobs. A backend restart therefore
   does not create a window where archive reads, exports, mutations, or a second
   same-dataset job launch can treat a still-running worker as idle before
-  auto-adoption completes.
+  auto-adoption completes. Custom caption job output directories still write a
+  discovery mirror under the backend caption-job root, so restart-time listing,
+  active-job guards, and auto-adoption do not depend on the operator choosing
+  the default metadata directory.
 - Caption recipe load and upload now use the same archive-idle guard. A recipe
   can rewrite prompt, model, generation, glossary, and instruction-row controls,
   so recipe application is blocked until the active archive mutation finishes;

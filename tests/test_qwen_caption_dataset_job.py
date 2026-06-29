@@ -5928,6 +5928,149 @@ def test_caption_dataset_job_list_includes_persisted_interrupted_jobs(monkeypatc
     assert by_id["qcap_old"]["request"]["dataset_id"] == "ds"
 
 
+def test_caption_dataset_job_persistence_mirrors_custom_output_for_restart_discovery(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import localinferenceapi as api
+
+    jobs_root = tmp_path / "jobs"
+    custom_output_dir = tmp_path / "custom-output"
+    monkeypatch.setattr(api, "QWEN_CAPTION_DATASET_JOB_ROOT", jobs_root)
+
+    job = api.QwenCaptionDatasetJob(
+        job_id="qcap_custom_output",
+        status="running",
+        output_dir=str(custom_output_dir),
+    )
+    job.request = {
+        "dataset_id": "ds",
+        "caption_request": {"user_prompt": "Describe it"},
+        "set_and_forget": True,
+        "output_dir": str(custom_output_dir),
+    }
+    job.result = {"dataset_id": "ds", "processed": 4, "total_cases": 10}
+    job.updated_at = 20.0
+
+    api._persist_qwen_caption_dataset_job(job)
+
+    canonical_path = custom_output_dir / "job.json"
+    discovery_path = jobs_root / "qcap_custom_output" / "job.json"
+    assert canonical_path.exists()
+    assert discovery_path.exists()
+    assert json.loads(canonical_path.read_text()) == json.loads(discovery_path.read_text())
+
+    loaded = api._load_qwen_caption_dataset_job_payload("qcap_custom_output")
+    assert loaded is not None
+    assert loaded["job_id"] == "qcap_custom_output"
+    assert loaded["status"] == "interrupted"
+    assert loaded["output_dir"] == str(custom_output_dir)
+
+    listed = api._iter_persisted_qwen_caption_dataset_job_payloads()
+    assert [payload["job_id"] for payload in listed] == ["qcap_custom_output"]
+
+
+def test_caption_dataset_active_guard_finds_custom_output_persisted_runner(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import localinferenceapi as api
+
+    jobs_root = tmp_path / "jobs"
+    custom_output_dir = tmp_path / "custom-output"
+    custom_output_dir.mkdir(parents=True)
+    (custom_output_dir / ".runner.lock").write_text(json.dumps({"pid": 12345}), encoding="utf-8")
+    monkeypatch.setattr(api, "QWEN_CAPTION_DATASET_JOB_ROOT", jobs_root)
+    monkeypatch.setattr(api, "_qwen_caption_dataset_pid_is_alive", lambda _pid: True)
+    monkeypatch.setattr(api, "QWEN_CAPTION_DATASET_JOBS", {})
+
+    job = api.QwenCaptionDatasetJob(
+        job_id="qcap_custom_live",
+        status="running",
+        output_dir=str(custom_output_dir),
+    )
+    job.request = {
+        "dataset_id": "ds",
+        "caption_request": {"user_prompt": "Describe it"},
+        "set_and_forget": True,
+        "output_dir": str(custom_output_dir),
+    }
+    job.updated_at = 20.0
+    api._persist_qwen_caption_dataset_job(job)
+
+    active = api._qwen_caption_dataset_active_export_job("ds")
+
+    assert active is not None
+    assert active["job_id"] == "qcap_custom_live"
+    assert active["status"] == "running"
+    assert active["message"] == "Live set-and-forget caption runner is still active"
+    assert active["output_dir"] == str(custom_output_dir)
+
+
+def test_caption_dataset_auto_resume_adopts_custom_output_persisted_runner(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import localinferenceapi as api
+
+    jobs_root = tmp_path / "jobs"
+    custom_output_dir = tmp_path / "custom-output"
+    custom_output_dir.mkdir(parents=True)
+    (custom_output_dir / ".runner.lock").write_text(
+        json.dumps(
+            {
+                "runner_id": "custom-output-runner",
+                "pid": os.getpid(),
+                "heartbeat_epoch": time.time(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(api, "QWEN_CAPTION_DATASET_JOB_ROOT", jobs_root)
+    monkeypatch.setattr(api, "QWEN_CAPTION_DATASET_JOBS", {})
+    monkeypatch.setattr(api, "QWEN_CAPTION_SET_AND_FORGET_AUTO_RESUME", True)
+    monkeypatch.setattr(api, "QWEN_CAPTION_SET_AND_FORGET_MAX_AUTO_RESUMES", 25)
+
+    job = api.QwenCaptionDatasetJob(
+        job_id="qcap_custom_adopt",
+        status="running",
+        output_dir=str(custom_output_dir),
+    )
+    job.request = {
+        "dataset_id": "ds",
+        "caption_request": {"user_prompt": "Describe it"},
+        "set_and_forget": True,
+        "auto_resume_count": 0,
+        "output_dir": str(custom_output_dir),
+    }
+    job.updated_at = 20.0
+    api._persist_qwen_caption_dataset_job(job)
+    registered = {}
+
+    def fake_register_job_and_start_thread(*, job, registry, lock, target, args, name=None):
+        registered["job"] = job
+        registered["target"] = target
+        registered["args"] = args
+        registered["name"] = name
+        with lock:
+            registry[job.job_id] = job
+
+    monkeypatch.setattr(api, "_register_job_and_start_thread", fake_register_job_and_start_thread)
+    monkeypatch.setattr(
+        api,
+        "_start_qwen_caption_dataset_job",
+        lambda *_args, **_kwargs: pytest.fail("custom live runner should be adopted, not restarted"),
+    )
+
+    adopted = api._auto_resume_qwen_caption_dataset_jobs()
+
+    assert [payload["job_id"] for payload in adopted] == ["qcap_custom_adopt"]
+    assert adopted[0]["status"] == "queued"
+    assert adopted[0]["message"] == "Adopting live set-and-forget caption runner"
+    assert registered["job"].job_id == "qcap_custom_adopt"
+    assert registered["args"][0].job_id == "qcap_custom_adopt"
+
+
 def test_caption_dataset_job_can_use_separate_metadata_and_artifact_dirs(monkeypatch, tmp_path: Path) -> None:
     import localinferenceapi as api
 

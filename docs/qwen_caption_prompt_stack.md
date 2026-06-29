@@ -744,7 +744,11 @@ with `set_and_forget=true`; the backend then auto-resumes persisted `queued`,
 backend restart. After the startup pass, a periodic reconciliation sweeper
 repeats the same bounded scan for orphaned persisted set-and-forget records.
 This covers cases where a job record remains `running` or `failed` on disk
-without a live in-memory backend owner. The sweeper is conservative: it will not
+without a live in-memory backend owner. When an operator uses a custom caption
+job output directory, the backend writes the canonical `job.json` there and a
+same-payload discovery mirror under the default caption-job root keyed by job
+ID, so restart-time listing, active-job guards, and auto-adoption can still find
+the run. The sweeper is conservative: it will not
 overtake any artifact directory currently owned by an active live backend job
 (`queued`, `running`, or `cancelling`). Terminal in-memory records such as
 `failed` jobs do not block the periodic sweep, so a missed immediate auto-resume

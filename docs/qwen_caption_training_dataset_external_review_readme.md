@@ -201,7 +201,7 @@ If a fact should train the model, it must be present in the trainer row's
 | Repeated punctuation or token loops looked like hangs | Streaming output inspection detects repeated surfaces, trims progress display, raises a controlled loop error, unloads the runtime, and routes recovery |
 | Full-image visual composition could stall after successful crop passes | Set-and-forget windowed Auto uses text-only full-image composition from completed crop evidence instead of resending the full image tensor |
 | MLX/Metal GPU faults can abort the Python process | Dataset runs use isolated child attempts and recorded recovery policy; process-level aborts are handled by the parent runner, not hidden |
-| Backend restarts can leave users unsure about job state | Persisted status, progress, attach/recover behavior, and active-job guards make live or interrupted runs visible |
+| Backend restarts can leave users unsure about job state | Persisted status, progress, attach/recover behavior, active-job guards, and default-root discovery mirrors for custom-output jobs make live or interrupted runs visible |
 | Model availability was ambiguous | Download-needed models are visually distinct in the selector |
 | Archive/export actions could race a live caption job | UI controls and backend routes check active caption dataset jobs before mutating, reading, exporting, or importing review data |
 

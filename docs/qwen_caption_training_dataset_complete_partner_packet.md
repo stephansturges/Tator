@@ -581,9 +581,12 @@ receives `dataset_delete_blocked_active_jobs` before the registry record or
 managed dataset tree can be removed.
 
 The active-job lookup covers both the current backend process and persisted
-set-and-forget runners with live runner locks. This closes the backend-restart
-window where a worker may still be mutating the archive before the new backend
-process has adopted that worker into its in-memory job registry.
+set-and-forget runners with live runner locks. Custom output directories also
+write a default-root discovery mirror for `job.json`, so restart-time listing,
+auto-adoption, and same-dataset busy guards can still find the job. This closes
+the backend-restart window where a worker may still be mutating the archive
+before the new backend process has adopted that worker into its in-memory job
+registry.
 
 The dataset manager UI now downloads dataset ZIP files through an explicit
 fetch-and-save flow rather than a fire-and-forget anchor click. That means

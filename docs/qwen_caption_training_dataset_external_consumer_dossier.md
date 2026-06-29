@@ -353,7 +353,10 @@ Implemented guards include:
 The backend active-job lookup checks both in-memory jobs and persisted
 set-and-forget runner locks. If the backend restarts while a runner is still
 alive, API/script calls still receive busy responses until that live runner is
-adopted, resumed, completed, or otherwise no longer active.
+adopted, resumed, completed, or otherwise no longer active. Jobs that use a
+custom output directory still write a small discovery copy of `job.json` under
+the backend caption-job root, so restart-time listing and active-job guards do
+not lose track of them.
 
 Completed-job handoff can explicitly opt into reloading the archive after the
 job finishes. Normal mid-run reads stay blocked or deferred.

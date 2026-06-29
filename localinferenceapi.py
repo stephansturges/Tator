@@ -24480,6 +24480,11 @@ def _qwen_caption_dataset_job_dir(job_id: str, requested_output_dir: Optional[st
     return QWEN_CAPTION_DATASET_JOB_ROOT / safe_job_id
 
 
+def _qwen_caption_dataset_job_discovery_dir(job_id: str) -> Path:
+    safe_job_id = _sanitize_yolo_run_id_impl(job_id) or job_id
+    return QWEN_CAPTION_DATASET_JOB_ROOT / safe_job_id
+
+
 def _serialize_qwen_caption_dataset_job(job: QwenCaptionDatasetJob) -> Dict[str, Any]:
     return {
         "job_id": job.job_id,
@@ -24506,13 +24511,18 @@ def _persist_qwen_caption_dataset_job(job: QwenCaptionDatasetJob) -> None:
         tmp_path = output_dir / "job.json.tmp"
         tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
         tmp_path.replace(output_dir / "job.json")
+        discovery_dir = _qwen_caption_dataset_job_discovery_dir(job.job_id)
+        if discovery_dir.resolve(strict=False) != output_dir.resolve(strict=False):
+            discovery_dir.mkdir(parents=True, exist_ok=True)
+            mirror_tmp_path = discovery_dir / "job.json.tmp"
+            mirror_tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+            mirror_tmp_path.replace(discovery_dir / "job.json")
     except Exception:
         logger.debug("Failed to persist Qwen caption dataset job", exc_info=True)
 
 
 def _load_qwen_caption_dataset_job_payload(job_id: str) -> Optional[Dict[str, Any]]:
-    safe_job_id = _sanitize_yolo_run_id_impl(job_id) or job_id
-    job_path = QWEN_CAPTION_DATASET_JOB_ROOT / safe_job_id / "job.json"
+    job_path = _qwen_caption_dataset_job_discovery_dir(job_id) / "job.json"
     if not job_path.exists():
         return None
     try:

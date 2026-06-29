@@ -304,6 +304,9 @@ Review import fails closed on:
 - generated-QA review rows missing the reviewed question or answer text
 - caption0 review rows missing the reviewed caption text
 - stale generated-QA targets
+- harmless image-path aliases are normalized before matching, but a
+  split-prefixed path is kept split-aware and cannot match another split with
+  the same basename
 - QA ids whose review-row image path does not match the stored caption or
   generated-QA record
 - QA ids whose image path matches but whose reviewed question, candidate answer,
@@ -538,7 +541,7 @@ Result:
 Result:
 
 ```text
-191 passed
+194 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

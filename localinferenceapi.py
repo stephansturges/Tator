@@ -23091,41 +23091,103 @@ def _caption_instruction_reject_dataset_id_mismatches(
         )
 
 
+_CAPTION_INSTRUCTION_REVIEW_SPLITS = ("train", "val", "valid", "test")
+_CAPTION_INSTRUCTION_REVIEW_SPLIT_PREFIX_RE = re.compile(r"^(train|val|valid|test)/(.+)$")
+
+
+def _caption_instruction_review_path_aliases(
+    image_path: Any,
+    split: Any = None,
+) -> Tuple[Set[str], Set[str]]:
+    raw = str(image_path or "").strip()
+    split_text = str(split or "").strip()
+    image_names: Set[str] = set()
+    image_keys: Set[str] = set()
+
+    def _add_name(value: Any) -> None:
+        candidate = str(value or "").strip()
+        normalized = _caption_instruction_normalized_image_path(candidate)
+        for item in {candidate, normalized}:
+            if item:
+                image_names.add(item)
+
+    def _add_key(value: Any) -> None:
+        candidate = str(value or "").strip()
+        normalized = _caption_instruction_normalized_image_path(candidate)
+        for item in {candidate, normalized}:
+            if item:
+                image_keys.add(item)
+
+    if not raw:
+        return image_names, image_keys
+
+    _add_name(raw)
+    _add_key(raw)
+    normalized_path = _caption_instruction_normalized_image_path(raw)
+    if normalized_path:
+        _add_name(normalized_path)
+        _add_key(normalized_path)
+
+    relative_path = normalized_path or raw
+    split_match = _CAPTION_INSTRUCTION_REVIEW_SPLIT_PREFIX_RE.match(relative_path)
+    inferred_split = ""
+    if split_match:
+        inferred_split = split_match.group(1)
+        relative_path = split_match.group(2).strip()
+        _add_name(relative_path)
+        _add_key(f"{inferred_split}/{relative_path}")
+
+    if split_text and relative_path and not inferred_split:
+        _add_key(f"{split_text}/{relative_path}")
+    elif relative_path and not inferred_split:
+        for split_candidate in _CAPTION_INSTRUCTION_REVIEW_SPLITS:
+            _add_key(f"{split_candidate}/{relative_path}")
+
+    return image_names, image_keys
+
+
 def _caption_instruction_review_image_candidates(
     entry: Dict[str, Any],
     row: Mapping[str, Any],
 ) -> Tuple[Set[str], Set[str]]:
     image_path = str(row.get("image_path") or row.get("image_name") or row.get("image") or "").strip()
     split = str(row.get("split") or "").strip() or None
-    image_names: Set[str] = set()
-    image_keys: Set[str] = set()
+    image_names, image_keys = _caption_instruction_review_path_aliases(image_path, split)
     if not image_path:
         return image_names, image_keys
-    image_names.add(image_path)
-    image_keys.add(image_path)
-    if split:
-        image_keys.add(f"{split}/{image_path}")
-    elif not re.match(r"^(?:train|val|valid|test)/", image_path):
-        image_keys.add(f"train/{image_path}")
-        image_keys.add(f"val/{image_path}")
-    names_to_try = [image_path]
-    if split and image_path.startswith(f"{split}/"):
-        stripped = image_path[len(split) + 1 :].strip()
-        if stripped:
-            names_to_try.append(stripped)
-            image_names.add(stripped)
+
+    normalized_path = _caption_instruction_normalized_image_path(image_path)
+    names_to_try = sorted(image_names or {image_path, normalized_path})
+    inferred_split = ""
+    split_match = _CAPTION_INSTRUCTION_REVIEW_SPLIT_PREFIX_RE.match(normalized_path or image_path)
+    if split_match:
+        inferred_split = split_match.group(1)
+    if inferred_split:
+        split_candidates: Tuple[Optional[str], ...] = (inferred_split,)
+    elif split:
+        split_candidates = (split,)
+    else:
+        split_candidates = (None, *_CAPTION_INSTRUCTION_REVIEW_SPLITS)
+    split_overrides: List[Optional[str]] = []
+    for split_candidate in split_candidates:
+        normalized_split = str(split_candidate or "").strip() or None
+        if normalized_split not in split_overrides:
+            split_overrides.append(normalized_split)
     for name in names_to_try:
-        split_overrides = [split, None] if split else [None, "train", "val"]
         for split_override in split_overrides:
             try:
                 ctx_payload = {"split": split_override} if split_override else None
-                resolved_split, _rel, image_key = _dataset_caption_context(entry, name, ctx_payload)
+                resolved_split, rel, image_key = _dataset_caption_context(entry, name, ctx_payload)
             except Exception:
                 continue
+            rel_name = str(rel.as_posix() if hasattr(rel, "as_posix") else rel or "").strip()
+            if rel_name:
+                rel_names, rel_keys = _caption_instruction_review_path_aliases(rel_name, resolved_split)
+                image_names.update(rel_names)
+                image_keys.update(rel_keys)
             if image_key:
-                image_keys.add(str(image_key))
-            if resolved_split and name:
-                image_keys.add(f"{resolved_split}/{name}")
+                _names, key_aliases = _caption_instruction_review_path_aliases(image_key, resolved_split)
+                image_keys.update(key_aliases)
     return image_names, image_keys
 
 
@@ -23200,10 +23262,8 @@ def _caption_instruction_current_review_row_status(
             continue
         current_image = str(current.get("image_path") or current.get("image_name") or current.get("image") or "").strip()
         current_split = str(current.get("split") or "").strip()
-        current_image_aliases = {current_image}
-        if current_split and current_image:
-            current_image_aliases.add(f"{current_split}/{current_image}")
-        if not (current_image_aliases & image_keys or current_image in image_names):
+        current_image_names, current_image_keys = _caption_instruction_review_path_aliases(current_image, current_split)
+        if not (current_image_keys & image_keys or current_image_names & image_names):
             continue
         matched_by_identity = True
         current_question = _caption_instruction_normalized_question(current.get("question"))
@@ -23290,7 +23350,11 @@ def _caption_instruction_match_instruction_record(
     image_keys: Set[str],
 ) -> bool:
     record_image_key = str(record.get("image_key") or record.get("image_name") or "").strip()
-    if record_image_key not in image_keys:
+    _record_image_names, record_image_keys = _caption_instruction_review_path_aliases(
+        record_image_key,
+        record.get("split"),
+    )
+    if not (record_image_keys & image_keys):
         return False
     row_question = _caption_instruction_normalized_question(row.get("question"))
     if row_question and _caption_instruction_normalized_question(record.get("question")) != row_question:
@@ -23317,7 +23381,11 @@ def _caption_instruction_match_caption_record(
     image_keys: Set[str],
 ) -> bool:
     record_image_key = str(record.get("image_key") or record.get("image_name") or "").strip()
-    if record_image_key not in image_keys:
+    _record_image_names, record_image_keys = _caption_instruction_review_path_aliases(
+        record_image_key,
+        record.get("split"),
+    )
+    if not (record_image_keys & image_keys):
         return False
     candidate_caption = str(row.get("candidate_answer") or row.get("training_answer") or "").strip()
     if candidate_caption and str(record.get("caption") or "").strip() != candidate_caption:

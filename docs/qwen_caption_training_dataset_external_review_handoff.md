@@ -151,6 +151,10 @@ What is implemented in this checkpoint:
   canonical image paths for duplicate checks, selected-row counts, and
   review-target identity. This prevents harmless path spelling differences from
   masking stale or mismatched artifacts.
+- Server-side review import uses the same canonical image-path identity model
+  for target matching. Path aliases can resolve to the saved target, but a
+  split-prefixed path does not fall through to a different split that shares the
+  basename.
 - Server-side review import target matching requires image context and current
   reviewed text, so a review row with the same QA id is rejected if its
   question, candidate answer, or selected training answer is missing or no
@@ -919,7 +923,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Result:
 
 ```text
-191 passed
+194 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch
@@ -945,6 +949,8 @@ Focused review-import fail-closed tests:
 ```bash
 ./.venv-macos/bin/python -m pytest \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_persists_review_metadata \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_accepts_canonical_image_path_aliases \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_conflicting_split_alias \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_mismatched_dataset_id \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_missing_dataset_id \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_missing_or_mismatched_qa_id \
@@ -962,7 +968,7 @@ Focused review-import fail-closed tests:
 Result:
 
 ```text
-29 passed
+32 passed
 ```
 
 Focused trainer-import boundary tests:
@@ -1012,7 +1018,7 @@ Caption/instruction/UI contract suite outside the trainer file:
 Result:
 
 ```text
-164 passed
+167 passed
 ```
 
 Syntax and formatting checks:

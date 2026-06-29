@@ -184,15 +184,17 @@ row before training.
   preventing missing-provenance rows, unknown statuses, rejected, failed,
   invalid, needs-revision, or otherwise malformed rows from being saved by the
   UI.
-- Browser downloads now perform artifact-level consistency checks against the
-  instruction report before writing trainer JSONL, archive JSONL, review JSONL,
-  or the report JSON itself. A file can pass row validation and still be blocked
-  if its row counts disagree with the report's selected flattened-row count,
-  image count, review-row count, or manual-review count. Archive JSONL also
-  rejects duplicate `image_path` rows. The same guard now also compares trainer
-  rows, selected review rows, and archive candidates by canonical image path,
-  QA id, normalized question, selected per-image row counts, and matching
-  training answers, so equal-count stale or mixed artifacts fail closed.
+- Browser downloads now perform row-shape validation and artifact-level
+  consistency checks against the instruction report before writing trainer
+  JSONL, archive JSONL, review JSONL, or the report JSON itself. A file can pass
+  row validation and still be blocked if its row counts disagree with the
+  report's selected flattened-row count, image count, review-row count, or
+  manual-review count. Archive JSONL also rejects duplicate `image_path` rows.
+  The report download validates trainer, archive, and review row payloads before
+  saving the run summary. The same guard now also compares trainer rows,
+  selected review rows, and archive candidates by canonical image path, QA id,
+  normalized question, selected per-image row counts, and matching training
+  answers, so equal-count stale or mixed artifacts fail closed.
 - Browser-side archive, review, and artifact-consistency validators now
   canonicalize image paths before duplicate checks, per-image selected-row
   counts, and review-target identity checks. This keeps UI preflight behavior

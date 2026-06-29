@@ -36697,8 +36697,31 @@ async function cancelRfDetrTrainingJobRequest() {
             setSamStatus(message, { variant: "error", duration: 5000 });
             return;
         }
-        const consistency = validateCaptionInstructionArtifactConsistency(payload, "training", rowValidation);
-        if (!consistency.ok) {
+        const archiveValidation = validateCaptionInstructionArchiveRows(payload?.instruction_archive_rows);
+        if (!archiveValidation.ok) {
+            const firstErrors = (archiveValidation.errors || []).slice(0, 3).join("; ");
+            const suffix = (archiveValidation.errors || []).length > 3 ? `; +${archiveValidation.errors.length - 3} more` : "";
+            const message = `Instruction report export blocked: ${firstErrors || "invalid instruction archive rows"}${suffix}.`;
+            setCaptionExportHealth(message, "fail");
+            setSamStatus(message, { variant: "error", duration: 5000 });
+            return;
+        }
+        const reviewValidation = validateCaptionInstructionReviewRows(payload?.instruction_review_rows);
+        if (!reviewValidation.ok) {
+            const firstErrors = (reviewValidation.errors || []).slice(0, 3).join("; ");
+            const suffix = (reviewValidation.errors || []).length > 3 ? `; +${reviewValidation.errors.length - 3} more` : "";
+            const message = `Instruction report export blocked: ${firstErrors || "invalid instruction review rows"}${suffix}.`;
+            setCaptionExportHealth(message, "fail");
+            setSamStatus(message, { variant: "error", duration: 5000 });
+            return;
+        }
+        const consistencyChecks = [
+            validateCaptionInstructionArtifactConsistency(payload, "training", rowValidation),
+            validateCaptionInstructionArtifactConsistency(payload, "archive", archiveValidation),
+            validateCaptionInstructionArtifactConsistency(payload, "review", reviewValidation),
+        ];
+        const consistency = consistencyChecks.find((check) => !check.ok);
+        if (consistency) {
             const firstErrors = (consistency.errors || []).slice(0, 3).join("; ");
             const suffix = (consistency.errors || []).length > 3 ? `; +${consistency.errors.length - 3} more` : "";
             const message = `Instruction report export blocked: ${firstErrors || "artifact consistency failed"}${suffix}.`;

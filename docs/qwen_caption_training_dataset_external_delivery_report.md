@@ -258,8 +258,8 @@ Implemented protections include:
 - review import checks busy state before opening the file picker and again
   before importing a selected file;
 - export failures use shared operator-facing status formatting;
-- report export validates the sibling trainer, archive, and review artifacts
-  before saving the run summary;
+- report export validates sibling trainer, archive, and review row shapes plus
+  cross-artifact consistency before saving the run summary;
 - custom output directories mirror `job.json` into the default discovery root
   so active jobs are visible after restart or auto-resume.
 

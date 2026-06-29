@@ -756,6 +756,69 @@ def test_qwen_caption_instruction_export_formats_backend_readiness_failure():
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
 
 
+def test_qwen_caption_instruction_export_actions_preserve_malformed_payload_errors():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            "const CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ID_CHARS = 512;",
+            "const CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_PATH_CHARS = 4096;",
+            "const CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_QUESTION_CHARS = 4096;",
+            "const CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ANSWER_CHARS = 65536;",
+            "const CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_NOTES_CHARS = 8192;",
+            _extract_js_function(js, "normalizeCaptionInstructionReviewDecision"),
+            _extract_js_function(js, "validateCaptionInstructionTrainingRows"),
+            _extract_js_function(js, "describeCaptionInstructionValidation"),
+            _extract_js_function(js, "validateCaptionInstructionArchiveRows"),
+            _extract_js_function(js, "validateCaptionInstructionReviewRows"),
+            _extract_js_function(js, "describeCaptionInstructionReviewValidation"),
+            _extract_js_function(js, "downloadCaptionInstructionJsonl").replace(
+                "function downloadCaptionInstructionJsonl",
+                "async function downloadCaptionInstructionJsonl",
+                1,
+            ),
+            _extract_js_function(js, "downloadCaptionInstructionArchive").replace(
+                "function downloadCaptionInstructionArchive",
+                "async function downloadCaptionInstructionArchive",
+                1,
+            ),
+            _extract_js_function(js, "downloadCaptionInstructionReview").replace(
+                "function downloadCaptionInstructionReview",
+                "async function downloadCaptionInstructionReview",
+                1,
+            ),
+            "let currentPayload = {};",
+            "let exportHealth = null;",
+            "let saveCount = 0;",
+            "function getCaptionDatasetId() { return 'ds'; }",
+            "function captionInstructionArtifactBusyMessage() { return ''; }",
+            "function getCaptionInstructionDatasetSettings() { return { require_ready_instruction_export: false }; }",
+            "async function loadCaptionExportPayload() { return currentPayload; }",
+            "function setCaptionExportHealth(message, variant) { exportHealth = { message, variant }; }",
+            "function setSamStatus() {}",
+            "function saveBlobToDisk() { saveCount += 1; throw new Error('save should not be reached'); }",
+            "(async () => {",
+            "  currentPayload = { instruction_training_rows: { bad: true } };",
+            "  await downloadCaptionInstructionJsonl();",
+            "  assert.strictEqual(saveCount, 0);",
+            "  assert.strictEqual(exportHealth.variant, 'fail');",
+            "  assert(exportHealth.message.includes('instruction rows must be an array'));",
+            "  currentPayload = { instruction_archive_rows: { bad: true } };",
+            "  await downloadCaptionInstructionArchive();",
+            "  assert.strictEqual(saveCount, 0);",
+            "  assert.strictEqual(exportHealth.variant, 'fail');",
+            "  assert(exportHealth.message.includes('instruction archive rows must be an array'));",
+            "  currentPayload = { instruction_review_rows: { bad: true } };",
+            "  await downloadCaptionInstructionReview();",
+            "  assert.strictEqual(saveCount, 0);",
+            "  assert.strictEqual(exportHealth.variant, 'fail');",
+            "  assert(exportHealth.message.includes('instruction review rows must be an array'));",
+            "})().catch((error) => { console.error(error); process.exit(1); });",
+        ]
+    )
+    subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
+
+
 def test_qwen_caption_vlm_training_validator_rejects_canonical_image_path_duplicates():
     js = _js()
     script = "\n".join(

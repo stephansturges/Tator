@@ -35753,17 +35753,18 @@ async function cancelRfDetrTrainingJobRequest() {
         const payload = await loadCaptionExportPayload(datasetId, settings, {
             requireReadyInstructionExport: settings.require_ready_instruction_export === true,
         });
-        const rows = Array.isArray(payload?.instruction_training_rows) ? payload.instruction_training_rows : [];
-        if (!rows.length) {
-            setCaptionExportHealth("No instruction rows are ready for export yet.", "warn");
-            setSamStatus("No instruction rows are ready for export.", { variant: "warn", duration: 3000 });
-            return;
-        }
+        const rows = payload?.instruction_training_rows;
         const validation = validateCaptionInstructionTrainingRows(rows);
         if (!validation.ok) {
             const message = describeCaptionInstructionValidation(validation);
             setCaptionExportHealth(message, "fail");
             setSamStatus(message, { variant: "error", duration: 5000 });
+            return;
+        }
+        const rowList = Array.isArray(rows) ? rows : [];
+        if (!rowList.length) {
+            setCaptionExportHealth("No instruction rows are ready for export yet.", "warn");
+            setSamStatus("No instruction rows are ready for export.", { variant: "warn", duration: 3000 });
             return;
         }
         const consistency = validateCaptionInstructionArtifactConsistency(payload, "training", validation);
@@ -35789,7 +35790,7 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         setCaptionExportHealth(`${describeCaptionInstructionValidation(validation)} ${readinessSummary.message}`, readinessSummary.severity);
-        const lines = rows.map((row) => JSON.stringify(row));
+        const lines = rowList.map((row) => JSON.stringify(row));
         const blob = new Blob([lines.join("\n")], { type: "application/jsonl" });
         saveBlobToDisk(blob, "caption_instruction_training.jsonl");
     }
@@ -35807,12 +35808,7 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         const payload = await loadCaptionExportPayload(datasetId, getCaptionInstructionDatasetSettings(true));
-        const rows = Array.isArray(payload?.instruction_archive_rows) ? payload.instruction_archive_rows : [];
-        if (!rows.length) {
-            setCaptionExportHealth("No instruction archive rows are ready for export yet.", "warn");
-            setSamStatus("No instruction archive rows are ready for export.", { variant: "warn", duration: 3000 });
-            return;
-        }
+        const rows = payload?.instruction_archive_rows;
         const validation = validateCaptionInstructionArchiveRows(rows);
         if (!validation.ok) {
             const firstErrors = (validation.errors || []).slice(0, 3).join("; ");
@@ -35820,6 +35816,12 @@ async function cancelRfDetrTrainingJobRequest() {
             const message = `Instruction archive export blocked: ${firstErrors || "invalid rows"}${suffix}.`;
             setCaptionExportHealth(message, "fail");
             setSamStatus(message, { variant: "error", duration: 5000 });
+            return;
+        }
+        const rowList = Array.isArray(rows) ? rows : [];
+        if (!rowList.length) {
+            setCaptionExportHealth("No instruction archive rows are ready for export yet.", "warn");
+            setSamStatus("No instruction archive rows are ready for export.", { variant: "warn", duration: 3000 });
             return;
         }
         const consistency = validateCaptionInstructionArtifactConsistency(payload, "archive", validation);
@@ -35831,7 +35833,7 @@ async function cancelRfDetrTrainingJobRequest() {
             setSamStatus(message, { variant: "error", duration: 5000 });
             return;
         }
-        const lines = rows.map((row) => JSON.stringify(row));
+        const lines = rowList.map((row) => JSON.stringify(row));
         const blob = new Blob([lines.join("\n")], { type: "application/jsonl" });
         saveBlobToDisk(blob, "caption_instruction_archive.jsonl");
     }
@@ -35849,17 +35851,18 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         const payload = await loadCaptionExportPayload(datasetId, getCaptionInstructionDatasetSettings(true));
-        const rows = Array.isArray(payload?.instruction_review_rows) ? payload.instruction_review_rows : [];
-        if (!rows.length) {
-            setCaptionExportHealth("No instruction review rows are ready for export yet.", "warn");
-            setSamStatus("No instruction review rows are ready for export.", { variant: "warn", duration: 3000 });
-            return;
-        }
+        const rows = payload?.instruction_review_rows;
         const validation = validateCaptionInstructionReviewRows(rows);
         if (!validation.ok) {
             const message = describeCaptionInstructionReviewValidation(validation);
             setCaptionExportHealth(message, "fail");
             setSamStatus(message, { variant: "error", duration: 5000 });
+            return;
+        }
+        const rowList = Array.isArray(rows) ? rows : [];
+        if (!rowList.length) {
+            setCaptionExportHealth("No instruction review rows are ready for export yet.", "warn");
+            setSamStatus("No instruction review rows are ready for export.", { variant: "warn", duration: 3000 });
             return;
         }
         const consistency = validateCaptionInstructionArtifactConsistency(payload, "review", validation);
@@ -35872,7 +35875,7 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         setCaptionExportHealth(describeCaptionInstructionReviewValidation(validation), "pass");
-        const lines = rows.map((row) => JSON.stringify(row));
+        const lines = rowList.map((row) => JSON.stringify(row));
         const blob = new Blob([lines.join("\n")], { type: "application/jsonl" });
         saveBlobToDisk(blob, "caption_instruction_review.jsonl");
     }

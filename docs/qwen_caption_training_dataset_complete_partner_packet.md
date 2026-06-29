@@ -496,7 +496,7 @@ below.
 | Repetition or loop safety | streaming loop inspector, controlled retry, fallback, deterministic recovery | Implemented |
 | Model-download clarity | model dropdown colors missing/download-needed models red and local models normal | Implemented |
 | Safe artifact actions during long jobs | UI disabling plus action-time checks for ordinary caption exports, full dataset ZIP downloads, instruction exports, report downloads, and reviewed JSONL import | Implemented |
-| Safe caption mutations during long jobs | Manual caption add/update/primary/delete controls visibly disable during active archive mutation, and text-label saves plus caption add/update/delete refuse while the selected dataset has an active caption job | Implemented |
+| Safe caption mutations during long jobs | Caption output editing, autosave, manual caption add/update/primary/delete controls, and alternate selection visibly disable or refuse during active archive mutation; text-label saves plus caption add/update/delete also refuse while the selected dataset has an active caption job | Implemented |
 | Safe prompt metadata during long jobs | Prompt-stack, style, glossary, model, token, decode, set-and-forget, pilot, health-gate, save/promote, and batch-scope controls visibly lock while the selected archive is mutating; glossary reset/save and stale input events also hit archive-idle guards, and backend glossary saves refuse active caption jobs | Implemented |
 | Safe dataset deletion during long jobs | Dataset deletion refuses while an active caption dataset job references the same dataset | Implemented |
 | Same-dataset job concurrency | Caption dataset job start refuses while another queued, running, or cancelling caption job owns the same dataset | Implemented |
@@ -1444,7 +1444,7 @@ node --check ybat-master/ybat.js
 Result:
 
 ```text
-261 passed, 8 warnings
+262 passed, 8 warnings
 ```
 
 Additional focused validation recorded in the supporting hardening docs covers:

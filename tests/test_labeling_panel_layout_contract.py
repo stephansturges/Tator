@@ -570,6 +570,10 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "qwenElements.captionGlossary.disabled = locked;" in glossary_helper
     assert "qwenElements.captionGlossaryReset.disabled = locked;" in glossary_helper
     assert "qwenElements.captionGlossarySave.disabled = locked || !datasetId;" in glossary_helper
+    assert "function updateCaptionOutputEditControl" in js
+    assert "function captionOutputEditingBlocked" in js
+    assert 'guardQwenCaptionArchiveIdle("editing caption text")' in js
+    assert 'guardQwenCaptionArchiveIdle("saving caption text edits")' in js
     assert 'guardQwenCaptionArchiveIdle("editing caption prompt settings")' in js
     assert 'guardQwenCaptionArchiveIdle("editing caption run settings")' in js
     assert 'guardQwenCaptionArchiveIdle("editing the caption glossary")' in js
@@ -633,6 +637,8 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             "const selectedCaption = { id: 'alt-1', is_primary: false, caption: 'caption text' };",
             "function getCaptionDatasetId() { return 'ds'; }",
             "function isGpuHeavyLockActive() { return false; }",
+            "function isAnnotationDatasetModeActive() { return false; }",
+            "function isAnnotationMutationBlocked() { return false; }",
             "function getSelectedCaptionRecord(imageName) { return imageName ? selectedCaption : null; }",
             "function syncQwenCaptionDatasetControls() {}",
             "function button() { return { disabled: false, textContent: '' }; }",
@@ -687,6 +693,8 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             _extract_js_function(js, "getCaptionPromptStackEditors"),
             _extract_js_function(js, "captionRunConfigurationElements"),
             _extract_js_function(js, "updateCaptionRunConfigurationControls"),
+            _extract_js_function(js, "captionOutputEditingBlocked"),
+            _extract_js_function(js, "updateCaptionOutputEditControl"),
             _extract_js_function(js, "updateCaptionGlossaryControls"),
             _extract_js_function(js, "updateCaptionInstructionDatasetOptionControls"),
             _extract_js_function(js, "updateCaptionArchiveActionControls"),
@@ -707,6 +715,7 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             "assert.strictEqual(qwenElements.captionResumeBackendJob.disabled, true);",
             "assert.strictEqual(qwenElements.captionCancelButton.disabled, false);",
             "assert.strictEqual(qwenElements.captionBatchCancel.disabled, false);",
+            "assert.strictEqual(qwenElements.captionOutput.disabled, true);",
             "assert.strictEqual(qwenElements.captionSaveAlternate.disabled, true);",
             "assert.strictEqual(qwenElements.captionUpdateSelected.disabled, true);",
             "assert.strictEqual(qwenElements.captionSetPrimary.disabled, true);",
@@ -750,6 +759,7 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             "assert.strictEqual(qwenElements.captionResumeBackendJob.disabled, false);",
             "assert.strictEqual(qwenElements.captionCancelButton.disabled, true);",
             "assert.strictEqual(qwenElements.captionBatchCancel.disabled, true);",
+            "assert.strictEqual(qwenElements.captionOutput.disabled, false);",
             "assert.strictEqual(qwenElements.captionSaveAlternate.disabled, false);",
             "assert.strictEqual(qwenElements.captionUpdateSelected.disabled, false);",
             "assert.strictEqual(qwenElements.captionSetPrimary.disabled, false);",
@@ -1000,6 +1010,7 @@ def test_qwen_caption_text_label_save_formats_caption_mutation_busy_error():
             "function isAnnotationMutationBlocked() { return false; }",
             "function isAnnotationDatasetModeActive() { return false; }",
             "function annotationEditableGuard() { return true; }",
+            "function guardQwenCaptionArchiveIdle() { return true; }",
             "function captureAnnotationDirtyStateForImage() {}",
             "async function flushAnnotationSnapshot() { return true; }",
             "function ensureCaptionLabelStoreForDataset() {}",
@@ -2079,6 +2090,58 @@ def test_qwen_caption_glossary_actions_block_while_archive_is_mutating():
             "assert.strictEqual(saveResult, false);",
             "assert.strictEqual(fetchCalls, 0);",
             "assert(backendStatuses.some((message) => message.includes('saving the caption glossary')));",
+            "assert(updateCalls >= 2);",
+        ]
+    )
+    subprocess.run(
+        [
+            "node",
+            "-e",
+            f"(async () => {{\n{script}\n}})().catch((error) => {{ console.error(error); process.exit(1); }});",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+    )
+
+
+def test_qwen_caption_text_autosave_blocks_while_archive_is_mutating():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            "let qwenCaptionActive = false;",
+            "let qwenCaptionBatchActive = false;",
+            "let qwenCaptionBatchBackendJobId = 'job-1';",
+            "let updateCalls = 0;",
+            "let fetchCalls = 0;",
+            "const captionStatuses = [];",
+            "const backendStatuses = [];",
+            "const samStatuses = [];",
+            "const qwenElements = { captionSaveText: { checked: true } };",
+            "const captionAutoSaveState = { timerId: null, pendingImage: null, lastSaved: new Map(), lastAttempted: new Map() };",
+            "function setQwenCaptionStatus(message) { captionStatuses.push(message); }",
+            "function setQwenCaptionBackendJobStatus(message) { backendStatuses.push(message); }",
+            "function setSamStatus(message, options) { samStatuses.push({ message, options }); }",
+            "function updateQwenCaptionButton() { updateCalls += 1; }",
+            "function formatBackendFetchError(error) { return error?.message || String(error); }",
+            "global.fetch = async () => { fetchCalls += 1; throw new Error('fetch should be blocked'); };",
+            _extract_js_function(js, "qwenCaptionArchiveMutationActive"),
+            _extract_js_function(js, "captionArchiveMutationBusyMessage"),
+            _extract_js_function(js, "guardQwenCaptionArchiveIdle"),
+            "async " + _extract_js_function_before(
+                js,
+                "saveCaptionImmediate",
+                "\n    function scheduleCaptionAutosave",
+            ),
+            _extract_js_function(js, "scheduleCaptionAutosave"),
+            "const saved = await saveCaptionImmediate('frame.jpg', 'edited caption');",
+            "assert.strictEqual(saved, false);",
+            "assert.strictEqual(fetchCalls, 0);",
+            "assert(captionStatuses.includes('Caption archive busy'));",
+            "assert(backendStatuses.some((message) => message.includes('saving caption text edits')));",
+            "scheduleCaptionAutosave('frame.jpg', 'edited caption');",
+            "assert.strictEqual(captionAutoSaveState.timerId, null);",
+            "assert.strictEqual(fetchCalls, 0);",
             "assert(updateCalls >= 2);",
         ]
     )

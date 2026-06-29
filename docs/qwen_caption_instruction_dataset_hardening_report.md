@@ -111,6 +111,10 @@ row before training.
   mutation. A stale edit event restores the last captured glossary text, while
   reset/save return before rebuilding or posting glossary metadata. The backend
   metadata route still fails closed for script/API callers.
+- The caption output textarea now locks during active caption or instruction
+  jobs as well. Live generated text can still be written by the caption worker,
+  but stale manual input/blur events restore the last accepted caption text and
+  cannot trigger text-label autosave while the archive is mutating.
 - Caption image, caption batch, caption-all, and training-dataset launch paths
   now repeat the archive-idle guard at action time. Disabled buttons are
   therefore backed by runtime checks, and stale or scripted clicks cannot start

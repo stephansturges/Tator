@@ -26,6 +26,10 @@ claim that a caption record changed when nothing happened. Those controls also
 visibly disable while a caption or instruction job is mutating the caption
 archive, and they re-enable only when an image, caption text, and the required
 selected caption state are available.
+The caption output textarea itself is read-only during active caption or
+instruction jobs. The worker can still stream or write generated text, but
+manual input/blur events cannot overwrite the live output or autosave text-label
+edits while the archive is mutating.
 The caption dataset picker and dataset-refresh control are also disabled while
 the archive is mutating, so the panel cannot switch to a different caption
 dataset context while a backend job is still writing to the current archive.

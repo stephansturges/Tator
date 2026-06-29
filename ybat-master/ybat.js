@@ -3282,6 +3282,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
     let qwenCaptionSetAndForgetWatchImmediatePending = false;
     let qwenCaptionAbortController = null;
     let qwenCaptionCancelRequested = false;
+    let qwenCaptionOutputStableText = "";
     let qwenPanelInitialized = false;
     const captionAutoSaveState = {
         timerId: null,
@@ -4559,10 +4560,7 @@ const sam3TrainState = {
         const canImport =
             !datasetMode && Object.keys(images).length > 0 && Object.keys(classes).length > 0;
         setBboxImportEnabled(canImport);
-        if (qwenElements.captionOutput) {
-            // In annotation read-only mode, block direct text edits to avoid local drift vs locked source.
-            qwenElements.captionOutput.disabled = datasetMode && readOnly;
-        }
+        updateCaptionOutputEditControl();
         syncQwenCaptionDatasetControls();
         updateAnnotationSourceUi();
         if (classSplitState.initialized && activeTab === TAB_CLASS_SPLIT) {
@@ -22664,17 +22662,24 @@ async function cancelRfDetrTrainingJobRequest() {
                 if (!currentImage?.name) {
                     return;
                 }
+                if (!guardQwenCaptionArchiveIdle("editing caption text")) {
+                    restoreCaptionOutputStableText();
+                    updateCaptionArchiveActionControls();
+                    return;
+                }
                 updateCaptionArchiveActionControls();
                 if (!annotationEditableGuard("Edit text label")) {
-                    qwenElements.captionOutput.value = textLabels[currentImage.name] || "";
+                    setCaptionOutputValue(textLabels[currentImage.name] || "");
                     updateCaptionArchiveActionControls();
                     return;
                 }
                 if (selectedCaptionIsStoredAlternate(currentImage.name)) {
+                    rememberCaptionOutputStableText();
                     setQwenCaptionStatus("Editing alternate…");
                     return;
                 }
                 const value = qwenElements.captionOutput.value || "";
+                rememberCaptionOutputStableText(value);
                 if (!textLabels) {
                     textLabels = {};
                 }
@@ -22686,15 +22691,22 @@ async function cancelRfDetrTrainingJobRequest() {
                 if (!currentImage?.name) {
                     return;
                 }
+                if (!guardQwenCaptionArchiveIdle("saving caption text edits")) {
+                    restoreCaptionOutputStableText();
+                    updateCaptionArchiveActionControls();
+                    return;
+                }
                 if (!annotationEditableGuard("Edit text label")) {
-                    qwenElements.captionOutput.value = textLabels[currentImage.name] || "";
+                    setCaptionOutputValue(textLabels[currentImage.name] || "");
                     return;
                 }
                 if (selectedCaptionIsStoredAlternate(currentImage.name)) {
+                    rememberCaptionOutputStableText();
                     setQwenCaptionStatus("Alternate edited; click Update selected to save");
                     return;
                 }
                 const value = qwenElements.captionOutput.value || "";
+                rememberCaptionOutputStableText(value);
                 if (!textLabels) {
                     textLabels = {};
                 }
@@ -25180,6 +25192,46 @@ async function cancelRfDetrTrainingJobRequest() {
         setSamStatus(message, { variant: "warn", duration: 5000 });
         updateQwenCaptionButton();
         return false;
+    }
+
+    function captionOutputEditingBlocked() {
+        const annotationReadOnly = isAnnotationDatasetModeActive() && isAnnotationMutationBlocked();
+        return qwenCaptionArchiveMutationActive() || annotationReadOnly;
+    }
+
+    function rememberCaptionOutputStableText(text = null) {
+        if (text === null && qwenElements.captionOutput) {
+            qwenCaptionOutputStableText = String(qwenElements.captionOutput.value || "");
+            return qwenCaptionOutputStableText;
+        }
+        qwenCaptionOutputStableText = String(text || "");
+        return qwenCaptionOutputStableText;
+    }
+
+    function setCaptionOutputValue(text, options = {}) {
+        if (!qwenElements.captionOutput) {
+            return false;
+        }
+        const value = String(text || "");
+        qwenElements.captionOutput.value = value;
+        rememberCaptionOutputStableText(value);
+        if (Object.prototype.hasOwnProperty.call(options, "generatedFor")) {
+            qwenElements.captionOutput.dataset.generatedFor = String(options.generatedFor || "");
+        }
+        return true;
+    }
+
+    function restoreCaptionOutputStableText() {
+        if (!qwenElements.captionOutput) {
+            return;
+        }
+        qwenElements.captionOutput.value = qwenCaptionOutputStableText || "";
+    }
+
+    function updateCaptionOutputEditControl() {
+        if (qwenElements.captionOutput) {
+            qwenElements.captionOutput.disabled = captionOutputEditingBlocked();
+        }
     }
 
     function captionRunConfigurationElements() {
@@ -27935,8 +27987,7 @@ async function cancelRfDetrTrainingJobRequest() {
         const currentName = currentImage?.name || "";
         const shouldShow = forceLatest || !imageName || currentName === imageName;
         if (shouldShow) {
-            qwenElements.captionOutput.value = text;
-            qwenElements.captionOutput.dataset.generatedFor = imageName || "";
+            setCaptionOutputValue(text, { generatedFor: imageName || "" });
         }
         return shouldShow;
     }
@@ -30513,6 +30564,7 @@ async function cancelRfDetrTrainingJobRequest() {
         const storedCaption = !!selected && !selected.id.startsWith("primary:");
         const storedAlternate = storedCaption && !selected.is_primary;
         const busy = qwenCaptionArchiveMutationActive();
+        updateCaptionOutputEditControl();
         if (qwenElements.captionSaveAlternate) {
             qwenElements.captionSaveAlternate.disabled = busy || !imageName || !caption;
         }
@@ -30623,12 +30675,16 @@ async function cancelRfDetrTrainingJobRequest() {
                 button.appendChild(summary);
                 button.appendChild(meta);
                 button.addEventListener("click", () => {
+                    if (!guardQwenCaptionArchiveIdle("switching selected captions")) {
+                        return;
+                    }
                     setSelectedCaptionId(imageName, record.id);
                     if (qwenElements.captionOutput) {
-                        qwenElements.captionOutput.value = record.caption || "";
+                        setCaptionOutputValue(record.caption || "");
                     }
                     renderCaptionAlternatesForCurrentImage();
                 });
+                button.disabled = qwenCaptionArchiveMutationActive();
                 qwenElements.captionAlternates.appendChild(button);
             });
             setCaptionAlternateStatus(`${records.length} caption${records.length === 1 ? "" : "s"} for this image.`);
@@ -31087,7 +31143,7 @@ async function cancelRfDetrTrainingJobRequest() {
         ensureCaptionLabelStoreForDataset(datasetId || "");
         if (!datasetId) {
             const localCaption = textLabels?.[imageName] || "";
-            qwenElements.captionOutput.value = localCaption;
+            setCaptionOutputValue(localCaption);
             renderCaptionAlternatesForCurrentImage();
             return;
         }
@@ -31112,7 +31168,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 textLabels[imageName] = caption;
             }
             const selected = getSelectedCaptionRecord(imageName);
-            qwenElements.captionOutput.value = selected?.caption || caption || "";
+            setCaptionOutputValue(selected?.caption || caption || "");
             captionAutoSaveState.lastSaved.set(imageName, caption || "");
             renderCaptionAlternatesForCurrentImage();
         } catch (error) {
@@ -31199,6 +31255,9 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!imageName) {
             return false;
         }
+        if (!guardQwenCaptionArchiveIdle("saving caption text edits")) {
+            return false;
+        }
         if (isAnnotationMutationBlocked()) {
             annotationEditableGuard("Edit text label");
             return false;
@@ -31235,6 +31294,10 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function scheduleCaptionAutosave(imageName, caption) {
         if (!qwenElements.captionSaveText?.checked) {
+            return;
+        }
+        if (qwenCaptionArchiveMutationActive()) {
+            guardQwenCaptionArchiveIdle("saving caption text edits");
             return;
         }
         if (isAnnotationMutationBlocked()) {

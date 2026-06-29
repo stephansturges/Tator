@@ -20,6 +20,26 @@ The document is intentionally dataset-neutral. Do not add customer, partner,
 dataset, or project code names before sharing it. The implementation and review
 contract do not require those names.
 
+## How To Read This Packet
+
+Use this file as the primary external-review narrative. It is meant to be read
+without prior implementation history.
+
+The supporting documents have narrower purposes:
+
+| Document | Use |
+| --- | --- |
+| `docs/qwen_caption_training_dataset_external_review_readme.md` | Short first-read summary for reviewers |
+| `docs/qwen_caption_training_dataset_external_delivery_report.md` | Delivery-oriented explanation of what was shipped |
+| `docs/qwen_caption_training_dataset_external_implementation_report.md` | More implementation-oriented walkthrough |
+| `docs/qwen_caption_training_dataset_external_consumer_dossier.md` | Consumer-facing data-contract explanation |
+| `docs/qwen_caption_training_dataset_external_review_handoff.md` | Review-process handoff |
+| `docs/qwen_caption_training_dataset_reviewer_dossier.md` | Reviewer checklist and artifact expectations |
+
+This handoff is the most complete single document. If any shorter document
+appears ambiguous, treat this file as the controlling explanation and then
+verify behavior against the code and tests.
+
 ## Executive Summary
 
 The caption panel now supports two distinct workflows:
@@ -51,6 +71,72 @@ small real-data pilot. It is not a claim that every generated corpus is already
 training-grade. A corpus should be used for fine-tuning only after a real-data
 pilot, human review where required, reviewed-row import, strict re-export, and
 trainer-loader or fine-tuning dry-run validation.
+
+## Request-To-Implementation Mapping
+
+The implemented work was driven by several concrete product concerns:
+
+| Product concern | Implemented answer |
+| --- | --- |
+| One caption per image is not enough for VLM training | Added a distinct training-dataset workflow that can generate `caption0` plus configurable image/question/answer sub-captions |
+| Generated text must not become trusted labels | Separated `source_annotations`, `language_annotations`, deterministic metadata QA, review metadata, and final trainer rows |
+| The user needs a one-click dataset path, not a manual recipe | Added **Create VLM training dataset** with persisted backend jobs, set-and-forget progress, attach/recover, and export controls |
+| Reviewers need to audit generated language before training | Added review JSONL export and metadata-only reviewed-row import |
+| Trainer input must be simple | Exported flat `image_path` / `question` / `answer` JSONL rows, with optional audit metadata |
+| Audit evidence must not be lost | Added per-image archive JSONL and run-level instruction report JSON |
+| Label-derived facts should be trainable only when explicit | Added optional deterministic metadata QA from trusted labels, off by default |
+| Empty or missing label evidence should not force VLM hallucination | Recorded source evidence state and avoided asking label-specific questions when trusted labels do not support them |
+| Large prompts and thinking models need robust budget handling | Separated Auto output-token behavior from explicit user caps, added effective-budget telemetry, and bounded dense-box prompt context |
+| Repeated-output loops must not look like a successful caption | Added streaming loop inspection, controlled loop errors, runtime unload/retry paths, and degraded recovery telemetry |
+| Dataset-scale jobs should survive browser refreshes and common runtime failures | Added durable job status, progress polling, active archive guards, child-attempt isolation, and recovery reporting |
+| Exports must not race archive mutation | Locked UI controls and added backend busy guards for archive reads, mutations, exports, review import, and related dataset operations |
+| The model selector must communicate missing local models | Styled download-needed model options distinctly and kept missing-model preflight explicit |
+| External consumers need proof, not only a UI button | Added browser/backend/trainer validation, artifact consistency checks, readiness reports, tests, and this handoff packet |
+
+## End-To-End Data Flow
+
+The workflow should be understood as a construction pipeline, not as a single
+caption export.
+
+```text
+dataset images and trusted labels
+  -> source annotation summaries
+  -> caption0 generation
+  -> generated visual QA candidates
+  -> optional deterministic metadata QA
+  -> archive, review rows, and preliminary trainer rows
+  -> artifact consistency and readiness report
+  -> optional human review export/import
+  -> strict trainer JSONL re-export
+  -> trainer-loader validation or fine-tuning dry run
+```
+
+The important boundary is the final flattening step. The archive can contain
+more information than the trainer sees, but the model trains only on the flat
+trainer rows. A label fact, count, class list, or spatial claim is training
+signal only when it appears in a trainer row's `question` or `answer`.
+
+## What This Does Not Claim Yet
+
+This implementation creates the application path and the validation boundaries.
+It does not by itself prove that a particular generated corpus is good enough
+for model training.
+
+Do not treat a corpus as training-ready merely because the UI produced files.
+The external proof still needs:
+
+- a representative real-data pilot;
+- the full artifact set packaged from one run;
+- manual review of generated-language rows where the report requires it;
+- reviewed-row import and strict re-export;
+- trainer-loader acceptance of the final JSONL;
+- at least a loader-plus-batch or fine-tuning dry run;
+- inspection of rejected-row reasons, degraded-recovery rate, and generated-QA
+  usefulness.
+
+This boundary is intentional. The implementation is designed to make bad,
+stale, unreviewed, or unsupported rows fail closed while preserving enough
+evidence for reviewers to decide whether a pilot corpus is worth training on.
 
 ## What Was Done
 

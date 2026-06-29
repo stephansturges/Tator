@@ -19,8 +19,8 @@ For deeper implementation details, use
 The captioning stack now has a functional UI and backend path for creating
 caption-based VLM training datasets. The implementation is wired end to end for
 dataset-backed generation, artifact export, human review import, readiness
-reporting, trainer import compatibility, and trainer-side rejection of stale or
-hand-edited non-trainable rows.
+reporting, busy-state export protection, trainer import compatibility, and
+trainer-side rejection of stale or hand-edited non-trainable rows.
 
 This is an implementation handoff, not a claim that any generated corpus is
 already training-grade. The code path is structurally tested. A real-data pilot,
@@ -47,6 +47,8 @@ The new work adds a separate instruction-dataset path:
   only.
 - The backend exports trainer rows, per-image archive rows, review rows, and a
   run-level report.
+- Ordinary caption exports and instruction artifact actions are blocked while a
+  backend caption job is still mutating the selected caption archive.
 - The browser validates instruction JSONL before download, including required
   row metadata, instruction archive provenance, known validation/review states,
   rejected/failed/invalid validation state, non-trainable review state,
@@ -122,6 +124,9 @@ The intended operator flow is:
 
 The UI still supports ordinary captioning separately. Captioning and instruction
 dataset creation share infrastructure, but they are different product modes.
+Both modes now refuse export actions while the selected caption archive is being
+changed by an active backend caption job, so exported files are snapshots of a
+stable archive rather than mid-run partial state.
 
 ## Core Invariants
 
@@ -607,6 +612,8 @@ Current combined caption/instruction/trainer/UI contract suite:
 ./.venv-macos/bin/python -m pytest \
   tests/test_qwen_caption_dataset_job.py \
   tests/test_qwen_training_backend.py \
+  tests/test_dataset_linked_annotation_flows.py::test_caption_instruction_strict_export_gate_requires_ready_proofs \
+  tests/test_dataset_linked_annotation_flows.py::test_caption_instruction_strict_export_route_blocks_malformed_rows_when_ready_required \
   tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete \
   tests/test_labeling_panel_layout_contract.py \
   tests/test_qwen_caption_ui_smoke_tool.py \
@@ -616,7 +623,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-205 passed
+228 passed, 8 warnings
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

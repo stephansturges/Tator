@@ -7,8 +7,9 @@ Date: 2026-06-29
 This document is the complete partner-facing explanation of the caption-based
 VLM training-dataset work in this repository. It explains what was built, why it
 was built this way, which data contracts matter, how an operator uses the UI,
-how generated rows are validated and reviewed, and what still needs real-data
-pilot validation before a generated corpus should be used for fine-tuning.
+how generated rows are validated and reviewed, what was hardened after failure
+testing, and what still needs real-data pilot validation before a generated
+corpus should be used for fine-tuning.
 
 The implementation is intentionally dataset-neutral. It does not rely on
 project-specific dataset names, class names, or private evaluation assumptions.
@@ -16,7 +17,7 @@ project-specific dataset names, class names, or private evaluation assumptions.
 ## Reader Entry Point
 
 Use this document as the main external review packet. It is intended to answer
-five questions without requiring the reviewer to reconstruct the development
+six questions without requiring the reviewer to reconstruct the development
 history from commits:
 
 1. What user-facing workflow exists now?
@@ -25,7 +26,9 @@ history from commits:
    deterministic code output, or selected trainer rows?
 4. Which validation gates prevent stale, malformed, review-pending, or
    unsupported rows from entering a fine-tuning file?
-5. What remains to be proven with real data before using a generated corpus for
+5. Which runtime and UI hardening keeps long caption jobs from producing stale
+   or unstable exports?
+6. What remains to be proven with real data before using a generated corpus for
    actual training?
 
 The companion documents are supporting references:
@@ -40,6 +43,48 @@ The companion documents are supporting references:
   reviewer checklist.
 - `docs/qwen_caption_instruction_dataset_external_partner_packet.md` remains a
   supporting implementation packet; this file is the canonical overview.
+
+## One-Page Decision Summary
+
+The current implementation is ready for external implementation review and a
+small real-data pilot. It is not presented as a certified production corpus
+generator until that pilot has been run, reviewed, re-exported, and loaded by
+the trainer.
+
+What exists now:
+
+- A UI button, **Create VLM training dataset**, that launches dataset-scale
+  caption-derived instruction generation.
+- One broad image-caption row per image when `caption0` is enabled.
+- Configurable VLM-generated visual question/answer candidates per image.
+- Optional deterministic metadata QA derived only from source labels.
+- Set-and-forget backend execution with progress, attach/recover behavior, loop
+  recovery, model-availability feedback, and safer full-image composition
+  defaults for long jobs.
+- Four export artifacts: flat trainer JSONL, per-image archive JSONL,
+  candidate-level review JSONL, and report JSON.
+- Browser-side, backend-side, and trainer-side validation gates.
+- Review JSONL import that applies review metadata only.
+
+Why it was built this way:
+
+- A single caption per image is too weak for VLM fine-tuning.
+- Generated language is useful but cannot be allowed to become source truth.
+- Training rows must be flat and model-visible, while audit artifacts must be
+  richer and provenance-preserving.
+- Long caption jobs can mutate caption archives while an operator is exporting;
+  export actions therefore need busy-state guards and action-time checks.
+- MLX/VLM generation can loop or fault; set-and-forget mode needs streaming
+  loop inspection, bounded retries, fallback policy, and deterministic
+  recovery only as an explicitly degraded last resort.
+
+What still must be proven:
+
+- Generated QA quality on the real target dataset.
+- Manual review usefulness and reviewer throughput.
+- Trainer import plus at least one fine-tuning or loader-plus-batch dry run on
+  a reviewed pilot export.
+- Acceptable rate of degraded recovery captions in unattended runs.
 
 ## Handoff Scope
 
@@ -374,7 +419,7 @@ below.
 | Dense prompt safety | prompt budget accounting and representative box subsets | Implemented |
 | Repetition or loop safety | streaming loop inspector, controlled retry, fallback, deterministic recovery | Implemented |
 | Model-download clarity | model dropdown colors missing/download-needed models red and local models normal | Implemented |
-| Safe artifact actions during long jobs | UI disabling plus action-time checks for instruction exports, report downloads, and reviewed JSONL import | Implemented |
+| Safe artifact actions during long jobs | UI disabling plus action-time checks for ordinary caption exports, instruction exports, report downloads, and reviewed JSONL import | Implemented |
 | Script/API parity with browser export gates | `require_ready_instruction_export=true` on the caption export endpoint | Implemented |
 | Backend launch failure visibility | caption job creation failures are surfaced in caption status, backend-job status, and UI health text | Implemented |
 
@@ -383,21 +428,27 @@ below.
 The most recent work focused on making the instruction-dataset path durable
 enough for a real operator, not only a developer running one happy-path export.
 
-### Artifact Actions Are Frozen While Captions Mutate
+### Caption And Instruction Artifact Actions Are Frozen While Captions Mutate
 
-Instruction artifact downloads and reviewed JSONL import are now disabled until
-both conditions are true:
+Ordinary caption exports, instruction artifact downloads, instruction report
+downloads, and reviewed JSONL import are now disabled until both conditions are
+true:
 
 - a caption dataset is selected;
 - no caption job or instruction-dataset job is actively mutating the selected
   dataset's caption archive.
 
-The same check also runs inside each action handler. That second check matters
-because UI state can go stale: a user may leave a file picker open, a scripted
-click can bypass a disabled button, or a backend job can start after the button
-was first rendered. In those cases the operation refuses to export or import
-against a moving target and explains the reason in the caption health/status
-surface.
+The ordinary caption exports covered by this guard are caption audit JSONL,
+grouped caption JSON, and caption-only VLM JSONL. The instruction artifacts
+covered by this guard are trainer JSONL, archive JSONL, review JSONL, report
+JSON, and reviewed JSONL import.
+
+The same busy check also runs inside each action handler. That second check
+matters because UI state can go stale: a user may leave a file picker open, a
+scripted click can bypass a disabled button, or a backend job can start after
+the button was first rendered. In those cases the operation refuses to export
+or import against a moving target and explains the reason in the caption
+health/status surface.
 
 The reason is simple: instruction JSONL, archive JSONL, review JSONL, and the
 instruction report are one coherent export set. If a caption or generated-QA
@@ -1218,6 +1269,7 @@ node --check ybat-master/ybat.js
   tests/test_qwen_caption_dataset_job.py \
   tests/test_qwen_training_backend.py \
   tests/test_dataset_linked_annotation_flows.py::test_caption_instruction_strict_export_gate_requires_ready_proofs \
+  tests/test_dataset_linked_annotation_flows.py::test_caption_instruction_strict_export_route_blocks_malformed_rows_when_ready_required \
   tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete \
   tests/test_labeling_panel_layout_contract.py \
   tests/test_qwen_caption_ui_smoke_tool.py \
@@ -1227,7 +1279,7 @@ node --check ybat-master/ybat.js
 Result:
 
 ```text
-222 passed, 8 warnings
+228 passed, 8 warnings
 ```
 
 Additional focused validation recorded in the supporting hardening docs covers:
@@ -1250,6 +1302,8 @@ Additional focused validation recorded in the supporting hardening docs covers:
   export-validation proof fails, or versioned artifact-consistency proofs are
   missing, wrong-version, inconsistent, or paired with missing, malformed,
   stale, or mismatched returned artifact arrays
+- ordinary caption exports and instruction artifact actions refusing to run
+  while a backend caption job id is still active
 - trainer import of flat rows
 - trainer rejection of non-trainable rows
 - rendered UI smoke for visible controls and unclipped caption actions
@@ -1276,6 +1330,7 @@ node --check ybat-master/ybat.js
   tests/test_qwen_caption_dataset_job.py \
   tests/test_qwen_training_backend.py \
   tests/test_dataset_linked_annotation_flows.py::test_caption_instruction_strict_export_gate_requires_ready_proofs \
+  tests/test_dataset_linked_annotation_flows.py::test_caption_instruction_strict_export_route_blocks_malformed_rows_when_ready_required \
   tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete \
   tests/test_labeling_panel_layout_contract.py \
   tests/test_qwen_caption_ui_smoke_tool.py \

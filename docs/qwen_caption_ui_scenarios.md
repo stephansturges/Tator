@@ -275,4 +275,7 @@ count rather than crashing the export action.
 source-field provenance, split image counts, split row counts, QA count per
 image, selected flattened-row counts, duplicate-question/diversity metrics,
 structured-rewrite rates, answer-format distribution, source-class coverage,
-and the `ready` / `needs_review` / `blocked` training-readiness status.
+and the `ready` / `needs_review` / `blocked` training-readiness status. The
+report download also validates the trainer rows and cross-artifact consistency
+before saving, so a report is not exported as the authoritative run summary
+when its sibling trainer, archive, or review artifacts are stale or malformed.

@@ -36688,6 +36688,24 @@ async function cancelRfDetrTrainingJobRequest() {
             setSamStatus(message, { variant: "error", duration: 5000 });
             return;
         }
+        const rowValidation = validateCaptionInstructionTrainingRows(payload?.instruction_training_rows);
+        if (!rowValidation.ok) {
+            const firstErrors = (rowValidation.errors || []).slice(0, 3).join("; ");
+            const suffix = (rowValidation.errors || []).length > 3 ? `; +${rowValidation.errors.length - 3} more` : "";
+            const message = `Instruction report export blocked: ${firstErrors || "invalid instruction rows"}${suffix}.`;
+            setCaptionExportHealth(message, "fail");
+            setSamStatus(message, { variant: "error", duration: 5000 });
+            return;
+        }
+        const consistency = validateCaptionInstructionArtifactConsistency(payload, "training", rowValidation);
+        if (!consistency.ok) {
+            const firstErrors = (consistency.errors || []).slice(0, 3).join("; ");
+            const suffix = (consistency.errors || []).length > 3 ? `; +${consistency.errors.length - 3} more` : "";
+            const message = `Instruction report export blocked: ${firstErrors || "artifact consistency failed"}${suffix}.`;
+            setCaptionExportHealth(message, "fail");
+            setSamStatus(message, { variant: "error", duration: 5000 });
+            return;
+        }
         const readinessSummary = captionInstructionReadinessSummary(report);
         setCaptionExportHealth(`Instruction report validated: corpus-quality metrics and readiness are present. ${readinessSummary.message}`, readinessSummary.severity);
         const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });

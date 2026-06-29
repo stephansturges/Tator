@@ -170,6 +170,34 @@ could support reviewed replacement text, but that would need a separate explicit
 contract with provenance for the replacement author and the original generated
 candidate.
 
+### Review Imports Are Bounded Data, Not Open Text Dumps
+
+The review JSONL import path now enforces both shape and text-field limits in
+the browser and backend. This is deliberately stricter than normal JSON parsing:
+a syntactically valid review packet can still be unsafe if a reviewer tool
+turns a text field into an object, writes extremely large notes, or produces a
+row that cannot be matched back to a saved caption0 or generated-QA record.
+
+The enforced per-field limits are:
+
+| Field family | Limit |
+| --- | --- |
+| dataset id, QA id, row origin, split, validation status, review decision | 512 characters |
+| image path, image name, image alias | 4096 characters |
+| question | 4096 characters |
+| candidate answer, selected training answer | 65536 characters |
+| review notes | 8192 characters |
+
+The review file still has an overall browser-side import cap and the backend
+still has a row-count cap. The point is not to prevent legitimate review notes;
+it is to keep a hand-edited or tool-generated review packet from persisting
+unbounded text into caption metadata or causing an import path to spend time on
+rows that will later fail identity checks.
+
+Backend failures are formatted into row-specific UI messages. For example, a
+long `review_notes` field reports the row number and the field limit instead of
+surfacing a raw server code.
+
 ## Non-Negotiable Training Shape
 
 The trainer learns only from model-visible rows shaped like this:
@@ -575,6 +603,9 @@ Review import fails closed on:
 
 - caption0 or generated-QA review rows missing dataset identity, even before a
   reviewer fills a decision
+- non-text values in text fields such as image path, QA id, question, candidate
+  answer, selected training answer, review decision, or review notes
+- text fields that exceed the documented import limits
 - missing embedded dataset id for persisted language decisions
 - dataset id mismatch
 - unsupported non-blank review decisions
@@ -796,7 +827,10 @@ node --check ybat-master/ybat.js
 ```
 
 ```bash
-./.venv-macos/bin/python -m py_compile localinferenceapi.py
+./.venv-macos/bin/python -m py_compile \
+  localinferenceapi.py \
+  api/datasets.py \
+  models/schemas.py
 ```
 
 ```bash
@@ -812,7 +846,7 @@ node --check ybat-master/ybat.js
 Result:
 
 ```text
-205 passed
+212 passed
 ```
 
 Additional focused validation recorded in the supporting hardening docs covers:
@@ -827,6 +861,7 @@ Additional focused validation recorded in the supporting hardening docs covers:
 - stale caption0/generated-QA text rejection
 - stale selected training-answer rejection
 - duplicate actionable review-target rejection
+- review-row text-field type and length rejection in the browser and backend
 - trainer import of flat rows
 - trainer rejection of non-trainable rows
 - rendered UI smoke for visible controls and unclipped caption actions

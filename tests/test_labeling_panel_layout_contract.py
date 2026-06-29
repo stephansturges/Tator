@@ -565,6 +565,11 @@ def test_qwen_caption_instruction_review_import_parser_accepts_reviewer_file_sha
     script = "\n".join(
         [
             "const assert = require('assert');",
+            "const CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ID_CHARS = 512;",
+            "const CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_PATH_CHARS = 4096;",
+            "const CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_QUESTION_CHARS = 4096;",
+            "const CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ANSWER_CHARS = 65536;",
+            "const CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_NOTES_CHARS = 8192;",
             _extract_js_function(js, "normalizeCaptionInstructionReviewDecision"),
             _extract_js_function_before(
                 js,
@@ -687,6 +692,12 @@ def test_qwen_caption_instruction_review_import_formats_backend_failures():
             "assert(resolvedDuplicate.includes('same saved caption or generated-QA record'));",
             "const unsupported = formatCaptionInstructionReviewImportApiError('review_rows_unsupported_row_origin:row_6:freeform_review');",
             "assert(unsupported.includes('freeform_review is not a persisted review row type'));",
+            "const tooLong = formatCaptionInstructionReviewImportApiError('review_rows_field_too_long:row_2:review_notes:8192');",
+            "assert(tooLong.includes('blocked at row 2'));",
+            "assert(tooLong.includes('review_notes exceeds 8192 characters'));",
+            "const invalidText = formatCaptionInstructionReviewImportApiError('review_rows_review_notes_invalid:row_3');",
+            "assert(invalidText.includes('blocked at row 3'));",
+            "assert(invalidText.includes('review_notes must be a text field'));",
             "const noActionable = formatCaptionInstructionReviewImportApiError('review_rows_no_actionable_decisions');",
             "assert(noActionable.includes('no accepted, rejected, or needs-revision caption0 or generated-QA decisions'));",
             "assert(noActionable.includes('Fill review_decision'));",
@@ -894,6 +905,11 @@ def test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports
     script = "\n".join(
         [
             "const assert = require('assert');",
+            "const CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ID_CHARS = 512;",
+            "const CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_PATH_CHARS = 4096;",
+            "const CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_QUESTION_CHARS = 4096;",
+            "const CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ANSWER_CHARS = 65536;",
+            "const CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_NOTES_CHARS = 8192;",
             _extract_js_function(js, "normalizeCaptionInstructionReviewDecision"),
             _extract_js_function(js, "validateCaptionInstructionArchiveRows"),
             _extract_js_function(js, "validateCaptionInstructionReviewRows"),
@@ -1062,6 +1078,11 @@ def test_qwen_caption_instruction_review_validator_blocks_bad_actionable_rows():
     script = "\n".join(
         [
             "const assert = require('assert');",
+            "const CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ID_CHARS = 512;",
+            "const CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_PATH_CHARS = 4096;",
+            "const CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_QUESTION_CHARS = 4096;",
+            "const CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ANSWER_CHARS = 65536;",
+            "const CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_NOTES_CHARS = 8192;",
             _extract_js_function(js, "normalizeCaptionInstructionReviewDecision"),
             _extract_js_function(js, "validateCaptionInstructionReviewRows"),
             "const base = {",
@@ -1105,6 +1126,15 @@ def test_qwen_caption_instruction_review_validator_blocks_bad_actionable_rows():
             "const conflicting = validateCaptionInstructionReviewRows([base, { ...base, review_decision: 'rejected' }]);",
             "assert.strictEqual(conflicting.ok, false);",
             "assert(conflicting.errors.some((error) => error.includes('conflicting duplicate actionable review target')));",
+            "const invalidNotes = validateCaptionInstructionReviewRows([{ ...base, review_notes: 123 }]);",
+            "assert.strictEqual(invalidNotes.ok, false);",
+            "assert(invalidNotes.errors.some((error) => error.includes('review_notes must be text')));",
+            "const longNotes = validateCaptionInstructionReviewRows([{ ...base, review_notes: 'x'.repeat(8193) }]);",
+            "assert.strictEqual(longNotes.ok, false);",
+            "assert(longNotes.errors.some((error) => error.includes('review_notes exceeds 8192 characters')));",
+            "const longQuestion = validateCaptionInstructionReviewRows([{ ...base, question: 'x'.repeat(4097) }]);",
+            "assert.strictEqual(longQuestion.ok, false);",
+            "assert(longQuestion.errors.some((error) => error.includes('question exceeds 4096 characters')));",
             "const deterministic = validateCaptionInstructionReviewRows([{ ...base, row_origin: 'deterministic_metadata_qa', qa_id: 'meta-1', row_type: 'deterministic_count', selected_for_training: false, requires_manual_review: false }]);",
             "assert.strictEqual(deterministic.ok, true);",
         ]

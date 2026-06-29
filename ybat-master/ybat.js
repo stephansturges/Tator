@@ -3253,6 +3253,11 @@ const AUTOMATION_LOCKED_TABS = new Set([
     const DEFAULT_CAPTION_PILOT_PROMPT_ADAPTED_RATE = 1;
     const CAPTION_MAX_TOKEN_CAP = 4096;
     const CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_BYTES = 25 * 1024 * 1024;
+    const CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ID_CHARS = 512;
+    const CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_PATH_CHARS = 4096;
+    const CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_QUESTION_CHARS = 4096;
+    const CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ANSWER_CHARS = 65536;
+    const CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_NOTES_CHARS = 8192;
     const DEFAULT_CAPTION_AUTO_SENTENCES = 10;
     const CAPTION_RECIPE_KIND = "tator.caption_recipe";
     const CAPTION_RECIPE_VERSION = 1;
@@ -34997,6 +35002,32 @@ async function cancelRfDetrTrainingJobRequest() {
             const reviewDecision = normalizeCaptionInstructionReviewDecision(row.review_decision);
             const hasActionableDecision = ["accepted", "rejected", "needs_revision"].includes(reviewDecision);
             const hasSupportedNonActionableDecision = !rawReviewDecision || reviewDecision === "unreviewed";
+            [
+                ["dataset_id", CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ID_CHARS],
+                ["image_path", CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_PATH_CHARS],
+                ["image_name", CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_PATH_CHARS],
+                ["image", CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_PATH_CHARS],
+                ["qa_id", CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ID_CHARS],
+                ["row_origin", CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ID_CHARS],
+                ["split", CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ID_CHARS],
+                ["question", CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_QUESTION_CHARS],
+                ["candidate_answer", CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ANSWER_CHARS],
+                ["training_answer", CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ANSWER_CHARS],
+                ["validation_status", CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ID_CHARS],
+                ["review_decision", CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ID_CHARS],
+                ["review_notes", CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_NOTES_CHARS],
+            ].forEach(([field, maxChars]) => {
+                if (!Object.prototype.hasOwnProperty.call(row, field)) {
+                    return;
+                }
+                if (typeof row[field] !== "string") {
+                    errors.push(`review row ${rowNumber} ${field} must be text`);
+                    return;
+                }
+                if (row[field].trim().length > maxChars) {
+                    errors.push(`review row ${rowNumber} ${field} exceeds ${maxChars} characters`);
+                }
+            });
             if (!imagePath) {
                 errors.push(`review row ${rowNumber} missing image_path`);
             } else {
@@ -35904,6 +35935,29 @@ async function cancelRfDetrTrainingJobRequest() {
         const datasetMatch = raw.match(/^review_rows_dataset_id_mismatch:row_(\d+):(.+)!=(.+)$/);
         if (datasetMatch) {
             return `Instruction review import blocked at row ${datasetMatch[1]}: this review file is for dataset ${datasetMatch[2]}, not ${datasetMatch[3]}. Select the matching dataset or export a fresh review JSONL.`;
+        }
+        const fieldTooLongMatch = raw.match(/^review_rows_field_too_long:row_(\d+):([^:]+):(\d+)$/);
+        if (fieldTooLongMatch) {
+            return `Instruction review import blocked at row ${fieldTooLongMatch[1]}: ${fieldTooLongMatch[2]} exceeds ${fieldTooLongMatch[3]} characters. Shorten that field or export a fresh review JSONL.`;
+        }
+        const invalidTextFieldMatch = raw.match(/^review_rows_([^:]+)_invalid:row_(\d+)$/);
+        const textReviewFields = new Set([
+            "dataset_id",
+            "image_path",
+            "image_name",
+            "image",
+            "qa_id",
+            "row_origin",
+            "split",
+            "question",
+            "candidate_answer",
+            "training_answer",
+            "validation_status",
+            "review_decision",
+            "review_notes",
+        ]);
+        if (invalidTextFieldMatch && textReviewFields.has(invalidTextFieldMatch[1])) {
+            return `Instruction review import blocked at row ${invalidTextFieldMatch[2]}: ${invalidTextFieldMatch[1]} must be a text field from the exported review JSONL.`;
         }
         const unsupportedMatch = raw.match(/^review_rows_unsupported_row_origin:row_(\d+):(.+)$/);
         if (unsupportedMatch) {

@@ -20255,6 +20255,11 @@ CAPTION_INSTRUCTION_TRAINING_ROWS_FORMAT = "tator_caption_instruction_rows_v1"
 CAPTION_INSTRUCTION_REVIEW_ROWS_FORMAT = "tator_caption_instruction_review_rows_v1"
 CAPTION_INSTRUCTION_ARTIFACT_CONSISTENCY_FORMAT = "tator_caption_instruction_artifact_consistency_v1"
 CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ROWS = 200000
+CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ID_CHARS = 512
+CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_PATH_CHARS = 4096
+CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_QUESTION_CHARS = 4096
+CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ANSWER_CHARS = 65536
+CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_NOTES_CHARS = 8192
 CAPTION_INSTRUCTION_TRAINABLE_VALIDATION_STATUSES = {"accepted", "machine_validated"}
 CAPTION_INSTRUCTION_NONTRAINABLE_VALIDATION_STATUSES = {"rejected", "failed", "invalid"}
 CAPTION_INSTRUCTION_TRAINABLE_REVIEW_STATUSES = {"accepted", "unreviewed", "machine_validated"}
@@ -23205,6 +23210,35 @@ def _caption_instruction_reject_unsupported_review_decisions(rows: Sequence[Any]
 
 
 def _caption_instruction_reject_malformed_review_rows(rows: Sequence[Any]) -> None:
+    def _require_text_field(
+        row: Mapping[str, Any],
+        field: str,
+        index: int,
+        *,
+        max_chars: int,
+        detail_code: str,
+        required: bool = True,
+    ) -> str:
+        if field not in row:
+            if required:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"{detail_code}:row_{index}")
+            return ""
+        value = row.get(field)
+        if not isinstance(value, str):
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"review_rows_{field}_invalid:row_{index}",
+            )
+        text = value.strip()
+        if required and not text:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"{detail_code}:row_{index}")
+        if len(text) > max_chars:
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"review_rows_field_too_long:row_{index}:{field}:{max_chars}",
+            )
+        return text
+
     for index, row in enumerate(rows, start=1):
         if not isinstance(row, Mapping):
             raise HTTPException(
@@ -23216,25 +23250,71 @@ def _caption_instruction_reject_malformed_review_rows(rows: Sequence[Any]) -> No
                 status_code=HTTP_400_BAD_REQUEST,
                 detail=f"review_rows_invalid_format:row_{index}",
             )
-        if not str(row.get("image_path") or row.get("image_name") or row.get("image") or "").strip():
+        if "dataset_id" in row:
+            _require_text_field(
+                row,
+                "dataset_id",
+                index,
+                max_chars=CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ID_CHARS,
+                detail_code="review_rows_dataset_id_missing",
+                required=False,
+            )
+        image_path = ""
+        for image_field in ("image_path", "image_name", "image"):
+            if image_field in row:
+                image_path = _require_text_field(
+                    row,
+                    image_field,
+                    index,
+                    max_chars=CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_PATH_CHARS,
+                    detail_code="review_rows_missing_image_path",
+                    required=False,
+                )
+                if image_path:
+                    break
+        if not image_path:
             raise HTTPException(
                 status_code=HTTP_400_BAD_REQUEST,
                 detail=f"review_rows_missing_image_path:row_{index}",
             )
-        if not str(row.get("qa_id") or "").strip():
-            raise HTTPException(
-                status_code=HTTP_400_BAD_REQUEST,
-                detail=f"review_rows_qa_id_missing:row_{index}",
-            )
-        row_origin = str(row.get("row_origin") or "").strip()
-        question = str(row.get("question") or "").strip()
-        candidate_answer = str(row.get("candidate_answer") or "").strip()
-        training_answer = str(row.get("training_answer") or "").strip()
-        if not row_origin:
-            raise HTTPException(
-                status_code=HTTP_400_BAD_REQUEST,
-                detail=f"review_rows_row_origin_missing:row_{index}",
-            )
+        qa_id = _require_text_field(
+            row,
+            "qa_id",
+            index,
+            max_chars=CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ID_CHARS,
+            detail_code="review_rows_qa_id_missing",
+        )
+        row_origin = _require_text_field(
+            row,
+            "row_origin",
+            index,
+            max_chars=CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ID_CHARS,
+            detail_code="review_rows_row_origin_missing",
+        )
+        question = _require_text_field(
+            row,
+            "question",
+            index,
+            max_chars=CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_QUESTION_CHARS,
+            detail_code="review_rows_question_missing",
+            required=False,
+        )
+        candidate_answer = _require_text_field(
+            row,
+            "candidate_answer",
+            index,
+            max_chars=CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ANSWER_CHARS,
+            detail_code="review_rows_candidate_answer_missing",
+            required=False,
+        )
+        training_answer = _require_text_field(
+            row,
+            "training_answer",
+            index,
+            max_chars=CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ANSWER_CHARS,
+            detail_code="review_rows_training_answer_missing",
+            required=False,
+        )
         if row_origin == "generated_qa" and (not question or not (candidate_answer or training_answer)):
             raise HTTPException(
                 status_code=HTTP_400_BAD_REQUEST,
@@ -23255,11 +23335,13 @@ def _caption_instruction_reject_malformed_review_rows(rows: Sequence[Any]) -> No
                 status_code=HTTP_400_BAD_REQUEST,
                 detail=f"review_rows_candidate_answer_missing:row_{index}",
             )
-        if not str(row.get("validation_status") or "").strip():
-            raise HTTPException(
-                status_code=HTTP_400_BAD_REQUEST,
-                detail=f"review_rows_validation_status_missing:row_{index}",
-            )
+        _require_text_field(
+            row,
+            "validation_status",
+            index,
+            max_chars=CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ID_CHARS,
+            detail_code="review_rows_validation_status_missing",
+        )
         if not isinstance(row.get("selected_for_training"), bool):
             raise HTTPException(
                 status_code=HTTP_400_BAD_REQUEST,
@@ -23290,11 +23372,27 @@ def _caption_instruction_reject_malformed_review_rows(rows: Sequence[Any]) -> No
                 status_code=HTTP_400_BAD_REQUEST,
                 detail=f"review_rows_review_decision_missing:row_{index}",
             )
+        _require_text_field(
+            row,
+            "review_decision",
+            index,
+            max_chars=CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ID_CHARS,
+            detail_code="review_rows_review_decision_missing",
+            required=False,
+        )
         if "review_notes" not in row:
             raise HTTPException(
                 status_code=HTTP_400_BAD_REQUEST,
                 detail=f"review_rows_review_notes_missing:row_{index}",
             )
+        _require_text_field(
+            row,
+            "review_notes",
+            index,
+            max_chars=CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_NOTES_CHARS,
+            detail_code="review_rows_review_notes_missing",
+            required=False,
+        )
 
 
 def _caption_instruction_has_persisted_actionable_review_decision(rows: Sequence[Any]) -> bool:

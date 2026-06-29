@@ -2477,10 +2477,22 @@ def test_caption_instruction_artifact_consistency_validator_blocks_mismatched_ba
         ],
         review_rows=[
             {
+                "format": "tator_caption_instruction_review_rows_v1",
+                "dataset_id": "ds",
                 "image_path": "frame.jpg",
+                "row_origin": "caption0",
                 "qa_id": "caption0",
+                "row_type": "caption0",
+                "question": "Describe this image.",
+                "candidate_answer": "A caption.",
+                "training_answer": "A caption.",
+                "validation_status": "accepted",
                 "selected_for_training": True,
                 "requires_manual_review": True,
+                "review_decision": "accepted",
+                "review_notes": "",
+                "rejection_reasons": [],
+                "source_summary": {"status": "empty_label_file"},
             }
         ],
         report={
@@ -2561,12 +2573,22 @@ def test_caption_instruction_artifact_consistency_validator_blocks_same_count_id
         ],
         review_rows=[
             {
+                "format": "tator_caption_instruction_review_rows_v1",
+                "dataset_id": "ds",
                 "image_path": "frame.jpg",
+                "row_origin": "caption0",
                 "qa_id": "different-caption0",
+                "row_type": "caption0",
                 "question": "Describe this image in detail.",
+                "candidate_answer": "A correct caption.",
                 "training_answer": "A correct caption.",
+                "validation_status": "accepted",
                 "selected_for_training": True,
                 "requires_manual_review": True,
+                "review_decision": "accepted",
+                "review_notes": "",
+                "rejection_reasons": [],
+                "source_summary": {"status": "empty_label_file"},
             }
         ],
         report=report,
@@ -2639,14 +2661,22 @@ def test_caption_instruction_artifact_consistency_validator_canonicalizes_image_
         ],
         review_rows=[
             {
+                "format": "tator_caption_instruction_review_rows_v1",
                 "dataset_id": "ds",
                 "image_path": "train/frame.jpg",
                 "row_origin": "generated_qa",
                 "qa_id": "qa-1",
+                "row_type": "generated_qa",
                 "question": "What is shown?",
+                "candidate_answer": "A building.",
                 "training_answer": "A building.",
+                "validation_status": "accepted",
                 "selected_for_training": True,
                 "requires_manual_review": True,
+                "review_decision": "accepted",
+                "review_notes": "",
+                "rejection_reasons": [],
+                "source_summary": {"status": "empty_label_file"},
             }
         ],
         report=report,
@@ -2692,14 +2722,20 @@ def test_caption_instruction_artifact_consistency_validator_requires_review_data
         ],
         review_rows=[
             {
+                "format": "tator_caption_instruction_review_rows_v1",
                 "image_path": "train/frame.jpg",
                 "row_origin": "generated_qa",
                 "qa_id": "qa-1",
+                "row_type": "generated_qa",
                 "question": "What is shown?",
                 "candidate_answer": "A building.",
+                "validation_status": "accepted",
                 "selected_for_training": False,
                 "requires_manual_review": True,
                 "review_decision": "",
+                "review_notes": "",
+                "rejection_reasons": [],
+                "source_summary": {"status": "empty_label_file"},
             }
         ],
         report=report,
@@ -2709,6 +2745,71 @@ def test_caption_instruction_artifact_consistency_validator_requires_review_data
     assert validation["ok"] is False
     assert validation["error_count"] == 1
     assert "review row 1 missing dataset_id for persisted language review row" in validation["errors"]
+
+
+def test_caption_instruction_artifact_consistency_validator_rejects_malformed_review_rows() -> None:
+    import localinferenceapi as api
+
+    report = {
+        "format": "tator_caption_instruction_report_v1",
+        "image_count": 1,
+        "selected_flattened_row_count": 0,
+        "instruction_review_row_count": 1,
+        "manual_review_required_count": 0,
+        "corpus_quality_metrics": {
+            "image_count": 1,
+            "selected_flattened_row_count": 0,
+        },
+        "instruction_export_validation": {
+            "ok": True,
+            "error_count": 0,
+            "errors": [],
+            "row_count": 0,
+        },
+    }
+
+    validation = api._caption_instruction_artifact_consistency_validation(
+        training_rows=[],
+        archive_rows=[
+            {
+                "image_path": "train/frame.jpg",
+                "language_annotations": {},
+                "deterministic_metadata_qa_pairs": [],
+                "export_metadata": {"selected_training_row_count": 0},
+            }
+        ],
+        review_rows=[
+            {
+                "format": "bad",
+                "dataset_id": "ds",
+                "image_path": "",
+                "row_origin": "freeform_review",
+                "qa_id": "",
+                "question": "",
+                "candidate_answer": "",
+                "validation_status": "",
+                "selected_for_training": "yes",
+                "requires_manual_review": "yes",
+                "review_decision": "accepted",
+            }
+        ],
+        report=report,
+        archive_image_count=1,
+    )
+
+    assert validation["ok"] is False
+    assert "review row 1 format is invalid" in validation["errors"]
+    assert "review row 1 missing image_path" in validation["errors"]
+    assert "review row 1 missing qa_id" in validation["errors"]
+    assert "review row 1 missing question" in validation["errors"]
+    assert "review row 1 missing candidate_answer" in validation["errors"]
+    assert "review row 1 missing validation_status" in validation["errors"]
+    assert "review row 1 selected_for_training must be boolean" in validation["errors"]
+    assert "review row 1 requires_manual_review must be boolean" in validation["errors"]
+    assert "review row 1 missing source_summary" in validation["errors"]
+    assert "review row 1 rejection_reasons must be an array" in validation["errors"]
+    assert "review row 1 missing review_notes field" in validation["errors"]
+    assert "review row 1 has unsupported actionable row_origin" in validation["errors"]
 
 
 def test_caption_instruction_training_validator_requires_complete_row_metadata() -> None:

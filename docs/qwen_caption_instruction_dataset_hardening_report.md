@@ -173,6 +173,14 @@ row before training.
   generated-QA review rows to carry dataset identity before export/import, even
   while `review_decision` is blank. Review packets therefore fail before
   download if they would become impossible to import after human review.
+- Backend artifact-consistency validation now mirrors the browser review-row
+  shape contract. Review JSONL rows must carry the review-row format marker,
+  image path, QA id, row origin, question, candidate answer, validation status,
+  boolean `selected_for_training` and `requires_manual_review` values, source
+  summary, rejection-reason array, review-decision field, and review-notes
+  field. Unsupported decisions, unsupported actionable row origins, duplicate
+  actionable targets, duplicate image-path/QA-id pairs, and selected rows with
+  no training answer fail before artifacts are treated as consistent.
 - Review-import backend failures are formatted into row-specific operator
   messages instead of raw `review_rows_*` codes. Stale caption0/generated-QA
   text, dataset mismatch, duplicate actionable decisions, unsupported row
@@ -270,13 +278,13 @@ row before training.
   - `node --check ybat-master/ybat.js`
 - Focused instruction-dataset, export, and UI contract tests:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py tests/test_qwen_training_backend.py tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete tests/test_labeling_panel_layout_contract.py tests/test_qwen_caption_ui_smoke_tool.py -q`
-  - Current result: 198 passed.
+  - Current result: 199 passed.
 - Current artifact-consistency UI contract tests:
   - `./.venv-macos/bin/python -m pytest tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports tests/test_labeling_panel_layout_contract.py::test_qwen_caption_export_preserves_saved_alternates_and_primary_rows -q`
   - Result: 2 passed.
 - Current backend artifact-consistency and canonical image-key tests:
-  - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_blocks_same_count_identity_mismatches tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_blocks_mismatched_backend_counts tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_canonicalizes_image_paths tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports -q`
-  - Result: 4 passed.
+  - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_blocks_same_count_identity_mismatches tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_blocks_mismatched_backend_counts tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_canonicalizes_image_paths tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_rejects_malformed_review_rows tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports -q`
+  - Result: 5 passed.
 - Current review-import fail-closed tests:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_persists_review_metadata tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_accepts_canonical_image_path_aliases tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_conflicting_split_alias tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_mismatched_dataset_id tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_missing_dataset_id tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_missing_or_mismatched_qa_id tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_duplicate_actionable_targets tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_canonical_duplicate_actionable_targets tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_rows_missing_current_text tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_unmatchable_actionable_rows_atomically tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_stale_generated_qa_text tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_stale_rewritten_training_answer tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_stale_caption0_text tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_arbitrary_caption0_creation -q`
   - Result: 32 passed.
@@ -286,6 +294,9 @@ row before training.
 - Current review-export dataset identity guard:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_requires_review_dataset_identity tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_canonicalizes_image_paths tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_review_validator_blocks_bad_actionable_rows tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_review_import_parser_accepts_reviewer_file_shapes -q`
   - Result: 5 passed.
+- Current backend review-row schema guard:
+  - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_rejects_malformed_review_rows tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_requires_review_dataset_identity tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_canonicalizes_image_paths tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_review_validator_blocks_bad_actionable_rows -q`
+  - Result: 4 passed.
 - Current trainer-import fail-closed boundary tests:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_imports_flat_question_answer_rows tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_non_trainable_flat_rows tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_duplicate_flat_questions tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_normalized_duplicate_flat_questions tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_resolved_duplicate_flat_image_aliases tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_ignores_blank_flat_rows_before_duplicate_check -q`
   - Result: 9 passed.

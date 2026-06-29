@@ -285,6 +285,12 @@ aliases such as `./frame.jpg`, `frame.jpg`, and split-prefixed forms cannot
 hide duplicate rows or create ambiguous training targets. It fails closed
 before writing a mismatched download, while the trainer keeps its
 own final validation boundary for hand-edited paths.
+Review JSONL rows are checked by the same shape contract in the backend and
+browser. A row must include the format marker, image path, QA id, origin,
+question, candidate answer, validation status, boolean selection/review flags,
+source summary, rejection-reason array, review-decision field, review-notes
+field, a supported review decision, a supported actionable origin, and a
+training answer whenever the row is selected for training.
 
 Flat-layout image keys are canonicalized before merge so `foo.jpg` and
 `train/foo.jpg` do not become two separate instruction objects for the same
@@ -565,7 +571,7 @@ Result:
 Result:
 
 ```text
-198 passed
+199 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch
@@ -576,6 +582,7 @@ coverage:
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_blocks_same_count_identity_mismatches \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_blocks_mismatched_backend_counts \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_canonicalizes_image_paths \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_rejects_malformed_review_rows \
   tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports \
   -q
 ```
@@ -583,7 +590,7 @@ coverage:
 Result:
 
 ```text
-4 passed
+5 passed
 ```
 
 Additional validation recorded in the hardening report includes trainer import

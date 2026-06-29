@@ -653,6 +653,13 @@ trainer rows, selected review rows, and archive candidates must agree on image
 canonical image path, QA id, normalized question, per-image selected counts, and selected
 training answers where available. This blocks same-count artifact swaps, such as
 a stale review JSONL or archive JSONL from another generation run.
+Review JSONL rows must also keep their row-shape fields intact. The backend and
+browser both require the format marker, image path, QA id, origin, question,
+candidate answer, validation status, boolean selection/review flags, source
+summary, rejection-reason array, review-decision field, review-notes field,
+supported review decision, supported actionable origin, and a training answer
+for selected rows. This makes reviewer edits fail closed when a spreadsheet or
+manual edit drops operational columns.
 
 The export merge also canonicalizes flat-layout image keys before constructing
 instruction artifacts. Saved captions, text-label mirrors, source manifest rows,
@@ -949,7 +956,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Result:
 
 ```text
-198 passed
+199 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch
@@ -960,6 +967,7 @@ coverage:
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_blocks_same_count_identity_mismatches \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_blocks_mismatched_backend_counts \
   tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_canonicalizes_image_paths \
+  tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_rejects_malformed_review_rows \
   tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports \
   -q
 ```
@@ -967,7 +975,7 @@ coverage:
 Result:
 
 ```text
-4 passed
+5 passed
 ```
 
 Focused review-import fail-closed tests:

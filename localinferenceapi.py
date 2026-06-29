@@ -21715,10 +21715,10 @@ def _caption_instruction_training_readiness(
     source_class_count = int(corpus_quality_metrics.get("source_class_count") or 0)
 
     selected_review_rows = [
-        row for row in review_rows if isinstance(row, Mapping) and bool(row.get("selected_for_training"))
+        row for row in review_rows if isinstance(row, Mapping) and row.get("selected_for_training") is True
     ]
     selected_manual_review_rows = [
-        row for row in selected_review_rows if bool(row.get("requires_manual_review"))
+        row for row in selected_review_rows if row.get("requires_manual_review") is True
     ]
     accepted_manual_review_rows = [
         row
@@ -21913,10 +21913,10 @@ def _caption_instruction_artifact_consistency_validation(
     archive_row_count = len(archive_rows) if isinstance(archive_rows, Sequence) else 0
     review_row_count = len(review_rows) if isinstance(review_rows, Sequence) else 0
     selected_review_row_count = sum(
-        1 for row in review_rows if isinstance(row, Mapping) and bool(row.get("selected_for_training"))
+        1 for row in review_rows if isinstance(row, Mapping) and row.get("selected_for_training") is True
     )
     manual_review_required_count = sum(
-        1 for row in review_rows if isinstance(row, Mapping) and bool(row.get("requires_manual_review"))
+        1 for row in review_rows if isinstance(row, Mapping) and row.get("requires_manual_review") is True
     )
 
     report_image_count = _optional_nonnegative_int(report_mapping.get("image_count"), "instruction_report.image_count")
@@ -21988,13 +21988,91 @@ def _caption_instruction_artifact_consistency_validation(
             f"manual review row count {manual_review_required_count} does not match report manual review count {report_manual_review_count}"
         )
 
+    review_image_qa_ids: Set[Tuple[str, str]] = set()
+    actionable_review_targets: Dict[Tuple[str, str, str, str], Tuple[int, str]] = {}
     for index, row in enumerate(review_rows, start=1):
         if not isinstance(row, Mapping):
             errors.append(f"review row {index} is not an object")
             continue
+        if str(row.get("format") or "").strip() != CAPTION_INSTRUCTION_REVIEW_ROWS_FORMAT:
+            errors.append(f"review row {index} format is invalid")
+        image_path = str(row.get("image_path") or row.get("image_name") or row.get("image") or "").strip()
+        split = str(row.get("split") or "").strip()
+        normalized_image_path = _caption_instruction_normalized_image_path(image_path)
+        if split and normalized_image_path and not re.match(r"^(train|val|valid|test)/", normalized_image_path):
+            normalized_image_path = _caption_instruction_normalized_image_path(f"{split}/{normalized_image_path}")
+        image_key = normalized_image_path or image_path
+        qa_id = str(row.get("qa_id") or "").strip()
+        question = str(row.get("question") or "").strip()
+        candidate_answer = str(row.get("candidate_answer") or "").strip()
+        training_answer = str(row.get("training_answer") or "").strip()
         row_origin = str(row.get("row_origin") or "").strip()
+        validation_status = str(row.get("validation_status") or "").strip()
+        raw_review_decision = str(row.get("review_decision") or "").strip()
+        review_decision = _caption_instruction_review_decision(row.get("review_decision"))
+        has_actionable_decision = review_decision in {"accepted", "rejected", "needs_revision"}
+        has_supported_nonactionable_decision = not raw_review_decision or review_decision == "unreviewed"
+        if not image_path:
+            errors.append(f"review row {index} missing image_path")
+        if not qa_id:
+            errors.append(f"review row {index} missing qa_id")
+        if not row_origin:
+            errors.append(f"review row {index} missing row_origin")
+        if not question:
+            errors.append(f"review row {index} missing question")
+        if not candidate_answer:
+            errors.append(f"review row {index} missing candidate_answer")
+        if not validation_status:
+            errors.append(f"review row {index} missing validation_status")
+        if not isinstance(row.get("selected_for_training"), bool):
+            errors.append(f"review row {index} selected_for_training must be boolean")
+        if not isinstance(row.get("requires_manual_review"), bool):
+            errors.append(f"review row {index} requires_manual_review must be boolean")
+        if row.get("selected_for_training") is True and not training_answer:
+            errors.append(f"review row {index} selected for training but missing training_answer")
+        if not isinstance(row.get("source_summary"), Mapping):
+            errors.append(f"review row {index} missing source_summary")
+        if not isinstance(row.get("rejection_reasons"), list):
+            errors.append(f"review row {index} rejection_reasons must be an array")
+        if "review_decision" not in row:
+            errors.append(f"review row {index} missing review_decision field")
+        if "review_notes" not in row:
+            errors.append(f"review row {index} missing review_notes field")
+        if raw_review_decision and not has_actionable_decision and not has_supported_nonactionable_decision:
+            errors.append(f"review row {index} has unsupported review_decision")
+        if has_actionable_decision and row_origin and row_origin not in {
+            "caption0",
+            "generated_qa",
+            "deterministic_metadata_qa",
+        }:
+            errors.append(f"review row {index} has unsupported actionable row_origin")
         if row_origin in {"caption0", "generated_qa"} and not str(row.get("dataset_id") or "").strip():
             errors.append(f"review row {index} missing dataset_id for persisted language review row")
+        if has_actionable_decision and row_origin in {"caption0", "generated_qa"}:
+            normalized_question = _caption_instruction_normalized_question(question)
+            answer_for_target = candidate_answer or training_answer
+            target_key = (
+                row_origin,
+                qa_id or normalized_question,
+                image_key,
+                "" if qa_id else answer_for_target,
+            )
+            prior = actionable_review_targets.get(target_key)
+            if prior:
+                prior_index, prior_decision = prior
+                prefix = (
+                    "duplicate actionable review target"
+                    if prior_decision == review_decision
+                    else "conflicting duplicate actionable review target"
+                )
+                errors.append(f"{prefix} at review row {index} (first seen at row {prior_index})")
+            else:
+                actionable_review_targets[target_key] = (index, review_decision)
+        if image_key and qa_id:
+            pair_key = (image_key, qa_id)
+            if pair_key in review_image_qa_ids:
+                errors.append(f"duplicate image_path + qa_id at review row {index}")
+            review_image_qa_ids.add(pair_key)
 
     image_paths: Set[str] = set()
     duplicate_image_paths: Set[str] = set()
@@ -22028,7 +22106,7 @@ def _caption_instruction_artifact_consistency_validation(
             training_rows_by_image[_caption_instruction_normalized_image_path(image_path) or image_path] += 1
         _add_identity(training_identities, duplicate_training_identities, _training_identity(row), row)
     for row in review_rows:
-        if not isinstance(row, Mapping) or not bool(row.get("selected_for_training")):
+        if not isinstance(row, Mapping) or row.get("selected_for_training") is not True:
             continue
         _add_identity(selected_review_identities, duplicate_selected_review_identities, _review_identity(row), row)
     for row in archive_rows:

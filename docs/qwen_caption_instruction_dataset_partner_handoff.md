@@ -59,6 +59,9 @@ The new work adds a separate instruction-dataset path:
 - Text-label saves and caption add/update/delete paths reject with
   `caption_mutation_busy` before dataset reads while the same dataset has an
   active caption job.
+- Dataset deletion rejects with `dataset_delete_blocked_active_jobs` while an
+  active caption dataset job references the same dataset, preventing a running
+  generator from losing its registry record or managed dataset tree.
 - The browser validates instruction JSONL before download, including required
   row metadata, instruction archive provenance, known validation/review states,
   rejected/failed/invalid validation state, non-trainable review state,
@@ -144,6 +147,8 @@ caption records or instruction records, so reviewed decisions cannot be applied
 against a moving archive.
 The same active-job rule protects direct caption and text-label mutations, so
 manual/API edits cannot interleave with backend caption generation.
+The dataset deletion path participates in the same protection: active caption
+dataset jobs block deletion, while terminal caption jobs do not.
 The backend also applies the rule at job launch, with the active-job check and
 registry insertion under one lock, so two same-dataset caption workers cannot
 be launched concurrently by near-simultaneous API calls.
@@ -637,6 +642,8 @@ Current combined caption/instruction/trainer/UI contract suite:
   tests/test_dataset_linked_annotation_flows.py::test_instruction_review_import_blocks_active_backend_caption_job_before_dataset_read \
   tests/test_dataset_linked_annotation_flows.py::test_instruction_review_route_blocks_when_backend_caption_job_is_active \
   tests/test_dataset_linked_annotation_flows.py::test_caption_mutations_block_active_backend_caption_job_before_dataset_read \
+  tests/test_dataset_linked_annotation_flows.py::test_delete_linked_dataset_blocks_active_caption_dataset_job \
+  tests/test_dataset_linked_annotation_flows.py::test_delete_linked_dataset_allows_completed_caption_dataset_job \
   tests/test_dataset_linked_annotation_flows.py::test_caption_instruction_strict_export_gate_requires_ready_proofs \
   tests/test_dataset_linked_annotation_flows.py::test_caption_instruction_strict_export_route_blocks_malformed_rows_when_ready_required \
   tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete \
@@ -648,7 +655,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-238 passed, 8 warnings
+240 passed, 8 warnings
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

@@ -16473,6 +16473,7 @@ def _active_job_registry_referencing_path_root(path_root: Path) -> Optional[str]
         ("class_analysis", CLASS_ANALYSIS_JOBS, CLASS_ANALYSIS_JOBS_LOCK),
         ("class_analysis_cluster", CLASS_ANALYSIS_CLUSTER_JOBS, CLASS_ANALYSIS_CLUSTER_JOBS_LOCK),
         ("data_ingestion", DATA_INGESTION_JOBS, DATA_INGESTION_JOBS_LOCK),
+        ("qwen_caption_dataset", QWEN_CAPTION_DATASET_JOBS, QWEN_CAPTION_DATASET_JOBS_LOCK),
         ("calibration", CALIBRATION_JOBS, CALIBRATION_JOBS_LOCK),
     ]
     for name, registry, lock in registries:
@@ -16496,6 +16497,7 @@ def _active_job_registry_referencing_dataset_id(dataset_id: str) -> Optional[str
         ("class_analysis", CLASS_ANALYSIS_JOBS, CLASS_ANALYSIS_JOBS_LOCK),
         ("class_analysis_cluster", CLASS_ANALYSIS_CLUSTER_JOBS, CLASS_ANALYSIS_CLUSTER_JOBS_LOCK),
         ("data_ingestion", DATA_INGESTION_JOBS, DATA_INGESTION_JOBS_LOCK),
+        ("qwen_caption_dataset", QWEN_CAPTION_DATASET_JOBS, QWEN_CAPTION_DATASET_JOBS_LOCK),
         ("calibration", CALIBRATION_JOBS, CALIBRATION_JOBS_LOCK),
     ]
     for name, registry, lock in registries:

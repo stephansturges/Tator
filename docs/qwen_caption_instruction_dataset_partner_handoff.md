@@ -5,10 +5,14 @@ Date: 2026-06-29
 ## Start Here
 
 For a complete external implementation review, start with
-`docs/qwen_caption_instruction_dataset_external_partner_packet.md`. It explains
+`docs/qwen_caption_training_dataset_complete_partner_packet.md`. It explains
 what changed, why it changed, which invariants matter, how artifacts are shaped,
 what was tested, and what still requires a real-data pilot before training use.
 This shorter handoff is a companion summary.
+
+For deeper implementation details, use
+`docs/qwen_caption_instruction_dataset_external_partner_packet.md` and
+`docs/qwen_caption_training_dataset_external_review_handoff.md`.
 
 ## Status
 

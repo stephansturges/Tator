@@ -4,6 +4,11 @@ Date: 2026-06-29
 
 ## Purpose
 
+The newest canonical partner packet is
+`docs/qwen_caption_training_dataset_complete_partner_packet.md`. Use that file
+as the external starting point; this packet remains a supporting implementation
+detail document for the instruction-dataset feature.
+
 This packet explains what was implemented in the caption-to-instruction-dataset
 work, why those choices were made, what artifacts the workflow produces, and
 what still needs real-data validation before the generated corpus is treated as

@@ -4,10 +4,14 @@ Date: 2026-06-29
 
 ## Canonical Review Packet
 
-This is the canonical external review packet for the caption-to-instruction-data
-work in this repository. It is written for a team that needs to understand what
-was implemented, why the implementation is shaped this way, how to test it, and
-what still must be proven before generated rows are used for fine-tuning.
+The newest canonical partner packet is
+`docs/qwen_caption_training_dataset_complete_partner_packet.md`. It is the
+recommended starting point for a team that needs to understand what was
+implemented, why the implementation is shaped this way, how to test it, and what
+still must be proven before generated rows are used for fine-tuning.
+
+This file remains as the longer implementation handoff and validation ledger for
+the same caption-to-instruction-data work.
 
 The packet is deliberately dataset-neutral. It does not rely on project-specific
 dataset names, class lists, or private evaluation assumptions. When sharing this
@@ -16,8 +20,11 @@ annotation-assisted VLM training-data workflow.
 
 Supporting documents:
 
+- `docs/qwen_caption_training_dataset_complete_partner_packet.md` is the
+  complete partner-facing overview, requirement mapping, workflow explanation,
+  and review checklist.
 - `docs/qwen_caption_instruction_dataset_external_partner_packet.md` is the
-  complete external partner packet for what was implemented and why.
+  previous external packet for what was implemented and why.
 - `docs/qwen_caption_instruction_dataset_hardening_report.md` records the latest
   implementation and validation ledger.
 - `docs/qwen_caption_prompt_stack.md` records prompt, token-budget, box-subset,

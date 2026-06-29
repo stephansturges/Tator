@@ -19,6 +19,90 @@ Those names are not needed to review the implementation, and keeping the packet
 neutral prevents product-specific assumptions from leaking into reusable
 training-data contracts.
 
+## Canonical Review Brief
+
+This is the canonical external-consumer packet for the caption-derived VLM
+training-dataset work. The important point is that the implementation is no
+longer "caption all images and dump a JSONL file." It is an application path
+for building an auditable instruction dataset from image captions, generated
+visual question/answer candidates, optional deterministic label-derived QA,
+review decisions, and strict export evidence.
+
+The work was done because a single broad caption per image is usually too weak
+for VLM fine-tuning. A useful training corpus needs varied prompts about the
+same image: broad scene descriptions, object-presence questions, count
+questions, spatial questions, attribute questions, and short grounded answers.
+At the same time, generated language cannot be allowed to become source-label
+truth. The implementation therefore separates four concepts throughout the
+pipeline:
+
+- trusted source annotations from labels and deterministic geometry;
+- model-written language candidates, including `caption0` and generated QA;
+- optional deterministic metadata QA produced by code from trusted labels;
+- selected flat trainer rows that are safe enough to export.
+
+The UI now exposes a distinct **Create VLM training dataset** workflow with
+controls for generated-QA count, QA mix, answer format, row-family inclusion,
+read-only label context, strict grounding, set-and-forget execution, and
+ready-report enforcement. Ordinary **Caption image**, **Caption next N**, and
+**Caption all images** remain captioning workflows. They do not silently become
+training-dataset generation.
+
+The preferred handoff artifact is the self-contained training bundle. It copies
+image bytes into `images/...`, copies effective label files into `labels/...`,
+rewrites trainer/archive/review image paths to the bundled image paths, keeps
+original-path and SHA-256 metadata for provenance, and includes the trainer
+JSONL, archive JSONL, review JSONL, report JSON, label map, and bundle
+manifest. The bundle exists so review and trainer dry runs do not depend on a
+mutable local image root on the originating workstation.
+
+Validation is layered rather than centralized in one place:
+
+- the browser blocks malformed downloads and presents operator-facing errors;
+- the backend applies strict export gates for API and script callers;
+- artifact-consistency checks compare trainer, archive, review, report, and
+  summary payloads as one coherent export set;
+- bundle creation verifies row rewrites to copied images before returning a
+  ZIP;
+- the bundle manifest validator verifies the non-manifest ZIP inventory,
+  duplicate members, declared file count, byte counts, and SHA-256 digests;
+- the trainer loader is the final boundary and rejects malformed, duplicate,
+  unsupported, rejected, needs-revision, or unresolved rows.
+
+Do not read the bundle manifest alone as a semantic training-readiness proof.
+The manifest is the reproducibility and checksum inventory for the ZIP. The
+row-level readiness proof is the instruction report plus the embedded
+artifact-consistency and export-validation objects. A reviewer should inspect
+both: the manifest proves "these bytes are the declared handoff bytes," while
+the report and consistency objects prove "these rows agree with the archive,
+review state, selected counts, and readiness policy."
+
+Several failure cases were hardened specifically because they had been observed
+or were likely in unattended runs:
+
+- output token budgets now distinguish automatic model-aware defaults from an
+  explicit user cap;
+- dense box prompts keep authoritative counts but use representative spatial
+  box subsets when the full box list would make the prompt too large;
+- stream output is inspected for repeated punctuation or token loops, and loop
+  recovery is logged as recovery rather than accepted as a caption;
+- set-and-forget mode is treated as the durable operating path, with progress,
+  attach/recover behavior, and active-job guards around archive mutation and
+  exports;
+- missing/download-needed model choices are visually distinct in the model
+  selector before a long job starts;
+- empty label files are treated as empty source evidence, not as a reason to
+  ask the VLM to invent label-derived facts for nonexistent objects;
+- generated structured claims are rewritten from trusted source annotations
+  when supported or rejected from trainer output when unsupported.
+
+The current readiness claim is deliberately limited. The implementation is
+ready for external implementation review and a small real-data pilot. It is not
+claiming that any generated corpus is automatically production-grade training
+data. A corpus should be treated as training-ready only after a real pilot run,
+human review where required, reviewed-row import, strict re-export, trainer
+loader validation, and at least one loader-plus-batch or fine-tuning dry run.
+
 ## Reader Entry Point
 
 Use this document as the main external review packet. It is intended to answer

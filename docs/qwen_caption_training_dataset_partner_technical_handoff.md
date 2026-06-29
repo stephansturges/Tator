@@ -75,6 +75,58 @@ review should decide whether the artifact schema, row-family defaults,
 human-review loop, readiness gates, and bundle contents are sufficient for a
 real pilot corpus.
 
+## Implementation Evidence Index
+
+This packet is written for a reviewer who may not know the implementation
+history. The claims below are tied to the current repo structure and recent
+hardening checkpoints.
+
+### Primary Files
+
+| File | What to inspect |
+| --- | --- |
+| `ybat-master/ybat.js` | Caption panel UI, model availability styling, instruction settings, bundle/report/review download actions, reviewed-row import, browser-side validators, busy guards, and formatted operator errors |
+| `localinferenceapi.py` | Dataset caption job APIs, instruction archive/report export, self-contained bundle creation, semantic manifest validation, review import, active-job/archive guards, and backend validation |
+| `models/schemas.py` | `QwenCaptionDatasetJobRequest` normalization for instruction settings, row-family inclusion, generated QA counts, and set-and-forget controls |
+| `tools/run_qwen_caption_flow_benchmark.py` | Caption runner plumbing, generated QA execution path, prompt-budget telemetry, recovery fields, and dataset-scale caption flow behavior |
+| `tools/qwen_training.py` | Trainer-side flat instruction-row loader and fail-closed validation for row provenance, review/validation state, duplicates, image resolution, and bundled-image digests |
+| `tools/audit_qwen_caption_soak.py` and related soak tools | Set-and-forget audit, certification, watchdog, and unattended-run health checks |
+| `tests/test_qwen_caption_dataset_job.py` | Backend instruction dataset, archive, report, bundle, review import, artifact consistency, and canonical image-path tests |
+| `tests/test_labeling_panel_layout_contract.py` | Browser UI contract, validator, busy-guard, formatter, and instruction action tests |
+| `tests/test_qwen_training_backend.py` | Trainer loader tests for flat rows, fail-closed metadata, duplicate handling, image aliasing, and bundle image checksum validation |
+
+### Recent Hardening Checkpoints
+
+The latest caption-training-dataset work was committed in scoped checkpoints.
+The most relevant checkpoints for external review are:
+
+| Commit | Scope |
+| --- | --- |
+| `803367a` | Trainer loader verifies bundled image digests when `bundle_image_sha256` is present |
+| `4a79b6f` | Review import requires bundled review rows to preserve original image identity and valid bundle SHA metadata |
+| `e22200f` | Partner-facing technical rationale and handoff narrative |
+| `6684d08` | Bundle validator revalidates trainer rows inside the finished bundle |
+| `2f893a8` | Bundle validator recomputes artifact consistency from bundled artifacts |
+| `7295751` | Operator-facing formatting for semantic bundle-manifest failures |
+
+These checkpoints should be reviewed together. The product surface is the UI
+workflow, but the safety boundary depends on the browser, backend, bundle, and
+trainer loader all enforcing the same contract independently.
+
+### Review Principle
+
+Do not review this as a caption generator only. Review it as a training-data
+construction system with four boundaries:
+
+1. **Generation boundary**: VLM language candidates are created but not trusted
+   as labels.
+2. **Artifact boundary**: trainer, archive, review, report, copied images,
+   copied labels, and manifest must describe one coherent export.
+3. **Human-review boundary**: review files can apply decisions and notes, but
+   cannot rewrite source truth or generated text.
+4. **Trainer boundary**: the loader rejects stale, malformed, duplicate,
+   unreviewed, rejected, unresolved, or checksum-drifted rows before training.
+
 ## What We Did And Why
 
 The implementation work converted captioning from a single-output annotation
@@ -274,6 +326,24 @@ boundary even when a trainer JSONL file has been copied, edited, or separated
 from the original bundle manifest.
 
 This keeps trainer input simple while making the handoff fail closed.
+
+### Bundle Review Identity Validation
+
+Bundled review rows carry both the copied bundle path and the original dataset
+image identity. The review importer requires original image identity whenever a
+review row includes bundle image metadata. It also rejects malformed bundle
+SHA-256 values before applying decisions.
+
+The reason is practical: external reviewers should be able to review a
+self-contained bundle whose `image_path` points at `images/...`, while the
+application still needs to match that decision back to the current dataset
+archive. The copied bundle path is for portable review. The original image path
+and stable QA identity are for safe import back into the app.
+
+At the trainer boundary, `bundle_image_sha256` is checked against the resolved
+training image bytes. This catches the most dangerous downstream case: a flat
+trainer JSONL row that still looks syntactically valid but now points at the
+wrong image bytes.
 
 ## Implementation Map
 
@@ -798,6 +868,36 @@ trainer row
 
 For generated QA, the reviewer should additionally confirm that accepted rows
 are useful training examples rather than repetitive rewordings of `caption0`.
+
+## How To Consume This Handoff
+
+The recommended external-review sequence is:
+
+1. Read the executive summary and evidence index in this document.
+2. Inspect the UI behavior in `ybat-master/ybat.js` against the UI/UX contract.
+3. Inspect backend export, bundle, and review-import validation in
+   `localinferenceapi.py`.
+4. Inspect trainer-loader rejection behavior in `tools/qwen_training.py`.
+5. Run the focused tests listed below or review the recorded outputs from the
+   same commands.
+6. Generate one small pilot bundle from the UI.
+7. Verify the bundle manifest, report, archive, review JSONL, trainer JSONL,
+   copied image bytes, copied labels, and trainer-loader import as one packet.
+8. Review sampled generated QA rows for usefulness, not just validity.
+9. Import review decisions and re-export under the strict ready-report gate.
+10. Only then decide whether the row families and defaults are acceptable for a
+    larger fine-tuning corpus.
+
+The expected reviewer output should include:
+
+- whether the artifact contract is sufficient;
+- whether bundle contents are self-contained enough for external training;
+- whether generated QA defaults should be train-included or review-only for the
+  first large run;
+- whether deterministic metadata QA should remain off by default;
+- whether the readiness blockers are strict enough;
+- whether the loader should require additional metadata before fine-tuning;
+- which pilot metrics must pass before scaling beyond the sample run.
 
 ## Required Pilot Before Training Use
 

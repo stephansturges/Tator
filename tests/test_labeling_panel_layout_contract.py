@@ -537,6 +537,7 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     update_caption_helper = js[update_caption_start:update_caption_end]
     assert "const hasCaptionDataset = !!getCaptionDatasetId();" in update_caption_helper
     assert "function qwenCaptionArchiveMutationActive" in js
+    assert "function updateCaptionInstructionDatasetOptionControls" in js
     assert "function updateCaptionArchiveActionControls" in js
     assert "const busy = qwenCaptionArchiveMutationActive();" in update_caption_helper
     assert "const captionExportDisabled = busy;" in update_caption_helper
@@ -549,7 +550,17 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "qwenElements.captionDownloadInstructionReview.disabled = instructionExportDisabled" in update_caption_helper
     assert "qwenElements.captionImportInstructionReview.disabled = instructionExportDisabled" in update_caption_helper
     assert "qwenElements.captionDownloadInstructionReport.disabled = instructionExportDisabled" in update_caption_helper
+    assert "updateCaptionInstructionDatasetOptionControls();" in update_caption_helper
     assert "updateCaptionArchiveActionControls();" in update_caption_helper
+    instruction_option_helper = _extract_js_function(js, "updateCaptionInstructionDatasetOptionControls")
+    assert "qwenElements.captionSubcaptionsPerImage" in instruction_option_helper
+    assert "qwenElements.captionQaMix" in instruction_option_helper
+    assert "qwenElements.captionAnswerFormat" in instruction_option_helper
+    assert "qwenElements.captionIncludeCaption0Training" in instruction_option_helper
+    assert "qwenElements.captionIncludeGeneratedQaTraining" in instruction_option_helper
+    assert "qwenElements.captionIncludeDeterministicMetadataQa" in instruction_option_helper
+    assert "qwenElements.captionIncludeSourceAnnotationsContext" in instruction_option_helper
+    assert "qwenElements.captionStrictGrounding" in instruction_option_helper
     render_alternates_helper = _extract_js_function(js, "renderCaptionAlternatesForCurrentImage")
     assert "updateCaptionArchiveActionControls();" in render_alternates_helper
     assert "qwenElements.captionSaveAlternate.disabled = busy || !imageName || !caption" in js
@@ -617,6 +628,14 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             "  captionDownloadInstructionReport: button(),",
             "  captionBatchCancel: button(),",
             "  captionResumeBackendJob: button(),",
+            "  captionSubcaptionsPerImage: button(),",
+            "  captionQaMix: button(),",
+            "  captionAnswerFormat: button(),",
+            "  captionIncludeCaption0Training: button(),",
+            "  captionIncludeGeneratedQaTraining: button(),",
+            "  captionIncludeDeterministicMetadataQa: button(),",
+            "  captionIncludeSourceAnnotationsContext: button(),",
+            "  captionStrictGrounding: button(),",
             "  captionOutput: { value: 'caption text' },",
             "  captionSaveAlternate: button(),",
             "  captionUpdateSelected: button(),",
@@ -625,6 +644,7 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             "};",
             _extract_js_function(js, "qwenCaptionArchiveMutationActive"),
             _extract_js_function(js, "captionInstructionArtifactBusyMessage"),
+            _extract_js_function(js, "updateCaptionInstructionDatasetOptionControls"),
             _extract_js_function(js, "updateCaptionArchiveActionControls"),
             _extract_js_function(js, "updateQwenCaptionButton"),
             "assert.strictEqual(qwenCaptionArchiveMutationActive(), true);",
@@ -647,6 +667,14 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             "assert.strictEqual(qwenElements.captionUpdateSelected.disabled, true);",
             "assert.strictEqual(qwenElements.captionSetPrimary.disabled, true);",
             "assert.strictEqual(qwenElements.captionDeleteSelected.disabled, true);",
+            "assert.strictEqual(qwenElements.captionSubcaptionsPerImage.disabled, true);",
+            "assert.strictEqual(qwenElements.captionQaMix.disabled, true);",
+            "assert.strictEqual(qwenElements.captionAnswerFormat.disabled, true);",
+            "assert.strictEqual(qwenElements.captionIncludeCaption0Training.disabled, true);",
+            "assert.strictEqual(qwenElements.captionIncludeGeneratedQaTraining.disabled, true);",
+            "assert.strictEqual(qwenElements.captionIncludeDeterministicMetadataQa.disabled, true);",
+            "assert.strictEqual(qwenElements.captionIncludeSourceAnnotationsContext.disabled, true);",
+            "assert.strictEqual(qwenElements.captionStrictGrounding.disabled, true);",
             "qwenCaptionBatchBackendJobId = '';",
             "assert.strictEqual(qwenCaptionArchiveMutationActive(), false);",
             "assert.strictEqual(captionInstructionArtifactBusyMessage('exporting instruction rows'), '');",
@@ -668,6 +696,14 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             "assert.strictEqual(qwenElements.captionUpdateSelected.disabled, false);",
             "assert.strictEqual(qwenElements.captionSetPrimary.disabled, false);",
             "assert.strictEqual(qwenElements.captionDeleteSelected.disabled, false);",
+            "assert.strictEqual(qwenElements.captionSubcaptionsPerImage.disabled, false);",
+            "assert.strictEqual(qwenElements.captionQaMix.disabled, false);",
+            "assert.strictEqual(qwenElements.captionAnswerFormat.disabled, false);",
+            "assert.strictEqual(qwenElements.captionIncludeCaption0Training.disabled, false);",
+            "assert.strictEqual(qwenElements.captionIncludeGeneratedQaTraining.disabled, false);",
+            "assert.strictEqual(qwenElements.captionIncludeDeterministicMetadataQa.disabled, false);",
+            "assert.strictEqual(qwenElements.captionIncludeSourceAnnotationsContext.disabled, false);",
+            "assert.strictEqual(qwenElements.captionStrictGrounding.disabled, false);",
         ]
     )
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)

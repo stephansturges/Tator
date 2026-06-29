@@ -96,6 +96,10 @@ row before training.
 - Added instruction launch preflight so the UI refuses an instruction job with
   all trainable row families disabled and makes archive/review-only generated
   QA candidates explicit in the confirmation text.
+- Instruction row-family and generated-QA setup controls now disable while a
+  caption or instruction job is mutating the caption archive, so mid-run edits
+  do not appear to affect the backend job that has already captured its
+  settings.
 - Fixed caption action layout so export and instruction buttons wrap into
   readable responsive columns instead of clipping in the sidebar.
 - Fixed readiness and attach/recover rows so long status text cannot squeeze the

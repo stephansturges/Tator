@@ -2506,6 +2506,8 @@ const AUTOMATION_LOCKED_TABS = new Set([
         captionDownloadGroupedJson: null,
         captionDownloadVlmJsonl: null,
         captionSubcaptionsPerImage: null,
+        captionQaMix: null,
+        captionAnswerFormat: null,
         captionIncludeCaption0Training: null,
         captionIncludeGeneratedQaTraining: null,
         captionIncludeDeterministicMetadataQa: null,
@@ -25126,6 +25128,24 @@ async function cancelRfDetrTrainingJobRequest() {
         return !!(qwenCaptionActive || qwenCaptionBatchActive || qwenCaptionBatchBackendJobId);
     }
 
+    function updateCaptionInstructionDatasetOptionControls() {
+        const busy = qwenCaptionArchiveMutationActive();
+        [
+            qwenElements.captionSubcaptionsPerImage,
+            qwenElements.captionQaMix,
+            qwenElements.captionAnswerFormat,
+            qwenElements.captionIncludeCaption0Training,
+            qwenElements.captionIncludeGeneratedQaTraining,
+            qwenElements.captionIncludeDeterministicMetadataQa,
+            qwenElements.captionIncludeSourceAnnotationsContext,
+            qwenElements.captionStrictGrounding,
+        ].forEach((el) => {
+            if (el) {
+                el.disabled = busy;
+            }
+        });
+    }
+
     function updateQwenCaptionButton() {
         if (!qwenElements.captionRunButton) {
             return;
@@ -25183,6 +25203,7 @@ async function cancelRfDetrTrainingJobRequest() {
         if (qwenElements.captionResumeBackendJob) {
             qwenElements.captionResumeBackendJob.disabled = locked || !qwenAvailable || busy || !hasCaptionDataset;
         }
+        updateCaptionInstructionDatasetOptionControls();
         updateCaptionArchiveActionControls();
     }
 

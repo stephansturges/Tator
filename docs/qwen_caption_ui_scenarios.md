@@ -137,6 +137,11 @@ or parseable JSON. **Give generator read-only label context** may pass source
 label counts into the generator as grounding context, but generated QA never
 becomes source annotations. **Strict QA grounding** asks the model to answer only
 from the image, caption0, or read-only source context.
+While a caption or instruction job is mutating the caption archive, the
+instruction row-family and generated-QA setup controls are disabled so the UI
+does not imply that mid-run edits will change the active backend job. They
+re-enable after the archive is stable and apply to the next launch/export
+cycle.
 
 **Download instruction JSONL** exports normal `image_path` / `question` /
 `answer` rows. The trainer imports this flat shape directly and normalizes each

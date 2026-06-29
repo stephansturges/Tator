@@ -475,15 +475,18 @@ has not completed the pilot and review loop.
 
 ## Recommended External Review Order
 
-1. Read this report for the narrative and design intent.
-2. Read `docs/qwen_caption_training_dataset_complete_partner_packet.md` for the
+1. Read `docs/qwen_caption_training_dataset_external_review_readme.md` for the
+   neutral first-read overview of what changed, why, how to operate it, and
+   what still needs pilot proof.
+2. Read this report for the narrative and design intent.
+3. Read `docs/qwen_caption_training_dataset_complete_partner_packet.md` for the
    full contract and test checklist.
-3. Read `docs/qwen_caption_prompt_stack.md` for prompt, token, box-subset, and
+4. Read `docs/qwen_caption_prompt_stack.md` for prompt, token, box-subset, and
    loop-recovery details.
-4. Read `docs/qwen_caption_ui_scenarios.md` for operator-visible scenarios.
-5. Run the targeted test bundle listed in the complete partner packet.
-6. Run a small real-data pilot and review import/re-export cycle.
-7. Load the final trainer JSONL through the Qwen trainer.
+5. Read `docs/qwen_caption_ui_scenarios.md` for operator-visible scenarios.
+6. Run the targeted test bundle listed in the complete partner packet.
+7. Run a small real-data pilot and review import/re-export cycle.
+8. Load the final trainer JSONL through the Qwen trainer.
 
 ## Bottom Line
 

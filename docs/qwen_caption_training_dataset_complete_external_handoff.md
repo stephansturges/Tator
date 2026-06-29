@@ -10,6 +10,10 @@ structured this way, what artifacts it produces, how the implementation protects
 source truth from generated language, what has been hardened, and what still
 must be proven before a generated corpus is used for fine-tuning.
 
+For the neutral first-read external review packet, start with
+`docs/qwen_caption_training_dataset_external_review_readme.md`. This handoff is
+the shorter supporting narrative after that README.
+
 The document is intentionally dataset-neutral. Do not add customer, partner,
 dataset, or project code names before sharing it. The implementation and review
 contract do not require those names.

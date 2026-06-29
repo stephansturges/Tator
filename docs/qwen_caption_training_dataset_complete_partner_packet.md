@@ -38,29 +38,36 @@ history from commits:
 
 Recommended reading order for a technical review:
 
-1. Read `docs/qwen_caption_training_dataset_complete_external_handoff.md` for
+1. Read `docs/qwen_caption_training_dataset_external_review_readme.md` for the
+   neutral shareable entry point: what changed, why it changed, how to operate
+   the workflow, which artifacts matter, what has been validated, and what
+   pilot proof is still required.
+2. Read `docs/qwen_caption_training_dataset_complete_external_handoff.md` for
    the concise complete handoff: what was built, why, how to operate it, what
    is validated, and what still needs pilot proof.
-2. Read `docs/qwen_caption_training_dataset_external_consumer_dossier.md` for
+3. Read `docs/qwen_caption_training_dataset_external_consumer_dossier.md` for
    the complete external-consumer explanation of what was built, why each layer
    exists, how artifacts should be reviewed, and what pilot proof is still
    required.
-3. Read **One-Page Decision Summary** to understand the current readiness claim.
-4. Read **What Was Done And Why** and **Layer-By-Layer Implementation
+4. Read **One-Page Decision Summary** to understand the current readiness claim.
+5. Read **What Was Done And Why** and **Layer-By-Layer Implementation
    Narrative** to understand the design intent.
-5. Read **Requirement Mapping** to verify that the product behavior requested
+6. Read **Requirement Mapping** to verify that the product behavior requested
    by the multi-prompt training-data workflow has an implemented artifact,
    control, or guard.
-6. Read **Artifact Contract** and **How To Inspect A Generated Packet** before
+7. Read **Artifact Contract** and **How To Inspect A Generated Packet** before
    reviewing sample exports.
-7. Run **Reproducible Verification Commands** against the checked-out
+8. Run **Reproducible Verification Commands** against the checked-out
    repository.
-8. Use **Required Pilot Before Training Use** and **Open Decisions For The
+9. Use **Required Pilot Before Training Use** and **Open Decisions For The
    Review Team** to decide whether the implementation is ready to run on a
    real target corpus.
 
 The companion documents are supporting references:
 
+- `docs/qwen_caption_training_dataset_external_review_readme.md` is the neutral
+  external-review entry point that explains what was done, why it was done, how
+  an operator runs it, and what pilot proof remains.
 - `docs/qwen_caption_training_dataset_complete_external_handoff.md` is the
   concise complete external handoff for what was built, why, how it is
   validated, and what pilot proof remains.
@@ -115,6 +122,7 @@ fine-tuning smoke validation.
 
 For external review, provide this file plus the following supporting files:
 
+- `docs/qwen_caption_training_dataset_external_review_readme.md`
 - `docs/qwen_caption_training_dataset_complete_external_handoff.md`
 - `docs/qwen_caption_training_dataset_external_consumer_dossier.md`
 - `docs/qwen_caption_training_dataset_external_implementation_report.md`

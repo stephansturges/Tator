@@ -549,6 +549,9 @@ same settings be used for a larger corpus.
 
 Use these files with this dossier:
 
+- `docs/qwen_caption_training_dataset_external_review_readme.md`: neutral
+  first-read entry point for external review, including what changed, why,
+  operation flow, validation boundaries, and pilot requirements.
 - `docs/qwen_caption_training_dataset_complete_partner_packet.md`: broad
   external-review packet and reading order.
 - `docs/qwen_caption_training_dataset_complete_external_handoff.md`: concise

@@ -290,7 +290,8 @@ browser. A row must include the format marker, image path, QA id, origin,
 question, candidate answer, validation status, boolean selection/review flags,
 source summary, rejection-reason array, review-decision field, review-notes
 field, a supported review decision, a supported actionable origin, and a
-training answer whenever the row is selected for training.
+training answer whenever the row is selected for training. The same contract is
+enforced before review import mutates saved language-review metadata.
 
 Flat-layout image keys are canonicalized before merge so `foo.jpg` and
 `train/foo.jpg` do not become two separate instruction objects for the same
@@ -571,7 +572,7 @@ Result:
 Result:
 
 ```text
-199 passed
+205 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

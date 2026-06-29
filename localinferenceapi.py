@@ -22661,7 +22661,7 @@ def _dataset_caption_instruction_archive(
         dataset_id=str(dataset_id or "").strip(),
     )
     manual_review_required_count = sum(
-        1 for row in review_rows if isinstance(row, Mapping) and bool(row.get("requires_manual_review"))
+        1 for row in review_rows if isinstance(row, Mapping) and row.get("requires_manual_review") is True
     )
     training_readiness = _caption_instruction_training_readiness(
         corpus_quality_metrics=corpus_quality_metrics,
@@ -23091,7 +23091,7 @@ def export_captions(dataset_id: str, options: Optional[Mapping[str, Any]] = None
         ),
         "instruction_review_row_count": len(instruction_review_rows),
         "manual_review_required_count": sum(
-            1 for row in instruction_review_rows if isinstance(row, Mapping) and bool(row.get("requires_manual_review"))
+            1 for row in instruction_review_rows if isinstance(row, Mapping) and row.get("requires_manual_review") is True
         ),
         "training_readiness_status": str(
             (instruction_report.get("training_readiness") or {}).get("status")
@@ -23202,6 +23202,99 @@ def _caption_instruction_reject_unsupported_review_decisions(rows: Sequence[Any]
             status_code=HTTP_400_BAD_REQUEST,
             detail=f"review_rows_unsupported_review_decision:row_{index}:{raw_decision}",
         )
+
+
+def _caption_instruction_reject_malformed_review_rows(rows: Sequence[Any]) -> None:
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, Mapping):
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"review_rows_row_not_object:row_{index}",
+            )
+        if str(row.get("format") or "").strip() != CAPTION_INSTRUCTION_REVIEW_ROWS_FORMAT:
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"review_rows_invalid_format:row_{index}",
+            )
+        if not str(row.get("image_path") or row.get("image_name") or row.get("image") or "").strip():
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"review_rows_missing_image_path:row_{index}",
+            )
+        if not str(row.get("qa_id") or "").strip():
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"review_rows_qa_id_missing:row_{index}",
+            )
+        row_origin = str(row.get("row_origin") or "").strip()
+        question = str(row.get("question") or "").strip()
+        candidate_answer = str(row.get("candidate_answer") or "").strip()
+        training_answer = str(row.get("training_answer") or "").strip()
+        if not row_origin:
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"review_rows_row_origin_missing:row_{index}",
+            )
+        if row_origin == "generated_qa" and (not question or not (candidate_answer or training_answer)):
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"review_rows_generated_qa_text_missing:row_{index}",
+            )
+        if row_origin == "caption0" and not (candidate_answer or training_answer):
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"review_rows_caption0_answer_missing:row_{index}",
+            )
+        if not question:
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"review_rows_question_missing:row_{index}",
+            )
+        if not candidate_answer:
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"review_rows_candidate_answer_missing:row_{index}",
+            )
+        if not str(row.get("validation_status") or "").strip():
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"review_rows_validation_status_missing:row_{index}",
+            )
+        if not isinstance(row.get("selected_for_training"), bool):
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"review_rows_selected_for_training_invalid:row_{index}",
+            )
+        if not isinstance(row.get("requires_manual_review"), bool):
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"review_rows_requires_manual_review_invalid:row_{index}",
+            )
+        if row.get("selected_for_training") is True and not training_answer:
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"review_rows_training_answer_missing:row_{index}",
+            )
+        if not isinstance(row.get("source_summary"), Mapping):
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"review_rows_source_summary_missing:row_{index}",
+            )
+        if not isinstance(row.get("rejection_reasons"), list):
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"review_rows_rejection_reasons_invalid:row_{index}",
+            )
+        if "review_decision" not in row:
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"review_rows_review_decision_missing:row_{index}",
+            )
+        if "review_notes" not in row:
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"review_rows_review_notes_missing:row_{index}",
+            )
 
 
 def _caption_instruction_has_persisted_actionable_review_decision(rows: Sequence[Any]) -> bool:
@@ -23378,7 +23471,7 @@ def _caption_instruction_current_review_row_status(
     question = _caption_instruction_normalized_question(row.get("question"))
     candidate_answer = str(row.get("candidate_answer") or "").strip()
     training_answer = str(row.get("training_answer") or "").strip()
-    selected_for_training = bool(row.get("selected_for_training"))
+    selected_for_training = row.get("selected_for_training") is True
     matched_by_identity = False
     for current in current_review_rows:
         if not isinstance(current, Mapping):
@@ -23401,7 +23494,7 @@ def _caption_instruction_current_review_row_status(
         if candidate_answer and current_candidate_answer and current_candidate_answer != candidate_answer:
             return "candidate_answer_stale"
         current_training_answer = str(current.get("training_answer") or "").strip()
-        if selected_for_training and bool(current.get("selected_for_training")) is not True:
+        if selected_for_training and current.get("selected_for_training") is not True:
             return "training_answer_stale"
         if training_answer and current_training_answer != training_answer:
             return "training_answer_stale"
@@ -23803,6 +23896,7 @@ def apply_caption_instruction_review(dataset_id: str, payload: Dict[str, Any]):
     entry = _resolve_dataset_entry(dataset_id)
     _require_dataset_annotation_lock_owner_if_active(entry, payload)
     rows = _caption_instruction_review_payload_rows(payload)
+    _caption_instruction_reject_malformed_review_rows(rows)
     _caption_instruction_reject_unsupported_review_decisions(rows)
     _caption_instruction_reject_dataset_id_mismatches(rows, dataset_id=dataset_id)
     _caption_instruction_reject_duplicate_review_targets(rows, dataset_id=dataset_id)

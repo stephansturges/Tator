@@ -162,7 +162,8 @@ before writing any review metadata, including persisted language decisions
 missing an embedded dataset id, rows whose QA id is known but whose image path
 no longer matches the stored record, whose reviewed question/answer or caption
 text is missing, rows whose stable QA id is missing or does not match a saved
-record, or whose image path still matches but whose reviewed text or selected
+record, rows with non-boolean selection/review flags or missing review columns,
+or rows whose image path still matches but whose reviewed text or selected
 training answer is no longer current, so mixed valid/stale packets do not
 partially apply. The browser
 import preflight also catches

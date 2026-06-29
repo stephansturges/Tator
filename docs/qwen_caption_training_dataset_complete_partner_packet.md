@@ -409,7 +409,8 @@ Consistency checks include:
 - selected review row count matches the report selected-row count
 - manual-review row count matches the report manual-review count
 - review rows preserve the required review schema, supported review decisions,
-  supported actionable origins, and selected-row training answers
+  supported actionable origins, and selected-row training answers before export
+  and before review import mutates saved metadata
 - embedded consistency proofs agree across payload, archive, report, and summary
 
 The report includes `training_readiness`:
@@ -602,7 +603,7 @@ node --check ybat-master/ybat.js
 Result:
 
 ```text
-199 passed
+205 passed
 ```
 
 Additional focused validation recorded in the supporting hardening docs covers:

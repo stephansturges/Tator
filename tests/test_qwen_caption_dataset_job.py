@@ -913,6 +913,59 @@ def test_caption_instruction_review_import_rejects_unsupported_review_decision(
 
 
 @pytest.mark.parametrize(
+    ("row_update", "expected_detail"),
+    [
+        ({"selected_for_training": "yes"}, "review_rows_selected_for_training_invalid:row_1"),
+        ({"requires_manual_review": "yes"}, "review_rows_requires_manual_review_invalid:row_1"),
+        ({"training_answer": ""}, "review_rows_training_answer_missing:row_1"),
+        ({"source_summary": ""}, "review_rows_source_summary_missing:row_1"),
+        ({"rejection_reasons": ""}, "review_rows_rejection_reasons_invalid:row_1"),
+        ({"review_notes": None}, "review_rows_review_notes_missing:row_1"),
+    ],
+)
+def test_caption_instruction_review_import_rejects_malformed_review_row_shape(
+    monkeypatch,
+    tmp_path,
+    row_update,
+    expected_detail,
+) -> None:
+    import localinferenceapi as api
+
+    entry = {"id": "ds", "dataset_root": str(tmp_path), "registry_root": str(tmp_path)}
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: entry)
+
+    row = {
+        "format": "tator_caption_instruction_review_rows_v1",
+        "dataset_id": "ds",
+        "image_path": "frame.jpg",
+        "split": "train",
+        "row_origin": "generated_qa",
+        "qa_id": "qa-1",
+        "row_type": "generated_qa",
+        "question": "What is the scene type?",
+        "candidate_answer": "A waterfront area.",
+        "training_answer": "A waterfront area.",
+        "validation_status": "accepted",
+        "selected_for_training": True,
+        "requires_manual_review": True,
+        "review_decision": "accepted",
+        "review_notes": "",
+        "rejection_reasons": [],
+        "source_summary": {"status": "empty_label_file"},
+    }
+    if row_update == {"review_notes": None}:
+        row.pop("review_notes")
+    else:
+        row.update(row_update)
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.apply_caption_instruction_review("ds", {"rows": [row]})
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == expected_detail
+
+
+@pytest.mark.parametrize(
     "row_update",
     [
         {"row_origin": "generated_qa", "review_decision": ""},

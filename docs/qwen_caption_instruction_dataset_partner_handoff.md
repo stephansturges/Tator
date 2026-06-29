@@ -315,7 +315,10 @@ backend and browser: format marker, image path, QA id, origin, question,
 candidate answer, validation status, boolean selection/review flags, source
 summary, rejection-reason array, review-decision field, review-notes field,
 supported review decision, supported actionable origin, and a training answer
-for selected rows.
+for selected rows. The backend enforces this contract both when proving artifact
+consistency and when importing reviewed JSONL, so spreadsheet or script edits
+that drop required fields fail before any saved caption or generated-QA review
+metadata is changed.
 
 Flat-layout image keys are canonicalized before this check runs. That means a
 saved caption keyed as `sub/img.jpg` and a manifest row that temporarily appears
@@ -613,7 +616,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-199 passed
+205 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

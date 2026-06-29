@@ -23338,6 +23338,34 @@ def _caption_instruction_bundle_rewrite_rows(
     return rewritten
 
 
+def _caption_instruction_bundle_missing_rewritten_images(
+    rows: Sequence[Any],
+    *,
+    row_kind: str,
+) -> List[str]:
+    missing: List[str] = []
+    row_iterable = rows if isinstance(rows, Sequence) and not isinstance(rows, (str, bytes, bytearray)) else []
+    for row in row_iterable:
+        if not isinstance(row, Mapping):
+            continue
+        image_path = str(row.get("image_path") or row.get("image_name") or row.get("image") or "").strip()
+        if not image_path:
+            continue
+        if row_kind == "training":
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), Mapping) else {}
+            if not str(metadata.get("bundle_image_path") or "").strip():
+                missing.append(image_path)
+            continue
+        if row_kind == "archive":
+            export_metadata = row.get("export_metadata") if isinstance(row.get("export_metadata"), Mapping) else {}
+            if not str(export_metadata.get("bundle_image_path") or "").strip():
+                missing.append(str(row.get("original_image_path") or image_path).strip())
+            continue
+        if row_kind == "review" and not str(row.get("bundle_image_sha256") or "").strip():
+            missing.append(str(row.get("original_image_path") or image_path).strip())
+    return missing
+
+
 def download_caption_instruction_bundle(
     dataset_id: str,
     options: Optional[Mapping[str, Any]] = None,
@@ -23477,12 +23505,10 @@ def download_caption_instruction_bundle(
             image_assets,
             row_kind="training",
         )
-        missing_training_images = [
-            str(row.get("image_path") or "").strip()
-            for row in rewritten_training_rows
-            if isinstance(row, Mapping)
-            and not str((row.get("metadata") or {}).get("bundle_image_path") or "").strip()
-        ]
+        missing_training_images = _caption_instruction_bundle_missing_rewritten_images(
+            rewritten_training_rows,
+            row_kind="training",
+        )
         if missing_training_images:
             raise HTTPException(
                 status_code=HTTP_412_PRECONDITION_FAILED,
@@ -23498,6 +23524,24 @@ def download_caption_instruction_bundle(
             image_assets,
             row_kind="review",
         )
+        missing_archive_images = _caption_instruction_bundle_missing_rewritten_images(
+            rewritten_archive_rows,
+            row_kind="archive",
+        )
+        if missing_archive_images:
+            raise HTTPException(
+                status_code=HTTP_412_PRECONDITION_FAILED,
+                detail=f"caption_instruction_bundle_archive_image_missing:{missing_archive_images[0]}",
+            )
+        missing_review_images = _caption_instruction_bundle_missing_rewritten_images(
+            rewritten_review_rows,
+            row_kind="review",
+        )
+        if missing_review_images:
+            raise HTTPException(
+                status_code=HTTP_412_PRECONDITION_FAILED,
+                detail=f"caption_instruction_bundle_review_image_missing:{missing_review_images[0]}",
+            )
         training_validation = _caption_instruction_validate_training_rows(rewritten_training_rows)
         if not training_validation.get("ok"):
             raise HTTPException(

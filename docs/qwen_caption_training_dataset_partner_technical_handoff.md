@@ -129,7 +129,9 @@ The backend validates the bundle before returning it. The manifest must declare
 the expected format, manifest path, checksum scope, file count, non-manifest
 ZIP member inventory, byte counts, and SHA-256 digests. Duplicate ZIP members,
 missing members, mismatched byte counts, and checksum mismatches fail the
-download.
+download. Trainer, archive, and review rows must also resolve to copied images
+inside the bundle; stale rows that still point at an uncopied original path
+block the bundle instead of producing a partially self-contained handoff.
 
 ### Coordinated JSONL And Report Artifacts
 
@@ -409,7 +411,7 @@ copied, edited, mixed, or shared outside the UI.
 | --- | --- |
 | Browser preflight | Row shape, metadata, readiness, review state, duplicates, settings fingerprint, and consistency before writing downloads |
 | Backend export validation | Flat trainer rows, report readiness, artifact consistency, settings fingerprint, review-row shape, image alias resolution, and strict API/script export |
-| Bundle validation | Copied image/label assets, rewritten paths, trainer rows, artifact consistency, ZIP integrity, manifest inventory, byte counts, and SHA-256 digests |
+| Bundle validation | Copied image/label assets, rewritten trainer/archive/review paths, trainer rows, artifact consistency, ZIP integrity, manifest inventory, byte counts, and SHA-256 digests |
 | Review import validation | Wrong dataset, stale text, duplicate targets, unsupported origins, malformed rows, and metadata-only mutation |
 | Trainer loader validation | Missing images, malformed rows, duplicate canonical image/question pairs, rejected or needs-revision rows, invalid answer format, missing provenance |
 
@@ -430,8 +432,8 @@ The repository has focused coverage for:
 - review JSONL export and metadata-only review import;
 - stale, duplicate, wrong-dataset, malformed, and unsupported review rows;
 - trainer import of flat question/answer rows;
-- bundle construction, copied images, copied labels, manifest checksums, and
-  path rewriting;
+- bundle construction, copied images, copied labels, trainer/archive/review
+  path rewriting, stale-row bundle rejection, and manifest checksums;
 - review-row import from bundled paths using original-image aliases;
 - browser UI contract for the instruction controls, busy guards, validation
   failures, and formatted bundle failure messages;

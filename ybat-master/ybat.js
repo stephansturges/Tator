@@ -31189,6 +31189,14 @@ async function cancelRfDetrTrainingJobRequest() {
         if (missingTrainingImage) {
             return `Training bundle export blocked: trainer row image ${missingTrainingImage[1]} was not copied into the bundle. Regenerate the instruction dataset and retry.`;
         }
+        const missingArchiveImage = raw.match(/^caption_instruction_bundle_archive_image_missing:(.+)$/);
+        if (missingArchiveImage) {
+            return `Training bundle export blocked: archive image ${missingArchiveImage[1]} was not copied into the bundle. Refresh or regenerate the instruction dataset before sharing it.`;
+        }
+        const missingReviewImage = raw.match(/^caption_instruction_bundle_review_image_missing:(.+)$/);
+        if (missingReviewImage) {
+            return `Training bundle export blocked: review image ${missingReviewImage[1]} was not copied into the bundle. Refresh or regenerate the instruction dataset before sharing it.`;
+        }
         const invalidTrainingRows = raw.match(/^caption_instruction_bundle_training_rows_invalid:(.+)$/);
         if (invalidTrainingRows) {
             return `Training bundle export blocked: bundled trainer rows failed validation (${invalidTrainingRows[1]}).`;

@@ -162,7 +162,9 @@ the self-contained training bundle from the same run. That bundle contains:
 
 The bundle manifest records row counts, instruction settings, copied image
 assets, copied label assets, file sizes, and SHA-256 checksums for bundle
-contents. The manifest also declares `manifest_path`,
+contents. Bundle creation fails closed when any trainer, archive, or review row
+cannot be rewritten to a copied image inside the ZIP. The manifest also declares
+`manifest_path`,
 `checksum_scope=all_zip_members_except_manifest`, and `file_count`. The backend
 verifies before returning the ZIP that every non-manifest ZIP member appears in
 the manifest and that each recorded byte count and SHA-256 digest matches the

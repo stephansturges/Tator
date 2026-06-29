@@ -3538,6 +3538,133 @@ def test_caption_instruction_archive_rewrites_supported_structured_generated_qa_
     assert metrics["source_class_coverage_rate"] == 1.0
 
 
+@pytest.mark.parametrize(
+    ("stale_row_kind", "expected_detail"),
+    [
+        ("archive", "caption_instruction_bundle_archive_image_missing:stale.jpg"),
+        ("review", "caption_instruction_bundle_review_image_missing:stale.jpg"),
+    ],
+)
+def test_caption_instruction_bundle_rejects_uncopied_archive_or_review_images(
+    monkeypatch,
+    tmp_path: Path,
+    stale_row_kind: str,
+    expected_detail: str,
+) -> None:
+    import localinferenceapi as api
+
+    dataset_root = tmp_path / "dataset"
+    image_path = dataset_root / "train" / "images" / "current.jpg"
+    image_path.parent.mkdir(parents=True)
+    Image.new("RGB", (16, 16), color=(20, 30, 40)).save(image_path)
+    entry = {
+        "id": "ds",
+        "label": "Dataset",
+        "yolo_layout": "split",
+        "classes": ["Boat"],
+        "linked_root": str(dataset_root),
+    }
+    collect_row = {
+        "split": "train",
+        "image_relpath": "current.jpg",
+        "image_name": "current.jpg",
+        "image_path": str(image_path),
+    }
+    manifest = {
+        "dataset_id": "ds",
+        "dataset_label": "Dataset",
+        "yolo_layout": "split",
+        "labelmap": ["Boat"],
+        "images": [
+            {
+                "split": "train",
+                "image_relpath": "current.jpg",
+                "image_name": "current.jpg",
+                "image_width": 16,
+                "image_height": 16,
+                "label_lines": [],
+                "label_source_present": False,
+            }
+        ],
+    }
+    settings = api._caption_instruction_export_settings(
+        {
+            "include_caption0_in_training": False,
+            "include_generated_qa_in_training": False,
+            "include_deterministic_metadata_qa": False,
+        }
+    )
+    current_archive_row = {
+        "image_path": "current.jpg",
+        "image_name": "current.jpg",
+        "split": "train",
+        "language_annotations": {},
+        "source_annotations": {"status": "ok"},
+        "export_metadata": {"selected_training_row_count": 0},
+    }
+    stale_archive_row = {
+        "image_path": "stale.jpg",
+        "image_name": "stale.jpg",
+        "split": "train",
+        "language_annotations": {},
+        "source_annotations": {"status": "source_manifest_row_missing"},
+        "export_metadata": {"selected_training_row_count": 0},
+    }
+    stale_review_row = {
+        "format": api.CAPTION_INSTRUCTION_REVIEW_ROWS_FORMAT,
+        "dataset_id": "ds",
+        "image_path": "stale.jpg",
+        "image_name": "stale.jpg",
+        "image": "stale.jpg",
+        "split": "train",
+        "row_origin": "caption0",
+        "qa_id": "caption-stale",
+        "question": "Describe this image in detail.",
+        "current_answer": "A stale caption.",
+        "selected_training_answer": "",
+        "selected_for_training": False,
+        "validation_status": "rejected",
+        "review_status": "rejected",
+        "review_decision": "rejected",
+        "review_notes": "stale image path",
+    }
+    archive_rows = [current_archive_row]
+    if stale_row_kind == "archive":
+        archive_rows.append(stale_archive_row)
+    export_payload = {
+        "instruction_archive_rows": archive_rows,
+        "instruction_training_rows": [],
+        "instruction_review_rows": [stale_review_row] if stale_row_kind == "review" else [],
+        "instruction_report": {"format": "tator_caption_instruction_report_v1"},
+        "instruction_settings": settings,
+        "instruction_settings_fingerprint": api._caption_instruction_settings_fingerprint(settings),
+    }
+
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: entry)
+    monkeypatch.setattr(api, "_dataset_effective_root_from_entry", lambda _entry: dataset_root)
+    monkeypatch.setattr(api, "_annotation_manifest_for_entry", lambda _entry: manifest)
+    monkeypatch.setattr(api, "_annotation_collect_images", lambda _entry: [collect_row])
+    monkeypatch.setattr(
+        api,
+        "_annotation_effective_label_payload",
+        lambda *_args, **_kwargs: {
+            "label_lines": [],
+            "label_source": "dataset_label_file",
+            "label_source_present": True,
+        },
+    )
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.download_caption_instruction_bundle(
+            "ds",
+            {"require_ready_instruction_export": False},
+            export_payload=export_payload,
+        )
+
+    assert exc_info.value.status_code == 412
+    assert exc_info.value.detail == expected_detail
+
+
 def test_caption_dataset_runner_summary_counts_completed_cases_not_attempts() -> None:
     import localinferenceapi as api
 

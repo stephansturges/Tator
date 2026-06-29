@@ -32019,15 +32019,21 @@ async function cancelRfDetrTrainingJobRequest() {
                 const processed = Number(result.processed || 0);
                 const totalCases = Number(result.total_cases || 1);
                 const failed = Number(result.failed || 0);
-                renderQwenCaptionLocalProgress(
-                    `Isolated caption job ${processed}/${totalCases || "?"}` +
-                    (failed ? ` • ${failed} failed` : ""),
-                    {
-                        phase: status === "queued" ? "queued" : "running",
-                        phaseLabel: status === "queued" ? "Queued" : "Captioning",
-                        progress: Math.max(0.05, Math.min(0.95, processed / Math.max(1, totalCases || 1))),
-                    },
-                );
+                const liveSnapshot = renderQwenCaptionBackendJobProgress(job, {
+                    totalFallback: 1,
+                    force: true,
+                });
+                if (!liveSnapshot) {
+                    renderQwenCaptionLocalProgress(
+                        `Isolated caption job ${processed}/${totalCases || "?"}` +
+                        (failed ? ` • ${failed} failed` : ""),
+                        {
+                            phase: status === "queued" ? "queued" : "running",
+                            phaseLabel: status === "queued" ? "Queued" : "Captioning",
+                            progress: Math.max(0.05, Math.min(0.95, processed / Math.max(1, totalCases || 1))),
+                        },
+                    );
+                }
                 if (["failed", "interrupted"].includes(status)) {
                     const autoResumeJobId = qwenCaptionBackendJobAutoResumeId(job);
                     if (autoResumeJobId && autoResumeJobId !== jobId) {
@@ -32145,6 +32151,27 @@ async function cancelRfDetrTrainingJobRequest() {
         return Number(job?.result?.failed || job?.result?.runner_totals?.failed || 0) || 0;
     }
 
+    function isQwenCaptionBackendJobHardFailure(job) {
+        const errorCode = String(job?.error || "").trim();
+        return [
+            "caption_runner_preflight_failed",
+            "caption_runner_pilot_required",
+            "caption_runner_pilot_certification_failed",
+            "caption_runner_backend_supervision_required",
+        ].includes(errorCode);
+    }
+
+    function hasQwenCaptionBackendResumeEvidence(job) {
+        const result = job?.result && typeof job.result === "object" ? job.result : {};
+        if (!result || !Object.keys(result).length) {
+            return false;
+        }
+        if (result.preflight || result.runner_heartbeat || result.strict_audit || result.latest_caption) {
+            return true;
+        }
+        return ["processed", "total_cases", "attempts_seen", "failed_attempts"].some((key) => result[key] !== undefined && result[key] !== null);
+    }
+
     function qwenCaptionBackendJobAutoResumeId(job) {
         const resultId = String(job?.result?.auto_resumed_job_id || "").trim();
         if (resultId) {
@@ -32211,12 +32238,142 @@ async function cancelRfDetrTrainingJobRequest() {
         return errorCode || `backend caption job ${job?.status || "failed"}`;
     }
 
+    function qwenCaptionBackendProgressFallbackPlan() {
+        return [
+            { id: "case_start", label: "Select image" },
+            { id: "prompt_stack", label: "Build prompt stack" },
+            { id: "caption", label: "Run Qwen caption" },
+            { id: "save", label: "Save caption result" },
+            { id: "next_image", label: "Advance to next image" },
+        ];
+    }
+
+    function qwenCaptionBackendTerminalPhase(status) {
+        const normalized = String(status || "").toLowerCase();
+        if (normalized === "completed") {
+            return "complete";
+        }
+        if (normalized === "cancelled") {
+            return "cancelled";
+        }
+        if (normalized === "failed" || normalized === "interrupted") {
+            return "error";
+        }
+        return normalized === "queued" ? "queued" : "running";
+    }
+
+    function qwenCaptionBackendLiveProgressSnapshot(job, options) {
+        if (!job || typeof job !== "object") {
+            return null;
+        }
+        options = options || {};
+        const totalFallback = Number(options.totalFallback || 0);
+        const status = String(job.status || "").toLowerCase();
+        const result = job.result && typeof job.result === "object" ? job.result : {};
+        const live = job.live_progress && typeof job.live_progress === "object"
+            ? { ...job.live_progress }
+            : {};
+        const datasetProgress = live.caption_dataset_progress && typeof live.caption_dataset_progress === "object"
+            ? live.caption_dataset_progress
+            : {};
+        const totalCases = Number(
+            datasetProgress.total_cases
+            || result.total_cases
+            || totalFallback
+            || 0
+        );
+        const processed = Number(datasetProgress.processed || result.processed || 0);
+        const failed = Number(datasetProgress.failed || result.failed || 0);
+        const saved = Number(datasetProgress.saved_text_labels || result.saved_text_labels || 0);
+        const currentCase = String(datasetProgress.case || "").trim();
+        const active = ["queued", "running", "cancelling"].includes(status);
+        let phase = live.phase || qwenCaptionBackendTerminalPhase(status);
+        if (active && phase === "complete") {
+            phase = "running";
+        }
+        let phaseLabel = live.phase_label
+            || (phase === "queued" ? "Queued" : phase === "complete" ? "Complete" : phase === "error" ? "Error" : "Captioning");
+        if (active && String(phaseLabel).toLowerCase() === "complete") {
+            phaseLabel = "Captioning";
+        }
+        let progress = Number(live.progress);
+        if (!Number.isFinite(progress)) {
+            progress = totalCases > 0 ? processed / Math.max(1, totalCases) : Number(job.progress || 0);
+        }
+        if (phase === "complete") {
+            progress = 1;
+        }
+        const stepPlan = Array.isArray(live.step_plan) && live.step_plan.length
+            ? live.step_plan
+            : qwenCaptionBackendProgressFallbackPlan();
+        const message = String(live.message || job.message || "").trim()
+            || `Backend batch ${processed}/${totalCases || "?"}`;
+        const statusDetail = [
+            totalCases > 0 ? `Image ${datasetProgress.case_index || Math.min(processed + 1, totalCases)}/${totalCases}` : "",
+            currentCase,
+            failed ? `${failed} failed` : "",
+            saved ? `${saved} saved` : "",
+        ].filter(Boolean).join(" • ");
+        const displayError = phase === "error" ? qwenCaptionBackendJobDisplayError(job) : "";
+        const liveError = String(live.error || "").trim();
+        const rawJobError = String(job.error || "").trim();
+        return {
+            ...live,
+            run_id: live.run_id || `caption_job:${job.job_id || "backend"}`,
+            backend_job_id: live.backend_job_id || job.job_id || null,
+            active,
+            kind: "caption",
+            phase,
+            phase_label: phaseLabel,
+            progress: Math.max(0, Math.min(1, progress)),
+            message,
+            step_plan: stepPlan,
+            step_id: live.step_id || phase,
+            step_index: live.step_index || null,
+            step_total: live.step_total || stepPlan.length,
+            step_label: live.step_label || phaseLabel,
+            step_detail: String(live.step_detail || statusDetail).trim(),
+            token_preview: String(live.token_preview || ""),
+            live_output: String(live.live_output || live.token_preview || ""),
+            io_events: Array.isArray(live.io_events) ? live.io_events : [],
+            log_lines: Array.isArray(live.log_lines) ? live.log_lines : [],
+            error: phase === "error"
+                ? (liveError && liveError !== rawJobError ? liveError : displayError || rawJobError || liveError)
+                : live.error,
+            caption_dataset_progress: {
+                processed,
+                total_cases: Number.isFinite(totalCases) ? totalCases : 0,
+                failed,
+                saved_text_labels: saved,
+                case: currentCase,
+                case_index: Number(datasetProgress.case_index || 0),
+                attempt: datasetProgress.attempt,
+            },
+        };
+    }
+
+    function renderQwenCaptionBackendJobProgress(job, options = {}) {
+        const snapshot = qwenCaptionBackendLiveProgressSnapshot(job, options);
+        if (!snapshot) {
+            return null;
+        }
+        renderQwenProgressState(snapshot);
+        renderQwenCaptionProgressState(snapshot, { force: true });
+        return snapshot;
+    }
+
     function qwenCaptionBackendJobSortValue(job) {
         return Number(job?.updated_at || job?.created_at || 0) || 0;
     }
 
     function isQwenCaptionBackendJobRecoverable(job) {
         const status = String(job?.status || "").toLowerCase();
+        if (status === "failed" && isQwenCaptionBackendJobHardFailure(job)) {
+            return false;
+        }
+        if (status === "interrupted" && !hasQwenCaptionBackendResumeEvidence(job)) {
+            return false;
+        }
         if (["queued", "running", "interrupted", "failed"].includes(status)) {
             return true;
         }
@@ -32422,7 +32579,13 @@ async function cancelRfDetrTrainingJobRequest() {
             const totalCases = Number(result.total_cases || total || 0);
             const failed = Number(result.failed || 0);
             const saved = Number(result.saved_text_labels || 0);
+            const liveSnapshot = renderQwenCaptionBackendJobProgress(currentJob, {
+                totalFallback: totalCases || total,
+                force: true,
+            });
+            const currentCase = String(liveSnapshot?.caption_dataset_progress?.case || "").trim();
             const statusLine = `Backend batch ${processed}/${totalCases || "?"}` +
+                (currentCase ? ` • ${currentCase}` : "") +
                 (failed ? ` • ${failed} failed` : "") +
                 (saved ? ` • ${saved} saved` : "");
             setQwenCaptionStatus(statusLine);
@@ -32444,7 +32607,7 @@ async function cancelRfDetrTrainingJobRequest() {
             if (["completed", "failed", "cancelled", "interrupted"].includes(currentStatus)) {
                 break;
             }
-            await new Promise((resolve) => window.setTimeout(resolve, 3000));
+            await new Promise((resolve) => window.setTimeout(resolve, 1000));
         }
         if (currentJob?.status === "completed") {
             await finishQwenCaptionBackendJob(currentJob, datasetId);
@@ -32511,6 +32674,12 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (!job?.job_id) {
             throw new Error("backend caption job record has no id");
+        }
+        if (!["queued", "running"].includes(status) && !isQwenCaptionBackendJobRecoverable(job)) {
+            const message = qwenCaptionBackendJobDisplayError(job);
+            setQwenCaptionBackendJobStatus(`Backend job is not resumable: ${message}`);
+            setSamStatus(`Backend caption job is not resumable: ${message}`, { variant: "warn", duration: 6000 });
+            return;
         }
         if (!["queued", "running"].includes(status)) {
             setQwenCaptionBackendJobStatus(`Resuming backend caption job ${job.job_id || ""}…`);

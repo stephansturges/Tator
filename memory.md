@@ -32,3 +32,20 @@ Durable rule:
 
 For the current Qwen likely-wrong review work, see
 [docs/class_split_qwen_review_agent.md](docs/class_split_qwen_review_agent.md).
+
+## 2026-06-29: Caption Set-And-Forget Resume Invariants
+
+Set-and-forget caption jobs must be able to save their own generated captions
+while still blocking unrelated user/UI caption mutations during active backend
+runs. Preserve the active job id bypass only for internal caption job writes.
+
+Resume against an existing caption artifact directory must reuse that artifact's
+manifest case set. Do not rebuild the resume case list from current text labels,
+because newly saved captions can otherwise shrink the case list and fail runner
+preflight against the original artifact manifest.
+
+Hard launch failures such as preflight, pilot-certification, and backend
+supervision failures are non-resumable until their underlying gate is fixed.
+Interrupted wrapper jobs without runner/preflight evidence are also
+non-resumable; stale browser tabs must receive a backend 409 instead of
+spawning another wrapper job.

@@ -19936,9 +19936,18 @@ def get_text_labels(dataset_id: str, image_names: Sequence[str]):
     return {"captions": captions, "missing": missing}
 
 
-def set_text_label(dataset_id: str, image_name: str, payload: Dict[str, Any]):
+def _set_text_label_impl(
+    dataset_id: str,
+    image_name: str,
+    payload: Dict[str, Any],
+    *,
+    allow_active_caption_job_id: Optional[str] = None,
+):
     payload = payload or {}
-    _raise_if_qwen_caption_mutation_busy(dataset_id)
+    _raise_if_qwen_caption_mutation_busy(
+        dataset_id,
+        allow_active_caption_job_id=allow_active_caption_job_id,
+    )
     entry = _resolve_dataset_entry(dataset_id)
     _require_dataset_annotation_lock_owner_if_active(entry, payload)
     split, image_relpath = _annotation_text_split_rel_from_name(
@@ -19951,6 +19960,10 @@ def set_text_label(dataset_id: str, image_name: str, payload: Dict[str, Any]):
     overlay_root = _dataset_overlay_root_from_entry(entry, ensure=True)
     _annotation_write_text_within_root(text_path, overlay_root, caption)
     return {"status": "saved", "caption": caption}
+
+
+def set_text_label(dataset_id: str, image_name: str, payload: Dict[str, Any]):
+    return _set_text_label_impl(dataset_id, image_name, payload)
 
 
 def _require_dataset_annotation_lock_owner_if_active(
@@ -20154,9 +20167,18 @@ def get_captions_batch(dataset_id: str, image_names: Sequence[str]):
     return {"dataset_id": dataset_id, "images": bundles}
 
 
-def add_caption(dataset_id: str, image_name: str, payload: Dict[str, Any]):
+def _add_caption_impl(
+    dataset_id: str,
+    image_name: str,
+    payload: Dict[str, Any],
+    *,
+    allow_active_caption_job_id: Optional[str] = None,
+):
     payload = payload or {}
-    _raise_if_qwen_caption_mutation_busy(dataset_id)
+    _raise_if_qwen_caption_mutation_busy(
+        dataset_id,
+        allow_active_caption_job_id=allow_active_caption_job_id,
+    )
     entry = _resolve_dataset_entry(dataset_id)
     _require_dataset_annotation_lock_owner_if_active(entry, payload)
     split, image_relpath, image_key = _dataset_caption_context(entry, image_name, payload)
@@ -20191,7 +20213,12 @@ def add_caption(dataset_id: str, image_name: str, payload: Dict[str, Any]):
         session_id = str(payload.get("session_id") or "").strip()
         if session_id:
             text_payload["session_id"] = session_id
-        set_text_label(dataset_id, image_name, text_payload)
+        _set_text_label_impl(
+            dataset_id,
+            image_name,
+            text_payload,
+            allow_active_caption_job_id=allow_active_caption_job_id,
+        )
     records.append(record)
     _write_dataset_caption_records(entry, records)
     return {
@@ -20199,6 +20226,10 @@ def add_caption(dataset_id: str, image_name: str, payload: Dict[str, Any]):
         "caption": _dataset_caption_record_public(record),
         "primary_caption": caption if make_primary else existing_primary,
     }
+
+
+def add_caption(dataset_id: str, image_name: str, payload: Dict[str, Any]):
+    return _add_caption_impl(dataset_id, image_name, payload)
 
 
 def update_caption(dataset_id: str, caption_id: str, payload: Dict[str, Any]):
@@ -23311,11 +23342,18 @@ def _raise_if_qwen_caption_review_import_busy(dataset_id: str) -> None:
     )
 
 
-def _raise_if_qwen_caption_mutation_busy(dataset_id: str) -> None:
+def _raise_if_qwen_caption_mutation_busy(
+    dataset_id: str,
+    *,
+    allow_active_caption_job_id: Optional[str] = None,
+) -> None:
     active = _qwen_caption_dataset_active_export_job(dataset_id)
     if not active:
         return
     job_id = str(active.get("job_id") or "").strip() or "unknown"
+    allowed_job_id = str(allow_active_caption_job_id or "").strip()
+    if allowed_job_id and job_id == allowed_job_id:
+        return
     status = str(active.get("status") or "").strip() or "active"
     raise HTTPException(
         status_code=HTTP_409_CONFLICT,
@@ -25514,6 +25552,23 @@ def _qwen_caption_dataset_cases(
     return manifest, cases
 
 
+def _qwen_caption_dataset_resume_manifest_cases(output_dir: Path) -> Optional[List[Dict[str, Any]]]:
+    manifest_path = output_dir / "manifest.json"
+    if not manifest_path.exists():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except Exception:
+        return None
+    if not isinstance(manifest, Mapping):
+        return None
+    raw_cases = manifest.get("cases")
+    if not isinstance(raw_cases, list):
+        return None
+    cases = [dict(case) for case in raw_cases if isinstance(case, Mapping)]
+    return cases or None
+
+
 def _qwen_caption_dataset_job_dir(job_id: str, requested_output_dir: Optional[str] = None) -> Path:
     if requested_output_dir:
         requested = Path(str(requested_output_dir)).expanduser()
@@ -25539,6 +25594,263 @@ def _qwen_caption_dataset_job_discovery_dir(job_id: str) -> Path:
     return QWEN_CAPTION_DATASET_JOB_ROOT / safe_job_id
 
 
+def _qwen_caption_dataset_numeric(value: Any, fallback: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return float(fallback)
+    if not math.isfinite(number):
+        return float(fallback)
+    return number
+
+
+def _qwen_caption_dataset_live_step_plan(worker_progress: Mapping[str, Any]) -> List[Dict[str, str]]:
+    raw_plan = worker_progress.get("step_plan")
+    if isinstance(raw_plan, list):
+        plan: List[Dict[str, str]] = []
+        for index, raw_entry in enumerate(raw_plan):
+            if not isinstance(raw_entry, Mapping):
+                continue
+            step_id = str(raw_entry.get("id") or f"step_{index + 1}").strip() or f"step_{index + 1}"
+            entry = {
+                "id": step_id,
+                "label": str(raw_entry.get("label") or step_id).strip() or step_id,
+            }
+            detail = str(raw_entry.get("detail") or "").strip()
+            if detail:
+                entry["detail"] = detail[:280]
+            plan.append(entry)
+        if plan:
+            return plan
+    return [
+        {"id": "case_start", "label": "Select image"},
+        {"id": "prompt_stack", "label": "Build prompt stack"},
+        {"id": "caption", "label": "Run Qwen caption"},
+        {"id": "save", "label": "Save caption result"},
+        {"id": "next_image", "label": "Advance to next image"},
+    ]
+
+
+def _qwen_caption_dataset_live_io_events(worker_progress: Mapping[str, Any]) -> List[Dict[str, str]]:
+    raw_events = worker_progress.get("io_events")
+    if isinstance(raw_events, list):
+        events: List[Dict[str, str]] = []
+        for raw_event in raw_events[-8:]:
+            if not isinstance(raw_event, Mapping):
+                continue
+            event = str(raw_event.get("event") or "event").strip() or "event"
+            text = str(raw_event.get("text") or raw_event.get("text_tail") or "")
+            entry = {
+                "event": event,
+                "title": str(raw_event.get("title") or event).strip() or event,
+                "text": text[-2000:],
+            }
+            kind = str(raw_event.get("kind") or "").strip()
+            if kind:
+                entry["kind"] = kind
+            run_id = str(raw_event.get("run_id") or "").strip()
+            if run_id:
+                entry["run_id"] = run_id
+            events.append(entry)
+        if events:
+            return events
+    last_event = worker_progress.get("last_io_event")
+    if isinstance(last_event, Mapping):
+        event = str(last_event.get("event") or "event").strip() or "event"
+        text = str(last_event.get("text_tail") or "")
+        if text:
+            return [
+                {
+                    "event": event,
+                    "title": str(last_event.get("step_label") or event).strip() or event,
+                    "text": text[-2000:],
+                }
+            ]
+    return []
+
+
+def _qwen_caption_dataset_live_log_lines(job: QwenCaptionDatasetJob) -> List[str]:
+    lines: List[str] = []
+    for entry in list(job.logs[-12:]):
+        if not isinstance(entry, Mapping):
+            continue
+        message = str(entry.get("message") or "").strip()
+        if message:
+            lines.append(message)
+    return lines[-12:]
+
+
+def _qwen_caption_dataset_job_live_progress(job: QwenCaptionDatasetJob) -> Dict[str, Any]:
+    result = job.result if isinstance(job.result, Mapping) else {}
+    request = job.request if isinstance(job.request, Mapping) else {}
+    caption_request = request.get("caption_request") if isinstance(request.get("caption_request"), Mapping) else {}
+    heartbeat = result.get("runner_heartbeat") if isinstance(result.get("runner_heartbeat"), Mapping) else {}
+    worker_progress = (
+        heartbeat.get("worker_progress")
+        if isinstance(heartbeat.get("worker_progress"), Mapping)
+        else {}
+    )
+    latest_caption = result.get("latest_caption") if isinstance(result.get("latest_caption"), Mapping) else {}
+    status = str(job.status or "").strip().lower()
+    active = status in {"queued", "running", "cancelling"}
+    phase_map = {
+        "completed": "complete",
+        "failed": "error",
+        "interrupted": "error",
+        "cancelled": "cancelled",
+    }
+    phase = phase_map.get(status)
+    if not phase:
+        phase = (
+            str(worker_progress.get("phase") or "").strip()
+            or str(heartbeat.get("phase") or "").strip()
+            or ("queued" if status == "queued" else "running")
+        )
+    if active and phase == "complete":
+        phase = str(heartbeat.get("phase") or "").strip() or "running"
+    phase_label = str(worker_progress.get("phase_label") or "").strip()
+    if active and phase_label.lower() == "complete":
+        phase_label = ""
+    if not phase_label:
+        phase_label = {
+            "queued": "Queued",
+            "complete": "Complete",
+            "error": "Error",
+            "cancelled": "Cancelled",
+        }.get(phase, "Captioning")
+
+    total = int(
+        max(
+            0.0,
+            _qwen_caption_dataset_numeric(heartbeat.get("total_cases"), result.get("total_cases") or 0),
+        )
+    )
+    processed = int(
+        max(
+            0.0,
+            _qwen_caption_dataset_numeric(heartbeat.get("processed"), result.get("processed") or 0),
+        )
+    )
+    case_index = int(max(0.0, _qwen_caption_dataset_numeric(heartbeat.get("case_index"), 0.0)))
+    worker_fraction = max(0.0, min(1.0, _qwen_caption_dataset_numeric(worker_progress.get("progress"), 0.0)))
+    job_fraction = max(0.0, min(1.0, _qwen_caption_dataset_numeric(job.progress, 0.0)))
+    if total > 0 and case_index > 0 and active:
+        overall_progress = max(processed / float(total), ((case_index - 1) + worker_fraction) / float(total))
+        progress = min(0.99, max(job_fraction, overall_progress))
+    else:
+        progress = job_fraction
+    if phase == "complete":
+        progress = 1.0
+    elif phase in {"error", "cancelled"}:
+        progress = max(progress, 1.0 if not active else progress)
+
+    step_plan = _qwen_caption_dataset_live_step_plan(worker_progress)
+    phase_step_indices = {
+        "started": 1,
+        "case_start": 1,
+        "attempt_running": 3,
+        "attempt_cooldown": 3,
+        "case_complete": 4,
+        "case_success_cooldown": 5,
+        "finished": 5,
+    }
+    raw_step_index = worker_progress.get("step_index")
+    step_index = int(max(0.0, _qwen_caption_dataset_numeric(raw_step_index, 0.0))) or None
+    if step_index is None:
+        step_index = phase_step_indices.get(str(heartbeat.get("phase") or "").strip())
+    step_total = int(max(0.0, _qwen_caption_dataset_numeric(worker_progress.get("step_total"), len(step_plan))))
+    if step_total <= 0:
+        step_total = len(step_plan)
+    step_id = (
+        str(worker_progress.get("step_id") or "").strip()
+        or str(heartbeat.get("worker_step_id") or "").strip()
+        or str(heartbeat.get("phase") or phase).strip()
+    )
+    step_label = (
+        str(worker_progress.get("step_label") or "").strip()
+        or str(heartbeat.get("worker_step_label") or "").strip()
+        or (step_plan[step_index - 1]["label"] if step_index and step_index <= len(step_plan) else phase_label)
+    )
+
+    case_name = str(heartbeat.get("case") or heartbeat.get("stem") or "").strip()
+    detail_parts: List[str] = []
+    if total > 0:
+        image_counter = case_index if case_index > 0 else min(processed + 1, total)
+        image_detail = f"Image {image_counter}/{total}"
+        if case_name:
+            image_detail = f"{image_detail}: {case_name}"
+        detail_parts.append(image_detail)
+    elif case_name:
+        detail_parts.append(case_name)
+    attempt = heartbeat.get("attempt")
+    total_attempts = heartbeat.get("total_attempts")
+    if attempt:
+        attempt_text = f"attempt {attempt}"
+        if total_attempts:
+            attempt_text = f"{attempt_text}/{total_attempts}"
+        detail_parts.append(attempt_text)
+    worker_detail = str(worker_progress.get("step_detail") or worker_progress.get("message") or "").strip()
+    if worker_detail:
+        detail_parts.append(worker_detail)
+
+    token_preview = str(worker_progress.get("token_preview_tail") or "").strip()
+    live_output = token_preview
+    if not token_preview and latest_caption:
+        token_preview = str(latest_caption.get("caption") or "").strip()
+    generated_tokens = heartbeat.get("worker_generated_tokens", worker_progress.get("generated_tokens"))
+    max_new_tokens = heartbeat.get("worker_max_new_tokens", worker_progress.get("max_new_tokens"))
+    model_id = (
+        str(worker_progress.get("model_id") or "").strip()
+        or str(caption_request.get("model_id") or caption_request.get("model") or "").strip()
+        or None
+    )
+    message = str(job.message or "").strip()
+    if not message and active:
+        message = "Caption job running"
+    snapshot: Dict[str, Any] = {
+        "run_id": f"caption_job:{job.job_id}",
+        "backend_job_id": job.job_id,
+        "active": active,
+        "kind": "caption",
+        "phase": phase,
+        "phase_label": phase_label,
+        "progress": max(0.0, min(1.0, progress)),
+        "message": message,
+        "model_id": model_id,
+        "loaded": None,
+        "local": None,
+        "partial": None,
+        "needs_download": None,
+        "generated_tokens": generated_tokens,
+        "max_new_tokens": max_new_tokens,
+        "token_preview": token_preview,
+        "live_output": live_output,
+        "step_id": step_id,
+        "step_index": step_index,
+        "step_total": step_total,
+        "step_label": step_label,
+        "step_detail": " • ".join(detail_parts),
+        "step_plan": step_plan,
+        "io_events": _qwen_caption_dataset_live_io_events(worker_progress),
+        "log_lines": _qwen_caption_dataset_live_log_lines(job),
+        "updated_at": job.updated_at,
+        "caption_dataset_progress": {
+            "processed": processed,
+            "total_cases": total,
+            "case_index": case_index,
+            "case": case_name,
+            "attempt": attempt,
+            "failed": int(max(0.0, _qwen_caption_dataset_numeric(result.get("failed"), 0.0))),
+            "saved_text_labels": int(max(0.0, _qwen_caption_dataset_numeric(result.get("saved_text_labels"), 0.0))),
+        },
+    }
+    if phase in {"error", "cancelled"} and job.error:
+        snapshot["error"] = job.error
+    if phase in {"complete", "error", "cancelled"}:
+        snapshot["completed_at"] = job.updated_at
+    return snapshot
+
+
 def _serialize_qwen_caption_dataset_job(job: QwenCaptionDatasetJob) -> Dict[str, Any]:
     return {
         "job_id": job.job_id,
@@ -25552,6 +25864,7 @@ def _serialize_qwen_caption_dataset_job(job: QwenCaptionDatasetJob) -> Dict[str,
         "created_at": job.created_at,
         "updated_at": job.updated_at,
         "logs": list(job.logs[-100:]),
+        "live_progress": _qwen_caption_dataset_job_live_progress(job),
     }
 
 
@@ -25706,7 +26019,12 @@ def _qwen_caption_dataset_save_caption_from_row(
     session_id = str(annotation_session_id or "").strip()
     if session_id:
         payload["session_id"] = session_id
-    add_caption(dataset_id, image_name, payload)
+    _add_caption_impl(
+        dataset_id,
+        image_name,
+        payload,
+        allow_active_caption_job_id=job.job_id,
+    )
     _qwen_caption_dataset_job_log(job, f"saved caption {image_name}", image_name=image_name)
     return image_name
 
@@ -27029,7 +27347,16 @@ def _run_qwen_caption_dataset_job(job: QwenCaptionDatasetJob, payload: QwenCapti
                 dataset_entry,
                 _qwen_caption_dataset_annotation_lock_payload(payload),
             )
-        manifest, cases = _qwen_caption_dataset_cases(payload, output_dir=runner_output_dir)
+        resume_manifest_cases = (
+            _qwen_caption_dataset_resume_manifest_cases(runner_output_dir)
+            if bool(payload.resume) and bool(payload.output_dir)
+            else None
+        )
+        if resume_manifest_cases is not None:
+            manifest = _annotation_manifest_for_entry(dataset_entry)
+            cases = resume_manifest_cases
+        else:
+            manifest, cases = _qwen_caption_dataset_cases(payload, output_dir=runner_output_dir)
         if not cases:
             job.status = "completed"
             job.progress = 1.0
@@ -27930,6 +28257,36 @@ def _qwen_caption_dataset_job_has_jsonl_corruption(payload: Mapping[str, Any]) -
     return False
 
 
+def _qwen_caption_dataset_job_hard_resume_error(error: Any) -> bool:
+    error_code = str(error or "").strip()
+    return error_code in {
+        "caption_runner_preflight_failed",
+        "caption_runner_pilot_required",
+        "caption_runner_pilot_certification_failed",
+        "caption_runner_backend_supervision_required",
+    }
+
+
+def _qwen_caption_dataset_job_has_resume_evidence(payload: Mapping[str, Any]) -> bool:
+    result_data = payload.get("result") if isinstance(payload.get("result"), Mapping) else {}
+    if not isinstance(result_data, Mapping) or not result_data:
+        return False
+    evidence_keys = {
+        "preflight",
+        "runner_heartbeat",
+        "strict_audit",
+        "latest_caption",
+        "captions",
+        "runner_totals",
+    }
+    if any(result_data.get(key) for key in evidence_keys):
+        return True
+    for numeric_key in ("processed", "total_cases", "attempts_seen", "failed_attempts"):
+        if result_data.get(numeric_key) is not None:
+            return True
+    return False
+
+
 def _qwen_caption_dataset_reconcile_completed_artifact(
     payload: Mapping[str, Any],
     *,
@@ -28022,7 +28379,11 @@ def _qwen_caption_dataset_job_should_auto_resume(
     if status not in {"queued", "running", "interrupted", "failed"}:
         return False
     error = str(payload.get("error") or "").strip()
+    if status == "interrupted" and not _qwen_caption_dataset_job_has_resume_evidence(payload):
+        return False
     if status == "failed":
+        if _qwen_caption_dataset_job_hard_resume_error(error):
+            return False
         if error in {
             "caption_runner_preflight_failed",
             "caption_runner_pilot_required",
@@ -28074,6 +28435,17 @@ def _resume_qwen_caption_dataset_job(
     status = str(existing.get("status") or "").strip().lower()
     if status in {"queued", "running"}:
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail="qwen_caption_dataset_job_still_running")
+    error = str(existing.get("error") or "").strip()
+    if status == "failed" and _qwen_caption_dataset_job_hard_resume_error(error):
+        raise HTTPException(
+            status_code=HTTP_409_CONFLICT,
+            detail=f"qwen_caption_dataset_job_not_resumable:{error}",
+        )
+    if status == "interrupted" and not _qwen_caption_dataset_job_has_resume_evidence(existing):
+        raise HTTPException(
+            status_code=HTTP_409_CONFLICT,
+            detail="qwen_caption_dataset_job_not_resumable:interrupted_without_runner_evidence",
+        )
     request_data = existing.get("request") if isinstance(existing.get("request"), Mapping) else {}
     if not request_data:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_caption_dataset_job_missing_request")

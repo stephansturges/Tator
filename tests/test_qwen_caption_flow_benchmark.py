@@ -327,6 +327,51 @@ def test_worker_qwen_caption_io_artifacts_report_missing_per_run_trace(
     assert artifacts["qwen_caption_io_sources"]["source"] == "qwen_caption_io_sources"
 
 
+def test_worker_progress_snapshot_carries_prompt_stack_and_io_events() -> None:
+    snapshot = {
+        "active": True,
+        "run_id": "caption-run",
+        "phase": "generate",
+        "phase_label": "Captioning",
+        "progress": 0.5,
+        "message": "Generating response tokens",
+        "step_id": "caption",
+        "step_index": 3,
+        "step_total": 4,
+        "step_label": "Compose full-image caption",
+        "step_plan": [
+            {"id": "prepare", "label": "Prepare image and prompts"},
+            {"id": "prompt_stack", "label": "Build prompt stack"},
+            {"id": "caption", "label": "Compose full-image caption"},
+        ],
+        "token_preview": "The scene contains a vehicle.",
+        "live_output": "The scene contains a vehicle.",
+        "io_events": [
+            {
+                "event": "input",
+                "kind": "prompt",
+                "title": "input - Compose full-image caption",
+                "text": "rendered prompt stack",
+            },
+            {
+                "event": "output",
+                "kind": "output",
+                "title": "output - Compose full-image caption",
+                "text": "The scene contains a vehicle.",
+            },
+        ],
+    }
+
+    progress = bench.worker_progress_snapshot(snapshot, seq=7)
+
+    assert progress["seq"] == 7
+    assert progress["step_plan"][1]["label"] == "Build prompt stack"
+    assert progress["io_event_count"] == 2
+    assert [event["kind"] for event in progress["io_events"]] == ["prompt", "output"]
+    assert progress["io_events"][-1]["text"] == "The scene contains a vehicle."
+    assert progress["last_io_event"]["text_tail"] == "The scene contains a vehicle."
+
+
 def test_all_image_cases_have_stable_resume_keys(tmp_path: Path) -> None:
     dataset = tmp_path / "dataset"
     (dataset / "labelmap.txt").parent.mkdir(parents=True, exist_ok=True)

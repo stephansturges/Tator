@@ -63,10 +63,21 @@ certification payload apply to the backend batch job.
 
 The user clicks **Caption all images** with set-and-forget enabled. The backend
 requires a selected caption dataset, keeps jobs resumable, and reports backend
-crash-supervision readiness before the user walks away. If the backend job
-cannot be created, the caption status, backend-job status, and toast must show
-the parsed launch failure instead of leaving the panel at a stale "Starting"
-state or relying on console output.
+crash-supervision readiness before the user walks away. While attached to the
+job, the same caption progress panel and live output toast used by single-image
+captioning must stay visible for each image: current image index/name, prompt
+stack step chips, bounded prompt/output trace, token preview, retry/cooldown
+state, and failure text. If the backend job cannot be created, the caption
+status, backend-job status, and toast must show the parsed launch failure
+instead of leaving the panel at a stale "Starting" state or relying on console
+output.
+
+Set-and-forget jobs own their generated caption writes. The backend may save a
+caption for the active job id while ordinary UI/user caption mutations remain
+blocked against the same dataset. Resume against an existing artifact directory
+must reuse the artifact manifest's original case list rather than rebuilding the
+case list from current text-label state, so a newly saved caption cannot shrink a
+recovered job before it reconciles the original manifest.
 
 ## 5. Launch A 10k-Scale Certified Run
 
@@ -118,6 +129,11 @@ manual inspection without making manual recovery the normal path. The global
 **Refresh backend jobs** and **Cancel active backend jobs** controls show and
 stop active backend caption work even when it does not belong to the currently
 selected caption dataset.
+Hard launch failures such as preflight, pilot certification, and backend
+supervision failures are non-resumable until the failed gate is fixed. Interrupted
+wrapper jobs without runner/preflight evidence are also non-resumable. In those
+cases the backend returns a conflict, and the UI must show a "not resumable"
+status instead of posting another resume request or spawning another wrapper job.
 
 ## 11. Export Alternate Captions For Training
 

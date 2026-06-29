@@ -1278,6 +1278,49 @@ def _worker_progress_text_tail(value: Any, *, limit: int = 240) -> str:
     return text[-limit:]
 
 
+def _worker_progress_compact_step_plan(value: Any, *, limit: int = 80) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    compact: list[dict[str, str]] = []
+    for index, raw_entry in enumerate(value[:limit]):
+        if not isinstance(raw_entry, Mapping):
+            continue
+        step_id = str(raw_entry.get("id") or f"step_{index + 1}").strip() or f"step_{index + 1}"
+        entry = {
+            "id": step_id,
+            "label": str(raw_entry.get("label") or step_id).strip() or step_id,
+        }
+        detail = str(raw_entry.get("detail") or "").strip()
+        if detail:
+            entry["detail"] = _worker_progress_text_tail(detail, limit=280)
+        compact.append(entry)
+    return compact
+
+
+def _worker_progress_compact_io_events(value: Any, *, limit: int = 8) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    compact: list[dict[str, str]] = []
+    for raw_event in value[-limit:]:
+        if not isinstance(raw_event, Mapping):
+            continue
+        event = str(raw_event.get("event") or "event").strip() or "event"
+        kind = str(raw_event.get("kind") or "").strip()
+        title = str(raw_event.get("title") or event).strip() or event
+        entry = {
+            "event": event,
+            "title": _worker_progress_text_tail(title, limit=240),
+            "text": _worker_progress_text_tail(raw_event.get("text"), limit=2000),
+        }
+        if kind:
+            entry["kind"] = kind
+        run_id = str(raw_event.get("run_id") or "").strip()
+        if run_id:
+            entry["run_id"] = run_id
+        compact.append(entry)
+    return compact
+
+
 def worker_progress_snapshot(snapshot: Mapping[str, Any], *, seq: int) -> dict[str, Any]:
     io_events = snapshot.get("io_events")
     last_io_event: dict[str, Any] | None = None
@@ -1320,6 +1363,12 @@ def worker_progress_snapshot(snapshot: Mapping[str, Any], *, seq: int) -> dict[s
     }
     if last_io_event is not None:
         payload["last_io_event"] = last_io_event
+    compact_step_plan = _worker_progress_compact_step_plan(snapshot.get("step_plan"))
+    if compact_step_plan:
+        payload["step_plan"] = compact_step_plan
+    compact_io_events = _worker_progress_compact_io_events(io_events)
+    if compact_io_events:
+        payload["io_events"] = compact_io_events
     return payload
 
 

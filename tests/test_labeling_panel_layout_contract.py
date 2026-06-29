@@ -2337,6 +2337,14 @@ def test_qwen_next_n_caption_prefers_resumable_backend_job():
     assert "VLM training dataset" in batch
     assert "failed to start" in batch
     assert "setQwenCaptionBackendJobStatus(message)" in batch
+    assert "renderQwenCaptionBackendJobProgress(currentJob" in js
+    assert "renderQwenCaptionBackendJobProgress(job" in js
+    assert "isQwenCaptionBackendJobHardFailure" in js
+    assert "hasQwenCaptionBackendResumeEvidence" in js
+    assert "Backend job is not resumable" in js
+    assert "!isQwenCaptionBackendJobRecoverable(job)" in js
+    assert "caption_runner_preflight_failed" in js
+    assert "Caption all images" in _html()
     assert "invokeQwenCaptionForImage(" not in batch
 
 
@@ -3626,6 +3634,64 @@ def test_qwen_caption_backend_job_display_error_formats_structured_failures():
             "  qwenCaptionBackendJobDisplayError({ status: 'failed', message: 'Custom backend message', error: 'caption_runner_pilot_required' }),",
             "  'Custom backend message'",
             ");",
+        ]
+    )
+    subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
+
+
+def test_qwen_caption_backend_live_progress_snapshot_normalizes_job_telemetry():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            _extract_js_function(js, "qwenCaptionCheckReportFirstError"),
+            _extract_js_function(js, "qwenCaptionBackendJobDisplayError"),
+            _extract_js_function(js, "qwenCaptionBackendProgressFallbackPlan"),
+            _extract_js_function(js, "qwenCaptionBackendTerminalPhase"),
+            _extract_js_function(js, "qwenCaptionBackendLiveProgressSnapshot"),
+            "let snapshot = qwenCaptionBackendLiveProgressSnapshot({",
+            "  job_id: 'job-1',",
+            "  status: 'running',",
+            "  message: 'Caption runner attempt running',",
+            "  live_progress: {",
+            "    phase: 'complete',",
+            "    phase_label: 'Complete',",
+            "    progress: 0.25,",
+            "    step_id: 'caption',",
+            "    step_index: 3,",
+            "    step_total: 4,",
+            "    step_label: 'Compose full-image caption',",
+            "    step_plan: [{ id: 'prepare', label: 'Prepare image and prompts' }, { id: 'prompt_stack', label: 'Build prompt stack' }, { id: 'caption', label: 'Compose full-image caption' }],",
+            "    token_preview: 'The scene contains a vehicle.',",
+            "    io_events: [{ event: 'output', kind: 'output', title: 'output', text: 'The scene contains a vehicle.' }],",
+            "    caption_dataset_progress: { processed: 2, total_cases: 10, case_index: 3, case: 'frame003.jpg', failed: 1, saved_text_labels: 2 },",
+            "  },",
+            "});",
+            "assert.strictEqual(snapshot.phase, 'running');",
+            "assert.strictEqual(snapshot.phase_label, 'Captioning');",
+            "assert.strictEqual(snapshot.active, true);",
+            "assert.strictEqual(snapshot.step_plan[1].label, 'Build prompt stack');",
+            "assert.strictEqual(snapshot.caption_dataset_progress.case, 'frame003.jpg');",
+            "assert(snapshot.step_detail.includes('frame003.jpg'));",
+            "assert.strictEqual(snapshot.io_events[0].kind, 'output');",
+            "snapshot = qwenCaptionBackendLiveProgressSnapshot({",
+            "  job_id: 'job-2',",
+            "  status: 'running',",
+            "  progress: 0.5,",
+            "  result: { processed: 4, total_cases: 8 },",
+            "});",
+            "assert.strictEqual(snapshot.progress, 0.5);",
+            "assert.strictEqual(snapshot.step_plan[1].label, 'Build prompt stack');",
+            "assert.strictEqual(snapshot.caption_dataset_progress.total_cases, 8);",
+            "snapshot = qwenCaptionBackendLiveProgressSnapshot({",
+            "  job_id: 'job-3',",
+            "  status: 'failed',",
+            "  error: 'caption_runner_preflight_failed',",
+            "  live_progress: { phase: 'error', error: 'caption_runner_preflight_failed' },",
+            "  result: { preflight: { status: 'error', checks: [{ name: 'model_available', status: 'error', detail: 'selected caption model is not local' }] } },",
+            "});",
+            "assert.strictEqual(snapshot.phase, 'error');",
+            "assert(snapshot.error.includes('Caption runner preflight failed: selected caption model is not local'));",
         ]
     )
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)

@@ -19,6 +19,8 @@ def _dataset_export_route_client(
     apply_review_fn=None,
     download_fn=None,
     set_glossary_fn=None,
+    get_captions_fn=None,
+    get_captions_batch_fn=None,
 ):
     from api.datasets import build_datasets_router
 
@@ -52,8 +54,8 @@ def _dataset_export_route_client(
             get_text_label_fn=noop,
             get_text_labels_fn=noop,
             set_text_label_fn=noop,
-            get_captions_fn=noop,
-            get_captions_batch_fn=noop,
+            get_captions_fn=get_captions_fn or noop,
+            get_captions_batch_fn=get_captions_batch_fn or noop,
             add_caption_fn=noop,
             update_caption_fn=noop,
             delete_caption_fn=noop,
@@ -217,6 +219,64 @@ def test_instruction_review_route_blocks_when_backend_caption_job_is_active() ->
 
     assert response.status_code == 409
     assert response.json()["detail"] == "caption_review_import_busy:qcap_busy:running"
+
+
+@pytest.mark.parametrize(
+    ("operation", "call"),
+    [
+        ("single_caption_read", lambda: api.get_captions("ds", "img.jpg")),
+        ("batch_caption_read", lambda: api.get_captions_batch("ds", ["img.jpg"])),
+    ],
+)
+def test_caption_reads_block_active_backend_caption_job_before_dataset_read(
+    monkeypatch,
+    operation,
+    call,
+) -> None:
+    job = api.QwenCaptionDatasetJob(job_id="qcap_busy", status="running")
+    job.request = {"dataset_id": "ds"}
+    monkeypatch.setattr(api, "QWEN_CAPTION_DATASET_JOBS", {job.job_id: job})
+
+    def fail_resolve(_dataset_id):
+        raise AssertionError(f"{operation} should block before reading a mutating dataset")
+
+    monkeypatch.setattr(api, "_resolve_dataset_entry", fail_resolve)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        call()
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "caption_read_busy:qcap_busy:running"
+
+
+def test_caption_read_routes_block_when_backend_caption_job_is_active() -> None:
+    def read_caption(_dataset_id, _image_name):
+        raise api.HTTPException(
+            status_code=409,
+            detail="caption_read_busy:qcap_busy:running",
+        )
+
+    def read_caption_batch(_dataset_id, _image_names):
+        raise api.HTTPException(
+            status_code=409,
+            detail="caption_read_busy:qcap_busy:running",
+        )
+
+    client = _dataset_export_route_client(
+        {},
+        get_captions_fn=read_caption,
+        get_captions_batch_fn=read_caption_batch,
+    )
+
+    response = client.get("/datasets/ds/captions/img.jpg")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "caption_read_busy:qcap_busy:running"
+
+    response = client.post("/datasets/ds/captions/batch", json={"image_names": ["img.jpg"]})
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "caption_read_busy:qcap_busy:running"
 
 
 @pytest.mark.parametrize(

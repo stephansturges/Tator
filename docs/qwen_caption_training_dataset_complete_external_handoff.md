@@ -328,7 +328,10 @@ mutation, the UI disables or action-time guards:
 
 The same principles exist on backend routes. API/script callers receive busy
 responses before reading or mutating archive-backed data when a caption dataset
-job owns the same dataset.
+job owns the same dataset. Single-image and batch caption archive reads return
+`caption_read_busy`; exports return `caption_export_busy`; reviewed-row imports
+return `caption_review_import_busy`; text-label and caption mutations return
+`caption_mutation_busy`; metadata writes return `caption_metadata_busy`.
 
 Read-side consistency is important too. If image navigation or a scheduled
 caption load tries to read the archive while a job is mutating it, the UI keeps

@@ -5635,7 +5635,7 @@ const sam3TrainState = {
             const msg = parsed?.detail || parsed?.message || parsed?.error;
             if (typeof msg === "string" && msg.trim()) {
                 const normalized = msg.trim();
-                const captionBusyMatch = /^(caption_export_busy|caption_review_import_busy|caption_mutation_busy|dataset_download_busy|caption_metadata_busy|qwen_caption_dataset_job_active):([^:]+):([^:]+)$/.exec(normalized);
+                const captionBusyMatch = /^(caption_export_busy|caption_review_import_busy|caption_mutation_busy|caption_read_busy|dataset_download_busy|caption_metadata_busy|qwen_caption_dataset_job_active):([^:]+):([^:]+)$/.exec(normalized);
                 if (captionBusyMatch) {
                     const jobId = captionBusyMatch[2] || "unknown";
                     const status = captionBusyMatch[3] || "active";
@@ -5643,6 +5643,7 @@ const sam3TrainState = {
                         caption_export_busy: "Caption export is blocked",
                         caption_review_import_busy: "Review import is blocked",
                         caption_mutation_busy: "Caption and text-label edits are blocked",
+                        caption_read_busy: "Caption archive reads are blocked",
                         dataset_download_busy: "Dataset download is blocked",
                         caption_metadata_busy: "Dataset glossary changes are blocked",
                         qwen_caption_dataset_job_active: "A caption dataset job is already active",

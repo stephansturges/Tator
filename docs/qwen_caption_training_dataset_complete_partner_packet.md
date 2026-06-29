@@ -545,6 +545,9 @@ glossary save path, and dataset deletion path also use backend active-job
 guards. A script or API caller that tries to export captions while an active
 caption dataset job is registered for the same dataset receives a `409` with a
 `caption_export_busy` detail instead of a partial archive snapshot. A script or
+API caller that tries to read a single-image or batch caption bundle during the
+same active state receives `caption_read_busy` before the backend resolves the
+dataset or reads caption records. A script or
 API caller that tries to download the full dataset ZIP during the same active
 state receives `dataset_download_busy` before the backend reads the dataset or
 overlay files. A script or API caller that tries to import review decisions
@@ -1486,6 +1489,8 @@ Additional focused validation recorded in the supporting hardening docs covers:
   while a backend caption job id is still active
 - the caption export HTTP route opting into the backend active-job guard and
   returning `caption_export_busy` for API clients while a dataset job is active
+- single-image and batch caption-read routes rejecting with `caption_read_busy`
+  before resolving the dataset while a dataset job is active
 - full dataset ZIP download rejecting with `dataset_download_busy` before
   dataset or overlay reads while a dataset job is active, with the UI showing
   the server-side failure instead of fire-and-forget downloading an error body

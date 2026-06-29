@@ -20127,11 +20127,13 @@ def _dataset_caption_bundle_for_image(
 
 
 def get_captions(dataset_id: str, image_name: str):
+    _raise_if_qwen_caption_read_busy(dataset_id)
     entry = _resolve_dataset_entry(dataset_id)
     return _dataset_caption_bundle_for_image(dataset_id, entry, image_name)
 
 
 def get_captions_batch(dataset_id: str, image_names: Sequence[str]):
+    _raise_if_qwen_caption_read_busy(dataset_id)
     entry = _resolve_dataset_entry(dataset_id)
     bundles: Dict[str, Any] = {}
     for raw_name in image_names or []:
@@ -23074,6 +23076,18 @@ def _raise_if_qwen_caption_mutation_busy(dataset_id: str) -> None:
     raise HTTPException(
         status_code=HTTP_409_CONFLICT,
         detail=f"caption_mutation_busy:{job_id}:{status}",
+    )
+
+
+def _raise_if_qwen_caption_read_busy(dataset_id: str) -> None:
+    active = _qwen_caption_dataset_active_export_job(dataset_id)
+    if not active:
+        return
+    job_id = str(active.get("job_id") or "").strip() or "unknown"
+    status = str(active.get("status") or "").strip() or "active"
+    raise HTTPException(
+        status_code=HTTP_409_CONFLICT,
+        detail=f"caption_read_busy:{job_id}:{status}",
     )
 
 

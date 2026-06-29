@@ -135,6 +135,9 @@ row before training.
   becomes active while the request is in flight. The panel keeps the last stable
   caption view instead of repainting from a half-updated archive. Explicit
   completion handoffs from the job that just finished can opt into a reload.
+  The backend single-image and batch caption-read routes now reject with
+  `caption_read_busy` before resolving the dataset when another active caption
+  dataset job owns the same archive.
 - Fixed caption action layout so export and instruction buttons wrap into
   readable responsive columns instead of clipping in the sidebar.
 - Fixed readiness and attach/recover rows so long status text cannot squeeze the

@@ -18,6 +18,8 @@ def _dataset_export_route_client(export_payload):
     from api.datasets import build_datasets_router
 
     def export_captions(dataset_id, options):
+        if callable(export_payload):
+            return export_payload(dataset_id, options)
         return export_payload
 
     def noop(*_args, **_kwargs):
@@ -73,6 +75,43 @@ def _dataset_export_route_client(export_payload):
         )
     )
     return TestClient(app)
+
+
+def test_caption_export_route_blocks_when_backend_caption_job_is_active() -> None:
+    observed_options = {}
+
+    def export_captions(_dataset_id, options):
+        observed_options.update(options)
+        raise api.HTTPException(
+            status_code=409,
+            detail="caption_export_busy:qcap_busy:running",
+        )
+
+    client = _dataset_export_route_client(export_captions)
+
+    response = client.get("/datasets/ds/captions/export")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "caption_export_busy:qcap_busy:running"
+    assert observed_options["block_active_caption_jobs"] is True
+
+
+def test_export_captions_blocks_active_backend_caption_job_before_dataset_read(monkeypatch) -> None:
+    job = api.QwenCaptionDatasetJob(job_id="qcap_busy", status="running")
+    job.request = {"dataset_id": "ds"}
+    monkeypatch.setattr(api, "QWEN_CAPTION_DATASET_JOBS", {job.job_id: job})
+
+    def fail_resolve(_dataset_id):
+        raise AssertionError("export should block before reading a mutating dataset")
+
+    monkeypatch.setattr(api, "_resolve_dataset_entry", fail_resolve)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.export_captions("ds", {"block_active_caption_jobs": True})
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "caption_export_busy:qcap_busy:running"
+    assert api._qwen_caption_dataset_active_export_job("other") is None
 
 
 def _ready_instruction_export_payload():

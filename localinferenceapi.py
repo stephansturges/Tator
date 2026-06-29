@@ -22998,7 +22998,48 @@ def _dataset_caption_grouped_archive(
     }
 
 
+def _qwen_caption_dataset_active_export_job(dataset_id: str) -> Optional[Dict[str, Any]]:
+    target = str(dataset_id or "").strip()
+    if not target:
+        return None
+    active_statuses = {"queued", "running", "cancelling"}
+    with QWEN_CAPTION_DATASET_JOBS_LOCK:
+        jobs = list(QWEN_CAPTION_DATASET_JOBS.values())
+    candidates: List[Dict[str, Any]] = []
+    for job in jobs:
+        status = str(job.status or "").strip().lower()
+        if status not in active_statuses:
+            continue
+        request_data = job.request if isinstance(job.request, Mapping) else {}
+        job_dataset_id = str(request_data.get("dataset_id") or "").strip()
+        if job_dataset_id != target:
+            continue
+        candidates.append(_serialize_qwen_caption_dataset_job(job))
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda item: float(item.get("updated_at") or item.get("created_at") or 0.0),
+        reverse=True,
+    )
+    return candidates[0]
+
+
+def _raise_if_qwen_caption_export_busy(dataset_id: str) -> None:
+    active = _qwen_caption_dataset_active_export_job(dataset_id)
+    if not active:
+        return
+    job_id = str(active.get("job_id") or "").strip() or "unknown"
+    status = str(active.get("status") or "").strip() or "active"
+    raise HTTPException(
+        status_code=HTTP_409_CONFLICT,
+        detail=f"caption_export_busy:{job_id}:{status}",
+    )
+
+
 def export_captions(dataset_id: str, options: Optional[Mapping[str, Any]] = None):
+    options_map = dict(options or {})
+    if options_map.get("block_active_caption_jobs"):
+        _raise_if_qwen_caption_export_busy(dataset_id)
     entry = _resolve_dataset_entry(dataset_id)
     records = [_dataset_caption_record_public(record) for record in _load_dataset_caption_records(entry)]
     existing = {
@@ -23054,7 +23095,7 @@ def export_captions(dataset_id: str, options: Optional[Mapping[str, Any]] = None
         and str(public.get("caption") or "").strip()
     ]
     caption_counts = [len(items) for items in grouped.values()]
-    instruction_settings = _caption_instruction_export_settings(options)
+    instruction_settings = _caption_instruction_export_settings(options_map)
     instruction_records = _load_dataset_caption_instruction_records(entry)
     instruction_archive = _dataset_caption_instruction_archive(
         indexed_records,

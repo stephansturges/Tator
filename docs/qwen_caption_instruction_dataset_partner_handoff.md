@@ -49,6 +49,8 @@ The new work adds a separate instruction-dataset path:
   run-level report.
 - Ordinary caption exports and instruction artifact actions are blocked while a
   backend caption job is still mutating the selected caption archive.
+- The HTTP caption-export route opts into the same backend active-job guard, so
+  API clients receive `caption_export_busy` instead of a mid-run snapshot.
 - The browser validates instruction JSONL before download, including required
   row metadata, instruction archive provenance, known validation/review states,
   rejected/failed/invalid validation state, non-trainable review state,
@@ -127,6 +129,8 @@ dataset creation share infrastructure, but they are different product modes.
 Both modes now refuse export actions while the selected caption archive is being
 changed by an active backend caption job, so exported files are snapshots of a
 stable archive rather than mid-run partial state.
+The server-side caption export route enforces the same active-job rule for
+scripts and API clients.
 
 ## Core Invariants
 
@@ -612,6 +616,8 @@ Current combined caption/instruction/trainer/UI contract suite:
 ./.venv-macos/bin/python -m pytest \
   tests/test_qwen_caption_dataset_job.py \
   tests/test_qwen_training_backend.py \
+  tests/test_dataset_linked_annotation_flows.py::test_caption_export_route_blocks_when_backend_caption_job_is_active \
+  tests/test_dataset_linked_annotation_flows.py::test_export_captions_blocks_active_backend_caption_job_before_dataset_read \
   tests/test_dataset_linked_annotation_flows.py::test_caption_instruction_strict_export_gate_requires_ready_proofs \
   tests/test_dataset_linked_annotation_flows.py::test_caption_instruction_strict_export_route_blocks_malformed_rows_when_ready_required \
   tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete \
@@ -623,7 +629,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-228 passed, 8 warnings
+230 passed, 8 warnings
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

@@ -535,6 +535,7 @@ def build_datasets_router(
                 "include_deterministic_metadata_qa": include_deterministic_metadata_qa,
                 "qa_mix": qa_mix,
                 "answer_format": answer_format,
+                "block_active_caption_jobs": True,
             },
         )
         not_ready_reason = _instruction_export_not_ready_reason(result)

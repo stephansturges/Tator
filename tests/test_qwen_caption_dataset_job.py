@@ -2677,6 +2677,14 @@ def test_caption_instruction_artifact_consistency_validator_blocks_same_count_id
             "required_actions": [],
             "quality_warnings": [],
             "thresholds": {},
+            "selected_training_row_count": 1,
+            "selected_review_row_count": 1,
+            "selected_manual_review_row_count": 1,
+            "accepted_manual_review_row_count": 1,
+            "pending_manual_review_row_count": 0,
+            "rejected_manual_review_row_count": 0,
+            "needs_revision_manual_review_row_count": 0,
+            "instruction_export_validation_error_count": 0,
         },
         "instruction_settings": settings,
         "instruction_settings_fingerprint": settings_fingerprint,
@@ -2780,6 +2788,14 @@ def test_caption_instruction_artifact_consistency_validator_canonicalizes_image_
             "required_actions": [],
             "quality_warnings": [],
             "thresholds": {},
+            "selected_training_row_count": 1,
+            "selected_review_row_count": 1,
+            "selected_manual_review_row_count": 1,
+            "accepted_manual_review_row_count": 1,
+            "pending_manual_review_row_count": 0,
+            "rejected_manual_review_row_count": 0,
+            "needs_revision_manual_review_row_count": 0,
+            "instruction_export_validation_error_count": 0,
         },
         "instruction_settings": settings,
         "instruction_settings_fingerprint": settings_fingerprint,
@@ -2926,6 +2942,14 @@ def test_caption_instruction_artifact_consistency_validator_requires_review_data
             "required_actions": ["review_selected_language_rows"],
             "quality_warnings": [],
             "thresholds": {},
+            "selected_training_row_count": 0,
+            "selected_review_row_count": 0,
+            "selected_manual_review_row_count": 0,
+            "accepted_manual_review_row_count": 0,
+            "pending_manual_review_row_count": 0,
+            "rejected_manual_review_row_count": 0,
+            "needs_revision_manual_review_row_count": 0,
+            "instruction_export_validation_error_count": 0,
         },
         "instruction_settings": settings,
         "instruction_settings_fingerprint": settings_fingerprint,
@@ -3140,6 +3164,38 @@ def test_caption_instruction_artifact_consistency_validator_rejects_invalid_read
         settings=settings,
         settings_fingerprint=settings_fingerprint,
     )
+    ready_with_pending_review = api._caption_instruction_artifact_consistency_validation(
+        training_rows=[],
+        archive_rows=[],
+        review_rows=[],
+        report={
+            **base_report,
+            "image_count": 0,
+            "corpus_quality_metrics": {
+                **base_report["corpus_quality_metrics"],
+                "image_count": 0,
+            },
+            "training_readiness": {
+                "status": "ready",
+                "ready_for_training": True,
+                "blocking_reasons": [],
+                "required_actions": [],
+                "quality_warnings": [],
+                "thresholds": {},
+                "selected_training_row_count": 0,
+                "selected_review_row_count": 0,
+                "selected_manual_review_row_count": 1,
+                "accepted_manual_review_row_count": 0,
+                "pending_manual_review_row_count": 1,
+                "rejected_manual_review_row_count": 0,
+                "needs_revision_manual_review_row_count": 0,
+                "instruction_export_validation_error_count": 0,
+            },
+        },
+        archive_image_count=0,
+        settings=settings,
+        settings_fingerprint=settings_fingerprint,
+    )
     blocked_without_reasons = api._caption_instruction_artifact_consistency_validation(
         training_rows=[],
         archive_rows=[],
@@ -3159,6 +3215,38 @@ def test_caption_instruction_artifact_consistency_validator_rejects_invalid_read
         settings=settings,
         settings_fingerprint=settings_fingerprint,
     )
+    stale_counts = api._caption_instruction_artifact_consistency_validation(
+        training_rows=[],
+        archive_rows=[],
+        review_rows=[],
+        report={
+            **base_report,
+            "image_count": 0,
+            "corpus_quality_metrics": {
+                **base_report["corpus_quality_metrics"],
+                "image_count": 0,
+            },
+            "training_readiness": {
+                "status": "needs_review",
+                "ready_for_training": False,
+                "blocking_reasons": [],
+                "required_actions": ["review_selected_language_rows"],
+                "quality_warnings": [],
+                "thresholds": {},
+                "selected_training_row_count": 1,
+                "selected_review_row_count": 0,
+                "selected_manual_review_row_count": 0,
+                "accepted_manual_review_row_count": 0,
+                "pending_manual_review_row_count": 0,
+                "rejected_manual_review_row_count": 0,
+                "needs_revision_manual_review_row_count": 0,
+                "instruction_export_validation_error_count": 0,
+            },
+        },
+        archive_image_count=0,
+        settings=settings,
+        settings_fingerprint=settings_fingerprint,
+    )
 
     assert missing["ok"] is False
     assert "instruction_report.training_readiness is missing" in missing["errors"]
@@ -3170,9 +3258,19 @@ def test_caption_instruction_artifact_consistency_validator_rejects_invalid_read
     assert "instruction_report.training_readiness ready status cannot include blocking_reasons" in ready_with_warnings["errors"]
     assert "instruction_report.training_readiness ready status cannot include required_actions" in ready_with_warnings["errors"]
     assert "instruction_report.training_readiness ready status cannot include quality_warnings" in ready_with_warnings["errors"]
+    assert ready_with_pending_review["ok"] is False
+    assert (
+        "instruction_report.training_readiness ready status cannot include unresolved manual review rows"
+        in ready_with_pending_review["errors"]
+    )
     assert blocked_without_reasons["ok"] is False
     assert "instruction_report.training_readiness.ready_for_training must be false unless status is ready" in blocked_without_reasons["errors"]
     assert "instruction_report.training_readiness blocked status requires blocking_reasons" in blocked_without_reasons["errors"]
+    assert stale_counts["ok"] is False
+    assert (
+        "instruction_report.training_readiness.selected_training_row_count 1 does not match actual count 0"
+        in stale_counts["errors"]
+    )
 
 
 def test_caption_instruction_training_validator_requires_complete_row_metadata() -> None:

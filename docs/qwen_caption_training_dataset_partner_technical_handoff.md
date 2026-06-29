@@ -632,8 +632,8 @@ copied, edited, mixed, or shared outside the UI.
 
 | Layer | What it protects |
 | --- | --- |
-| Browser preflight | Row shape, metadata, readiness, review state, duplicates, settings fingerprint, and consistency before writing downloads |
-| Backend export validation | Flat trainer rows, report readiness schema and state, artifact consistency, settings fingerprint, archive-row shape, review-row shape, image alias resolution, and strict API/script export |
+| Browser preflight | Row shape, metadata, readiness schema and count parity, review state, duplicates, settings fingerprint, and consistency before writing downloads |
+| Backend export validation | Flat trainer rows, report readiness schema, state, and count parity, artifact consistency, settings fingerprint, archive-row shape, review-row shape, image alias resolution, and strict API/script export |
 | Bundle validation | Copied image/label assets, rewritten trainer/archive/review paths, trainer rows, artifact consistency, ZIP integrity, manifest inventory, byte counts, and SHA-256 digests |
 | Review import validation | Wrong dataset, stale text, duplicate targets, unsupported origins, malformed rows, and metadata-only mutation |
 | Trainer loader validation | Missing images, malformed rows, duplicate canonical image/question pairs, rejected or needs-revision rows, invalid answer format, missing provenance |
@@ -654,6 +654,7 @@ The repository has focused coverage for:
 - artifact consistency validation;
 - readiness report blocking;
 - backend rejection of invalid readiness state;
+- browser and backend rejection of stale readiness counters;
 - review JSONL export and metadata-only review import;
 - stale, duplicate, wrong-dataset, malformed, and unsupported review rows;
 - trainer import of flat question/answer rows;

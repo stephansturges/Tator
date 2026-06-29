@@ -21944,6 +21944,7 @@ def _caption_instruction_artifact_consistency_validation(
         errors.append("instruction_report.instruction_export_validation is missing")
     readiness = report_mapping.get("training_readiness")
     readiness_mapping = readiness if isinstance(readiness, Mapping) else {}
+    readiness_counts: Dict[str, Optional[int]] = {}
     if not readiness_mapping:
         errors.append("instruction_report.training_readiness is missing")
     else:
@@ -21964,6 +21965,20 @@ def _caption_instruction_artifact_consistency_validation(
             errors.append("instruction_report.training_readiness.quality_warnings is invalid")
         if not isinstance(readiness_mapping.get("thresholds"), Mapping):
             errors.append("instruction_report.training_readiness.thresholds is missing")
+        for readiness_field in (
+            "selected_training_row_count",
+            "selected_review_row_count",
+            "selected_manual_review_row_count",
+            "accepted_manual_review_row_count",
+            "pending_manual_review_row_count",
+            "rejected_manual_review_row_count",
+            "needs_revision_manual_review_row_count",
+            "instruction_export_validation_error_count",
+        ):
+            readiness_counts[readiness_field] = _optional_nonnegative_int(
+                readiness_mapping.get(readiness_field),
+                f"instruction_report.training_readiness.{readiness_field}",
+            )
         if readiness_status == "ready":
             if readiness_flag is not True:
                 errors.append("instruction_report.training_readiness.ready_for_training must be true when status is ready")
@@ -21973,6 +21988,15 @@ def _caption_instruction_artifact_consistency_validation(
                 errors.append("instruction_report.training_readiness ready status cannot include required_actions")
             if isinstance(quality_warnings, list) and quality_warnings:
                 errors.append("instruction_report.training_readiness ready status cannot include quality_warnings")
+            if any(
+                (readiness_counts.get(field) or 0) > 0
+                for field in (
+                    "pending_manual_review_row_count",
+                    "rejected_manual_review_row_count",
+                    "needs_revision_manual_review_row_count",
+                )
+            ):
+                errors.append("instruction_report.training_readiness ready status cannot include unresolved manual review rows")
         elif readiness_status in {"needs_review", "blocked"} and readiness_flag is True:
             errors.append("instruction_report.training_readiness.ready_for_training must be false unless status is ready")
         if readiness_status == "blocked" and isinstance(blocking_reasons, list) and not blocking_reasons:
@@ -21999,6 +22023,35 @@ def _caption_instruction_artifact_consistency_validation(
     review_row_count = len(review_rows) if isinstance(review_rows, Sequence) else 0
     selected_review_row_count = sum(
         1 for row in review_rows if isinstance(row, Mapping) and row.get("selected_for_training") is True
+    )
+    selected_manual_review_rows = [
+        row
+        for row in review_rows
+        if isinstance(row, Mapping)
+        and row.get("selected_for_training") is True
+        and row.get("requires_manual_review") is True
+    ]
+    accepted_manual_review_count = sum(
+        1
+        for row in selected_manual_review_rows
+        if _caption_instruction_review_decision(row.get("review_decision")) == "accepted"
+    )
+    rejected_manual_review_count = sum(
+        1
+        for row in selected_manual_review_rows
+        if _caption_instruction_review_decision(row.get("review_decision")) == "rejected"
+    )
+    needs_revision_manual_review_count = sum(
+        1
+        for row in selected_manual_review_rows
+        if _caption_instruction_review_decision(row.get("review_decision")) == "needs_revision"
+    )
+    pending_manual_review_count = max(
+        0,
+        len(selected_manual_review_rows)
+        - accepted_manual_review_count
+        - rejected_manual_review_count
+        - needs_revision_manual_review_count,
     )
     manual_review_required_count = sum(
         1 for row in review_rows if isinstance(row, Mapping) and row.get("requires_manual_review") is True
@@ -22039,6 +22092,28 @@ def _caption_instruction_artifact_consistency_validation(
         )
         if export_error_count and export_error_count > 0:
             errors.append("instruction_report.instruction_export_validation has errors")
+    else:
+        export_error_count = None
+
+    readiness_actual_counts = {
+        "selected_training_row_count": training_row_count,
+        "selected_review_row_count": selected_review_row_count,
+        "selected_manual_review_row_count": len(selected_manual_review_rows),
+        "accepted_manual_review_row_count": accepted_manual_review_count,
+        "pending_manual_review_row_count": pending_manual_review_count,
+        "rejected_manual_review_row_count": rejected_manual_review_count,
+        "needs_revision_manual_review_row_count": needs_revision_manual_review_count,
+        "instruction_export_validation_error_count": export_error_count,
+    }
+    for readiness_field, actual_count in readiness_actual_counts.items():
+        readiness_count = readiness_counts.get(readiness_field)
+        if readiness_count is None or actual_count is None:
+            continue
+        if readiness_count != actual_count:
+            errors.append(
+                f"instruction_report.training_readiness.{readiness_field} "
+                f"{readiness_count} does not match actual count {actual_count}"
+            )
 
     if report_selected_count is not None and training_row_count != report_selected_count:
         errors.append(
@@ -22297,6 +22372,11 @@ def _caption_instruction_artifact_consistency_validation(
             "archive_row_count": archive_row_count,
             "review_row_count": review_row_count,
             "selected_review_row_count": selected_review_row_count,
+            "selected_manual_review_row_count": len(selected_manual_review_rows),
+            "accepted_manual_review_row_count": accepted_manual_review_count,
+            "pending_manual_review_row_count": pending_manual_review_count,
+            "rejected_manual_review_row_count": rejected_manual_review_count,
+            "needs_revision_manual_review_row_count": needs_revision_manual_review_count,
             "manual_review_required_count": manual_review_required_count,
             "report_image_count": report_image_count,
             "report_selected_flattened_row_count": report_selected_count,

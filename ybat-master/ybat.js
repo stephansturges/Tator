@@ -35818,6 +35818,41 @@ async function cancelRfDetrTrainingJobRequest() {
             if (!readiness.thresholds || typeof readiness.thresholds !== "object") {
                 errors.push("training_readiness.thresholds is missing");
             }
+            const readinessCountKeys = [
+                "selected_training_row_count",
+                "selected_review_row_count",
+                "selected_manual_review_row_count",
+                "accepted_manual_review_row_count",
+                "pending_manual_review_row_count",
+                "rejected_manual_review_row_count",
+                "needs_revision_manual_review_row_count",
+                "instruction_export_validation_error_count",
+            ];
+            readinessCountKeys.forEach((key) => {
+                const value = Number(readiness[key]);
+                if (!Number.isInteger(value) || value < 0) {
+                    errors.push(`training_readiness.${key} is missing or invalid`);
+                }
+            });
+            if (
+                Number.isFinite(reportSelectedCount)
+                && Number.isInteger(Number(readiness.selected_training_row_count))
+                && Number(readiness.selected_training_row_count) !== reportSelectedCount
+            ) {
+                errors.push("training_readiness.selected_training_row_count does not match report selected_flattened_row_count");
+            }
+            const selectedManualCount = Number(readiness.selected_manual_review_row_count);
+            const acceptedManualCount = Number(readiness.accepted_manual_review_row_count);
+            const pendingManualCount = Number(readiness.pending_manual_review_row_count);
+            const rejectedManualCount = Number(readiness.rejected_manual_review_row_count);
+            const needsRevisionManualCount = Number(readiness.needs_revision_manual_review_row_count);
+            if (
+                [selectedManualCount, acceptedManualCount, pendingManualCount, rejectedManualCount, needsRevisionManualCount]
+                    .every((value) => Number.isInteger(value) && value >= 0)
+                && acceptedManualCount + pendingManualCount + rejectedManualCount + needsRevisionManualCount !== selectedManualCount
+            ) {
+                errors.push("training_readiness selected manual review counts do not add up");
+            }
             if (status === "ready" && readiness.ready_for_training !== true) {
                 errors.push("training_readiness.ready_for_training must be true when status is ready");
             }
@@ -35833,6 +35868,9 @@ async function cancelRfDetrTrainingJobRequest() {
                 }
                 if (Array.isArray(readiness.quality_warnings) && readiness.quality_warnings.length) {
                     errors.push("training_readiness ready status cannot include quality_warnings");
+                }
+                if (pendingManualCount > 0 || rejectedManualCount > 0 || needsRevisionManualCount > 0) {
+                    errors.push("training_readiness ready status cannot include unresolved manual review rows");
                 }
             }
             if (status === "blocked" && Array.isArray(readiness.blocking_reasons) && !readiness.blocking_reasons.length) {
@@ -35855,6 +35893,14 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             if (exportValidation.ok === false || errorCount > 0) {
                 errors.push("instruction_export_validation contains training-row errors");
+            }
+            if (
+                readiness
+                && typeof readiness === "object"
+                && Number.isInteger(Number(readiness.instruction_export_validation_error_count))
+                && Number(readiness.instruction_export_validation_error_count) !== errorCount
+            ) {
+                errors.push("training_readiness.instruction_export_validation_error_count does not match instruction_export_validation.error_count");
             }
             const exportRowCount = Number(exportValidation.row_count);
             const selectedRowCount = Number(metrics?.selected_flattened_row_count);
@@ -36066,6 +36112,36 @@ async function cancelRfDetrTrainingJobRequest() {
         const trainingRows = Array.isArray(payload?.instruction_training_rows) ? payload.instruction_training_rows : [];
         const reviewRows = Array.isArray(payload?.instruction_review_rows) ? payload.instruction_review_rows : [];
         const archiveRows = Array.isArray(payload?.instruction_archive_rows) ? payload.instruction_archive_rows : [];
+        const readiness = report?.training_readiness && typeof report.training_readiness === "object"
+            ? report.training_readiness
+            : {};
+        const selectedReviewRowsForReadiness = reviewRows.filter((row) => row?.selected_for_training === true);
+        const selectedManualReviewRowsForReadiness = selectedReviewRowsForReadiness.filter((row) => row?.requires_manual_review === true);
+        const acceptedManualReviewCount = selectedManualReviewRowsForReadiness.filter((row) => normalizeCaptionInstructionReviewDecision(row?.review_decision) === "accepted").length;
+        const rejectedManualReviewCount = selectedManualReviewRowsForReadiness.filter((row) => normalizeCaptionInstructionReviewDecision(row?.review_decision) === "rejected").length;
+        const needsRevisionManualReviewCount = selectedManualReviewRowsForReadiness.filter((row) => normalizeCaptionInstructionReviewDecision(row?.review_decision) === "needs_revision").length;
+        const pendingManualReviewCount = Math.max(
+            0,
+            selectedManualReviewRowsForReadiness.length
+                - acceptedManualReviewCount
+                - rejectedManualReviewCount
+                - needsRevisionManualReviewCount
+        );
+        const readinessActualCounts = {
+            selected_training_row_count: trainingRows.length,
+            selected_review_row_count: selectedReviewRowsForReadiness.length,
+            selected_manual_review_row_count: selectedManualReviewRowsForReadiness.length,
+            accepted_manual_review_row_count: acceptedManualReviewCount,
+            pending_manual_review_row_count: pendingManualReviewCount,
+            rejected_manual_review_row_count: rejectedManualReviewCount,
+            needs_revision_manual_review_row_count: needsRevisionManualReviewCount,
+        };
+        Object.entries(readinessActualCounts).forEach(([key, actual]) => {
+            const reported = Number(readiness[key]);
+            if (Number.isInteger(reported) && reported >= 0 && reported !== actual) {
+                errors.push(`training_readiness.${key} ${reported} does not match actual count ${actual}`);
+            }
+        });
         if (trainingRows.length || reviewRows.length || archiveRows.length) {
             const trainingByIdentity = new Map();
             const selectedReviewByIdentity = new Map();

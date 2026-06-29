@@ -3252,6 +3252,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
     const DEFAULT_CAPTION_PILOT_MAX_PROMPT_TOKENS = 9000;
     const DEFAULT_CAPTION_PILOT_PROMPT_ADAPTED_RATE = 1;
     const CAPTION_MAX_TOKEN_CAP = 4096;
+    const CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_BYTES = 25 * 1024 * 1024;
     const DEFAULT_CAPTION_AUTO_SENTENCES = 10;
     const CAPTION_RECIPE_KIND = "tator.caption_recipe";
     const CAPTION_RECIPE_VERSION = 1;
@@ -35961,6 +35962,13 @@ async function cancelRfDetrTrainingJobRequest() {
         if (busyMessage) {
             setCaptionExportHealth(busyMessage, "warn");
             setSamStatus(busyMessage, { variant: "warn", duration: 5000 });
+            return;
+        }
+        const fileSize = Number(file?.size);
+        if (Number.isFinite(fileSize) && fileSize > CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_BYTES) {
+            const message = `Instruction review import blocked: selected file is ${formatBytesLabel(fileSize)}, above the ${formatBytesLabel(CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_BYTES)} browser import safety limit. Split the review packet or import a smaller review JSONL.`;
+            setCaptionExportHealth(message, "fail");
+            setSamStatus(message, { variant: "error", duration: 7000 });
             return;
         }
         const text = await file.text();

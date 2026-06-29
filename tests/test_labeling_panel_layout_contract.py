@@ -345,6 +345,8 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     assert "function validateCaptionInstructionReviewRows" in js
     assert "function parseCaptionInstructionReviewRowsText" in js
     assert "async function importCaptionInstructionReviewFile" in js
+    assert "CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_BYTES" in js
+    assert "browser import safety limit" in js
     assert "normalizeCaptionInstructionReviewDecision" in js
     assert "function validateCaptionInstructionReport" in js
     assert "function validateCaptionInstructionArtifactConsistency" in js
@@ -593,6 +595,49 @@ def test_qwen_caption_instruction_review_import_parser_accepts_reviewer_file_sha
         ]
     )
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
+
+
+def test_qwen_caption_instruction_review_import_rejects_oversized_file_before_read():
+    js = _js()
+    constant_match = re.search(r"const CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_BYTES = [^;]+;", js)
+    assert constant_match
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            constant_match.group(0),
+            "let health = null;",
+            "let status = null;",
+            "let readCalled = false;",
+            "let qwenCaptionActive = false;",
+            "let qwenCaptionBatchActive = false;",
+            "function getCaptionDatasetId() { return 'dataset-a'; }",
+            "function setCaptionExportHealth(message, severity) { health = { message, severity }; }",
+            "function setSamStatus(message, options) { status = { message, options }; }",
+            _extract_js_function(js, "formatBytesLabel"),
+            _extract_js_function(js, "captionInstructionArtifactBusyMessage"),
+            "async " + _extract_js_function(js, "importCaptionInstructionReviewFile"),
+            "const hugeFile = {",
+            "  size: CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_BYTES + 1,",
+            "  text: async () => { readCalled = true; throw new Error('file body should not be read'); }",
+            "};",
+            "await importCaptionInstructionReviewFile(hugeFile);",
+            "assert.strictEqual(readCalled, false);",
+            "assert.strictEqual(health.severity, 'fail');",
+            "assert(health.message.includes('browser import safety limit'));",
+            "assert(health.message.includes('Split the review packet'));",
+            "assert.strictEqual(status.options.variant, 'error');",
+            "assert(status.message.includes('smaller review JSONL'));",
+        ]
+    )
+    subprocess.run(
+        [
+            "node",
+            "-e",
+            f"(async () => {{\n{script}\n}})().catch((error) => {{ console.error(error); process.exit(1); }});",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+    )
 
 
 def test_qwen_caption_instruction_review_import_formats_backend_failures():

@@ -182,8 +182,10 @@ partially apply. The browser
 import preflight also catches
 unsupported actionable row
 origins and duplicate or conflicting actionable review targets before sending
-the packet, while the backend also rejects rows that use different row
-identities but resolve to the same saved caption or generated-QA record. Review
+the packet, and it rejects oversized review files before reading them into
+browser memory so a bad review packet cannot lock the UI. The backend also
+rejects rows that use different row identities but resolve to the same saved
+caption or generated-QA record. Review
 exports are blocked if caption0 or generated-QA rows are missing dataset
 identity, even before a reviewer fills a decision, so exported packets are
 import-ready by construction. It

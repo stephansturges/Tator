@@ -408,6 +408,9 @@ It ignores:
 - deterministic metadata QA rows, because those are regenerated from labels at
   export time
 
+API and script imports that contain only ignored rows are rejected instead of
+being reported as applied with zero persisted decisions.
+
 It fails closed on:
 
 - unsupported non-blank review decisions, such as typoed accepted/rejected
@@ -602,7 +605,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-195 passed
+197 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

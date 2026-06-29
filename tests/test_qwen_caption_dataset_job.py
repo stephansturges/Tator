@@ -912,6 +912,80 @@ def test_caption_instruction_review_import_rejects_unsupported_review_decision(
     assert excinfo.value.detail == "review_rows_unsupported_review_decision:row_1:acceppted"
 
 
+@pytest.mark.parametrize(
+    "row_update",
+    [
+        {"row_origin": "generated_qa", "review_decision": ""},
+        {
+            "row_origin": "deterministic_metadata_qa",
+            "row_type": "deterministic_count",
+            "qa_id": "meta-1",
+            "question": "Return the labeled object counts for this image as JSON.",
+            "candidate_answer": "{}",
+            "training_answer": "{}",
+            "validation_status": "machine_validated",
+            "selected_for_training": False,
+            "requires_manual_review": False,
+            "review_decision": "accepted",
+        },
+    ],
+)
+def test_caption_instruction_review_import_rejects_no_actionable_persisted_decisions(
+    monkeypatch,
+    tmp_path,
+    row_update,
+) -> None:
+    import localinferenceapi as api
+
+    entry = {"id": "ds", "dataset_root": str(tmp_path), "registry_root": str(tmp_path)}
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: entry)
+    monkeypatch.setattr(
+        api,
+        "_annotation_manifest_for_entry",
+        lambda _entry: {
+            "labelmap": [],
+            "images": [
+                {
+                    "image_name": "frame.jpg",
+                    "image_relpath": "frame.jpg",
+                    "split": "train",
+                    "label_source_present": True,
+                    "label_lines": [],
+                }
+            ],
+        },
+    )
+
+    row = {
+        "format": "tator_caption_instruction_review_rows_v1",
+        "dataset_id": "ds",
+        "image_path": "frame.jpg",
+        "split": "train",
+        "row_origin": "generated_qa",
+        "qa_id": "qa-1",
+        "row_type": "generated_qa",
+        "question": "What is the scene type?",
+        "candidate_answer": "A waterfront area.",
+        "training_answer": "A waterfront area.",
+        "validation_status": "accepted",
+        "selected_for_training": True,
+        "requires_manual_review": True,
+        "review_decision": "",
+        "review_notes": "",
+        "rejection_reasons": [],
+        "source_summary": {"status": "empty_label_file"},
+    }
+    row.update(row_update)
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.apply_caption_instruction_review("ds", {"rows": [row]})
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "review_rows_no_actionable_decisions"
+    assert api._load_dataset_caption_records(entry) == []
+    assert api._load_dataset_caption_instruction_records(entry) == []
+
+
 @pytest.mark.parametrize("row_origin", ["generated_qa", "caption0"])
 def test_caption_instruction_review_import_accepts_canonical_image_path_aliases(
     monkeypatch,

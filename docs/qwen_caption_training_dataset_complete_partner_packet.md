@@ -381,6 +381,8 @@ Review import fails closed on:
 - unresolvable caption0 targets
 - forged caption0 rows that would create a new saved caption without matching
   selected-dataset, resolved-image, and current text-label provenance
+- review packets that contain no accepted, rejected, or needs-revision
+  caption0/generated-QA decisions to persist
 
 Rejected and needs-revision language candidates remain in audit artifacts but
 are excluded from flattened trainer rows.
@@ -596,11 +598,13 @@ node --check ybat-master/ybat.js
 Result:
 
 ```text
-195 passed
+197 passed
 ```
 
 Additional focused validation recorded in the supporting hardening docs covers:
 
+- zero-action review import refusal for blank-decision and deterministic-only
+  API packets
 - artifact consistency and same-count identity mismatches
 - canonical image-path handling
 - review import persistence and fail-closed cases

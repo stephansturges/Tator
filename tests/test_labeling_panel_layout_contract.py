@@ -474,6 +474,8 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "formatCaptionInstructionReviewImportApiError" in js
     assert "accepted, rejected, or needs-revision decisions" in js
     assert "Use accepted, rejected, needs-revision, or leave the decision blank" in js
+    assert "review_rows_no_actionable_decisions" in js
+    assert "no accepted, rejected, or needs-revision caption0 or generated-QA decisions" in js
     assert "captionMutationPayload({ rows: persistableRows })" in js
     assert "Export a fresh review JSONL" in js
     assert "duplicate image_path + question" in js
@@ -591,6 +593,9 @@ def test_qwen_caption_instruction_review_import_formats_backend_failures():
             "assert(resolvedDuplicate.includes('same saved caption or generated-QA record'));",
             "const unsupported = formatCaptionInstructionReviewImportApiError('review_rows_unsupported_row_origin:row_6:freeform_review');",
             "assert(unsupported.includes('freeform_review is not a persisted review row type'));",
+            "const noActionable = formatCaptionInstructionReviewImportApiError('review_rows_no_actionable_decisions');",
+            "assert(noActionable.includes('no accepted, rejected, or needs-revision caption0 or generated-QA decisions'));",
+            "assert(noActionable.includes('Fill review_decision'));",
             "const blockedCreate = formatCaptionInstructionReviewImportApiError('review_rows_caption0_creation_not_allowed:row_7');",
             "assert(blockedCreate.includes('blocked at row 7'));",
             "assert(blockedCreate.includes('selected dataset, resolved image key, and current text-label caption'));",

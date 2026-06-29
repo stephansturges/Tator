@@ -330,6 +330,8 @@ Review import fails closed on:
 - caption0 rows that would create a new saved caption without a synthetic id
   that matches the selected dataset, resolved image key, and current text-label
   caption
+- review packets that contain no accepted, rejected, or needs-revision
+  caption0/generated-QA decisions to persist
 
 Review import does not edit source labels, boxes, image paths, generated
 questions, generated answers, deterministic metadata QA rows, or final
@@ -337,7 +339,8 @@ annotations. Rejected and needs-revision language rows remain auditable in
 archive and review artifacts but are excluded from flattened trainer rows.
 Deterministic metadata decisions are treated as non-persisted because those rows
 are rebuilt from trusted labels during export; the UI warns instead of sending a
-deterministic-only review file to the backend.
+deterministic-only review file to the backend, and the backend rejects
+API/script review packets that would otherwise apply zero persisted decisions.
 
 ### Training Readiness
 
@@ -560,7 +563,7 @@ Result:
 Result:
 
 ```text
-195 passed
+197 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

@@ -35819,6 +35819,9 @@ async function cancelRfDetrTrainingJobRequest() {
         if (raw === "review_rows_too_many") {
             return "Instruction review import blocked: the file contains too many review rows. Split the review packet or export a smaller review JSONL.";
         }
+        if (raw === "review_rows_no_actionable_decisions") {
+            return "Instruction review import blocked: no accepted, rejected, or needs-revision caption0 or generated-QA decisions were found. Fill review_decision for persisted language rows before importing.";
+        }
         const messageByCode = {
             review_rows_row_not_object: "the row is not a JSON object",
             review_rows_invalid_format: "the row is not an instruction review row from the current export format",

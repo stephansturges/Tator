@@ -23118,6 +23118,21 @@ def _caption_instruction_reject_unsupported_review_decisions(rows: Sequence[Any]
         )
 
 
+def _caption_instruction_has_persisted_actionable_review_decision(rows: Sequence[Any]) -> bool:
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        if str(row.get("format") or "").strip() != CAPTION_INSTRUCTION_REVIEW_ROWS_FORMAT:
+            continue
+        decision = _caption_instruction_review_decision(row.get("review_decision"))
+        if decision not in {"accepted", "rejected", "needs_revision"}:
+            continue
+        row_origin = str(row.get("row_origin") or "").strip()
+        if row_origin in {"caption0", "generated_qa"}:
+            return True
+    return False
+
+
 _CAPTION_INSTRUCTION_REVIEW_SPLITS = ("train", "val", "valid", "test")
 _CAPTION_INSTRUCTION_REVIEW_SPLIT_PREFIX_RE = re.compile(r"^(train|val|valid|test)/(.+)$")
 
@@ -23725,6 +23740,11 @@ def apply_caption_instruction_review(dataset_id: str, payload: Dict[str, Any]):
         instruction_records=instruction_records,
         current_review_rows=current_review_rows,
     )
+    if not _caption_instruction_has_persisted_actionable_review_decision(rows):
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="review_rows_no_actionable_decisions",
+        )
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     reviewer = str((payload or {}).get("reviewer") or "").strip()
     used_caption_ids = {str(record.get("id") or "").strip() for record in caption_records if str(record.get("id") or "").strip()}

@@ -717,6 +717,9 @@ The review import is deliberately conservative:
 - It skips deterministic metadata QA decisions because those rows are rebuilt
   from source labels at export time and do not correspond to persisted language
   records.
+- It rejects API or script review packets that contain no accepted, rejected, or
+  needs-revision caption0/generated-QA decisions to persist, so zero-decision
+  imports cannot be reported as applied work.
 - It records reviewer, notes, source row metadata, and decision timestamps.
 - It does not change questions, answers, source labels, boxes, image paths, or
   selected final annotations.
@@ -943,7 +946,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Result:
 
 ```text
-195 passed
+197 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

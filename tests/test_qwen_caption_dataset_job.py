@@ -7028,7 +7028,160 @@ def test_caption_dataset_job_cancel_marks_persisted_interrupted_job_cancelled(
     persisted = json.loads((job_dir / "job.json").read_text(encoding="utf-8"))
     assert persisted["status"] == "cancelled"
     assert persisted["result"]["cancelled_at"] == payload["updated_at"]
+    assert persisted["result"]["artifact_cancelled_by_job_id"] == "qcap_interrupted"
+    assert (job_dir / api.QWEN_CAPTION_DATASET_ARTIFACT_CANCEL_MARKER).exists()
     assert api._qwen_caption_dataset_job_should_auto_resume(persisted) is False
+
+
+def test_caption_dataset_job_cancel_tombstones_shared_artifact_lineage(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import localinferenceapi as api
+
+    jobs_root = tmp_path / "jobs"
+    artifact_dir = jobs_root / "qcap_source_artifact"
+    source_dir = jobs_root / "qcap_source"
+    child_dir = jobs_root / "qcap_child"
+    artifact_dir.mkdir(parents=True)
+    source_dir.mkdir(parents=True)
+    child_dir.mkdir(parents=True)
+    base_request = {
+        "dataset_id": "ds",
+        "caption_request": {"user_prompt": "Describe it"},
+        "set_and_forget": True,
+        "output_dir": str(artifact_dir),
+        "auto_resume_count": 0,
+        "max_auto_resumes": 5,
+    }
+    (source_dir / "job.json").write_text(
+        json.dumps(
+            {
+                "job_id": "qcap_source",
+                "status": "failed",
+                "error": "caption_runner_exit_1",
+                "request": dict(base_request),
+                "result": {"processed": 3, "total_cases": 10, "output_dir": str(artifact_dir)},
+                "output_dir": str(source_dir),
+                "created_at": 10.0,
+                "updated_at": 20.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    child_job = api.QwenCaptionDatasetJob(
+        job_id="qcap_child",
+        status="running",
+        output_dir=str(child_dir),
+    )
+    child_job.request = {
+        **base_request,
+        "auto_resume_count": 1,
+    }
+    child_job.result = {"processed": 4, "total_cases": 10, "output_dir": str(artifact_dir)}
+    monkeypatch.setattr(api, "QWEN_CAPTION_DATASET_JOB_ROOT", jobs_root)
+    monkeypatch.setattr(api, "QWEN_CAPTION_DATASET_JOBS", {child_job.job_id: child_job})
+    monkeypatch.setattr(api, "QWEN_CAPTION_SET_AND_FORGET_AUTO_RESUME", True)
+    monkeypatch.setattr(api, "QWEN_CAPTION_SET_AND_FORGET_MAX_AUTO_RESUMES", 5)
+    monkeypatch.setattr(
+        api,
+        "_start_qwen_caption_dataset_job",
+        lambda *_args, **_kwargs: pytest.fail("cancelled artifact lineage must not auto-resume"),
+    )
+    client = TestClient(api.app)
+
+    response = client.post("/qwen/caption/jobs/qcap_child/cancel")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["job_id"] == "qcap_child"
+    assert payload["status"] == "cancelled"
+    marker_path = artifact_dir / api.QWEN_CAPTION_DATASET_ARTIFACT_CANCEL_MARKER
+    assert marker_path.exists()
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    assert marker["cancelled"] is True
+    assert marker["cancelled_by_job_id"] == "qcap_child"
+
+    source_payload = json.loads((source_dir / "job.json").read_text(encoding="utf-8"))
+    assert source_payload["status"] == "cancelled"
+    assert source_payload["result"]["artifact_cancelled_by_job_id"] == "qcap_child"
+    assert source_payload["result"]["artifact_cancel_reason"] == "user_cancelled"
+    child_payload = json.loads((child_dir / "job.json").read_text(encoding="utf-8"))
+    assert child_payload["status"] == "cancelled"
+    assert child_payload["result"]["artifact_cancelled_by_job_id"] == "qcap_child"
+    assert api._qwen_caption_dataset_job_should_auto_resume(source_payload) is False
+    assert api._auto_resume_qwen_caption_dataset_jobs() == []
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api._resume_qwen_caption_dataset_job("qcap_source")
+    assert exc_info.value.status_code == api.HTTP_409_CONFLICT
+    assert exc_info.value.detail == "qwen_caption_dataset_job_not_resumable:user_cancelled"
+
+
+def test_caption_dataset_auto_resume_skips_artifact_with_legacy_cancelled_child(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import localinferenceapi as api
+
+    jobs_root = tmp_path / "jobs"
+    artifact_dir = jobs_root / "qcap_legacy_artifact"
+    source_dir = jobs_root / "qcap_source"
+    child_dir = jobs_root / "qcap_cancelled_child"
+    artifact_dir.mkdir(parents=True)
+    source_dir.mkdir(parents=True)
+    child_dir.mkdir(parents=True)
+    base_request = {
+        "dataset_id": "ds",
+        "caption_request": {"user_prompt": "Describe it"},
+        "set_and_forget": True,
+        "output_dir": str(artifact_dir),
+        "max_auto_resumes": 5,
+    }
+    (source_dir / "job.json").write_text(
+        json.dumps(
+            {
+                "job_id": "qcap_source",
+                "status": "failed",
+                "error": "caption_runner_exit_1",
+                "request": {**base_request, "auto_resume_count": 0},
+                "result": {"processed": 3, "total_cases": 10, "output_dir": str(artifact_dir)},
+                "output_dir": str(source_dir),
+                "updated_at": 20.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (child_dir / "job.json").write_text(
+        json.dumps(
+            {
+                "job_id": "qcap_cancelled_child",
+                "status": "cancelled",
+                "message": "Cancellation requested",
+                "request": {**base_request, "auto_resume_count": 1},
+                "result": {"processed": 4, "total_cases": 10, "output_dir": str(artifact_dir)},
+                "output_dir": str(child_dir),
+                "updated_at": 40.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(api, "QWEN_CAPTION_DATASET_JOB_ROOT", jobs_root)
+    monkeypatch.setattr(api, "QWEN_CAPTION_DATASET_JOBS", {})
+    monkeypatch.setattr(api, "QWEN_CAPTION_SET_AND_FORGET_AUTO_RESUME", True)
+    monkeypatch.setattr(api, "QWEN_CAPTION_SET_AND_FORGET_MAX_AUTO_RESUMES", 5)
+    monkeypatch.setattr(
+        api,
+        "_start_qwen_caption_dataset_job",
+        lambda *_args, **_kwargs: pytest.fail("legacy-cancelled artifact must not auto-resume"),
+    )
+
+    assert api._auto_resume_qwen_caption_dataset_jobs() == []
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api._resume_qwen_caption_dataset_job("qcap_source")
+    assert exc_info.value.status_code == api.HTTP_409_CONFLICT
+    assert exc_info.value.detail == "qwen_caption_dataset_job_not_resumable:user_cancelled"
 
 
 def test_caption_dataset_job_start_rejects_active_same_dataset(monkeypatch) -> None:

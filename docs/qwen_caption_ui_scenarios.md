@@ -129,6 +129,10 @@ manual inspection without making manual recovery the normal path. The global
 **Refresh backend jobs** and **Cancel active backend jobs** controls show and
 stop active backend caption work even when it does not belong to the currently
 selected caption dataset.
+Both **Cancel caption** and **Cancel active backend jobs** cancel the persisted
+artifact lineage, not only the currently visible wrapper process. A cancelled
+set-and-forget artifact is tombstoned so startup and periodic auto-recovery do
+not recreate a replacement caption job unless the user launches a fresh run.
 Hard launch failures such as preflight, pilot certification, and backend
 supervision failures are non-resumable until the failed gate is fixed. Interrupted
 wrapper jobs without runner/preflight evidence are also non-resumable. In those

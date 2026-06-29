@@ -22838,22 +22838,13 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (qwenElements.captionBatchCancel) {
             qwenElements.captionBatchCancel.addEventListener("click", () => {
-                if (!qwenCaptionBatchActive && !qwenCaptionBatchBackendJobId) {
+                const backendJobIds = qwenCaptionKnownBackendJobIds();
+                if (!qwenCaptionBatchActive && !backendJobIds.length) {
                     return;
                 }
-                qwenCaptionBatchCancel = true;
-                updateQwenCaptionButton();
-                if (qwenCaptionBatchBackendJobId) {
-                    fetch(`${API_ROOT}/qwen/caption/jobs/${encodeURIComponent(qwenCaptionBatchBackendJobId)}/cancel`, {
-                        method: "POST",
-                    }).catch((error) => {
-                        console.warn("Backend caption batch cancel request failed", error);
-                    });
-                } else {
-                    requestQwenCaptionCancel({ force: false }).catch((error) => {
-                        console.warn("Caption batch cancel request failed", error);
-                    });
-                }
+                requestQwenCaptionCancel({ force: false }).catch((error) => {
+                    console.warn("Caption batch cancel request failed", error);
+                });
                 setQwenCaptionStatus("Batch cancel requested");
             });
         }
@@ -25223,7 +25214,34 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function qwenCaptionArchiveMutationActive() {
-        return !!(qwenCaptionActive || qwenCaptionBatchActive || qwenCaptionBatchBackendJobId);
+        const backendListActive = (
+            typeof qwenCaptionBackendActiveJobs !== "undefined"
+            && Array.isArray(qwenCaptionBackendActiveJobs)
+            && qwenCaptionBackendActiveJobs.some((job) => {
+                return ["queued", "running", "cancelling", "interrupted"].includes(String(job?.status || "").toLowerCase());
+            })
+        );
+        return !!(qwenCaptionActive || qwenCaptionBatchActive || qwenCaptionBatchBackendJobId || backendListActive);
+    }
+
+    function qwenCaptionKnownBackendJobIds() {
+        const ids = new Set();
+        const directJobId = String(qwenCaptionBatchBackendJobId || "").trim();
+        if (directJobId) {
+            ids.add(directJobId);
+        }
+        if (typeof qwenCaptionBackendActiveJobs !== "undefined" && Array.isArray(qwenCaptionBackendActiveJobs)) {
+            qwenCaptionBackendActiveJobs.forEach((job) => {
+                if (!isQwenCaptionBackendJobActive(job)) {
+                    return;
+                }
+                const jobId = String(job?.job_id || "").trim();
+                if (jobId) {
+                    ids.add(jobId);
+                }
+            });
+        }
+        return [...ids];
     }
 
     function captionArchiveMutationBusyMessage(actionLabel) {
@@ -25440,7 +25458,10 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (qwenElements.captionBatchCancel) {
             // Once cancellation is requested, keep cancel button disabled until the batch fully unwinds.
-            qwenElements.captionBatchCancel.disabled = !(qwenCaptionBatchActive || qwenCaptionBatchBackendJobId) || qwenCaptionBatchCancel;
+            const backendCancelJobIds = typeof qwenCaptionKnownBackendJobIds === "function"
+                ? qwenCaptionKnownBackendJobIds()
+                : (qwenCaptionBatchBackendJobId ? [qwenCaptionBatchBackendJobId] : []);
+            qwenElements.captionBatchCancel.disabled = !(qwenCaptionBatchActive || backendCancelJobIds.length) || qwenCaptionBatchCancel;
         }
         if (qwenElements.captionResumeBackendJob) {
             qwenElements.captionResumeBackendJob.disabled = locked || !qwenAvailable || busy || !hasCaptionDataset;
@@ -27754,11 +27775,13 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function requestQwenCaptionCancel({ force = false } = {}) {
-        if (!qwenCaptionActive && !qwenCaptionBatchActive) {
+        const backendJobIds = qwenCaptionKnownBackendJobIds();
+        if (!qwenCaptionActive && !qwenCaptionBatchActive && !backendJobIds.length) {
             return;
         }
+        const detachedBackendOnly = !qwenCaptionActive && !qwenCaptionBatchActive && backendJobIds.length > 0;
         qwenCaptionCancelRequested = true;
-        qwenCaptionBatchCancel = qwenCaptionBatchCancel || qwenCaptionBatchActive;
+        qwenCaptionBatchCancel = qwenCaptionBatchCancel || qwenCaptionBatchActive || backendJobIds.length > 0;
         updateQwenCaptionButton();
         const message = force
             ? "Cancelling caption and restarting backend to stop active Qwen work"
@@ -27771,14 +27794,16 @@ async function cancelRfDetrTrainingJobRequest() {
         setQwenCaptionStatus("Cancellation requested");
         setSamStatus(`${message}…`, { variant: "warn", duration: 0 });
         try {
-            if (qwenCaptionBatchBackendJobId) {
-                await fetch(`${API_ROOT}/qwen/caption/jobs/${encodeURIComponent(qwenCaptionBatchBackendJobId)}/cancel`, {
+            for (const jobId of backendJobIds) {
+                await fetch(`${API_ROOT}/qwen/caption/jobs/${encodeURIComponent(jobId)}/cancel`, {
                     method: "POST",
                     keepalive: true,
                 });
             }
-            const url = `${API_ROOT}/qwen/caption/cancel?force=${force ? "1" : "0"}`;
-            await fetch(url, { method: "POST", keepalive: true });
+            if (qwenCaptionActive || qwenCaptionBatchActive || force) {
+                const url = `${API_ROOT}/qwen/caption/cancel?force=${force ? "1" : "0"}`;
+                await fetch(url, { method: "POST", keepalive: true });
+            }
         } catch (error) {
             console.warn("Backend caption cancel endpoint did not respond", error);
         }
@@ -27810,6 +27835,16 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenCaptionActive = false;
         if (!qwenCaptionBatchCancel) {
             qwenCaptionBatchActive = false;
+        }
+        if (detachedBackendOnly) {
+            qwenCaptionBatchActive = false;
+            qwenCaptionBatchCancel = false;
+            qwenCaptionCancelRequested = false;
+            qwenCaptionBatchBackendJobId = null;
+            qwenCaptionBackendActiveJobs = [];
+            refreshQwenCaptionBackendJobsStatus({ silent: true }).catch((error) => {
+                console.warn("Backend caption job summary refresh failed after cancel", error);
+            });
         }
         qwenProgressActiveContext = null;
         renderQwenCaptionProgressState(cancelledSnapshot, { force: true });

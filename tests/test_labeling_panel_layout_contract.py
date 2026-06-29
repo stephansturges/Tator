@@ -2405,6 +2405,74 @@ def test_qwen_caption_launches_block_while_archive_is_mutating():
     )
 
 
+def test_qwen_caption_cancel_handles_detached_backend_jobs():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            "const API_ROOT = 'http://api.test';",
+            "let qwenCaptionActive = false;",
+            "let qwenCaptionBatchActive = false;",
+            "let qwenCaptionBatchBackendJobId = 'qcap_child';",
+            "let qwenCaptionCancelRequested = false;",
+            "let qwenCaptionBatchCancel = false;",
+            "let qwenCaptionAbortController = null;",
+            "let qwenCaptionBatchAbortController = null;",
+            "let qwenProgressActiveContext = { kind: 'caption' };",
+            "let qwenCaptionBackendActiveJobs = [",
+            "  { job_id: 'qcap_child', status: 'running' },",
+            "  { job_id: 'qcap_source', status: 'interrupted' },",
+            "  { job_id: 'qcap_done', status: 'completed' },",
+            "];",
+            "const fetchCalls = [];",
+            "let refreshCalls = 0;",
+            "let updateCalls = 0;",
+            "global.fetch = async (url, options = {}) => { fetchCalls.push({ url: String(url), method: options.method || 'GET' }); return { ok: true, json: async () => [] }; };",
+            "function updateQwenCaptionButton() { updateCalls += 1; }",
+            "function renderQwenCaptionLocalProgress() {}",
+            "function setQwenCaptionStatus() {}",
+            "function setSamStatus() {}",
+            "function renderQwenCaptionProgressState() {}",
+            "function hideQwenCaptionLiveToast() {}",
+            "function getQwenCaptionLiveToastTerminalSignature() { return 'cancelled'; }",
+            "function stopQwenProgressPolling() {}",
+            "async function refreshQwenCaptionBackendJobsStatus() { refreshCalls += 1; return []; }",
+            _extract_js_function(js, "isQwenCaptionBackendJobActive"),
+            _extract_js_function(js, "qwenCaptionArchiveMutationActive"),
+            _extract_js_function(js, "qwenCaptionKnownBackendJobIds"),
+            _extract_js_function(js, "makeCaptionAbortError"),
+            "async " + _extract_js_function_before(
+                js,
+                "requestQwenCaptionCancel",
+                "\n    function formatQwenMemory",
+            ),
+            "assert.strictEqual(qwenCaptionArchiveMutationActive(), true);",
+            "assert.deepStrictEqual(qwenCaptionKnownBackendJobIds(), ['qcap_child', 'qcap_source']);",
+            "await requestQwenCaptionCancel({ force: false });",
+            "assert.deepStrictEqual(fetchCalls.map((call) => call.url), [",
+            "  'http://api.test/qwen/caption/jobs/qcap_child/cancel',",
+            "  'http://api.test/qwen/caption/jobs/qcap_source/cancel',",
+            "]);",
+            "assert(fetchCalls.every((call) => call.method === 'POST'));",
+            "assert.strictEqual(qwenCaptionBatchCancel, false);",
+            "assert.strictEqual(qwenCaptionCancelRequested, false);",
+            "assert.strictEqual(qwenCaptionBatchBackendJobId, null);",
+            "assert.deepStrictEqual(qwenCaptionBackendActiveJobs, []);",
+            "assert.strictEqual(refreshCalls, 1);",
+            "assert(updateCalls >= 2);",
+        ]
+    )
+    subprocess.run(
+        [
+            "node",
+            "-e",
+            f"(async () => {{\n{script}\n}})().catch((error) => {{ console.error(error); process.exit(1); }});",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+    )
+
+
 def test_qwen_caption_recipe_load_and_upload_block_while_archive_is_mutating():
     js = _js()
     apply_start = js.index("function applyCaptionRecipeToUi")

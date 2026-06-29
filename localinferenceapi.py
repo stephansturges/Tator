@@ -16025,6 +16025,7 @@ QWEN_PREPASS_TRACE_ROOT = UPLOAD_ROOT / "qwen_prepass_traces"
 _init_storage_root(QWEN_PREPASS_TRACE_ROOT)
 QWEN_CAPTION_DATASET_JOB_ROOT = UPLOAD_ROOT / "qwen_caption_jobs"
 _init_storage_root(QWEN_CAPTION_DATASET_JOB_ROOT)
+QWEN_CAPTION_DATASET_ARTIFACT_CANCEL_MARKER = ".caption_cancelled.json"
 QWEN_PREPASS_FULL_TRACE_ROOT = UPLOAD_ROOT / "qwen_prepass_traces_full"
 _init_storage_root(QWEN_PREPASS_FULL_TRACE_ROOT)
 QWEN_PREPASS_FULL_TRACE_LATEST = QWEN_PREPASS_FULL_TRACE_ROOT / "latest.jsonl"
@@ -23298,12 +23299,16 @@ def _qwen_caption_dataset_active_persisted_job(dataset_id: str) -> Optional[Dict
     for payload in _iter_persisted_qwen_caption_dataset_job_payloads():
         if _qwen_caption_dataset_job_hidden_reason(payload):
             continue
+        if _qwen_caption_dataset_job_cancelled_by_user(payload):
+            continue
         request_data = payload.get("request") if isinstance(payload.get("request"), Mapping) else {}
         job_dataset_id = str(request_data.get("dataset_id") or "").strip()
         if job_dataset_id != target:
             continue
         status = str(payload.get("status") or "").strip().lower()
         artifact_key = _qwen_caption_dataset_job_artifact_key(payload)
+        if _qwen_caption_dataset_artifact_cancelled_by_persisted_owner(artifact_key):
+            continue
         runner_lock = _qwen_caption_dataset_artifact_runner_lock(artifact_key)
         if not runner_lock.get("pid_alive") or status not in {"interrupted", "cancelling"}:
             continue
@@ -28176,6 +28181,216 @@ def _qwen_caption_dataset_job_artifact_key(payload: Mapping[str, Any]) -> str:
     return ""
 
 
+def _qwen_caption_dataset_artifact_cancel_marker_path(artifact_key: str) -> Optional[Path]:
+    if not artifact_key:
+        return None
+    if not _qwen_caption_dataset_can_write_job_payload_dir(artifact_key):
+        return None
+    return Path(artifact_key).expanduser().resolve(strict=False) / QWEN_CAPTION_DATASET_ARTIFACT_CANCEL_MARKER
+
+
+def _qwen_caption_dataset_artifact_cancel_marker(artifact_key: str) -> Optional[Dict[str, Any]]:
+    marker_path = _qwen_caption_dataset_artifact_cancel_marker_path(artifact_key)
+    if marker_path is None or not marker_path.exists():
+        return None
+    try:
+        marker = json.loads(marker_path.read_text())
+    except Exception:
+        return {"cancelled": True, "marker_path": str(marker_path)}
+    if not isinstance(marker, Mapping):
+        return {"cancelled": True, "marker_path": str(marker_path)}
+    result = dict(marker)
+    result["cancelled"] = True
+    result["marker_path"] = str(marker_path)
+    return result
+
+
+def _qwen_caption_dataset_payload_has_cancel_state(payload: Mapping[str, Any]) -> bool:
+    status = str(payload.get("status") or "").strip().lower()
+    if status == "cancelled":
+        return True
+    result_data = payload.get("result") if isinstance(payload.get("result"), Mapping) else {}
+    return bool(result_data.get("artifact_cancelled_at") or result_data.get("cancelled_at"))
+
+
+def _qwen_caption_dataset_artifact_cancelled_by_persisted_owner(
+    artifact_key: str,
+    *,
+    exclude_job_id: str = "",
+) -> bool:
+    if not artifact_key:
+        return False
+    for persisted in _iter_persisted_qwen_caption_dataset_job_payloads():
+        persisted_job_id = str(persisted.get("job_id") or "").strip()
+        if exclude_job_id and persisted_job_id == exclude_job_id:
+            continue
+        if _qwen_caption_dataset_job_artifact_key(persisted) != artifact_key:
+            continue
+        if _qwen_caption_dataset_payload_has_cancel_state(persisted):
+            return True
+    return False
+
+
+def _qwen_caption_dataset_job_cancelled_by_user(payload: Mapping[str, Any]) -> bool:
+    if _qwen_caption_dataset_payload_has_cancel_state(payload):
+        return True
+    artifact_key = _qwen_caption_dataset_job_artifact_key(payload)
+    return bool(_qwen_caption_dataset_artifact_cancel_marker(artifact_key))
+
+
+def _qwen_caption_dataset_cancel_payload(
+    payload: Mapping[str, Any],
+    *,
+    cancelled_at: float,
+    cancelled_by_job_id: str,
+    reason: str,
+) -> Dict[str, Any]:
+    updated = dict(payload)
+    status = str(updated.get("status") or "").strip().lower()
+    if status != "completed":
+        updated["status"] = "cancelled"
+        updated["message"] = "Cancellation requested"
+    updated["updated_at"] = cancelled_at
+    result_data = dict(updated.get("result") if isinstance(updated.get("result"), Mapping) else {})
+    result_data.setdefault("cancelled_at", cancelled_at)
+    result_data["artifact_cancelled_at"] = cancelled_at
+    result_data["artifact_cancelled_by_job_id"] = cancelled_by_job_id
+    result_data["artifact_cancel_reason"] = reason
+    updated["result"] = result_data
+    logs = list(updated.get("logs") if isinstance(updated.get("logs"), list) else [])
+    seqs = [
+        _qwen_caption_dataset_request_int(log.get("seq"), default=0)
+        for log in logs
+        if isinstance(log, Mapping)
+    ]
+    logs.append(
+        {
+            "seq": (max(seqs) if seqs else 0) + 1,
+            "time": cancelled_at,
+            "message": "caption artifact lineage cancelled",
+            "cancelled_by_job_id": cancelled_by_job_id,
+            "reason": reason,
+        }
+    )
+    updated["logs"] = logs[-300:]
+    return updated
+
+
+def _qwen_caption_dataset_write_artifact_cancel_marker(
+    artifact_key: str,
+    *,
+    cancelled_at: float,
+    cancelled_by_job_id: str,
+    reason: str,
+) -> Optional[Dict[str, Any]]:
+    marker_path = _qwen_caption_dataset_artifact_cancel_marker_path(artifact_key)
+    if marker_path is None:
+        return None
+    marker = {
+        "cancelled": True,
+        "cancelled_at": cancelled_at,
+        "cancelled_by_job_id": cancelled_by_job_id,
+        "reason": reason,
+    }
+    try:
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = marker_path.with_name(f"{marker_path.name}.tmp")
+        tmp_path.write_text(json.dumps(marker, indent=2, sort_keys=True))
+        tmp_path.replace(marker_path)
+    except Exception:
+        logger.debug("Failed to persist Qwen caption artifact cancellation marker", exc_info=True)
+        return None
+    marker["marker_path"] = str(marker_path)
+    return marker
+
+
+def _qwen_caption_dataset_apply_cancel_to_job(
+    job: QwenCaptionDatasetJob,
+    *,
+    cancelled_at: float,
+    cancelled_by_job_id: str,
+    reason: str,
+) -> None:
+    job.cancel_event.set()
+    if job.process is not None and job.process.poll() is None:
+        _qwen_caption_dataset_stop_process(job.process)
+    if job.status != "completed":
+        job.status = "cancelled"
+        job.message = "Cancellation requested"
+    result_data = dict(job.result or {})
+    result_data.setdefault("cancelled_at", cancelled_at)
+    result_data["artifact_cancelled_at"] = cancelled_at
+    result_data["artifact_cancelled_by_job_id"] = cancelled_by_job_id
+    result_data["artifact_cancel_reason"] = reason
+    job.result = result_data
+    job.updated_at = cancelled_at
+    _qwen_caption_dataset_job_log(
+        job,
+        "caption artifact lineage cancelled",
+        cancelled_by_job_id=cancelled_by_job_id,
+        reason=reason,
+    )
+
+
+def _qwen_caption_dataset_cancel_artifact_lineage(
+    payload: Mapping[str, Any],
+    *,
+    cancelled_by_job_id: str,
+    reason: str = "user_cancelled",
+) -> Dict[str, Any]:
+    cancelled_at = time.time()
+    artifact_key = _qwen_caption_dataset_job_artifact_key(payload)
+    if artifact_key:
+        _qwen_caption_dataset_write_artifact_cancel_marker(
+            artifact_key,
+            cancelled_at=cancelled_at,
+            cancelled_by_job_id=cancelled_by_job_id,
+            reason=reason,
+        )
+
+    with QWEN_CAPTION_DATASET_JOBS_LOCK:
+        live_jobs = list(QWEN_CAPTION_DATASET_JOBS.values())
+    for live_job in live_jobs:
+        live_payload = _serialize_qwen_caption_dataset_job(live_job)
+        if artifact_key and _qwen_caption_dataset_job_artifact_key(live_payload) != artifact_key:
+            continue
+        if not artifact_key and live_job.job_id != cancelled_by_job_id:
+            continue
+        _qwen_caption_dataset_apply_cancel_to_job(
+            live_job,
+            cancelled_at=cancelled_at,
+            cancelled_by_job_id=cancelled_by_job_id,
+            reason=reason,
+        )
+        _persist_qwen_caption_dataset_job(live_job)
+
+    requested_payload: Optional[Dict[str, Any]] = None
+    for persisted in _iter_persisted_qwen_caption_dataset_job_payloads():
+        persisted_job_id = str(persisted.get("job_id") or "").strip()
+        if artifact_key and _qwen_caption_dataset_job_artifact_key(persisted) != artifact_key:
+            continue
+        if not artifact_key and persisted_job_id != cancelled_by_job_id:
+            continue
+        updated = _qwen_caption_dataset_cancel_payload(
+            persisted,
+            cancelled_at=cancelled_at,
+            cancelled_by_job_id=cancelled_by_job_id,
+            reason=reason,
+        )
+        _persist_qwen_caption_dataset_job_payload(updated)
+        if persisted_job_id == cancelled_by_job_id:
+            requested_payload = updated
+
+    if requested_payload is not None:
+        return requested_payload
+    return _qwen_caption_dataset_cancel_payload(
+        payload,
+        cancelled_at=cancelled_at,
+        cancelled_by_job_id=cancelled_by_job_id,
+        reason=reason,
+    )
+
+
 def _qwen_caption_dataset_job_is_active_artifact_owner(payload: Mapping[str, Any]) -> bool:
     status = str(payload.get("status") or "").strip().lower()
     return status in {"queued", "running", "cancelling"}
@@ -28370,6 +28585,8 @@ def _qwen_caption_dataset_job_should_auto_resume(
         return False
     if suppress_hidden and _qwen_caption_dataset_job_hidden_reason(payload):
         return False
+    if _qwen_caption_dataset_job_cancelled_by_user(payload):
+        return False
     request_data = payload.get("request") if isinstance(payload.get("request"), Mapping) else {}
     if not request_data:
         return False
@@ -28435,6 +28652,20 @@ def _resume_qwen_caption_dataset_job(
     status = str(existing.get("status") or "").strip().lower()
     if status in {"queued", "running"}:
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail="qwen_caption_dataset_job_still_running")
+    if _qwen_caption_dataset_job_cancelled_by_user(existing):
+        raise HTTPException(
+            status_code=HTTP_409_CONFLICT,
+            detail="qwen_caption_dataset_job_not_resumable:user_cancelled",
+        )
+    artifact_key = _qwen_caption_dataset_job_artifact_key(existing)
+    if _qwen_caption_dataset_artifact_cancelled_by_persisted_owner(
+        artifact_key,
+        exclude_job_id=job_id,
+    ):
+        raise HTTPException(
+            status_code=HTTP_409_CONFLICT,
+            detail="qwen_caption_dataset_job_not_resumable:user_cancelled",
+        )
     error = str(existing.get("error") or "").strip()
     if status == "failed" and _qwen_caption_dataset_job_hard_resume_error(error):
         raise HTTPException(
@@ -28487,8 +28718,14 @@ def _qwen_caption_dataset_job_should_adopt_live_runner(
         return False
     if not artifact_key or not bool(runner_lock.get("pid_alive")):
         return False
+    if _qwen_caption_dataset_artifact_cancel_marker(artifact_key):
+        return False
+    if _qwen_caption_dataset_artifact_cancelled_by_persisted_owner(artifact_key):
+        return False
     request_data = payload.get("request") if isinstance(payload.get("request"), Mapping) else {}
     if not request_data:
+        return False
+    if _qwen_caption_dataset_job_cancelled_by_user(payload):
         return False
     if not _qwen_caption_dataset_request_bool(request_data.get("set_and_forget"), default=False):
         return False
@@ -28766,8 +29003,12 @@ def _auto_resume_qwen_caption_dataset_jobs() -> List[Dict[str, Any]]:
         for payload in _iter_persisted_qwen_caption_dataset_job_payloads():
             if _qwen_caption_dataset_job_hidden_reason(payload):
                 continue
+            if _qwen_caption_dataset_job_cancelled_by_user(payload):
+                continue
             artifact_key = _qwen_caption_dataset_job_artifact_key(payload)
             if not artifact_key or artifact_key in live_artifacts:
+                continue
+            if _qwen_caption_dataset_artifact_cancelled_by_persisted_owner(artifact_key):
                 continue
             current = latest_by_artifact.get(artifact_key)
             if current is None or _qwen_caption_dataset_job_sort_value(payload) > _qwen_caption_dataset_job_sort_value(current):
@@ -67960,29 +68201,18 @@ def cancel_qwen_caption_dataset_job(job_id: str):
     if job is None:
         payload = _qwen_caption_dataset_serialized_job(job_id)
         status = str(payload.get("status") or "").strip().lower()
-        if status in {"completed", "failed", "cancelled"}:
+        if status == "completed":
             return payload
-        payload = dict(payload)
-        payload["status"] = "cancelled"
-        payload["message"] = "Cancellation requested"
-        payload["updated_at"] = time.time()
-        result_data = dict(payload.get("result") if isinstance(payload.get("result"), Mapping) else {})
-        result_data["cancelled_at"] = payload["updated_at"]
-        payload["result"] = result_data
-        _persist_qwen_caption_dataset_job_payload(payload)
-        return payload
-    if job.status in {"completed", "failed", "cancelled"}:
+        return _qwen_caption_dataset_cancel_artifact_lineage(
+            payload,
+            cancelled_by_job_id=job_id,
+        )
+    if job.status == "completed":
         return _serialize_qwen_caption_dataset_job(job)
-    job.cancel_event.set()
-    if job.process is not None and job.process.poll() is None:
-        try:
-            job.process.terminate()
-        except Exception:
-            pass
-    job.status = "cancelled"
-    job.message = "Cancellation requested"
-    job.updated_at = time.time()
-    _persist_qwen_caption_dataset_job(job)
+    _qwen_caption_dataset_cancel_artifact_lineage(
+        _serialize_qwen_caption_dataset_job(job),
+        cancelled_by_job_id=job_id,
+    )
     return _serialize_qwen_caption_dataset_job(job)
 
 

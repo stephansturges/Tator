@@ -504,6 +504,7 @@ below.
 | Model-download clarity | model dropdown colors missing/download-needed models red and local models normal | Implemented |
 | Safe artifact actions during long jobs | UI disabling plus action-time checks for ordinary caption exports, full dataset ZIP downloads, instruction exports, report downloads, and reviewed JSONL import | Implemented |
 | Safe caption mutations during long jobs | Caption output editing, autosave, manual caption add/update/primary/delete controls, and alternate selection visibly disable or refuse during active archive mutation; text-label saves plus caption add/update/delete also refuse while the selected dataset has an active caption job | Implemented |
+| Safe caption archive reads during long jobs | Current-image archive reloads defer while the selected archive is mutating, in-flight responses are dropped if a job starts mid-read, and only explicit completed-job handoffs can force a reload | Implemented |
 | Safe prompt metadata during long jobs | Prompt-stack, style, glossary, model, token, decode, set-and-forget, pilot, health-gate, save/promote, and batch-scope controls visibly lock while the selected archive is mutating; glossary reset/save and stale input events also hit archive-idle guards, and backend glossary saves refuse active caption jobs | Implemented |
 | Safe dataset deletion during long jobs | Dataset deletion refuses while an active caption dataset job references the same dataset | Implemented |
 | Same-dataset job concurrency | Caption dataset job start refuses while another queued, running, or cancelling caption job owns the same dataset | Implemented |
@@ -581,6 +582,12 @@ false success messages for caption records that feed instruction exports. Those
 same controls are visibly disabled while a caption or instruction job is
 mutating the caption archive, and they only re-enable when the current image,
 caption text, and selected-caption state make the action valid.
+Current-image caption archive reloads also defer while the archive is mutating.
+Navigation-triggered or scheduled reloads keep the last stable caption view
+instead of fetching from a half-updated archive, and in-flight reload responses
+are dropped if a backend job becomes active before the response is applied.
+The explicit exception is a completed-job handoff, where the UI can reload the
+current image after the job result is known stable.
 Failed backend caption jobs receive the same treatment when structured failure
 reports are available. Pilot-certification, backend-supervision, and runner
 preflight reports are summarized from their first failed check, so the operator

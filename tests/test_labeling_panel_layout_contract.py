@@ -594,6 +594,16 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "qwenElements.captionUpdateSelected.disabled = busy || !imageName || !selected || !caption" in js
     assert "qwenElements.captionSetPrimary.disabled = busy || !imageName || !storedAlternate" in js
     assert "qwenElements.captionDeleteSelected.disabled = busy || !imageName || !storedAlternate" in js
+    assert "function deferCaptionArchiveReadWhileBusy" in js
+    assert "async function loadCaptionForCurrentImage(options = {})" in js
+    assert "const allowDuringActive = options.allowDuringActive === true;" in load_helper
+    assert 'const busyActionLabel = options.actionLabel || "loading caption archive";' in load_helper
+    assert load_helper.count("deferCaptionArchiveReadWhileBusy(busyActionLabel);") >= 2
+    assert "if (!allowDuringActive && qwenCaptionArchiveMutationActive())" in load_helper
+    assert "return false;" in load_helper
+    assert "return true;" in load_helper
+    assert 'actionLabel: "loading completed caption job output"' in js
+    assert 'actionLabel: "loading completed backend caption output"' in js
     assert "const datasetId = getCaptionRecordDatasetId();" in load_helper
     assert "isAnnotationDatasetModeActive()" not in load_helper
     assert "function captionInstructionArtifactBusyMessage" in js
@@ -789,6 +799,90 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
         ]
     )
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
+
+
+def test_qwen_caption_archive_loads_defer_while_backend_job_mutates_archive():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            "let qwenCaptionActive = false;",
+            "let qwenCaptionBatchActive = false;",
+            "let qwenCaptionBatchBackendJobId = 'job-1';",
+            "let currentImage = { name: 'frame.jpg' };",
+            "let captionStatus = '';",
+            "let backendStatus = '';",
+            "let renderCount = 0;",
+            "let buttonUpdates = 0;",
+            "let ensureCalls = 0;",
+            "let bundleCalls = 0;",
+            "let textLabels = { 'frame.jpg': 'old caption' };",
+            "let captionRecordsByImage = { 'frame.jpg': [{ id: 'old', caption: 'old alternate' }] };",
+            "const captionAutoSaveState = { lastSaved: new Map() };",
+            "const qwenElements = { captionOutput: { value: 'stable caption' } };",
+            "function setQwenCaptionStatus(message) { captionStatus = message; }",
+            "function setQwenCaptionBackendJobStatus(message) { backendStatus = message; }",
+            "function updateQwenCaptionButton() { buttonUpdates += 1; }",
+            "function renderCaptionAlternatesForCurrentImage() { renderCount += 1; }",
+            "function getCaptionRecordDatasetId() { return 'ds'; }",
+            "function ensureCaptionLabelStoreForDataset() { ensureCalls += 1; }",
+            "function normalizeCaptionRecord(record) { return record || {}; }",
+            "function getSelectedCaptionRecord() { return { caption: 'selected caption' }; }",
+            "function setCaptionOutputValue() { throw new Error('caption output should not be replaced by a stale archive read'); }",
+            "async function loadCaptionBundleForImage() { bundleCalls += 1; return { primary_caption: 'new caption', captions: [] }; }",
+            _extract_js_function(js, "qwenCaptionArchiveMutationActive"),
+            _extract_js_function(js, "captionArchiveMutationBusyMessage"),
+            _extract_js_function(js, "deferCaptionArchiveReadWhileBusy"),
+            "async " + _extract_js_function_before(
+                js,
+                "loadCaptionForCurrentImage",
+                "\n    async function captionExistsForImage",
+            ),
+            "let loaded = await loadCaptionForCurrentImage();",
+            "assert.strictEqual(loaded, false);",
+            "assert.strictEqual(bundleCalls, 0);",
+            "assert.strictEqual(ensureCalls, 0);",
+            "assert.strictEqual(qwenElements.captionOutput.value, 'stable caption');",
+            "assert.strictEqual(captionStatus, 'Caption archive busy');",
+            "assert(backendStatus.includes('loading caption archive'));",
+            "assert(backendStatus.includes('caption archive is changing'));",
+            "assert.strictEqual(renderCount, 1);",
+            "assert.strictEqual(buttonUpdates, 1);",
+            "qwenCaptionBatchBackendJobId = '';",
+            "captionStatus = '';",
+            "backendStatus = '';",
+            "renderCount = 0;",
+            "buttonUpdates = 0;",
+            "ensureCalls = 0;",
+            "bundleCalls = 0;",
+            "loadCaptionBundleForImage = async function() {",
+            "  bundleCalls += 1;",
+            "  qwenCaptionBatchBackendJobId = 'job-2';",
+            "  return { primary_caption: 'new caption', captions: [] };",
+            "};",
+            "loaded = await loadCaptionForCurrentImage();",
+            "assert.strictEqual(loaded, false);",
+            "assert.strictEqual(bundleCalls, 1);",
+            "assert.strictEqual(ensureCalls, 1);",
+            "assert.strictEqual(qwenElements.captionOutput.value, 'stable caption');",
+            "assert.strictEqual(textLabels['frame.jpg'], 'old caption');",
+            "assert.deepStrictEqual(captionRecordsByImage['frame.jpg'], [{ id: 'old', caption: 'old alternate' }]);",
+            "assert.strictEqual(captionStatus, 'Caption archive busy');",
+            "assert(backendStatus.includes('loading caption archive'));",
+            "assert(backendStatus.includes('caption archive is changing'));",
+            "assert.strictEqual(renderCount, 1);",
+            "assert.strictEqual(buttonUpdates, 1);",
+        ]
+    )
+    subprocess.run(
+        [
+            "node",
+            "-e",
+            f"(async () => {{\n{script}\n}})().catch((error) => {{ console.error(error); process.exit(1); }});",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+    )
 
 
 def test_qwen_caption_exports_block_while_backend_job_id_is_active():
@@ -2561,6 +2655,9 @@ def test_caption_dataset_picker_is_locked_to_annotation_dataset():
     assert "qwenElements.captionDatasetRefresh.disabled = qwenCaptionDatasetRefreshInFlight || busy" in js
     assert "guardQwenCaptionArchiveIdle(\"refreshing caption datasets\")" in js
     assert "guardQwenCaptionArchiveIdle(\"changing caption datasets\")" in js
+    assert "const allowDuringActive = options.allowDuringActive === true;" in js
+    assert "if (!allowDuringActive && qwenCaptionArchiveMutationActive())" in js
+    assert "await refreshQwenCaptionDatasets({\n                silent: true,\n                allowDuringActive: true," in js
     assert "qwenElements.captionDatasetSelect.value = stableDatasetId;" in js
     assert "if (isAnnotationDatasetModeActive()) {\n            return getActiveAnnotationDatasetIdForCaption();\n        }" in js
     assert "if (isAnnotationDatasetModeActive()) {\n                    syncCaptionDatasetSelectionWithAnnotationDataset();" in js

@@ -25194,6 +25194,17 @@ async function cancelRfDetrTrainingJobRequest() {
         return false;
     }
 
+    function deferCaptionArchiveReadWhileBusy(actionLabel) {
+        const message = captionArchiveMutationBusyMessage(actionLabel || "loading caption archive");
+        if (!message) {
+            return false;
+        }
+        setQwenCaptionStatus("Caption archive busy");
+        setQwenCaptionBackendJobStatus(message);
+        updateQwenCaptionButton();
+        return true;
+    }
+
     function captionOutputEditingBlocked() {
         const annotationReadOnly = isAnnotationDatasetModeActive() && isAnnotationMutationBlocked();
         return qwenCaptionArchiveMutationActive() || annotationReadOnly;
@@ -29831,7 +29842,8 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!qwenElements.captionDatasetSelect) {
             return;
         }
-        if (qwenCaptionArchiveMutationActive()) {
+        const allowDuringActive = options.allowDuringActive === true;
+        if (!allowDuringActive && qwenCaptionArchiveMutationActive()) {
             if (!options.silent) {
                 guardQwenCaptionArchiveIdle("refreshing caption datasets");
             }
@@ -29856,6 +29868,10 @@ async function cancelRfDetrTrainingJobRequest() {
                 throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
             }
             const data = await resp.json();
+            if (!allowDuringActive && qwenCaptionArchiveMutationActive()) {
+                syncQwenCaptionDatasetControls();
+                return;
+            }
             if (requestId !== qwenCaptionDatasetState.refreshRequestId) {
                 return;
             }
@@ -31134,9 +31150,16 @@ async function cancelRfDetrTrainingJobRequest() {
         return resp.json();
     }
 
-    async function loadCaptionForCurrentImage() {
+    async function loadCaptionForCurrentImage(options = {}) {
         if (!qwenElements.captionOutput || !currentImage?.name) {
-            return;
+            return false;
+        }
+        const allowDuringActive = options.allowDuringActive === true;
+        const busyActionLabel = options.actionLabel || "loading caption archive";
+        if (!allowDuringActive && qwenCaptionArchiveMutationActive()) {
+            deferCaptionArchiveReadWhileBusy(busyActionLabel);
+            renderCaptionAlternatesForCurrentImage();
+            return false;
         }
         const imageName = currentImage.name;
         const datasetId = getCaptionRecordDatasetId();
@@ -31145,7 +31168,7 @@ async function cancelRfDetrTrainingJobRequest() {
             const localCaption = textLabels?.[imageName] || "";
             setCaptionOutputValue(localCaption);
             renderCaptionAlternatesForCurrentImage();
-            return;
+            return true;
         }
         try {
             const bundle = await loadCaptionBundleForImage(imageName, datasetId);
@@ -31155,10 +31178,15 @@ async function cancelRfDetrTrainingJobRequest() {
                 : [];
             // Ignore stale caption loads when user switched image/dataset mid-request.
             if ((currentImage?.name || "") !== imageName) {
-                return;
+                return false;
             }
             if ((getCaptionRecordDatasetId() || "") !== datasetId) {
-                return;
+                return false;
+            }
+            if (!allowDuringActive && qwenCaptionArchiveMutationActive()) {
+                deferCaptionArchiveReadWhileBusy(busyActionLabel);
+                renderCaptionAlternatesForCurrentImage();
+                return false;
             }
             captionRecordsByImage[imageName] = records;
             if (!caption && textLabels?.[imageName]) {
@@ -31171,9 +31199,11 @@ async function cancelRfDetrTrainingJobRequest() {
             setCaptionOutputValue(selected?.caption || caption || "");
             captionAutoSaveState.lastSaved.set(imageName, caption || "");
             renderCaptionAlternatesForCurrentImage();
+            return true;
         } catch (error) {
             console.warn("Failed to load caption label", error);
             renderCaptionAlternatesForCurrentImage();
+            return false;
         }
     }
 
@@ -31583,7 +31613,10 @@ async function cancelRfDetrTrainingJobRequest() {
                 try {
                     if (result?.backend_job_id) {
                         if (stillViewingRequestedImage) {
-                            await loadCaptionForCurrentImage();
+                            await loadCaptionForCurrentImage({
+                                allowDuringActive: true,
+                                actionLabel: "loading completed caption job output",
+                            });
                         }
                     } else if (captionDatasetId) {
                         const saveResp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(captionDatasetId)}/captions/${encodeURIComponent(requestImageName)}`, {
@@ -32040,8 +32073,14 @@ async function cancelRfDetrTrainingJobRequest() {
             { variant: finalFailed ? "warn" : "success", duration: 5000 },
         );
         if (qwenElements.captionSaveText?.checked !== false) {
-            await refreshQwenCaptionDatasets().catch((error) => console.warn("Caption dataset refresh failed", error));
-            await loadCaptionForCurrentImage().catch((error) => console.warn("Caption reload failed", error));
+            await refreshQwenCaptionDatasets({
+                silent: true,
+                allowDuringActive: true,
+            }).catch((error) => console.warn("Caption dataset refresh failed", error));
+            await loadCaptionForCurrentImage({
+                allowDuringActive: true,
+                actionLabel: "loading completed backend caption output",
+            }).catch((error) => console.warn("Caption reload failed", error));
         }
     }
 

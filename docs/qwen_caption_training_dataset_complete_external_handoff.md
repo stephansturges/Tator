@@ -323,10 +323,19 @@ mutation, the UI disables or action-time guards:
 - token, box, windowing, decode, health, pilot, and set-and-forget settings;
 - caption dataset selection and refresh where the change would make the active
   panel display a different archive context.
+- current-image caption archive reloads, unless the reload is the explicit
+  handoff from a completed caption job.
 
 The same principles exist on backend routes. API/script callers receive busy
 responses before reading or mutating archive-backed data when a caption dataset
 job owns the same dataset.
+
+Read-side consistency is important too. If image navigation or a scheduled
+caption load tries to read the archive while a job is mutating it, the UI keeps
+the current stable caption view and reports that the archive is busy. If the
+read started before the job became active, the in-flight response is dropped
+instead of repainting the caption textarea or alternate list from a stale
+snapshot.
 
 The reason is artifact coherence. Trainer JSONL, archive JSONL, review JSONL,
 and report JSON are one export set. Exporting or importing while the underlying

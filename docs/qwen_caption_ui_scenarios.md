@@ -33,6 +33,13 @@ edits while the archive is mutating.
 The caption dataset picker and dataset-refresh control are also disabled while
 the archive is mutating, so the panel cannot switch to a different caption
 dataset context while a backend job is still writing to the current archive.
+Caption archive reloads are also deferred while the selected archive is
+mutating. Image navigation or stale scheduled loads keep the current caption
+view and update the backend-job status instead of fetching a half-updated
+archive. If a fetch started before the backend job became active, its response
+is dropped rather than repainting the caption textarea or alternate list from a
+stale snapshot. The only active-job reloads allowed are explicit completion
+handoffs from the job that just finished.
 The caption run-configuration surface is frozen for the same reason: prompt
 layers, style/opening text, glossary edit/reset/save controls, windowing,
 models, token and box limits, decode controls, set-and-forget/pilot settings,

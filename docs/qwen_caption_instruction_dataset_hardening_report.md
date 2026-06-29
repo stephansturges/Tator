@@ -129,6 +129,12 @@ row before training.
   selector changes are reverted to the stable dataset id and reported through
   the same archive-idle guard, preventing the panel from showing a different
   dataset context while the active job still owns the current archive.
+- Caption archive reads now follow the same consistency rule. Normal
+  current-image archive reloads are deferred while a caption or instruction job
+  is mutating the archive, and a reload response is dropped if a backend job
+  becomes active while the request is in flight. The panel keeps the last stable
+  caption view instead of repainting from a half-updated archive. Explicit
+  completion handoffs from the job that just finished can opt into a reload.
 - Fixed caption action layout so export and instruction buttons wrap into
   readable responsive columns instead of clipping in the sidebar.
 - Fixed readiness and attach/recover rows so long status text cannot squeeze the

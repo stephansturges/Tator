@@ -72,7 +72,7 @@ caption-assistance path.
 | Repeated-token loops could appear as hangs | Added live output-loop detection, safe retry, runtime unload, and fallback/recovery paths | Repeated punctuation or token streams are not accepted as valid captions |
 | Missing model files were visually ambiguous | Styled download-needed model choices in red and local models in the normal local color | Operators can see model availability before launching a long job |
 | Review import payloads were accepted inconsistently by UI, route, and backend parser | Made the API route accept any JSON body and moved body-shape enforcement into the shared backend review parser | JSON arrays, wrapper objects, and single review-row objects now follow the same fail-closed validation path instead of being rejected by framework typing before parser checks |
-| Scripted trainer exports could rely too heavily on the readiness label | The server-side ready gate now independently requires a valid ready report, export-validation proof, versioned artifact-consistency proof, corpus count agreement, and returned artifact arrays that match the proofs | API clients get the same critical fail-closed behavior as the browser when readiness labels, proof state, corpus metrics, or returned rows drift |
+| Scripted trainer exports could rely too heavily on the readiness label | The server-side ready gate now independently requires a valid ready report, export-validation proof, versioned artifact-consistency proof, corpus count agreement, and returned artifact arrays that match the proofs and row-shape contract | API clients get the same critical fail-closed behavior as the browser when readiness labels, proof state, corpus metrics, or returned rows drift |
 
 The result is a conservative pipeline: generate candidates, archive evidence,
 validate aggressively, let humans review generated language, then export only
@@ -200,13 +200,21 @@ report shape, ready flags, corpus metrics, export-validation proof, versioned
 artifact-consistency proof, and the returned artifact arrays. Trainer, archive,
 and review rows must be lists, and their lengths must agree with report,
 readiness, corpus-metric, and consistency counts when those counts are present.
+The returned rows must also satisfy the row-shape contract: trainer rows need
+required image/question/answer fields, instruction metadata, trainable
+validation/review state, supported source archive, valid JSON when requested,
+and unique canonical image/question identities; archive rows need source,
+language, deterministic-QA, and export metadata objects; review rows need the
+review schema, persisted identity fields, source summaries, review-decision
+fields, selected/training-answer consistency, and unique image/QA identities.
 
 This was added because the browser is not the only export client. Scripts and
 future automation must receive the same fail-closed behavior as the UI. A
 payload with a `ready` label but invalid report format, false
 `ready_for_training`, hidden blocking reasons, required actions, quality
-warnings, stale corpus metrics, or mismatched proof/artifact arrays is not
-allowed to produce trainer JSONL under the strict gate.
+warnings, stale corpus metrics, malformed returned rows, or mismatched
+proof/artifact arrays is not allowed to produce trainer JSONL under the strict
+gate.
 
 ### 10. The Trainer Loader Is The Last Safety Boundary
 
@@ -319,9 +327,11 @@ The same gate also checks the returned artifact arrays. Trainer, archive, and
 review rows must be lists, and their lengths must match the selected-row,
 image, review-row, manual-review, export-validation, readiness, corpus-metric,
 and artifact-consistency counts when those counts are present. Selected review
-rows must match selected trainer rows. This catches payload assembly bugs where
-valid proof objects are accidentally paired with missing, stale, or wrong-length
-artifact arrays.
+rows must match selected trainer rows. The rows themselves must also preserve
+the trainer metadata, archive schema, and review-row schema required by the UI
+and trainer. This catches payload assembly bugs where valid proof objects are
+accidentally paired with missing, malformed, stale, or wrong-length artifact
+arrays.
 
 ### Backend Launch Failures Are Visible
 
@@ -1079,8 +1089,8 @@ Additional focused validation recorded in the supporting hardening docs covers:
 - strict server-side trainer-export refusal when readiness is not ready,
   report format or ready flags are inconsistent, corpus metrics drift,
   export-validation proof fails, or versioned artifact-consistency proofs are
-  missing, wrong-version, inconsistent, or paired with missing, stale, or
-  mismatched returned artifact arrays
+  missing, wrong-version, inconsistent, or paired with missing, malformed,
+  stale, or mismatched returned artifact arrays
 - trainer import of flat rows
 - trainer rejection of non-trainable rows
 - rendered UI smoke for visible controls and unclipped caption actions

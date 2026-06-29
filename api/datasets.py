@@ -1,5 +1,7 @@
 """APIRouter for dataset registry endpoints."""
 
+import json
+import re
 from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, UploadFile, File, Form, Body, HTTPException, Query
@@ -37,6 +39,153 @@ def _instruction_export_nonnegative_int(value: Any) -> Optional[int]:
     if parsed < 0:
         return None
     return parsed
+
+
+def _instruction_export_normalized_image_path(value: Any) -> str:
+    raw = str(value or "").strip().replace("\\", "/")
+    raw = re.sub(r"/+", "/", raw)
+    while raw.startswith("./"):
+        raw = raw[2:]
+    return "/".join(part for part in raw.split("/") if part and part != ".")
+
+
+def _instruction_export_normalized_question(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip()).lower()
+
+
+def _instruction_export_review_decision(value: Any) -> str:
+    decision = re.sub(r"[\s-]+", "_", str(value or "").strip().lower())
+    if decision in {"accept", "accepted", "approve", "approved", "keep", "kept", "pass", "passed"}:
+        return "accepted"
+    if decision in {"reject", "rejected", "deny", "denied", "drop", "dropped", "fail", "failed"}:
+        return "rejected"
+    if decision in {"revise", "revised", "needs_revision", "needs_review", "needs_rewrite", "edit", "edited"}:
+        return "needs_revision"
+    return decision or "unreviewed"
+
+
+def _instruction_export_training_rows_are_valid(rows: list[Any]) -> bool:
+    image_question_pairs: set[tuple[str, str]] = set()
+    trainable_validation_statuses = {"accepted", "machine_validated"}
+    nontrainable_validation_statuses = {"rejected", "failed", "invalid"}
+    trainable_review_statuses = {"accepted", "unreviewed", "machine_validated"}
+    nontrainable_review_statuses = {"rejected", "needs_revision"}
+    for row in rows:
+        if not isinstance(row, dict):
+            return False
+        image_path = str(row.get("image_path") or "").strip()
+        question = str(row.get("question") or "").strip()
+        answer = str(row.get("answer") or "").strip()
+        metadata = row.get("metadata")
+        if not image_path or not question or not answer or not isinstance(metadata, dict):
+            return False
+        qa_id = str(metadata.get("qa_id") or "").strip()
+        row_type = str(metadata.get("row_type") or "").strip()
+        answer_source = str(metadata.get("answer_source") or "").strip()
+        source_archive = str(metadata.get("source_archive") or "").strip()
+        answer_format = str(metadata.get("answer_format") or "").strip().lower()
+        validation_status = str(metadata.get("validation_status") or "").strip().lower()
+        raw_review_values = [
+            value for value in (metadata.get("review_status"), metadata.get("review_decision"))
+            if str(value or "").strip()
+        ]
+        review_statuses = [_instruction_export_review_decision(value) for value in raw_review_values]
+        if not qa_id or not row_type or not answer_source or not answer_format:
+            return False
+        if source_archive != "tator_caption_instruction_archive_v1":
+            return False
+        if not validation_status:
+            return False
+        if validation_status in nontrainable_validation_statuses:
+            return False
+        if validation_status not in trainable_validation_statuses:
+            return False
+        if not raw_review_values:
+            return False
+        if any(status in nontrainable_review_statuses for status in review_statuses):
+            return False
+        if any(status not in trainable_review_statuses for status in review_statuses):
+            return False
+        if row_type.startswith("deterministic_") or answer_format == "json" or answer_format.endswith("_json"):
+            try:
+                json.loads(answer)
+            except Exception:
+                return False
+        image_key = _instruction_export_normalized_image_path(image_path) or image_path
+        question_key = _instruction_export_normalized_question(question)
+        pair_key = (image_key, question_key)
+        if pair_key in image_question_pairs:
+            return False
+        image_question_pairs.add(pair_key)
+    return True
+
+
+def _instruction_export_archive_rows_are_valid(rows: list[Any]) -> bool:
+    image_paths: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            return False
+        image_path = str(row.get("image_path") or "").strip()
+        if not image_path:
+            return False
+        image_key = _instruction_export_normalized_image_path(image_path) or image_path
+        if image_key in image_paths:
+            return False
+        image_paths.add(image_key)
+        if not isinstance(row.get("source_annotations"), dict):
+            return False
+        if not isinstance(row.get("language_annotations"), dict):
+            return False
+        if not isinstance(row.get("deterministic_metadata_qa_pairs"), list):
+            return False
+        if not isinstance(row.get("export_metadata"), dict):
+            return False
+    return True
+
+
+def _instruction_export_review_rows_are_valid(rows: list[Any]) -> bool:
+    image_qa_ids: set[tuple[str, str]] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            return False
+        if str(row.get("format") or "").strip() != "tator_caption_instruction_review_rows_v1":
+            return False
+        image_path = str(row.get("image_path") or row.get("image_name") or row.get("image") or "").strip()
+        split = str(row.get("split") or "").strip()
+        if split:
+            normalized_image_path = _instruction_export_normalized_image_path(f"{split}/{image_path}")
+        else:
+            normalized_image_path = _instruction_export_normalized_image_path(image_path)
+        image_key = normalized_image_path or image_path
+        qa_id = str(row.get("qa_id") or "").strip()
+        row_origin = str(row.get("row_origin") or "").strip()
+        question = str(row.get("question") or "").strip()
+        candidate_answer = str(row.get("candidate_answer") or "").strip()
+        training_answer = str(row.get("training_answer") or "").strip()
+        validation_status = str(row.get("validation_status") or "").strip()
+        if not image_path or not qa_id or not row_origin or not question or not candidate_answer or not validation_status:
+            return False
+        if not isinstance(row.get("selected_for_training"), bool):
+            return False
+        if not isinstance(row.get("requires_manual_review"), bool):
+            return False
+        if row.get("selected_for_training") is True and not training_answer:
+            return False
+        if not isinstance(row.get("source_summary"), dict):
+            return False
+        if not isinstance(row.get("rejection_reasons"), list):
+            return False
+        if "review_decision" not in row or "review_notes" not in row:
+            return False
+        review_decision = _instruction_export_review_decision(row.get("review_decision"))
+        raw_review_decision = str(row.get("review_decision") or "").strip()
+        if raw_review_decision and review_decision not in {"accepted", "rejected", "needs_revision", "unreviewed"}:
+            return False
+        pair_key = (image_key, qa_id)
+        if pair_key in image_qa_ids:
+            return False
+        image_qa_ids.add(pair_key)
+    return True
 
 
 def _instruction_export_not_ready_reason(result: Any) -> str:
@@ -87,6 +236,12 @@ def _instruction_export_not_ready_reason(result: Any) -> str:
     if not isinstance(archive_rows, list):
         return "instruction_archive_rows"
     if not isinstance(review_rows, list):
+        return "instruction_review_rows"
+    if not _instruction_export_training_rows_are_valid(training_rows):
+        return "instruction_training_rows"
+    if not _instruction_export_archive_rows_are_valid(archive_rows):
+        return "instruction_archive_rows"
+    if not _instruction_export_review_rows_are_valid(review_rows):
         return "instruction_review_rows"
 
     consistency_counts = payload_consistency.get("counts") if isinstance(payload_consistency.get("counts"), dict) else {}

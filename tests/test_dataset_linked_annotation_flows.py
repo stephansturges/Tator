@@ -58,14 +58,43 @@ def test_caption_instruction_strict_export_gate_requires_ready_proofs() -> None:
         "instruction_export_validation": dict(export_validation),
         "instruction_artifact_consistency": dict(artifact_consistency),
     }
-    training_row = {"image_path": "frame.jpg", "question": "What is shown?", "answer": "A building."}
-    archive_row = {"image_path": "frame.jpg"}
+    training_row = {
+        "image_path": "frame.jpg",
+        "question": "What is shown?",
+        "answer": "A building.",
+        "metadata": {
+            "qa_id": "qa-1",
+            "row_type": "generated_qa",
+            "answer_source": "generated_qa_record",
+            "source_archive": "tator_caption_instruction_archive_v1",
+            "answer_format": "natural",
+            "validation_status": "accepted",
+            "review_status": "accepted",
+        },
+    }
+    archive_row = {
+        "image_path": "frame.jpg",
+        "source_annotations": {},
+        "language_annotations": {},
+        "deterministic_metadata_qa_pairs": [],
+        "export_metadata": {},
+    }
     review_row = {
         "format": "tator_caption_instruction_review_rows_v1",
+        "dataset_id": "ds",
         "image_path": "frame.jpg",
+        "row_origin": "generated_qa",
         "qa_id": "qa-1",
+        "question": "What is shown?",
+        "candidate_answer": "A building.",
+        "training_answer": "A building.",
+        "validation_status": "accepted",
         "selected_for_training": True,
         "requires_manual_review": False,
+        "review_decision": "",
+        "review_notes": "",
+        "source_summary": {},
+        "rejection_reasons": [],
     }
     payload = {
         "instruction_report": report,
@@ -194,13 +223,59 @@ def test_caption_instruction_strict_export_gate_requires_ready_proofs() -> None:
     assert _instruction_export_not_ready_reason(
         {
             **payload,
+            "instruction_training_rows": [
+                {
+                    **training_row,
+                    "metadata": {**training_row["metadata"], "source_archive": "wrong_archive"},
+                }
+            ],
+        }
+    ) == "instruction_training_rows"
+    assert _instruction_export_not_ready_reason(
+        {
+            **payload,
+            "instruction_training_rows": [
+                {
+                    **training_row,
+                    "metadata": {**training_row["metadata"], "review_status": "needs_revision"},
+                }
+            ],
+        }
+    ) == "instruction_training_rows"
+    assert _instruction_export_not_ready_reason(
+        {
+            **payload,
             "instruction_archive_rows": [],
         }
     ) == "instruction_archive_rows"
     assert _instruction_export_not_ready_reason(
         {
             **payload,
+            "instruction_archive_rows": [
+                {
+                    key: value
+                    for key, value in archive_row.items()
+                    if key != "source_annotations"
+                }
+            ],
+        }
+    ) == "instruction_archive_rows"
+    assert _instruction_export_not_ready_reason(
+        {
+            **payload,
             "instruction_review_rows": [],
+        }
+    ) == "instruction_review_rows"
+    assert _instruction_export_not_ready_reason(
+        {
+            **payload,
+            "instruction_review_rows": [
+                {
+                    key: value
+                    for key, value in review_row.items()
+                    if key != "training_answer"
+                }
+            ],
         }
     ) == "instruction_review_rows"
     assert _instruction_export_not_ready_reason(

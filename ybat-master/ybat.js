@@ -35024,7 +35024,7 @@ async function cancelRfDetrTrainingJobRequest() {
                     errors.push(`review row ${rowNumber} ${field} must be text`);
                     return;
                 }
-                if (row[field].trim().length > maxChars) {
+                if (row[field].length > maxChars) {
                     errors.push(`review row ${rowNumber} ${field} exceeds ${maxChars} characters`);
                 }
             });

@@ -23229,14 +23229,14 @@ def _caption_instruction_reject_malformed_review_rows(rows: Sequence[Any]) -> No
                 status_code=HTTP_400_BAD_REQUEST,
                 detail=f"review_rows_{field}_invalid:row_{index}",
             )
-        text = value.strip()
-        if required and not text:
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"{detail_code}:row_{index}")
-        if len(text) > max_chars:
+        if len(value) > max_chars:
             raise HTTPException(
                 status_code=HTTP_400_BAD_REQUEST,
                 detail=f"review_rows_field_too_long:row_{index}:{field}:{max_chars}",
             )
+        text = value.strip()
+        if required and not text:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"{detail_code}:row_{index}")
         return text
 
     for index, row in enumerate(rows, start=1):

@@ -178,7 +178,8 @@ a syntactically valid review packet can still be unsafe if a reviewer tool
 turns a text field into an object, writes extremely large notes, or produces a
 row that cannot be matched back to a saved caption0 or generated-QA record.
 
-The enforced per-field limits are:
+The enforced per-field limits apply to the raw string value before trimming, so
+an oversized all-whitespace field is still rejected:
 
 | Field family | Limit |
 | --- | --- |

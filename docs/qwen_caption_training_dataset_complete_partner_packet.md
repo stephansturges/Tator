@@ -41,17 +41,21 @@ Recommended reading order for a technical review:
 1. Read `docs/qwen_caption_training_dataset_complete_external_handoff.md` for
    the concise complete handoff: what was built, why, how to operate it, what
    is validated, and what still needs pilot proof.
-2. Read **One-Page Decision Summary** to understand the current readiness claim.
-3. Read **What Was Done And Why** and **Layer-By-Layer Implementation
+2. Read `docs/qwen_caption_training_dataset_external_consumer_dossier.md` for
+   the complete external-consumer explanation of what was built, why each layer
+   exists, how artifacts should be reviewed, and what pilot proof is still
+   required.
+3. Read **One-Page Decision Summary** to understand the current readiness claim.
+4. Read **What Was Done And Why** and **Layer-By-Layer Implementation
    Narrative** to understand the design intent.
-4. Read **Requirement Mapping** to verify that the product behavior requested
+5. Read **Requirement Mapping** to verify that the product behavior requested
    by the multi-prompt training-data workflow has an implemented artifact,
    control, or guard.
-5. Read **Artifact Contract** and **How To Inspect A Generated Packet** before
+6. Read **Artifact Contract** and **How To Inspect A Generated Packet** before
    reviewing sample exports.
-6. Run **Reproducible Verification Commands** against the checked-out
+7. Run **Reproducible Verification Commands** against the checked-out
    repository.
-7. Use **Required Pilot Before Training Use** and **Open Decisions For The
+8. Use **Required Pilot Before Training Use** and **Open Decisions For The
    Review Team** to decide whether the implementation is ready to run on a
    real target corpus.
 
@@ -60,6 +64,10 @@ The companion documents are supporting references:
 - `docs/qwen_caption_training_dataset_complete_external_handoff.md` is the
   concise complete external handoff for what was built, why, how it is
   validated, and what pilot proof remains.
+- `docs/qwen_caption_training_dataset_external_consumer_dossier.md` is the
+  complete neutral dossier for external consumers who need one document that
+  explains the implemented contract, design rationale, artifact flow, hardening,
+  validation gates, and pilot requirements.
 - `docs/qwen_caption_training_dataset_reviewer_dossier.md` provides a
   self-contained external-review dossier covering what was built, why it was
   built, how to operate it, what is validated, and what remains to be proven in
@@ -108,6 +116,7 @@ fine-tuning smoke validation.
 For external review, provide this file plus the following supporting files:
 
 - `docs/qwen_caption_training_dataset_complete_external_handoff.md`
+- `docs/qwen_caption_training_dataset_external_consumer_dossier.md`
 - `docs/qwen_caption_training_dataset_external_implementation_report.md`
 - `docs/qwen_caption_training_dataset_reviewer_dossier.md`
 - `docs/qwen_caption_instruction_dataset_hardening_report.md`

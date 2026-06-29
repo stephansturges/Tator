@@ -176,14 +176,15 @@ original local dataset.
 The backend validates the bundle before returning it. The manifest must declare
 the expected format, manifest path, checksum scope, file count, non-manifest
 ZIP member inventory, required artifact paths, file roles, row counts,
-image/label asset inventories, byte counts, SHA-256 digests, and recomputed
-trainer/archive/review/report consistency. Duplicate ZIP members, missing
-members, malformed JSONL artifacts, mismatched row counts, wrong artifact
-roles, stale image/label inventory entries, mismatched artifact evidence,
-mismatched byte counts, and checksum mismatches fail the download. Trainer,
-archive, and review rows must also resolve to copied images inside the bundle;
-stale rows that still point at an uncopied original path block the bundle
-instead of producing a partially self-contained handoff.
+image/label asset inventories, byte counts, SHA-256 digests, trainer-row
+validity, and recomputed trainer/archive/review/report consistency. Duplicate
+ZIP members, missing members, malformed JSONL artifacts, invalid trainer rows,
+mismatched row counts, wrong artifact roles, stale image/label inventory
+entries, mismatched artifact evidence, mismatched byte counts, and checksum
+mismatches fail the download. Trainer, archive, and review rows must also
+resolve to copied images inside the bundle; stale rows that still point at an
+uncopied original path block the bundle instead of producing a partially
+self-contained handoff.
 
 ### Coordinated JSONL And Report Artifacts
 
@@ -638,7 +639,7 @@ copied, edited, mixed, or shared outside the UI.
 | --- | --- |
 | Browser preflight | Row shape, metadata, readiness schema and count parity, embedded consistency count parity, review state, duplicates, settings fingerprint, and consistency before writing downloads |
 | Backend export validation | Flat trainer rows, report readiness schema, state, and count parity, embedded consistency count parity, settings fingerprint, archive-row shape, review-row shape, image alias resolution, and strict API/script export |
-| Bundle validation | Copied image/label assets, rewritten trainer/archive/review paths, trainer rows, artifact consistency, ZIP integrity, manifest inventory, required artifact paths, JSONL row-count parity, image/label inventory parity, file roles, byte counts, SHA-256 digests, and recomputed artifact consistency from the finished ZIP |
+| Bundle validation | Copied image/label assets, rewritten trainer/archive/review paths, trainer rows, artifact consistency, ZIP integrity, manifest inventory, required artifact paths, JSONL row-count parity, image/label inventory parity, file roles, byte counts, SHA-256 digests, trainer-row validation, and recomputed artifact consistency from the finished ZIP |
 | Review import validation | Wrong dataset, stale text, duplicate targets, unsupported origins, malformed rows, and metadata-only mutation |
 | Trainer loader validation | Missing images, malformed rows, duplicate canonical image/question pairs, rejected or needs-revision rows, invalid answer format, missing provenance |
 

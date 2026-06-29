@@ -31225,6 +31225,10 @@ async function cancelRfDetrTrainingJobRequest() {
             if (artifactsInconsistent) {
                 return `Training bundle export blocked: bundled artifacts do not agree with each other (${artifactsInconsistent[1]}). Regenerate the instruction dataset before sharing it.`;
             }
+            const invalidTrainingRows = detail.match(/^manifest_training_rows_invalid:(.+)$/);
+            if (invalidTrainingRows) {
+                return `Training bundle export blocked: bundled trainer rows are invalid (${invalidTrainingRows[1]}). Regenerate the instruction dataset before sharing it.`;
+            }
             const missingAsset = detail.match(/^manifest_(image|label)_file_missing:(.+)$/);
             if (missingAsset) {
                 return `Training bundle export blocked: manifest references copied ${missingAsset[1]} ${missingAsset[2]}, but that file is not in the ZIP. Regenerate the bundle before sharing it.`;

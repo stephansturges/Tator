@@ -4327,6 +4327,16 @@ def _tamper_minimal_bundle_training_answer(members: dict) -> None:
     )
 
 
+def _tamper_minimal_bundle_training_source_archive(members: dict) -> None:
+    payload, role = members["caption_instruction_training.jsonl"]
+    row = json.loads(payload.decode("utf-8"))
+    row["metadata"].pop("source_archive", None)
+    members["caption_instruction_training.jsonl"] = (
+        (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8"),
+        role,
+    )
+
+
 def _tamper_minimal_bundle_report_selected_count(members: dict) -> None:
     import localinferenceapi as api
 
@@ -4377,6 +4387,10 @@ def _tamper_minimal_bundle_report_selected_count(members: dict) -> None:
         (
             _tamper_minimal_bundle_training_answer,
             "manifest_artifacts_inconsistent:archive candidate",
+        ),
+        (
+            _tamper_minimal_bundle_training_source_archive,
+            "manifest_training_rows_invalid:row 1 metadata missing source_archive",
         ),
         (
             _tamper_minimal_bundle_report_selected_count,

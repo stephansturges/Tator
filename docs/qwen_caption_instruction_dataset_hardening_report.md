@@ -209,8 +209,8 @@ row before training.
   paths, expected file roles, valid trainer/archive/review JSONL object rows,
   manifest row-count parity with JSONL line counts, copied image inventory
   parity, copied label inventory parity, image/label byte-count and SHA-256
-  agreement, and recomputed trainer/archive/review/report consistency before
-  the bundle can be returned.
+  agreement, trainer-row validation from the bundled JSONL, and recomputed
+  trainer/archive/review/report consistency before the bundle can be returned.
 - The browser-side instruction report validator now requires the embedded
   `instruction_artifact_consistency` object to be present, versioned as
   `tator_caption_instruction_artifact_consistency_v1`, boolean-OK, and
@@ -246,10 +246,10 @@ row before training.
   failures.
 - Training-bundle manifest failures now format the semantic failure class for
   operators. Row-count drift, missing copied images or labels, artifact-path
-  mistakes, recomputed artifact-consistency failures, file-role mismatches,
-  malformed JSONL rows, duplicate ZIP members, byte-count mismatches, and
-  checksum mismatches produce actionable blocked messages instead of a single
-  generic manifest error.
+  mistakes, invalid bundled trainer rows, recomputed artifact-consistency
+  failures, file-role mismatches, malformed JSONL rows, duplicate ZIP members,
+  byte-count mismatches, and checksum mismatches produce actionable blocked
+  messages instead of a single generic manifest error.
 - The reviewed-JSONL import button now checks the archive-busy guard before
   opening the browser file picker, and the selected-file import path checks it
   again before parsing or posting rows. This prevents a stale enabled button or

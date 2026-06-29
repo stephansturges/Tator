@@ -23527,6 +23527,12 @@ def _caption_instruction_validate_bundle_manifest(zip_path: Path) -> None:
             archive_rows = _read_jsonl_rows(artifact_paths["archive_jsonl"])
             review_rows = _read_jsonl_rows(artifact_paths["review_jsonl"])
             report = _read_json_object(artifact_paths["report_json"])
+            training_validation = _caption_instruction_validate_training_rows(training_rows)
+            if not training_validation.get("ok"):
+                raise ValueError(
+                    "manifest_training_rows_invalid:"
+                    + str((training_validation.get("errors") or ["unknown"])[0])
+                )
 
             row_counts = manifest.get("row_counts")
             if not isinstance(row_counts, Mapping):

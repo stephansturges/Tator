@@ -275,7 +275,7 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     js = _js()
 
     assert "Set-and-forget is the default dataset-backed path for Caption image, next-N, and Caption all" in html
-    assert "uses persisted backend jobs, isolated retries, health gates, and auto-resume after backend restarts" in html
+    assert "uses persisted backend jobs, isolated retries, health gates, and a bounded auto-resume limit after backend restarts" in html
     assert "Direct single-image captioning is only for deliberate non-set-and-forget diagnostics" in html
     assert "Saved generated captions are appended as alternate caption records" in html
     assert "qwenCaptionAlternates" in html
@@ -290,6 +290,8 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     assert "qwenCaptionDownloadJsonl" in html
     assert "qwenCaptionDownloadGroupedJson" in html
     assert "qwenCaptionDownloadVlmJsonl" in html
+    assert "qwenCaptionBatchFollowActive" in html
+    assert "Follow backend image" in html
     assert "qwenCaptionSubcaptionsPerImage" in html
     assert 'id="qwenCaptionSubcaptionsPerImage" min="0" max="20" step="1" value="8"' in html
     assert "qwenCaptionQaMix" in html
@@ -2314,6 +2316,7 @@ def test_qwen_single_caption_uses_isolated_backend_job_when_dataset_backed():
     assert "image_names: [imageName]" in helper
     assert "save_text_labels: qwenElements.captionSaveText?.checked !== false" in helper
     assert "set_and_forget: setAndForget" in helper
+    assert "runner_heartbeat_interval_seconds: DEFAULT_CAPTION_BACKEND_HEARTBEAT_SECONDS" in helper
     assert "qwenBackendCrashSupervisionMessage()" in helper
     assert "Isolated caption job auto-resumed as ${autoResumeJobId}" in helper
     assert "latest_caption" in helper
@@ -3533,10 +3536,14 @@ def test_qwen_caption_backend_batch_uses_visible_failure_stop_gate():
 
     assert "max_failures: getCaptionBackendMaxFailures(setAndForget, instructionSettings)" in single_helper
     assert "max_failures: getCaptionBackendMaxFailures(setAndForget, instructionSettings)" in batch_helper
+    assert "runner_heartbeat_interval_seconds: DEFAULT_CAPTION_BACKEND_HEARTBEAT_SECONDS" in single_helper
+    assert "runner_heartbeat_interval_seconds: DEFAULT_CAPTION_BACKEND_HEARTBEAT_SECONDS" in batch_helper
     assert "Backend batch complete • ${finalFailed} failed" in finish_helper
     assert "Backend caption batch complete with ${finalFailed} failed image" in finish_helper
     assert "qwenCaptionSetAndForget" in html
     assert "Set-and-forget backend run" in html
+    assert "qwenCaptionBatchFollowActive" in html
+    assert "Follow backend image" in html
     assert "qwenCaptionAllowModelDownload" in html
     assert "Allow model downloads" in html
     assert "qwenCaptionAttempts" in html
@@ -3633,6 +3640,7 @@ def test_qwen_caption_backend_batch_uses_visible_failure_stop_gate():
     assert "large-run-ready crash supervision" in html
     assert "updateQwenCaptionSetAndForgetSupervisionStatus({ force: true })" in js
     assert "max_recovery_event_case_rate" in js
+    assert "max_auto_resumes" in js
     assert "max_loop_recovery_case_rate" in js
     assert "max_deterministic_recovery_case_rate" in js
     assert "max_failed_attempt_row_rate" in js
@@ -3642,8 +3650,13 @@ def test_qwen_caption_backend_batch_uses_visible_failure_stop_gate():
     assert "DEFAULT_CAPTION_HEALTH_MAX_DETERMINISTIC_RECOVERY_RATE = 0.01" in js
     assert "DEFAULT_CAPTION_HEALTH_MAX_SIGNAL_EXIT_RATE = 0.05" in js
     assert "DEFAULT_CAPTION_SET_AND_FORGET_ATTEMPTS = 3" in js
+    assert "DEFAULT_CAPTION_MAX_AUTO_RESUMES = 2" in js
     assert "function getCaptionBackendAttempts" in js
+    assert "function getCaptionMaxAutoResumes" in js
     assert "attempts: getCaptionBackendAttempts(setAndForget)" in js
+    assert "max_auto_resumes: getCaptionMaxAutoResumes(setAndForget)" in js
+    assert 'id="qwenCaptionMaxAutoResumes" min="0" max="25" step="1" value="2"' in html
+    assert "Default 2 prevents an unstable first image or GPU fault from looping indefinitely" in html
     assert 'id="qwenCaptionMaxLoopRecoveryRate" min="-1" max="1" step="0.01" value="0.05"' in html
     assert "enter 0 to require zero loop recoveries" in html
     assert 'id="qwenCaptionMaxDeterministicRecoveryRate" min="-1" max="1" step="0.01" value="0.01"' in html
@@ -3758,14 +3771,16 @@ def test_qwen_caption_backend_live_progress_snapshot_normalizes_job_telemetry():
             "    step_plan: [{ id: 'prepare', label: 'Prepare image and prompts' }, { id: 'prompt_stack', label: 'Build prompt stack' }, { id: 'caption', label: 'Compose full-image caption' }],",
             "    token_preview: 'The scene contains a vehicle.',",
             "    io_events: [{ event: 'output', kind: 'output', title: 'output', text: 'The scene contains a vehicle.' }],",
-            "    caption_dataset_progress: { processed: 2, total_cases: 10, case_index: 3, case: 'frame003.jpg', failed: 1, saved_text_labels: 2 },",
+            "    caption_dataset_progress: { processed: 2, total_cases: 10, case_index: 3, case: 'image_000003', image_name: 'frame003.jpg', stem: 'frame003', failed: 1, saved_text_labels: 2 },",
             "  },",
             "});",
             "assert.strictEqual(snapshot.phase, 'running');",
             "assert.strictEqual(snapshot.phase_label, 'Captioning');",
             "assert.strictEqual(snapshot.active, true);",
             "assert.strictEqual(snapshot.step_plan[1].label, 'Build prompt stack');",
-            "assert.strictEqual(snapshot.caption_dataset_progress.case, 'frame003.jpg');",
+            "assert.strictEqual(snapshot.caption_dataset_progress.case, 'image_000003');",
+            "assert.strictEqual(snapshot.caption_dataset_progress.image_name, 'frame003.jpg');",
+            "assert.strictEqual(snapshot.caption_dataset_progress.stem, 'frame003');",
             "assert(snapshot.step_detail.includes('frame003.jpg'));",
             "assert.strictEqual(snapshot.io_events[0].kind, 'output');",
             "snapshot = qwenCaptionBackendLiveProgressSnapshot({",

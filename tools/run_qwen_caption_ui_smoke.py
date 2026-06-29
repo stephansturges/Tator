@@ -29,6 +29,7 @@ CRITICAL_CONTROLS = (
     "qwenCaptionBatchRun",
     "qwenCaptionBatchRunAll",
     "qwenCaptionSetAndForget",
+    "qwenCaptionMaxAutoResumes",
     "qwenCaptionSaveText",
     "qwenCaptionGeneratedPrimary",
     "qwenCaptionAlternates",
@@ -65,7 +66,7 @@ CRITICAL_CONTROLS = (
 
 ALLOWED_STATUS_TEXT_SNIPPETS = (
     "auto-attaches immediately and periodically",
-    "auto-resume is armed",
+    "auto-resume is armed up to",
     "not advertising crash-restart supervision",
 )
 

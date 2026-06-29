@@ -2100,6 +2100,20 @@ def generate_instruction_qa_pairs(
     max_new_tokens = _instruction_qa_max_new_tokens(args, requested)
     started = time.time()
     try:
+        if hasattr(api, "_qwen_progress_update"):
+            api._qwen_progress_update(
+                phase="generate",
+                phase_label="Generating QA",
+                progress=0.9,
+                message="Generating instruction QA rows",
+                step_id="instruction_qa",
+                step_label="Generate instruction QA",
+                step_detail=f"Creating up to {requested} generated QA rows",
+                token_preview="",
+                live_output_reset=True,
+            )
+        if hasattr(api, "_qwen_progress_begin_output_section"):
+            api._qwen_progress_begin_output_section("Generated QA output")
         with Image.open(image_path) as source_image:
             pil_img = source_image.convert("RGB")
         raw, _width, _height = api._run_qwen_inference(
@@ -2401,6 +2415,7 @@ def _run_parent_locked(args: argparse.Namespace, runner_lock: ArtifactRunnerLock
         if restart_ack is not None:
             break
         key = case_key(case)
+        image_name = Path(str(case.get("image_path") or case.get("name") or "")).name
         previous = latest_rows.get(key)
         reprocess_recovery = bool(getattr(args, "resume_reprocess_recovery_events", False))
         previous_has_recovery = bool(previous and row_has_recovery_events(previous))
@@ -2421,6 +2436,7 @@ def _run_parent_locked(args: argparse.Namespace, runner_lock: ArtifactRunnerLock
                     "case_skipped_completed",
                     case_id=key,
                     case=case.get("name"),
+                    image_name=image_name,
                     stem=case.get("stem"),
                     case_index=index,
                     recorded=True,
@@ -2431,6 +2447,7 @@ def _run_parent_locked(args: argparse.Namespace, runner_lock: ArtifactRunnerLock
             "case_start",
             case_id=key,
             case=case.get("name"),
+            image_name=image_name,
             stem=case.get("stem"),
             case_index=index,
         )
@@ -2438,6 +2455,7 @@ def _run_parent_locked(args: argparse.Namespace, runner_lock: ArtifactRunnerLock
             skipped = {
                 "case_id": key,
                 "case": case["name"],
+                "image_name": image_name,
                 "stem": case["stem"],
                 "caption_mode": case["caption_mode"],
                 "label_count": case["label_count"],
@@ -2455,6 +2473,7 @@ def _run_parent_locked(args: argparse.Namespace, runner_lock: ArtifactRunnerLock
                 "case_skipped_existing_caption",
                 case_id=key,
                 case=case.get("name"),
+                image_name=image_name,
                 stem=case.get("stem"),
                 case_index=index,
             )
@@ -2547,6 +2566,7 @@ def _run_parent_locked(args: argparse.Namespace, runner_lock: ArtifactRunnerLock
                 "attempt_running",
                 case_id=key,
                 case=case.get("name"),
+                image_name=image_name,
                 stem=case.get("stem"),
                 case_index=index,
                 attempt=attempt,
@@ -2574,6 +2594,7 @@ def _run_parent_locked(args: argparse.Namespace, runner_lock: ArtifactRunnerLock
                                 "attempt_running",
                                 case_id=key,
                                 case=case.get("name"),
+                                image_name=image_name,
                                 stem=case.get("stem"),
                                 case_index=index,
                                 attempt=attempt,
@@ -2660,6 +2681,7 @@ def _run_parent_locked(args: argparse.Namespace, runner_lock: ArtifactRunnerLock
             row = {
                 "case_id": key,
                 "case": case["name"],
+                "image_name": image_name,
                 "stem": case["stem"],
                 "caption_mode": case["caption_mode"],
                 "label_count": case["label_count"],
@@ -2721,8 +2743,8 @@ def _run_parent_locked(args: argparse.Namespace, runner_lock: ArtifactRunnerLock
                         row["saved_text_label"] = str(saved_path)
                     caption_record = {
                         "case_id": key,
-                        "image_name": Path(str(case.get("image_path") or "")).name,
-                        "image_path": case.get("image_path"),
+                        "image_name": image_name,
+	                        "image_path": case.get("image_path"),
                         "caption": caption,
                         "used_counts": response_data.get("used_counts") or {},
                         "recovery_events": response_data.get("recovery_events") or [],
@@ -2740,6 +2762,7 @@ def _run_parent_locked(args: argparse.Namespace, runner_lock: ArtifactRunnerLock
                     "attempt_cooldown",
                     case_id=key,
                     case=case.get("name"),
+                    image_name=image_name,
                     stem=case.get("stem"),
                     case_index=index,
                     attempt=attempt,
@@ -2829,7 +2852,7 @@ def _run_parent_locked(args: argparse.Namespace, runner_lock: ArtifactRunnerLock
                         captions_jsonl,
                         {
                             "case_id": key,
-                            "image_name": Path(str(case.get("image_path") or "")).name,
+                            "image_name": image_name,
                             "image_path": case.get("image_path"),
                             "caption": caption,
                             "used_counts": recovered_counts,
@@ -2853,6 +2876,7 @@ def _run_parent_locked(args: argparse.Namespace, runner_lock: ArtifactRunnerLock
             "case_complete",
             case_id=key,
             case=case.get("name"),
+            image_name=image_name,
             stem=case.get("stem"),
             case_index=index,
             final_status=final_row.get("final_status"),
@@ -2870,6 +2894,7 @@ def _run_parent_locked(args: argparse.Namespace, runner_lock: ArtifactRunnerLock
                 "case_success_cooldown",
                 case_id=key,
                 case=case.get("name"),
+                image_name=image_name,
                 stem=case.get("stem"),
                 case_index=index,
                 next_case_index=index + 1,

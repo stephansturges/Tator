@@ -16032,7 +16032,7 @@ QWEN_PREPASS_FULL_TRACE_LATEST = QWEN_PREPASS_FULL_TRACE_ROOT / "latest.jsonl"
 QWEN_CAPTION_SET_AND_FORGET_AUTO_RESUME = _env_bool("QWEN_CAPTION_SET_AND_FORGET_AUTO_RESUME", True)
 QWEN_CAPTION_SET_AND_FORGET_MAX_AUTO_RESUMES = max(
     0,
-    _env_int("QWEN_CAPTION_SET_AND_FORGET_MAX_AUTO_RESUMES", 25),
+    _env_int("QWEN_CAPTION_SET_AND_FORGET_MAX_AUTO_RESUMES", 2),
 )
 QWEN_CAPTION_SET_AND_FORGET_SWEEP_INTERVAL_SECONDS = max(
     0.0,
@@ -25777,16 +25777,20 @@ def _qwen_caption_dataset_job_live_progress(job: QwenCaptionDatasetJob) -> Dict[
         or (step_plan[step_index - 1]["label"] if step_index and step_index <= len(step_plan) else phase_label)
     )
 
-    case_name = str(heartbeat.get("case") or heartbeat.get("stem") or "").strip()
+    image_name = str(heartbeat.get("image_name") or "").strip()
+    stem = str(heartbeat.get("stem") or "").strip()
+    case_id = str(heartbeat.get("case_id") or "").strip()
+    case_name = str(heartbeat.get("case") or "").strip()
+    display_case = image_name or stem or case_name
     detail_parts: List[str] = []
     if total > 0:
         image_counter = case_index if case_index > 0 else min(processed + 1, total)
         image_detail = f"Image {image_counter}/{total}"
-        if case_name:
-            image_detail = f"{image_detail}: {case_name}"
+        if display_case:
+            image_detail = f"{image_detail}: {display_case}"
         detail_parts.append(image_detail)
-    elif case_name:
-        detail_parts.append(case_name)
+    elif display_case:
+        detail_parts.append(display_case)
     attempt = heartbeat.get("attempt")
     total_attempts = heartbeat.get("total_attempts")
     if attempt:
@@ -25800,7 +25804,7 @@ def _qwen_caption_dataset_job_live_progress(job: QwenCaptionDatasetJob) -> Dict[
 
     token_preview = str(worker_progress.get("token_preview_tail") or "").strip()
     live_output = token_preview
-    if not token_preview and latest_caption:
+    if not token_preview and latest_caption and not active:
         token_preview = str(latest_caption.get("caption") or "").strip()
     generated_tokens = heartbeat.get("worker_generated_tokens", worker_progress.get("generated_tokens"))
     max_new_tokens = heartbeat.get("worker_max_new_tokens", worker_progress.get("max_new_tokens"))
@@ -25844,6 +25848,9 @@ def _qwen_caption_dataset_job_live_progress(job: QwenCaptionDatasetJob) -> Dict[
             "total_cases": total,
             "case_index": case_index,
             "case": case_name,
+            "image_name": image_name,
+            "stem": stem,
+            "case_id": case_id,
             "attempt": attempt,
             "failed": int(max(0.0, _qwen_caption_dataset_numeric(result.get("failed"), 0.0))),
             "saved_text_labels": int(max(0.0, _qwen_caption_dataset_numeric(result.get("saved_text_labels"), 0.0))),
@@ -27252,7 +27259,10 @@ def _qwen_caption_dataset_runner_heartbeat_message(heartbeat: Mapping[str, Any])
     phase = str(heartbeat.get("phase") or "heartbeat").replace("_", " ")
     processed = heartbeat.get("processed")
     total = heartbeat.get("total_cases")
-    case_name = str(heartbeat.get("case") or heartbeat.get("stem") or "").strip()
+    image_name = str(heartbeat.get("image_name") or "").strip()
+    stem = str(heartbeat.get("stem") or "").strip()
+    case_name = str(heartbeat.get("case") or "").strip()
+    display_case = image_name or stem or case_name
     attempt = heartbeat.get("attempt")
     worker_progress = (
         heartbeat.get("worker_progress")
@@ -27260,8 +27270,8 @@ def _qwen_caption_dataset_runner_heartbeat_message(heartbeat: Mapping[str, Any])
         else {}
     )
     parts = [f"Caption runner {phase}"]
-    if case_name:
-        parts.append(case_name)
+    if display_case:
+        parts.append(display_case)
     if attempt:
         parts.append(f"attempt {attempt}")
     if processed is not None and total:

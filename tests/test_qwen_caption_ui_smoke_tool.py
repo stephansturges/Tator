@@ -24,6 +24,7 @@ def test_qwen_caption_ui_smoke_tool_covers_critical_controls() -> None:
         "qwenCaptionBatchRun",
         "qwenCaptionBatchRunAll",
         "qwenCaptionSetAndForget",
+        "qwenCaptionMaxAutoResumes",
         "qwenCaptionSaveText",
         "qwenCaptionGeneratedPrimary",
         "qwenCaptionAlternates",
@@ -60,7 +61,7 @@ def test_qwen_caption_ui_smoke_tool_covers_critical_controls() -> None:
 
     assert "Current backend origin" in text
     assert "auto-attaches immediately and periodically" in text
-    assert "auto-resume is armed" in text
+    assert "auto-resume is armed up to" in text
     assert "not advertising crash-restart supervision" in text
     assert "Primary text label plus saved alternates" in text
     assert "generated_primary_default_off" in text

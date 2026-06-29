@@ -858,12 +858,14 @@ finishes or exits. If the adopted runner disappears before a strict terminal
 artifact exists, the normal bounded auto-resume path takes over after the lock
 is gone. Each automatic resume increments `auto_resume_count`; adoption itself
 does not consume that retry budget because it observes the existing writer
-instead of launching another one. The request may set `max_auto_resumes`,
-otherwise `QWEN_CAPTION_SET_AND_FORGET_MAX_AUTO_RESUMES` defaults to 25. Set
-`QWEN_CAPTION_SET_AND_FORGET_AUTO_RESUME=0` to disable startup auto-resume while
-keeping manual recovery available. While the backend remains alive, the same
-bounded auto-resume path also restarts opted-in jobs after runner-process
-failures such as `caption_runner_no_output_timeout` or nonzero runner exits.
+instead of launching another one. The request may set `max_auto_resumes`; the
+caption UI now sends this explicitly from the **Auto-resume limit** field, and
+the backend fallback `QWEN_CAPTION_SET_AND_FORGET_MAX_AUTO_RESUMES` defaults to
+2. Set `QWEN_CAPTION_SET_AND_FORGET_AUTO_RESUME=0` to disable startup
+auto-resume while keeping manual recovery available. While the backend remains
+alive, the same bounded auto-resume path also restarts opted-in jobs after
+runner-process failures such as `caption_runner_no_output_timeout` or nonzero
+runner exits.
 The failed supervisor records `auto_resumed_job_id`, and the caption UI monitor
 follows that replacement job automatically instead of reporting the old
 supervisor as the final failure. The manual attach/resume button remains useful

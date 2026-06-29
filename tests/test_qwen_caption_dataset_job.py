@@ -141,6 +141,12 @@ def test_caption_dataset_job_request_defaults_generated_qa_set_and_forget_to_fai
     assert caption_only.max_failures == 0
 
 
+def test_caption_dataset_job_auto_resume_default_is_bounded() -> None:
+    import localinferenceapi as api
+
+    assert api._qwen_caption_dataset_job_auto_resume_limit({}) == 2
+
+
 def test_caption_dataset_job_request_uses_set_and_forget_loop_recovery_default() -> None:
     payload = QwenCaptionDatasetJobRequest(
         dataset_id="ds",
@@ -4973,6 +4979,8 @@ def test_caption_dataset_runner_heartbeat_read_and_message(tmp_path: Path) -> No
                 "seq": 3,
                 "phase": "attempt_running",
                 "case": "image_000123",
+                "image_name": "frame123.jpg",
+                "stem": "frame123",
                 "attempt": 2,
                 "processed": 122,
                 "total_cases": 10000,
@@ -4988,6 +4996,8 @@ def test_caption_dataset_runner_heartbeat_read_and_message(tmp_path: Path) -> No
     assert heartbeat is not None
     assert heartbeat["seq"] == 3
     message = api._qwen_caption_dataset_runner_heartbeat_message(heartbeat)
+    assert "frame123.jpg" in message
+    assert "image_000123" not in message
     assert "attempt 2" in message
     assert "122/10000 complete" in message
     progress_message = api._qwen_caption_dataset_runner_heartbeat_message(
@@ -5018,7 +5028,7 @@ def test_caption_dataset_job_serializes_live_progress_from_runner_heartbeat() ->
         job_id="qcap_live_progress",
         status="running",
         progress=0.2,
-        message="Caption runner attempt running; image_003; 2/10 complete",
+        message="Caption runner attempt running; frame003.jpg; 2/10 complete",
         request={"caption_request": {"model_id": "Qwen/Qwen3-VL-4B-Instruct"}},
         result={
             "processed": 2,
@@ -5027,7 +5037,10 @@ def test_caption_dataset_job_serializes_live_progress_from_runner_heartbeat() ->
             "saved_text_labels": 2,
             "runner_heartbeat": {
                 "phase": "attempt_running",
-                "case": "image_003.jpg",
+                "case": "image_000003",
+                "image_name": "frame003.jpg",
+                "stem": "frame003",
+                "case_id": "image:frame003:full",
                 "case_index": 3,
                 "processed": 2,
                 "total_cases": 10,
@@ -5081,9 +5094,55 @@ def test_caption_dataset_job_serializes_live_progress_from_runner_heartbeat() ->
     assert live["step_plan"][1]["label"] == "Build prompt stack"
     assert live["token_preview"] == "The scene contains a small vehicle."
     assert [event["kind"] for event in live["io_events"]] == ["prompt", "output"]
-    assert "Image 3/10: image_003.jpg" in live["step_detail"]
+    assert "Image 3/10: frame003.jpg" in live["step_detail"]
+    assert live["caption_dataset_progress"]["case"] == "image_000003"
+    assert live["caption_dataset_progress"]["image_name"] == "frame003.jpg"
+    assert live["caption_dataset_progress"]["stem"] == "frame003"
+    assert live["caption_dataset_progress"]["case_id"] == "image:frame003:full"
     assert live["caption_dataset_progress"]["failed"] == 1
     assert live["caption_dataset_progress"]["saved_text_labels"] == 2
+
+
+def test_caption_dataset_job_live_progress_does_not_show_stale_caption_while_active() -> None:
+    import localinferenceapi as api
+
+    job = api.QwenCaptionDatasetJob(
+        job_id="qcap_no_stale_preview",
+        status="running",
+        progress=0.1,
+        message="Caption runner attempt running",
+        request={"caption_request": {"model_id": "Qwen/Qwen3-VL-4B-Instruct"}},
+        result={
+            "processed": 1,
+            "total_cases": 3,
+            "latest_caption": {
+                "image_name": "previous.jpg",
+                "caption": "This caption belongs to the previous image.",
+            },
+            "runner_heartbeat": {
+                "phase": "attempt_running",
+                "case": "image_000002",
+                "image_name": "current.jpg",
+                "stem": "current",
+                "case_index": 2,
+                "processed": 1,
+                "total_cases": 3,
+                "attempt": 1,
+                "worker_progress": {
+                    "phase": "prepare",
+                    "phase_label": "Preparing",
+                    "step_label": "Prepare image and prompts",
+                },
+            },
+        },
+    )
+
+    live = api._serialize_qwen_caption_dataset_job(job)["live_progress"]
+
+    assert live["active"] is True
+    assert live["caption_dataset_progress"]["image_name"] == "current.jpg"
+    assert live["token_preview"] == ""
+    assert live["live_output"] == ""
 
 
 def test_caption_dataset_job_preflight_error_blocks_runner_launch(monkeypatch, tmp_path: Path) -> None:

@@ -1836,9 +1836,11 @@ def test_parent_writes_heartbeat_during_attempt(monkeypatch, tmp_path: Path) -> 
     assert observed_heartbeat
     assert observed_heartbeat[0]["phase"] == "attempt_running"
     assert observed_heartbeat[0]["attempt"] == 1
+    assert observed_heartbeat[0]["image_name"] == "frame.jpg"
     assert observed_worker_heartbeat
     assert observed_worker_heartbeat[0]["worker_message"] == "Generating response tokens"
     assert observed_worker_heartbeat[0]["worker_generated_tokens"] == 17
+    assert observed_worker_heartbeat[0]["image_name"] == "frame.jpg"
     assert observed_worker_heartbeat[0]["seq"] > observed_heartbeat[0]["seq"]
     assert len(observed_lock_epochs) == 2
     assert observed_lock_epochs[1] > observed_lock_epochs[0]
@@ -1852,6 +1854,7 @@ def test_parent_writes_heartbeat_during_attempt(monkeypatch, tmp_path: Path) -> 
         if line.strip()
     ]
     assert rows[-1]["worker_progress"]["step_label"] == "Compose full-image caption"
+    assert rows[-1]["image_name"] == "frame.jpg"
 
 
 def test_parent_artifact_lock_blocks_duplicate_writer_before_mutation(tmp_path: Path) -> None:

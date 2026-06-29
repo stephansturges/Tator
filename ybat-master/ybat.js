@@ -2450,6 +2450,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         captionSamplingPreset: null,
         captionLoopRecovery: null,
         captionAttempts: null,
+        captionMaxAutoResumes: null,
         captionArtifactLogMb: null,
         captionMaxFailures: null,
         captionMaxFailedCaseRate: null,
@@ -2504,6 +2505,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         captionBatchCount: null,
         captionBatchIncludeCurrent: null,
         captionBatchOverwrite: null,
+        captionBatchFollowActive: null,
         captionBatchRun: null,
         captionBatchRunAll: null,
         captionBatchCancel: null,
@@ -3244,7 +3246,9 @@ const AUTOMATION_LOCKED_TABS = new Set([
     const DEFAULT_CAPTION_ARTIFACT_LOG_MB = 1;
     const DEFAULT_CAPTION_BACKEND_ATTEMPTS = 2;
     const DEFAULT_CAPTION_SET_AND_FORGET_ATTEMPTS = 3;
+    const DEFAULT_CAPTION_MAX_AUTO_RESUMES = 2;
     const DEFAULT_CAPTION_INSTRUCTION_MAX_FAILURES = 1;
+    const DEFAULT_CAPTION_BACKEND_HEARTBEAT_SECONDS = 1;
     const DEFAULT_CAPTION_HEALTH_MAX_FAILED_CASE_RATE = 0;
     const DEFAULT_CAPTION_HEALTH_MAX_QUALITY_FAILURE_RATE = 0;
     const DEFAULT_CAPTION_HEALTH_MAX_RECOVERY_RATE = 0.25;
@@ -21938,6 +21942,7 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenElements.captionSamplingPreset = document.getElementById("qwenCaptionUseSampling");
         qwenElements.captionLoopRecovery = document.getElementById("qwenCaptionLoopRecovery");
         qwenElements.captionAttempts = document.getElementById("qwenCaptionAttempts");
+        qwenElements.captionMaxAutoResumes = document.getElementById("qwenCaptionMaxAutoResumes");
         qwenElements.captionArtifactLogMb = document.getElementById("qwenCaptionArtifactLogMb");
         qwenElements.captionMaxFailures = document.getElementById("qwenCaptionMaxFailures");
         qwenElements.captionMaxFailedCaseRate = document.getElementById("qwenCaptionMaxFailedCaseRate");
@@ -21999,6 +22004,7 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenElements.captionBatchCount = document.getElementById("qwenCaptionBatchCount");
         qwenElements.captionBatchIncludeCurrent = document.getElementById("qwenCaptionBatchIncludeCurrent");
         qwenElements.captionBatchOverwrite = document.getElementById("qwenCaptionBatchOverwrite");
+        qwenElements.captionBatchFollowActive = document.getElementById("qwenCaptionBatchFollowActive");
         qwenElements.captionBatchRun = document.getElementById("qwenCaptionBatchRun");
         qwenElements.captionBatchRunAll = document.getElementById("qwenCaptionBatchRunAll");
         qwenElements.captionBatchCancel = document.getElementById("qwenCaptionBatchCancel");
@@ -22351,6 +22357,7 @@ async function cancelRfDetrTrainingJobRequest() {
             qwenElements.captionTopK,
             qwenElements.captionPresencePenalty,
             qwenElements.captionAttempts,
+            qwenElements.captionMaxAutoResumes,
             qwenElements.captionArtifactLogMb,
             qwenElements.captionMaxFailures,
             qwenElements.captionMaxFailedCaseRate,
@@ -25380,6 +25387,7 @@ async function cancelRfDetrTrainingJobRequest() {
             qwenElements.captionBatchCount,
             qwenElements.captionBatchIncludeCurrent,
             qwenElements.captionBatchOverwrite,
+            qwenElements.captionBatchFollowActive,
         ].filter(Boolean);
     }
 
@@ -25600,6 +25608,17 @@ async function cancelRfDetrTrainingJobRequest() {
             return Math.min(Math.max(parsed, 1), 5);
         }
         return setAndForget ? DEFAULT_CAPTION_SET_AND_FORGET_ATTEMPTS : DEFAULT_CAPTION_BACKEND_ATTEMPTS;
+    }
+
+    function getCaptionMaxAutoResumes(setAndForget = false) {
+        if (!setAndForget) {
+            return 0;
+        }
+        const parsed = parseInt(qwenElements.captionMaxAutoResumes?.value || "", 10);
+        if (Number.isFinite(parsed)) {
+            return Math.min(Math.max(parsed, 0), 25);
+        }
+        return DEFAULT_CAPTION_MAX_AUTO_RESUMES;
     }
 
     function getCaptionBackendMaxFailures(setAndForget = false, instructionSettings = null) {
@@ -26082,6 +26101,9 @@ async function cancelRfDetrTrainingJobRequest() {
                 max_failed_attempt_row_rate: String(
                     qwenElements.captionMaxFailedAttemptRate?.value ?? DEFAULT_CAPTION_HEALTH_MAX_FAILED_ATTEMPT_RATE,
                 ),
+                max_auto_resumes: String(
+                    qwenElements.captionMaxAutoResumes?.value ?? DEFAULT_CAPTION_MAX_AUTO_RESUMES,
+                ),
                 max_signal_exit_attempt_row_rate: String(
                     qwenElements.captionMaxSignalExitRate?.value ?? DEFAULT_CAPTION_HEALTH_MAX_SIGNAL_EXIT_RATE,
                 ),
@@ -26251,6 +26273,11 @@ async function cancelRfDetrTrainingJobRequest() {
         setSelectValueIfPresent(qwenElements.captionLoopRecovery, generation.loop_recovery_mode || "safe_retry_fallback");
         if (qwenElements.captionAttempts && typeof generation.attempts !== "undefined") {
             qwenElements.captionAttempts.value = generation.attempts ? String(generation.attempts) : "";
+        }
+        if (qwenElements.captionMaxAutoResumes && typeof generation.max_auto_resumes !== "undefined") {
+            qwenElements.captionMaxAutoResumes.value = String(
+                generation.max_auto_resumes ?? DEFAULT_CAPTION_MAX_AUTO_RESUMES,
+            );
         }
         if (qwenElements.captionArtifactLogMb && typeof generation.artifact_log_mb !== "undefined") {
             qwenElements.captionArtifactLogMb.value = String(generation.artifact_log_mb || DEFAULT_CAPTION_ARTIFACT_LOG_MB);
@@ -26941,7 +26968,8 @@ async function cancelRfDetrTrainingJobRequest() {
             const launcher = qwenBackendSupervision.launcher || "backend launcher";
             const restartMax = String(qwenBackendSupervision.restart_max || "").trim();
             const limitText = restartMax && restartMax !== "0" ? `, restart limit ${restartMax}` : ", unlimited crash restarts";
-            return `Set-and-forget auto-resume is armed; ${launcher} will restart backend crashes${limitText}.`;
+            const autoResumeLimit = getCaptionMaxAutoResumes(true);
+            return `Set-and-forget auto-resume is armed up to ${autoResumeLimit} job resume cycle${autoResumeLimit === 1 ? "" : "s"}; ${launcher} will restart backend crashes${limitText}.`;
         }
         if (qwenBackendSupervision.restart_capable) {
             const policy = qwenBackendSupervision.restart_policy || {};
@@ -26997,7 +27025,9 @@ async function cancelRfDetrTrainingJobRequest() {
             ["captionRunButton", "Caption image control"],
             ["captionBatchRun", "Caption next-N control"],
             ["captionBatchRunAll", "Caption all control"],
+            ["captionBatchFollowActive", "Backend image follow toggle"],
             ["captionSetAndForget", "Set-and-forget toggle"],
+            ["captionMaxAutoResumes", "Set-and-forget auto-resume limit"],
             ["captionSaveText", "Save generated captions toggle"],
             ["captionGeneratedPrimary", "Generated-primary promotion toggle"],
             ["captionAlternates", "Alternate caption list"],
@@ -27801,7 +27831,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function requestQwenCaptionCancel({ force = false } = {}) {
-        const backendJobIds = qwenCaptionKnownBackendJobIds();
+        let backendJobIds = qwenCaptionKnownBackendJobIds();
         if (!qwenCaptionActive && !qwenCaptionBatchActive && !backendJobIds.length) {
             return;
         }
@@ -27820,6 +27850,27 @@ async function cancelRfDetrTrainingJobRequest() {
         setQwenCaptionStatus("Cancellation requested");
         setSamStatus(`${message}…`, { variant: "warn", duration: 0 });
         try {
+            try {
+                const datasetId = getCaptionDatasetId();
+                const jobs = await fetchQwenCaptionBackendJobs();
+                updateQwenCaptionBackendJobsSummary(jobs);
+                const idSet = new Set(backendJobIds);
+                jobs.forEach((job) => {
+                    if (!isQwenCaptionBackendJobActive(job)) {
+                        return;
+                    }
+                    if (datasetId && qwenCaptionBackendJobDatasetId(job) !== datasetId) {
+                        return;
+                    }
+                    const jobId = String(job?.job_id || "").trim();
+                    if (jobId) {
+                        idSet.add(jobId);
+                    }
+                });
+                backendJobIds = [...idSet];
+            } catch (refreshError) {
+                console.warn("Backend caption job refresh failed before cancel", refreshError);
+            }
             for (const jobId of backendJobIds) {
                 await fetch(`${API_ROOT}/qwen/caption/jobs/${encodeURIComponent(jobId)}/cancel`, {
                     method: "POST",
@@ -32047,7 +32098,9 @@ async function cancelRfDetrTrainingJobRequest() {
                 set_and_forget: setAndForget,
                 allow_model_download: !!qwenElements.captionAllowModelDownload?.checked,
                 attempts: getCaptionBackendAttempts(setAndForget),
+                max_auto_resumes: getCaptionMaxAutoResumes(setAndForget),
                 per_image_timeout_seconds: 900,
+                runner_heartbeat_interval_seconds: DEFAULT_CAPTION_BACKEND_HEARTBEAT_SECONDS,
                 runner_artifact_log_bytes: getCaptionRunnerArtifactLogBytes(),
                 max_failures: getCaptionBackendMaxFailures(setAndForget, instructionSettings),
                 continue_on_quality_failures: false,
@@ -32347,7 +32400,10 @@ async function cancelRfDetrTrainingJobRequest() {
         const processed = Number(datasetProgress.processed || result.processed || 0);
         const failed = Number(datasetProgress.failed || result.failed || 0);
         const saved = Number(datasetProgress.saved_text_labels || result.saved_text_labels || 0);
+        const currentImageName = String(datasetProgress.image_name || "").trim();
+        const currentStem = String(datasetProgress.stem || "").trim();
         const currentCase = String(datasetProgress.case || "").trim();
+        const currentDisplayCase = currentImageName || currentStem || currentCase;
         const active = ["queued", "running", "cancelling"].includes(status);
         let phase = live.phase || qwenCaptionBackendTerminalPhase(status);
         if (active && phase === "complete") {
@@ -32372,7 +32428,7 @@ async function cancelRfDetrTrainingJobRequest() {
             || `Backend batch ${processed}/${totalCases || "?"}`;
         const statusDetail = [
             totalCases > 0 ? `Image ${datasetProgress.case_index || Math.min(processed + 1, totalCases)}/${totalCases}` : "",
-            currentCase,
+            currentDisplayCase,
             failed ? `${failed} failed` : "",
             saved ? `${saved} saved` : "",
         ].filter(Boolean).join(" • ");
@@ -32408,10 +32464,63 @@ async function cancelRfDetrTrainingJobRequest() {
                 failed,
                 saved_text_labels: saved,
                 case: currentCase,
+                image_name: currentImageName,
+                stem: currentStem,
+                case_id: String(datasetProgress.case_id || "").trim(),
                 case_index: Number(datasetProgress.case_index || 0),
                 attempt: datasetProgress.attempt,
             },
         };
+    }
+
+    function qwenCaptionImageNameStem(name) {
+        const base = String(name || "").split(/[\\/]/).pop() || "";
+        const dot = base.lastIndexOf(".");
+        return dot > 0 ? base.slice(0, dot) : base;
+    }
+
+    function findQwenCaptionBackendProgressImageName(progress) {
+        if (!progress || typeof progress !== "object") {
+            return "";
+        }
+        const directCandidates = [
+            progress.image_name,
+            progress.image,
+            progress.case,
+        ].map((value) => String(value || "").trim()).filter(Boolean);
+        for (const candidate of directCandidates) {
+            if (images[candidate]) {
+                return candidate;
+            }
+            const basename = candidate.split(/[\\/]/).pop();
+            if (basename && images[basename]) {
+                return basename;
+            }
+        }
+        const targetStem = String(progress.stem || "").trim();
+        if (targetStem) {
+            const names = Object.keys(images || {});
+            const match = names.find((name) => qwenCaptionImageNameStem(name) === targetStem);
+            if (match) {
+                return match;
+            }
+        }
+        return "";
+    }
+
+    function followQwenCaptionBackendProgressImage(snapshot) {
+        if (qwenElements.captionBatchFollowActive?.checked === false) {
+            return;
+        }
+        if (!snapshot?.active) {
+            return;
+        }
+        const imageName = findQwenCaptionBackendProgressImageName(snapshot.caption_dataset_progress);
+        if (!imageName || !images[imageName] || currentImage?.name === imageName) {
+            return;
+        }
+        syncImageSelectionToName(imageName, { ensureVisible: true });
+        setCurrentImage(images[imageName]);
     }
 
     function renderQwenCaptionBackendJobProgress(job, options = {}) {
@@ -32645,7 +32754,11 @@ async function cancelRfDetrTrainingJobRequest() {
                 totalFallback: totalCases || total,
                 force: true,
             });
-            const currentCase = String(liveSnapshot?.caption_dataset_progress?.case || "").trim();
+            followQwenCaptionBackendProgressImage(liveSnapshot);
+            const progressCase = liveSnapshot?.caption_dataset_progress || {};
+            const currentCase = String(
+                progressCase.image_name || progressCase.stem || progressCase.case || ""
+            ).trim();
             const statusLine = `Backend batch ${processed}/${totalCases || "?"}` +
                 (currentCase ? ` • ${currentCase}` : "") +
                 (failed ? ` • ${failed} failed` : "") +
@@ -32832,7 +32945,12 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!datasetId) {
             return false;
         }
-        const templateImageName = imageNames.find((name) => images[name]) || currentImage?.name || imageNames[0];
+        const currentImageName = String(currentImage?.name || "").trim();
+        const templateImageName = (
+            currentImageName && imageNames.includes(currentImageName) && images[currentImageName]
+                ? currentImageName
+                : imageNames.find((name) => images[name]) || currentImageName || imageNames[0]
+        );
         if (!templateImageName) {
             return false;
         }
@@ -32887,7 +33005,9 @@ async function cancelRfDetrTrainingJobRequest() {
                     set_and_forget: setAndForget,
                     allow_model_download: !!qwenElements.captionAllowModelDownload?.checked,
                     attempts: getCaptionBackendAttempts(setAndForget),
+                    max_auto_resumes: getCaptionMaxAutoResumes(setAndForget),
                     per_image_timeout_seconds: 900,
+                    runner_heartbeat_interval_seconds: DEFAULT_CAPTION_BACKEND_HEARTBEAT_SECONDS,
                     runner_artifact_log_bytes: getCaptionRunnerArtifactLogBytes(),
                     max_failures: getCaptionBackendMaxFailures(setAndForget, instructionSettings),
                     continue_on_quality_failures: false,

@@ -208,6 +208,9 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         instruction_review_count = page.locator("text=Download review JSONL").count()
         instruction_import_count = page.locator("text=Import reviewed JSONL").count()
         instruction_report_count = page.locator("text=Download instruction report").count()
+        all_image_order_help_count = page.locator(
+            "text=All-image caption and training-dataset jobs start with the selected image"
+        ).count()
         instruction_help = page.locator(".qwen-caption-instruction-panel .training-help").inner_text(timeout=args.timeout_ms)
         action_button_metrics = page.evaluate(
             """
@@ -307,6 +310,7 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
             "instruction_review_button_count": instruction_review_count,
             "instruction_import_button_count": instruction_import_count,
             "instruction_report_button_count": instruction_report_count,
+            "all_image_order_help_count": all_image_order_help_count,
             "instruction_help": instruction_help,
             "action_button_metrics": action_button_metrics,
             "overflowing_action_buttons": overflowing_action_buttons,
@@ -396,6 +400,13 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         and "imported to apply accepted, rejected, or needs-revision decisions before training" in instruction_help,
         "Instruction dataset help explains generated QA/source annotation separation and review import.",
         help_text=instruction_help,
+    )
+    add_check(
+        report,
+        "all_image_order_help_visible",
+        all_image_order_help_count == 1,
+        "Caption-all and training-dataset help explains selected-image-first launch order.",
+        count=all_image_order_help_count,
     )
     add_check(
         report,

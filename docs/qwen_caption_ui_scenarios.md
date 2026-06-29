@@ -61,16 +61,18 @@ certification payload apply to the backend batch job.
 
 ## 4. Caption All Images As A Walk-Away Job
 
-The user clicks **Caption all images** with set-and-forget enabled. The backend
-requires a selected caption dataset, keeps jobs resumable, and reports backend
-crash-supervision readiness before the user walks away. While attached to the
-job, the same caption progress panel and live output toast used by single-image
-captioning must stay visible for each image: current image index/name, prompt
-stack step chips, bounded prompt/output trace, token preview, retry/cooldown
-state, and failure text. If the backend job cannot be created, the caption
-status, backend-job status, and toast must show the parsed launch failure
-instead of leaving the panel at a stale "Starting" state or relying on console
-output.
+The user clicks **Caption all images** with set-and-forget enabled. The UI sends
+the selected image first, then the remaining loaded images in display order and
+wraps earlier images to the end, so the first backend heartbeat matches the
+operator's current frame. The backend requires a selected caption dataset, keeps
+jobs resumable, and reports backend crash-supervision readiness before the user
+walks away. While attached to the job, the same caption progress panel and live
+output toast used by single-image captioning must stay visible for each image:
+current image index/name, prompt stack step chips, bounded prompt/output trace,
+token preview, retry/cooldown state, and failure text. If the backend job cannot
+be created, the caption status, backend-job status, and toast must show the
+parsed launch failure instead of leaving the panel at a stale "Starting" state
+or relying on console output.
 
 Set-and-forget jobs own their generated caption writes. The backend may save a
 caption for the active job id while ordinary UI/user caption mutations remain
@@ -166,7 +168,8 @@ before generation.
 ## 12. Create A VLM Instruction Dataset
 
 The user clicks **Create VLM training dataset** after choosing a caption dataset.
-The run creates caption0 rows and, by default, 8 generated visual QA rows per
+The run starts with the selected image, follows backend progress frame by frame,
+and creates caption0 rows plus, by default, 8 generated visual QA rows per
 image. **Generated QA per image** is clamped to 0-20, so `0` creates a
 caption0-only instruction export and high values cannot explode the prompt or
 artifact size; if a typed value or loaded recipe is outside that range, the

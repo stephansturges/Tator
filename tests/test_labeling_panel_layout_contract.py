@@ -2374,6 +2374,37 @@ def test_qwen_next_n_caption_prefers_resumable_backend_job():
     assert "invokeQwenCaptionForImage(" not in batch
 
 
+def test_qwen_all_image_caption_and_instruction_runs_start_with_selected_image():
+    js = _js()
+    html = _html()
+
+    run_all_start = js.index("qwenElements.captionBatchRunAll.addEventListener")
+    run_all_end = js.index("if (qwenElements.captionBuildInstructionDataset)", run_all_start)
+    run_all_listener = js[run_all_start:run_all_end]
+    instruction_start = run_all_end
+    instruction_end = js.index("if (qwenElements.captionBatchCancel)", instruction_start)
+    instruction_listener = js[instruction_start:instruction_end]
+
+    assert "getCaptionImageList({ startAtCurrent: true })" in run_all_listener
+    assert "Caption all ${imageNames.length} images starting with ${firstImage}" in run_all_listener
+    assert "getCaptionImageList({ startAtCurrent: true })" in instruction_listener
+    assert "Create a VLM training dataset for ${imageNames.length} images starting with ${firstImage}" in instruction_listener
+    assert "All-image caption and training-dataset jobs start with the selected image" in html
+    assert "viewer advances to each backend case" in html
+
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            _extract_js_function(js, "rotateCaptionImageNamesFromIndex"),
+            "assert.deepStrictEqual(rotateCaptionImageNamesFromIndex(['a.jpg', 'b.jpg', 'c.jpg'], 1), ['b.jpg', 'c.jpg', 'a.jpg']);",
+            "assert.deepStrictEqual(rotateCaptionImageNamesFromIndex(['a.jpg', 'b.jpg', 'c.jpg'], 0), ['a.jpg', 'b.jpg', 'c.jpg']);",
+            "assert.deepStrictEqual(rotateCaptionImageNamesFromIndex(['a.jpg', 'b.jpg', 'c.jpg'], 5), ['a.jpg', 'b.jpg', 'c.jpg']);",
+            "assert.deepStrictEqual(rotateCaptionImageNamesFromIndex([], 2), []);",
+        ]
+    )
+    subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
+
+
 def test_qwen_caption_launches_block_while_archive_is_mutating():
     js = _js()
     handle_start = js.index("async function handleQwenCaption()")
@@ -3501,6 +3532,9 @@ def test_qwen_caption_ui_scenarios_document_set_and_forget_workflows():
     assert "Generated caption jobs append variants by default" in scenarios
     assert "primary-first order" in scenarios
     assert "generated captions append as saved alternate caption records" in scenarios
+    assert "the selected image first" in scenarios
+    assert "operator's current frame" in scenarios
+    assert "follows backend progress frame by frame" in scenarios
     assert "qwenCaptionSetAndForget" in html
     assert "qwenCaptionPilotDeterministicRecoveryConfidence" in html
     assert "qwenCaptionAllowModelDownload" in html

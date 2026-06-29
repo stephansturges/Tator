@@ -1079,7 +1079,7 @@
         qwenCaptionRunButton: "Generate or refresh the caption for the current image.",
         qwenCaptionCancelButton: "Cancel the active Qwen captioning job.",
         qwenCaptionBatchRun: "Generate captions for the next batch of images.",
-        qwenCaptionBatchRunAll: "Generate captions for all loaded images.",
+        qwenCaptionBatchRunAll: "Generate captions for all loaded images, starting with the selected image.",
         qwenCaptionBatchCancel: "Cancel the active caption batch job.",
         qwenCaptionDownloadJsonl: "Download generated caption records as audit JSONL.",
         qwenCaptionDownloadGroupedJson: "Download one grouped caption archive object per image.",
@@ -1088,7 +1088,7 @@
         qwenCaptionQaMix: "Choose the generated question/answer mix requested from the model.",
         qwenCaptionAnswerFormat: "Choose whether generated QA answers should be natural text or parseable JSON.",
         qwenCaptionRequireReadyInstructionExport: "Require a ready instruction report before downloading trainer JSONL.",
-        qwenCaptionBuildInstructionDataset: "Run caption0 plus generated QA creation for all loaded images.",
+        qwenCaptionBuildInstructionDataset: "Run caption0 plus generated QA creation for all loaded images, starting with the selected image.",
         qwenCaptionDownloadInstructionBundle: "Download copied images, effective labels, trainer JSONL, archive JSONL, review JSONL, report JSON, and checksums.",
         qwenCaptionDownloadInstructionJsonl: "Download flattened instruction-training image/question/answer rows.",
         qwenCaptionDownloadInstructionArchive: "Download one per-image instruction archive row per line.",
@@ -22791,7 +22791,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (qwenElements.captionBatchRunAll) {
             qwenElements.captionBatchRunAll.addEventListener("click", () => {
-                const imageNames = getCaptionImageList();
+                const imageNames = getCaptionImageList({ startAtCurrent: true });
                 if (!imageNames.length) {
                     setSamStatus("No images loaded.", { variant: "warn", duration: 3000 });
                     return;
@@ -22799,7 +22799,8 @@ async function cancelRfDetrTrainingJobRequest() {
                 if (!guardQwenCaptionArchiveIdle("starting a caption-all job")) {
                     return;
                 }
-                if (!confirm(`Caption all ${imageNames.length} images? This can take a while.`)) {
+                const firstImage = imageNames[0] || "the selected image";
+                if (!confirm(`Caption all ${imageNames.length} images starting with ${firstImage}? This can take a while.`)) {
                     return;
                 }
                 runQwenCaptionBatch(imageNames, {
@@ -22813,7 +22814,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (qwenElements.captionBuildInstructionDataset) {
             qwenElements.captionBuildInstructionDataset.addEventListener("click", () => {
-                const imageNames = getCaptionImageList();
+                const imageNames = getCaptionImageList({ startAtCurrent: true });
                 if (!imageNames.length) {
                     setSamStatus("No images loaded.", { variant: "warn", duration: 3000 });
                     return;
@@ -22834,7 +22835,8 @@ async function cancelRfDetrTrainingJobRequest() {
                 const warningText = validation.warnings.length
                     ? `\n\nNote: ${validation.warnings.join(" ")}`
                     : "";
-                if (!confirm(`Create a VLM training dataset for ${imageNames.length} images with ${rowHint}? This can take a while.${warningText}`)) {
+                const firstImage = imageNames[0] || "the selected image";
+                if (!confirm(`Create a VLM training dataset for ${imageNames.length} images starting with ${firstImage}, using ${rowHint}? This can take a while.${warningText}`)) {
                     return;
                 }
                 runQwenCaptionBatch(imageNames, {
@@ -32025,12 +32027,38 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
-    function getCaptionImageList() {
+    function rotateCaptionImageNamesFromIndex(imageNames, selectedIndex) {
+        if (!Array.isArray(imageNames) || imageNames.length <= 1) {
+            return Array.isArray(imageNames) ? imageNames.slice() : [];
+        }
+        const pivot = Number.isFinite(Number(selectedIndex)) ? Math.trunc(Number(selectedIndex)) : 0;
+        if (pivot <= 0 || pivot >= imageNames.length) {
+            return imageNames.slice();
+        }
+        return imageNames.slice(pivot).concat(imageNames.slice(0, pivot));
+    }
+
+    function getCaptionImageList(options = {}) {
         const imageList = document.getElementById("imageList");
         if (!imageList) {
             return [];
         }
-        return Array.from(imageList.options || []).map((opt) => getOptionImageName(opt)).filter(Boolean);
+        const entries = Array.from(imageList.options || [])
+            .map((opt, index) => ({ index, name: getOptionImageName(opt) }))
+            .filter((entry) => entry.name);
+        const names = entries.map((entry) => entry.name);
+        if (!options?.startAtCurrent) {
+            return names;
+        }
+        const selectedOptionIndex = Math.max(0, imageList.selectedIndex || 0);
+        let pivot = entries.findIndex((entry) => entry.index === selectedOptionIndex);
+        if (pivot < 0) {
+            const currentName = String(currentImage?.name || "").trim();
+            if (currentName) {
+                pivot = names.indexOf(currentName);
+            }
+        }
+        return rotateCaptionImageNamesFromIndex(names, pivot);
     }
 
     function getNextImageBatch(count, includeCurrent = true) {

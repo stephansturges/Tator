@@ -77,6 +77,8 @@ def test_qwen_caption_ui_smoke_tool_covers_critical_controls() -> None:
     assert "Download instruction report" in text
     assert "Instruction dataset defaults are set for caption0 plus generated QA" in text
     assert "Generated QA never becomes source annotations" in text
+    assert "All-image caption and training-dataset jobs start with the selected image" in text
+    assert "all_image_order_help_visible" in text
     assert "vlm_export_button_count" in text
     assert "instruction_build_button_count" in text
     assert "instruction_review_button_count" in text

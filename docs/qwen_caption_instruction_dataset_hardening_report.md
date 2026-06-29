@@ -104,7 +104,9 @@ row before training.
   save, update, primary-selection, or delete action returns a real mutation.
   No-op paths from stale clicks or disabled-control bypasses stay quiet or show
   warnings, and backend failures use the shared operator-facing caption archive
-  failure formatter.
+  failure formatter. The same controls are also disabled while a caption or
+  instruction job is mutating the caption archive and only re-enable when the
+  current image, caption text, and selected-caption requirements are satisfied.
 
 ## Backend And Runner Changes
 

@@ -537,6 +537,7 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     update_caption_helper = js[update_caption_start:update_caption_end]
     assert "const hasCaptionDataset = !!getCaptionDatasetId();" in update_caption_helper
     assert "function qwenCaptionArchiveMutationActive" in js
+    assert "function updateCaptionArchiveActionControls" in js
     assert "const busy = qwenCaptionArchiveMutationActive();" in update_caption_helper
     assert "const captionExportDisabled = busy;" in update_caption_helper
     assert "qwenElements.captionDownloadJsonl.disabled = captionExportDisabled" in update_caption_helper
@@ -548,6 +549,13 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "qwenElements.captionDownloadInstructionReview.disabled = instructionExportDisabled" in update_caption_helper
     assert "qwenElements.captionImportInstructionReview.disabled = instructionExportDisabled" in update_caption_helper
     assert "qwenElements.captionDownloadInstructionReport.disabled = instructionExportDisabled" in update_caption_helper
+    assert "updateCaptionArchiveActionControls();" in update_caption_helper
+    render_alternates_helper = _extract_js_function(js, "renderCaptionAlternatesForCurrentImage")
+    assert "updateCaptionArchiveActionControls();" in render_alternates_helper
+    assert "qwenElements.captionSaveAlternate.disabled = busy || !imageName || !caption" in js
+    assert "qwenElements.captionUpdateSelected.disabled = busy || !imageName || !selected || !caption" in js
+    assert "qwenElements.captionSetPrimary.disabled = busy || !imageName || !storedAlternate" in js
+    assert "qwenElements.captionDeleteSelected.disabled = busy || !imageName || !storedAlternate" in js
     assert "const datasetId = getCaptionRecordDatasetId();" in load_helper
     assert "isAnnotationDatasetModeActive()" not in load_helper
     assert "function captionInstructionArtifactBusyMessage" in js
@@ -587,8 +595,11 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             "let qwenCaptionCancelRequested = false;",
             "let qwenCaptionBatchCancel = false;",
             "let qwenAvailable = true;",
+            "let currentImage = { name: 'frame.jpg' };",
+            "const selectedCaption = { id: 'alt-1', is_primary: false, caption: 'caption text' };",
             "function getCaptionDatasetId() { return 'ds'; }",
             "function isGpuHeavyLockActive() { return false; }",
+            "function getSelectedCaptionRecord(imageName) { return imageName ? selectedCaption : null; }",
             "function button() { return { disabled: false, textContent: '' }; }",
             "const qwenElements = {",
             "  captionRunButton: button(),",
@@ -606,9 +617,15 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             "  captionDownloadInstructionReport: button(),",
             "  captionBatchCancel: button(),",
             "  captionResumeBackendJob: button(),",
+            "  captionOutput: { value: 'caption text' },",
+            "  captionSaveAlternate: button(),",
+            "  captionUpdateSelected: button(),",
+            "  captionSetPrimary: button(),",
+            "  captionDeleteSelected: button(),",
             "};",
             _extract_js_function(js, "qwenCaptionArchiveMutationActive"),
             _extract_js_function(js, "captionInstructionArtifactBusyMessage"),
+            _extract_js_function(js, "updateCaptionArchiveActionControls"),
             _extract_js_function(js, "updateQwenCaptionButton"),
             "assert.strictEqual(qwenCaptionArchiveMutationActive(), true);",
             "assert(captionInstructionArtifactBusyMessage('exporting instruction rows').includes('instruction archive is changing'));",
@@ -626,6 +643,10 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             "assert.strictEqual(qwenElements.captionResumeBackendJob.disabled, true);",
             "assert.strictEqual(qwenElements.captionCancelButton.disabled, false);",
             "assert.strictEqual(qwenElements.captionBatchCancel.disabled, false);",
+            "assert.strictEqual(qwenElements.captionSaveAlternate.disabled, true);",
+            "assert.strictEqual(qwenElements.captionUpdateSelected.disabled, true);",
+            "assert.strictEqual(qwenElements.captionSetPrimary.disabled, true);",
+            "assert.strictEqual(qwenElements.captionDeleteSelected.disabled, true);",
             "qwenCaptionBatchBackendJobId = '';",
             "assert.strictEqual(qwenCaptionArchiveMutationActive(), false);",
             "assert.strictEqual(captionInstructionArtifactBusyMessage('exporting instruction rows'), '');",
@@ -643,6 +664,10 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             "assert.strictEqual(qwenElements.captionResumeBackendJob.disabled, false);",
             "assert.strictEqual(qwenElements.captionCancelButton.disabled, true);",
             "assert.strictEqual(qwenElements.captionBatchCancel.disabled, true);",
+            "assert.strictEqual(qwenElements.captionSaveAlternate.disabled, false);",
+            "assert.strictEqual(qwenElements.captionUpdateSelected.disabled, false);",
+            "assert.strictEqual(qwenElements.captionSetPrimary.disabled, false);",
+            "assert.strictEqual(qwenElements.captionDeleteSelected.disabled, false);",
         ]
     )
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)

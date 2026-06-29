@@ -33,6 +33,10 @@ history from commits:
 
 The companion documents are supporting references:
 
+- `docs/qwen_caption_training_dataset_reviewer_dossier.md` provides a
+  self-contained external-review dossier covering what was built, why it was
+  built, how to operate it, what is validated, and what remains to be proven in
+  a pilot.
 - `docs/qwen_caption_training_dataset_external_implementation_report.md`
   provides the external narrative of what was built, why each major design
   choice was made, and how the workflow should be reviewed.
@@ -423,7 +427,7 @@ below.
 | Repetition or loop safety | streaming loop inspector, controlled retry, fallback, deterministic recovery | Implemented |
 | Model-download clarity | model dropdown colors missing/download-needed models red and local models normal | Implemented |
 | Safe artifact actions during long jobs | UI disabling plus action-time checks for ordinary caption exports, full dataset ZIP downloads, instruction exports, report downloads, and reviewed JSONL import | Implemented |
-| Safe caption mutations during long jobs | Text-label saves and caption add/update/delete refuse while the selected dataset has an active caption job | Implemented |
+| Safe caption mutations during long jobs | Manual caption add/update/primary/delete controls visibly disable during active archive mutation, and text-label saves plus caption add/update/delete refuse while the selected dataset has an active caption job | Implemented |
 | Safe prompt metadata during long jobs | Dataset glossary saves refuse while the selected dataset has an active caption job | Implemented |
 | Safe dataset deletion during long jobs | Dataset deletion refuses while an active caption dataset job references the same dataset | Implemented |
 | Same-dataset job concurrency | Caption dataset job start refuses while another queued, running, or cancelling caption job owns the same dataset | Implemented |
@@ -497,7 +501,10 @@ double-prefixing already formatted blocked messages.
 Manual caption archive actions also report success only after the underlying
 save, update, primary-selection, or delete operation returns a real mutation.
 Stale clicks or scripted disabled-control bypasses therefore do not produce
-false success messages for caption records that feed instruction exports.
+false success messages for caption records that feed instruction exports. Those
+same controls are visibly disabled while a caption or instruction job is
+mutating the caption archive, and they only re-enable when the current image,
+caption text, and selected-caption state make the action valid.
 Failed backend caption jobs receive the same treatment when structured failure
 reports are available. Pilot-certification, backend-supervision, and runner
 preflight reports are summarized from their first failed check, so the operator

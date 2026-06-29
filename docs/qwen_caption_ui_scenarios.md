@@ -22,7 +22,10 @@ instead of raw backend JSON or a generic "Save failed" message. Manual caption
 archive controls such as **Save as new alternate**, **Update selected**,
 **Set primary**, and **Delete** only show success after the underlying action
 reports a real mutation, so stale clicks or disabled-control bypasses cannot
-claim that a caption record changed when nothing happened.
+claim that a caption record changed when nothing happened. Those controls also
+visibly disable while a caption or instruction job is mutating the caption
+archive, and they re-enable only when an image, caption text, and the required
+selected caption state are available.
 
 ## 2. Run A Direct Diagnostic Caption
 

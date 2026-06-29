@@ -22633,8 +22633,10 @@ async function cancelRfDetrTrainingJobRequest() {
                 if (!currentImage?.name) {
                     return;
                 }
+                updateCaptionArchiveActionControls();
                 if (!annotationEditableGuard("Edit text label")) {
                     qwenElements.captionOutput.value = textLabels[currentImage.name] || "";
+                    updateCaptionArchiveActionControls();
                     return;
                 }
                 if (selectedCaptionIsStoredAlternate(currentImage.name)) {
@@ -22647,6 +22649,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 }
                 textLabels[currentImage.name] = value;
                 scheduleCaptionAutosave(currentImage.name, value);
+                updateCaptionArchiveActionControls();
             });
             qwenElements.captionOutput.addEventListener("blur", () => {
                 if (!currentImage?.name) {
@@ -22670,6 +22673,7 @@ async function cancelRfDetrTrainingJobRequest() {
                         console.warn("Caption save on blur failed", error);
                     });
                 }
+                updateCaptionArchiveActionControls();
             });
         }
         if (qwenElements.captionBatchRun) {
@@ -25179,6 +25183,7 @@ async function cancelRfDetrTrainingJobRequest() {
         if (qwenElements.captionResumeBackendJob) {
             qwenElements.captionResumeBackendJob.disabled = locked || !qwenAvailable || busy || !hasCaptionDataset;
         }
+        updateCaptionArchiveActionControls();
     }
 
     function getCaptionPresetText() {
@@ -30292,6 +30297,27 @@ async function cancelRfDetrTrainingJobRequest() {
         return !!selected && !selected.id.startsWith("primary:");
     }
 
+    function updateCaptionArchiveActionControls() {
+        const imageName = currentImage?.name || "";
+        const caption = String(qwenElements.captionOutput?.value || "").trim();
+        const selected = imageName ? getSelectedCaptionRecord(imageName) : null;
+        const storedCaption = !!selected && !selected.id.startsWith("primary:");
+        const storedAlternate = storedCaption && !selected.is_primary;
+        const busy = qwenCaptionArchiveMutationActive();
+        if (qwenElements.captionSaveAlternate) {
+            qwenElements.captionSaveAlternate.disabled = busy || !imageName || !caption;
+        }
+        if (qwenElements.captionUpdateSelected) {
+            qwenElements.captionUpdateSelected.disabled = busy || !imageName || !selected || !caption;
+        }
+        if (qwenElements.captionSetPrimary) {
+            qwenElements.captionSetPrimary.disabled = busy || !imageName || !storedAlternate;
+        }
+        if (qwenElements.captionDeleteSelected) {
+            qwenElements.captionDeleteSelected.disabled = busy || !imageName || !storedAlternate;
+        }
+    }
+
     function setCaptionAlternateStatus(message) {
         if (qwenElements.captionAlternateStatus) {
             qwenElements.captionAlternateStatus.textContent = message || "";
@@ -30398,18 +30424,7 @@ async function cancelRfDetrTrainingJobRequest() {
             });
             setCaptionAlternateStatus(`${records.length} caption${records.length === 1 ? "" : "s"} for this image.`);
         }
-        const selected = imageName ? getSelectedCaptionRecord(imageName) : null;
-        const storedCaption = !!selected && !selected.id.startsWith("primary:");
-        const storedAlternate = storedCaption && !selected.is_primary;
-        if (qwenElements.captionUpdateSelected) {
-            qwenElements.captionUpdateSelected.disabled = !imageName || !selected;
-        }
-        if (qwenElements.captionSetPrimary) {
-            qwenElements.captionSetPrimary.disabled = !imageName || !storedAlternate;
-        }
-        if (qwenElements.captionDeleteSelected) {
-            qwenElements.captionDeleteSelected.disabled = !imageName || !storedAlternate;
-        }
+        updateCaptionArchiveActionControls();
         updateCaptionArchiveStatus();
     }
 

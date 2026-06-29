@@ -1465,6 +1465,20 @@ def test_qwen_caption_instruction_action_listeners_share_failure_reporter():
     assert "Instruction report export failed: ${error.message || error}" not in listener_block
 
 
+def test_qwen_caption_instruction_review_import_click_blocks_busy_file_picker():
+    js = _js()
+    listener_start = js.index("if (qwenElements.captionImportInstructionReview && qwenElements.captionImportInstructionReviewFile)")
+    listener_end = js.index("if (qwenElements.captionDownloadInstructionReport)", listener_start)
+    listener_block = js[listener_start:listener_end]
+    click_call = "qwenElements.captionImportInstructionReviewFile.click();"
+    busy_guard = 'captionInstructionArtifactBusyMessage("selecting reviewed instruction rows")'
+    assert busy_guard in listener_block
+    assert 'setCaptionExportHealth(busyMessage, "warn")' in listener_block
+    assert 'setSamStatus(busyMessage, { variant: "warn", duration: 5000 })' in listener_block
+    assert listener_block.index(busy_guard) < listener_block.index(click_call)
+    assert "return;" in listener_block[: listener_block.index(click_call)]
+
+
 def test_qwen_caption_export_action_listeners_share_failure_reporter():
     js = _js()
     listener_start = js.index("if (qwenElements.captionDownloadJsonl)")

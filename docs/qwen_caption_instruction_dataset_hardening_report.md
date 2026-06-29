@@ -235,6 +235,11 @@ row before training.
   messages are not double-prefixed. Live-job busy responses stay worded as
   blocked operator states instead of being wrapped as generic export/import
   failures.
+- The reviewed-JSONL import button now checks the archive-busy guard before
+  opening the browser file picker, and the selected-file import path checks it
+  again before parsing or posting rows. This prevents a stale enabled button or
+  scripted click from asking the operator to choose a file for an import that
+  cannot safely run.
 - Browser and backend artifact-consistency validation now require caption0 and
   generated-QA review rows to carry dataset identity before export/import, even
   while `review_decision` is blank. Review packets therefore fail before

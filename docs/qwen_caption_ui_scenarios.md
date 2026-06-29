@@ -195,8 +195,11 @@ Instruction artifact downloads and reviewed-JSONL import stay disabled until a
 caption dataset is selected and no caption or instruction job is actively
 mutating the caption archive, so operators do not export or import against a
 missing dataset or a moving target. The same active-job check runs again inside
-each export/import action, covering stale clicks, open file pickers, or scripted
-UI calls that bypass the disabled button state. Any backend, validation, or
+each export/import action, covering stale clicks, already-open file pickers, or
+scripted UI calls that bypass the disabled button state. The reviewed-JSONL
+import button also checks this guard before opening the browser file picker, so
+operators are not asked to choose a file for an import that is already blocked.
+Any backend, validation, or
 busy-state failure from caption audit JSONL, grouped caption JSON, VLM caption
 JSONL, instruction JSONL, archive, review, report, or review import actions
 must update the caption export health row and the status toast with the same

@@ -22871,6 +22871,12 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (qwenElements.captionImportInstructionReview && qwenElements.captionImportInstructionReviewFile) {
             qwenElements.captionImportInstructionReview.addEventListener("click", () => {
+                const busyMessage = captionInstructionArtifactBusyMessage("selecting reviewed instruction rows");
+                if (busyMessage) {
+                    setCaptionExportHealth(busyMessage, "warn");
+                    setSamStatus(busyMessage, { variant: "warn", duration: 5000 });
+                    return;
+                }
                 qwenElements.captionImportInstructionReviewFile.click();
             });
             qwenElements.captionImportInstructionReviewFile.addEventListener("change", () => {

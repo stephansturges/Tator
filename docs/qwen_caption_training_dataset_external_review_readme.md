@@ -216,6 +216,8 @@ The external reviewer should expect these operator-facing behaviors:
 - caption, prompt, glossary, dataset, recipe, archive, export, and review-import
   controls lock while a caption or instruction job mutates the archive;
 - stale click or input events do not silently mutate the active run settings;
+- reviewed-row import does not open a file picker while the archive is already
+  busy, and the selected-file import path checks the same guard again;
 - long status text wraps without squeezing action buttons;
 - caption and instruction download failures report actionable validation
   messages in the export health row and status toast, not raw internal codes;

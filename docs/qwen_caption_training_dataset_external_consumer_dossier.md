@@ -557,6 +557,9 @@ Use these files with this dossier:
   operation flow, validation boundaries, and pilot requirements.
 - `docs/qwen_caption_training_dataset_complete_partner_packet.md`: broad
   external-review packet and reading order.
+- `docs/qwen_caption_training_dataset_external_delivery_report.md`: standalone
+  delivery report covering what was implemented, why, hardening, validation,
+  and pilot gates.
 - `docs/qwen_caption_training_dataset_complete_external_handoff.md`: concise
   implementation handoff.
 - `docs/qwen_caption_training_dataset_reviewer_dossier.md`: reviewer-focused

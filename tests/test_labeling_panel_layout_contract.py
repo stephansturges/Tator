@@ -2047,6 +2047,10 @@ def test_qwen_next_n_caption_prefers_resumable_backend_job():
     listener_start = js.index("qwenElements.captionBatchRun.addEventListener")
     listener_end = js.index("if (qwenElements.captionBatchRunAll)", listener_start)
     listener = js[listener_start:listener_end]
+    click_guard = 'guardQwenCaptionArchiveIdle("starting a caption batch job")'
+    assert click_guard in listener
+    assert listener.index(click_guard) < listener.index("const includeCurrent")
+    assert listener.index(click_guard) < listener.index("runQwenCaptionBatch(batch")
     assert "runQwenCaptionBatch(batch" in listener
     assert "backend: true" in listener
 

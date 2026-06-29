@@ -12,7 +12,9 @@ must be proven before a generated corpus is used for fine-tuning.
 
 For the neutral first-read external review packet, start with
 `docs/qwen_caption_training_dataset_external_review_readme.md`. This handoff is
-the shorter supporting narrative after that README.
+the shorter supporting narrative after that README. For the standalone delivery
+report that explains what was implemented and why, use
+`docs/qwen_caption_training_dataset_external_delivery_report.md`.
 
 The document is intentionally dataset-neutral. Do not add customer, partner,
 dataset, or project code names before sharing it. The implementation and review

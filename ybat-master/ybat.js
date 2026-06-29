@@ -22727,6 +22727,9 @@ async function cancelRfDetrTrainingJobRequest() {
                     setSamStatus("Enter how many images to caption.", { variant: "warn", duration: 3000 });
                     return;
                 }
+                if (!guardQwenCaptionArchiveIdle("starting a caption batch job")) {
+                    return;
+                }
                 const includeCurrent = !!qwenElements.captionBatchIncludeCurrent?.checked;
                 const batch = getNextImageBatch(count, includeCurrent);
                 if (!batch.length) {

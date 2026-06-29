@@ -335,6 +335,9 @@ Use these files together:
 - `docs/qwen_caption_training_dataset_complete_partner_packet.md`: canonical
   complete packet with requirement mapping, artifact contract, validation
   commands, acceptance criteria, and pilot checklist.
+- `docs/qwen_caption_training_dataset_external_delivery_report.md`: standalone
+  delivery report covering what was implemented, why, hardening, validation,
+  and pilot gates.
 - `docs/qwen_caption_training_dataset_complete_external_handoff.md`: concise
   implementation handoff.
 - `docs/qwen_caption_training_dataset_external_consumer_dossier.md`: detailed

@@ -23993,10 +23993,11 @@ def _caption_instruction_reject_unmatchable_actionable_review_rows(
         )
 
 
-def apply_caption_instruction_review(dataset_id: str, payload: Dict[str, Any]):
-    payload = payload or {}
+def apply_caption_instruction_review(dataset_id: str, payload: Any):
+    payload = payload if payload is not None else {}
+    payload_mapping = payload if isinstance(payload, Mapping) else {}
     entry = _resolve_dataset_entry(dataset_id)
-    _require_dataset_annotation_lock_owner_if_active(entry, payload)
+    _require_dataset_annotation_lock_owner_if_active(entry, payload_mapping)
     rows = _caption_instruction_review_payload_rows(payload)
     _caption_instruction_reject_malformed_review_rows(rows)
     _caption_instruction_reject_unsupported_review_decisions(rows)
@@ -24028,7 +24029,7 @@ def apply_caption_instruction_review(dataset_id: str, payload: Dict[str, Any]):
             detail="review_rows_no_actionable_decisions",
         )
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    reviewer = str((payload or {}).get("reviewer") or "").strip()
+    reviewer = str(payload_mapping.get("reviewer") or "").strip()
     used_caption_ids = {str(record.get("id") or "").strip() for record in caption_records if str(record.get("id") or "").strip()}
 
     caption_changed = False

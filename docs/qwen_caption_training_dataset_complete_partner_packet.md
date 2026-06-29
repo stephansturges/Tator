@@ -71,6 +71,7 @@ caption-assistance path.
 | Thinking-capable models need larger generation budgets | Split automatic output-token budgeting from explicit numeric overrides | Defaults can be high enough for reasoning-heavy models while user caps remain hard caps |
 | Repeated-token loops could appear as hangs | Added live output-loop detection, safe retry, runtime unload, and fallback/recovery paths | Repeated punctuation or token streams are not accepted as valid captions |
 | Missing model files were visually ambiguous | Styled download-needed model choices in red and local models in the normal local color | Operators can see model availability before launching a long job |
+| Review import payloads were accepted inconsistently by UI, route, and backend parser | Made the API route accept any JSON body and moved body-shape enforcement into the shared backend review parser | JSON arrays, wrapper objects, and single review-row objects now follow the same fail-closed validation path instead of being rejected by framework typing before parser checks |
 
 The result is a conservative pipeline: generate candidates, archive evidence,
 validate aggressively, let humans review generated language, then export only
@@ -205,6 +206,28 @@ object. Wrapper fields are resolved in that order, and an explicitly present
 field must be a list. An empty `rows: []` field therefore means "no rows" and
 does not fall through to another wrapper field. A wrapper object with no row
 container is rejected instead of being treated as an empty review packet.
+
+### Review Import Body Shapes Are Parser-Owned
+
+The `/datasets/{dataset_id}/captions/instruction_review` route intentionally
+accepts any JSON body and delegates validation to the instruction-review parser.
+That is important because valid operator and script inputs are not all JSON
+objects:
+
+- browser-imported JSONL becomes a list of parsed review rows;
+- API clients may send a JSON array of review rows;
+- API clients may send a wrapper object with `rows`, `review_rows`, or
+  `instruction_review_rows`;
+- API clients may send a single review-row object carrying the review-row format
+  marker;
+- scalar values, malformed wrappers, row objects without the review-row format,
+  and packets with no actionable persisted decisions fail in the backend parser.
+
+The route no longer relies on a `dict` body type that would reject JSON arrays
+before the shared parser could apply row-specific errors. Lock-owner metadata
+and reviewer metadata are read only from wrapper objects; array and single-row
+imports still apply the same dataset-id, stale-text, duplicate-target,
+row-shape, text-limit, and metadata-only mutation rules.
 
 ## Non-Negotiable Training Shape
 
@@ -426,7 +449,7 @@ The main implementation responsibilities are split as follows.
 | Request schema | `models/schemas.py` | Normalizes instruction-dataset settings, clamps generated-QA count to `0..20`, and rejects jobs with no trainable row family |
 | Dataset job launch | `localinferenceapi.py` | Starts persisted caption jobs, passes instruction settings to the runner, mirrors job progress, and applies backend job lifecycle rules |
 | Source annotation and archive construction | `localinferenceapi.py` | Builds source summaries, generated-QA records, deterministic metadata QA, flattened rows, archive rows, review rows, report, export validation, artifact consistency, and readiness |
-| Review import | `localinferenceapi.py` and `api/datasets.py` | Applies metadata-only review decisions to saved caption0/generated-QA records and rejects malformed, stale, ambiguous, duplicate, or wrong-dataset packets |
+| Review import | `localinferenceapi.py` and `api/datasets.py` | Accepts JSON arrays, wrapper objects, or single review-row objects; applies metadata-only review decisions to saved caption0/generated-QA records; and rejects malformed, stale, ambiguous, duplicate, scalar, or wrong-dataset packets |
 | Export API | `api/datasets.py` | Exposes caption exports and the optional `require_ready_instruction_export` server-side gate |
 | UI workflow | `ybat-master/ybat.js` and `ybat-master/ybat.css` | Exposes controls, validates exports before download, formats operator errors, imports reviewed JSONL, and keeps the panel usable at narrow widths |
 | Trainer import | `tools/qwen_training.py` | Imports flat image/question/answer rows, preserves metadata, resolves image paths, and rejects non-trainable rows |
@@ -609,6 +632,8 @@ language records.
 
 Review import fails closed on:
 
+- scalar or otherwise unsupported request bodies
+- wrapper objects whose row container is missing or not a list
 - caption0 or generated-QA review rows missing dataset identity, even before a
   reviewer fills a decision
 - non-text values in text fields such as image path, QA id, question, candidate
@@ -854,7 +879,7 @@ node --check ybat-master/ybat.js
 Result:
 
 ```text
-212 passed
+221 passed
 ```
 
 Additional focused validation recorded in the supporting hardening docs covers:
@@ -870,6 +895,8 @@ Additional focused validation recorded in the supporting hardening docs covers:
 - stale selected training-answer rejection
 - duplicate actionable review-target rejection
 - review-row text-field type and length rejection in the browser and backend
+- route-level review import acceptance for JSON arrays and single review-row
+  objects, plus parser-owned rejection of scalar bodies
 - trainer import of flat rows
 - trainer rejection of non-trainable rows
 - rendered UI smoke for visible controls and unclipped caption actions

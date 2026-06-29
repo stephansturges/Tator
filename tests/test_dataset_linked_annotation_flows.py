@@ -2652,11 +2652,31 @@ def test_caption_alternate_routes_append_update_export_and_delete(
     )
     assert mismatched_review_response.status_code == 400
     assert "review_rows_dataset_id_mismatch:row_1:other-dataset!=ds" in mismatched_review_response.text
-    selected_review_row["review_decision"] = "accepted"
-    selected_review_row["review_notes"] = "route-level review import"
+    malformed_review_response = client.post(
+        "/datasets/ds/captions/instruction_review",
+        json=123,
+    )
+    assert malformed_review_response.status_code == 400
+    assert "review_rows_list_required" in malformed_review_response.text
+    array_review_row = {
+        **selected_review_row,
+        "review_decision": "accepted",
+        "review_notes": "route-level array review import",
+    }
+    array_review_response = client.post(
+        "/datasets/ds/captions/instruction_review",
+        json=[array_review_row],
+    )
+    assert array_review_response.status_code == 200
+    assert array_review_response.json()["applied_count"] == 1
+    selected_review_row = {
+        **selected_review_row,
+        "review_decision": "accepted",
+        "review_notes": "route-level object review import",
+    }
     review_response = client.post(
         "/datasets/ds/captions/instruction_review",
-        json={"rows": [selected_review_row]},
+        json=selected_review_row,
     )
     assert review_response.status_code == 200
     review_result = review_response.json()
@@ -2671,7 +2691,7 @@ def test_caption_alternate_routes_append_update_export_and_delete(
         if row["qa_id"] == selected_review_row["qa_id"]
     )
     assert reviewed_row["review_decision"] == "accepted"
-    assert reviewed_row["review_notes"] == "route-level review import"
+    assert reviewed_row["review_notes"] == "route-level object review import"
     assert (
         reviewed_export_payload["instruction_report"]["training_readiness"]["accepted_manual_review_row_count"]
         >= 1

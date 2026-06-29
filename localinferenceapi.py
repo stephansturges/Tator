@@ -23036,6 +23036,18 @@ def _raise_if_qwen_caption_export_busy(dataset_id: str) -> None:
     )
 
 
+def _raise_if_qwen_caption_review_import_busy(dataset_id: str) -> None:
+    active = _qwen_caption_dataset_active_export_job(dataset_id)
+    if not active:
+        return
+    job_id = str(active.get("job_id") or "").strip() or "unknown"
+    status = str(active.get("status") or "").strip() or "active"
+    raise HTTPException(
+        status_code=HTTP_409_CONFLICT,
+        detail=f"caption_review_import_busy:{job_id}:{status}",
+    )
+
+
 def export_captions(dataset_id: str, options: Optional[Mapping[str, Any]] = None):
     options_map = dict(options or {})
     if options_map.get("block_active_caption_jobs"):
@@ -24035,6 +24047,7 @@ def _caption_instruction_reject_unmatchable_actionable_review_rows(
 
 
 def apply_caption_instruction_review(dataset_id: str, payload: Any):
+    _raise_if_qwen_caption_review_import_busy(dataset_id)
     payload = payload if payload is not None else {}
     payload_mapping = payload if isinstance(payload, Mapping) else {}
     entry = _resolve_dataset_entry(dataset_id)

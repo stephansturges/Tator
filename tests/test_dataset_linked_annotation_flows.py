@@ -14,7 +14,7 @@ from PIL import Image
 import localinferenceapi as api
 
 
-def _dataset_export_route_client(export_payload):
+def _dataset_export_route_client(export_payload, apply_review_fn=None):
     from api.datasets import build_datasets_router
 
     def export_captions(dataset_id, options):
@@ -53,7 +53,7 @@ def _dataset_export_route_client(export_payload):
             update_caption_fn=noop,
             delete_caption_fn=noop,
             export_captions_fn=export_captions,
-            apply_caption_instruction_review_fn=noop,
+            apply_caption_instruction_review_fn=apply_review_fn or noop,
             register_path_fn=noop,
             open_path_fn=noop,
             save_transient_fn=noop,
@@ -112,6 +112,38 @@ def test_export_captions_blocks_active_backend_caption_job_before_dataset_read(m
     assert exc_info.value.status_code == 409
     assert exc_info.value.detail == "caption_export_busy:qcap_busy:running"
     assert api._qwen_caption_dataset_active_export_job("other") is None
+
+
+def test_instruction_review_import_blocks_active_backend_caption_job_before_dataset_read(monkeypatch) -> None:
+    job = api.QwenCaptionDatasetJob(job_id="qcap_busy", status="running")
+    job.request = {"dataset_id": "ds"}
+    monkeypatch.setattr(api, "QWEN_CAPTION_DATASET_JOBS", {job.job_id: job})
+
+    def fail_resolve(_dataset_id):
+        raise AssertionError("review import should block before reading a mutating dataset")
+
+    monkeypatch.setattr(api, "_resolve_dataset_entry", fail_resolve)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.apply_caption_instruction_review("ds", {"rows": []})
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "caption_review_import_busy:qcap_busy:running"
+
+
+def test_instruction_review_route_blocks_when_backend_caption_job_is_active() -> None:
+    def apply_review(_dataset_id, _payload):
+        raise api.HTTPException(
+            status_code=409,
+            detail="caption_review_import_busy:qcap_busy:running",
+        )
+
+    client = _dataset_export_route_client({}, apply_review_fn=apply_review)
+
+    response = client.post("/datasets/ds/captions/instruction_review", json={"rows": []})
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "caption_review_import_busy:qcap_busy:running"
 
 
 def _ready_instruction_export_payload():

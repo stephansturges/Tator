@@ -542,6 +542,20 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "qwenElements.captionDownloadInstructionReport.disabled = instructionExportDisabled" in update_caption_helper
     assert "const datasetId = getCaptionRecordDatasetId();" in load_helper
     assert "isAnnotationDatasetModeActive()" not in load_helper
+    assert "function captionInstructionArtifactBusyMessage" in js
+    assert "the instruction archive is changing" in js
+    instruction_artifact_actions = [
+        ("downloadCaptionInstructionJsonl", "exporting instruction trainer JSONL"),
+        ("downloadCaptionInstructionArchive", "exporting the instruction archive"),
+        ("downloadCaptionInstructionReview", "exporting instruction review rows"),
+        ("importCaptionInstructionReviewFile", "importing reviewed instruction rows"),
+        ("downloadCaptionInstructionReport", "exporting the instruction report"),
+    ]
+    for function_name, action_label in instruction_artifact_actions:
+        action_helper = _extract_js_function(js, function_name)
+        assert f'captionInstructionArtifactBusyMessage("{action_label}")' in action_helper
+        assert 'setCaptionExportHealth(busyMessage, "warn")' in action_helper
+        assert 'setSamStatus(busyMessage, { variant: "warn", duration: 5000 })' in action_helper
 
 
 def test_qwen_caption_instruction_review_import_parser_accepts_reviewer_file_shapes():

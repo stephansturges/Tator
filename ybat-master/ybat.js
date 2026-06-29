@@ -35671,10 +35671,23 @@ async function cancelRfDetrTrainingJobRequest() {
         saveBlobToDisk(blob, "captions_vlm_training.jsonl");
     }
 
+    function captionInstructionArtifactBusyMessage(actionLabel) {
+        if (qwenCaptionActive || qwenCaptionBatchActive) {
+            return `Wait for the active caption or instruction job to finish before ${actionLabel}; the instruction archive is changing.`;
+        }
+        return "";
+    }
+
     async function downloadCaptionInstructionJsonl() {
         const datasetId = getCaptionDatasetId();
         if (!datasetId) {
             setCaptionExportHealth("Select a caption dataset before exporting instruction rows.", "warn");
+            return;
+        }
+        const busyMessage = captionInstructionArtifactBusyMessage("exporting instruction trainer JSONL");
+        if (busyMessage) {
+            setCaptionExportHealth(busyMessage, "warn");
+            setSamStatus(busyMessage, { variant: "warn", duration: 5000 });
             return;
         }
         const settings = getCaptionInstructionDatasetSettings(true);
@@ -35728,6 +35741,12 @@ async function cancelRfDetrTrainingJobRequest() {
             setCaptionExportHealth("Select a caption dataset before exporting the instruction archive.", "warn");
             return;
         }
+        const busyMessage = captionInstructionArtifactBusyMessage("exporting the instruction archive");
+        if (busyMessage) {
+            setCaptionExportHealth(busyMessage, "warn");
+            setSamStatus(busyMessage, { variant: "warn", duration: 5000 });
+            return;
+        }
         const payload = await loadCaptionExportPayload(datasetId, getCaptionInstructionDatasetSettings(true));
         const rows = Array.isArray(payload?.instruction_archive_rows) ? payload.instruction_archive_rows : [];
         if (!rows.length) {
@@ -35762,6 +35781,12 @@ async function cancelRfDetrTrainingJobRequest() {
         const datasetId = getCaptionDatasetId();
         if (!datasetId) {
             setCaptionExportHealth("Select a caption dataset before exporting the instruction review rows.", "warn");
+            return;
+        }
+        const busyMessage = captionInstructionArtifactBusyMessage("exporting instruction review rows");
+        if (busyMessage) {
+            setCaptionExportHealth(busyMessage, "warn");
+            setSamStatus(busyMessage, { variant: "warn", duration: 5000 });
             return;
         }
         const payload = await loadCaptionExportPayload(datasetId, getCaptionInstructionDatasetSettings(true));
@@ -35932,6 +35957,12 @@ async function cancelRfDetrTrainingJobRequest() {
             setCaptionExportHealth("Select a caption dataset before importing reviewed instruction rows.", "warn");
             return;
         }
+        const busyMessage = captionInstructionArtifactBusyMessage("importing reviewed instruction rows");
+        if (busyMessage) {
+            setCaptionExportHealth(busyMessage, "warn");
+            setSamStatus(busyMessage, { variant: "warn", duration: 5000 });
+            return;
+        }
         const text = await file.text();
         const rows = parseCaptionInstructionReviewRowsText(text);
         const validation = validateCaptionInstructionReviewRows(rows);
@@ -35998,6 +36029,12 @@ async function cancelRfDetrTrainingJobRequest() {
         const datasetId = getCaptionDatasetId();
         if (!datasetId) {
             setCaptionExportHealth("Select a caption dataset before exporting the instruction report.", "warn");
+            return;
+        }
+        const busyMessage = captionInstructionArtifactBusyMessage("exporting the instruction report");
+        if (busyMessage) {
+            setCaptionExportHealth(busyMessage, "warn");
+            setSamStatus(busyMessage, { variant: "warn", duration: 5000 });
             return;
         }
         const payload = await loadCaptionExportPayload(datasetId, getCaptionInstructionDatasetSettings(true));

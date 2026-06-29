@@ -13,6 +13,72 @@ pilot validation before a generated corpus should be used for fine-tuning.
 The implementation is intentionally dataset-neutral. It does not rely on
 project-specific dataset names, class names, or private evaluation assumptions.
 
+## Reader Entry Point
+
+Use this document as the main external review packet. It is intended to answer
+five questions without requiring the reviewer to reconstruct the development
+history from commits:
+
+1. What user-facing workflow exists now?
+2. What training artifacts does the workflow produce?
+3. Which parts of the artifact are trusted source evidence, generated language,
+   deterministic code output, or selected trainer rows?
+4. Which validation gates prevent stale, malformed, review-pending, or
+   unsupported rows from entering a fine-tuning file?
+5. What remains to be proven with real data before using a generated corpus for
+   actual training?
+
+The companion documents are supporting references:
+
+- `docs/qwen_caption_ui_scenarios.md` describes UI behavior and operator
+  scenarios.
+- `docs/qwen_caption_prompt_stack.md` describes prompt construction, token
+  budgets, dense-box handling, and recovery wording.
+- `docs/qwen_caption_instruction_dataset_hardening_report.md` records
+  implementation-hardening details.
+- `docs/qwen_caption_training_dataset_external_review_handoff.md` is a shorter
+  reviewer checklist.
+- `docs/qwen_caption_instruction_dataset_external_partner_packet.md` remains a
+  supporting implementation packet; this file is the canonical overview.
+
+## Handoff Scope
+
+The completed scope is an end-to-end application path for producing auditable
+caption-derived VLM instruction datasets:
+
+- UI controls to launch caption-derived instruction-dataset generation.
+- Dataset-scale set-and-forget backend execution.
+- Prompt/runtime hardening for dense labels, large prompts, thinking-capable
+  models, repeated-token loops, and model availability.
+- Multi-row output per image: `caption0`, generated visual QA, and optional
+  deterministic label-derived QA.
+- Separate trainer, archive, review, and report artifacts.
+- Browser validation, server validation, and trainer-import validation.
+- Review JSONL download and reviewed JSONL import.
+- API/script strict export mode for trainer-ready exports.
+
+The completed scope does not include certifying a specific generated corpus as
+ready for production fine-tuning. That still requires a real-data pilot,
+manual generated-QA review, reviewed-row import, re-export, trainer import, and
+at least a small fine-tuning or loader-plus-batch dry run.
+
+## Product Contract
+
+The product contract is conservative because the output can become training
+data:
+
+- Generated language must never become source-label truth.
+- Trusted label-derived facts must be traceable to source annotations or
+  deterministic code.
+- Trainer JSONL must contain only model-visible `image_path`, `question`, and
+  `answer` rows, with optional metadata for audit.
+- Archive and review artifacts must preserve enough evidence to explain why a
+  row was selected or rejected.
+- Human review must apply metadata decisions only; it must not silently edit
+  labels, boxes, generated questions, generated answers, or final annotations.
+- Browser, backend, and trainer checks must each fail closed when artifacts are
+  stale, malformed, inconsistent, or not ready.
+
 ## Executive Summary
 
 The captioning stack now has two separate product paths:
@@ -77,6 +143,50 @@ caption-assistance path.
 The result is a conservative pipeline: generate candidates, archive evidence,
 validate aggressively, let humans review generated language, then export only
 trainable rows.
+
+## Reviewable Claims
+
+These are the concrete claims this packet makes about the current
+implementation.
+
+| Claim | Where to verify |
+| --- | --- |
+| The UI exposes instruction-dataset creation as a distinct workflow, not as a hidden caption export | `ybat-master/ybat.js`, `ybat-master/ybat.css`, `tests/test_labeling_panel_layout_contract.py` |
+| The operator can create one broad caption row plus configurable generated visual QA rows per image | `models/schemas.py`, `localinferenceapi.py`, UI scenario tests |
+| Deterministic metadata QA is optional and generated from source labels, not from the VLM | `localinferenceapi.py`, `tests/test_qwen_caption_dataset_job.py` |
+| Empty label files are treated as empty source evidence, not as a prompt to ask for nonexistent label facts | `localinferenceapi.py`, source-annotation tests and docs |
+| Generated language rows are archived even when they are rejected from trainer output | archive construction tests and instruction report counts |
+| Review JSONL import applies review metadata only | `localinferenceapi.py`, `api/datasets.py`, review-import tests |
+| Trainer JSONL, archive JSONL, review JSONL, and report JSON are validated as one artifact set | browser validators, backend validators, artifact-consistency tests |
+| API clients can require trainer-ready strict export with `require_ready_instruction_export=true` | `api/datasets.py`, strict export tests |
+| The trainer can import the flat instruction rows directly and reject non-trainable rows | `tools/qwen_training.py`, `tests/test_qwen_training_backend.py` |
+| Long dataset jobs use set-and-forget assumptions and expose recovery/health state | `localinferenceapi.py`, caption job and supervision tests |
+
+These claims are structural and workflow claims. They do not claim that the
+content quality of generated QA is production-ready on any particular dataset.
+Content quality is intentionally deferred to a pilot and human review.
+
+## Development Timeline In Plain Terms
+
+The hardening work happened in four broad phases:
+
+1. **Build the new product path**: add `caption0` plus generated QA generation,
+   instruction settings, archive construction, trainer JSONL export, and
+   report generation.
+2. **Close the review loop**: add review JSONL export/import, stable QA ids,
+   dataset identity checks, stale-text checks, duplicate-target checks, and
+   metadata-only mutation.
+3. **Harden runtime and prompts**: make set-and-forget the durable path, clarify
+   output-token budgeting, cap dense box prompts with representative subsets,
+   add stream-loop detection and recovery, and make missing model availability
+   visible.
+4. **Fail closed at export and trainer boundaries**: validate browser downloads,
+   validate API strict exports, check proof objects and row shapes, and make the
+   trainer reject malformed, stale, unknown-status, or non-trainable rows.
+
+The reason for this order is that a training-data feature is only useful when
+the generation path, audit artifacts, review loop, export gate, and trainer
+import boundary all agree. Producing a JSONL file alone is not enough.
 
 ## Layer-By-Layer Implementation Narrative
 
@@ -734,6 +844,52 @@ Reviewers fill `accepted`, `rejected`, or `needs_revision` in
 - export validation
 - training readiness
 
+## How To Inspect A Generated Packet
+
+An external reviewer should inspect artifacts in this order:
+
+1. **Instruction report JSON**: check `training_readiness`, row counts,
+   rejection reasons, corpus quality metrics, `instruction_export_validation`,
+   and `instruction_artifact_consistency`.
+2. **Archive JSONL**: choose a few images and verify that source annotations,
+   `caption0`, generated QA candidates, deterministic QA, rejected rows, and
+   selected flattened rows are separated.
+3. **Review JSONL**: confirm that generated-language rows needing review expose
+   stable QA ids, image paths, row origins, candidate answers, selected training
+   answers, validation state, review state, and rejection reasons.
+4. **Trainer JSONL**: verify that the flattened training rows contain the
+   model-visible signal only: image path, question, answer, and optional audit
+   metadata.
+5. **Trainer loader dry run**: import the flattened JSONL with the Qwen trainer
+   loader and confirm the loader accepts the same rows the report declares
+   trainable.
+
+The archive is the evidence artifact. The review JSONL is the human-decision
+artifact. The report is the run-certification artifact. The trainer JSONL is
+the model-input artifact. Treating one of these as a replacement for the others
+would hide either evidence, review state, or trainer simplicity.
+
+## Example Failure Modes The Packet Should Expose
+
+The packet is designed to make these failures visible instead of silently
+training on them:
+
+- a generated answer states a count that disagrees with trusted source labels;
+- a generated QA row is useful but still review-pending;
+- a reviewer marks a row rejected or needs-revision;
+- a review file refers to a stale question, stale answer, wrong image, wrong
+  dataset, or duplicate target;
+- a trainer JSONL row is hand-edited after export;
+- archive, review, report, and trainer row counts no longer agree;
+- a dense label scene omits detailed boxes from prompt context while retaining
+  complete authoritative counts;
+- a model emits repeated punctuation or repeated tokens instead of a caption;
+- a selected local model is unavailable and would need downloading.
+
+The intended behavior is not to hide these cases. The intended behavior is to
+preserve them in audit artifacts, block trainer rows when appropriate, and give
+the operator a concrete reason.
+
 ## Source Annotation Behavior
 
 `source_annotations` are derived from real label evidence and deterministic
@@ -1098,6 +1254,70 @@ Additional focused validation recorded in the supporting hardening docs covers:
 - trainer rejection of non-trainable rows
 - rendered UI smoke for visible controls and unclipped caption actions
 - restricted project-name scan across code, docs, tests, tools, UI, and backend
+
+## Reproducible Verification Commands
+
+From the repository root, a reviewer can reproduce the current smoke and
+contract checks with:
+
+```bash
+node --check ybat-master/ybat.js
+```
+
+```bash
+./.venv-macos/bin/python -m py_compile \
+  localinferenceapi.py \
+  api/datasets.py \
+  models/schemas.py
+```
+
+```bash
+./.venv-macos/bin/python -m pytest \
+  tests/test_qwen_caption_dataset_job.py \
+  tests/test_qwen_training_backend.py \
+  tests/test_dataset_linked_annotation_flows.py::test_caption_instruction_strict_export_gate_requires_ready_proofs \
+  tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete \
+  tests/test_labeling_panel_layout_contract.py \
+  tests/test_qwen_caption_ui_smoke_tool.py \
+  -q
+```
+
+Run the restricted-name scan with the current internal restricted-term pattern:
+
+```bash
+rg -n -i "$RESTRICTED_PROJECT_TERMS" \
+  docs ybat-master localinferenceapi.py api models tests tools \
+  --glob '!**/.git/**'
+```
+
+The expected result is no matches. If this command returns any match, the docs
+or code should be cleaned before external handoff.
+
+## Acceptance Criteria For External Review
+
+Treat the implementation as accepted for a small real-data pilot when all of
+the following are true:
+
+- The UI can launch **Create VLM training dataset** for a selected caption
+  dataset without using ordinary caption export controls as a substitute.
+- The job completes or records a recoverable failure with persisted status and
+  enough telemetry to resume or diagnose.
+- The exported report, archive, review, and trainer files agree on image and row
+  counts.
+- The report is `ready` only when validation proofs, artifact-consistency
+  proofs, corpus metrics, review state, and returned artifact arrays agree.
+- Review JSONL can be edited with accepted/rejected/needs-revision decisions and
+  imported without mutating labels or generated content.
+- Re-export after review changes only row selection/review state, not source
+  annotations.
+- The trainer loader accepts the final JSONL and rejects deliberately malformed
+  or non-trainable variants.
+- A manual reviewer confirms that generated QA is grounded and useful on the
+  pilot images.
+
+Treat the implementation as not yet accepted for larger training use if any of
+these fail. In that case, the next work should be a targeted hardening patch,
+not a larger generation run.
 
 ## What This Does Not Claim
 

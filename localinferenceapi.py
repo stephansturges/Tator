@@ -26563,7 +26563,6 @@ def _start_qwen_caption_dataset_job(
     *,
     force_default_output_dir: bool = False,
 ) -> QwenCaptionDatasetJob:
-    _preflight_qwen_caption_dataset_annotation_lock(payload)
     job_id = f"qcap_{uuid.uuid4().hex[:8]}"
     output_dir = _qwen_caption_dataset_job_dir(
         job_id,
@@ -26585,6 +26584,7 @@ def _start_qwen_caption_dataset_job(
             )
         QWEN_CAPTION_DATASET_JOBS[job.job_id] = job
     try:
+        _preflight_qwen_caption_dataset_annotation_lock(payload)
         thread = threading.Thread(
             target=_run_qwen_caption_dataset_job,
             args=(job, payload),

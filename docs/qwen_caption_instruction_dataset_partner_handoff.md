@@ -165,10 +165,12 @@ dataset jobs block deletion, while terminal caption jobs do not.
 The backend also applies the rule at job launch, with the active-job check and
 registry insertion under one lock, so two same-dataset caption workers cannot
 be launched concurrently by near-simultaneous API calls.
-For write-owning jobs, launch also checks the current annotation lock before
-registering the job, so a lock conflict is reported immediately instead of as a
-later asynchronous job failure. The worker repeats the lock check after launch
-to close races.
+For write-owning jobs, launch reserves the dataset in the active-job registry
+before checking the current annotation lock. That makes delete, export,
+download, and metadata-write guards see the queued job during preflight. A lock
+conflict is reported immediately and the reservation is rolled back instead of
+becoming a later asynchronous job failure. The worker repeats the lock check
+after launch to close races.
 
 ## Core Invariants
 
@@ -676,7 +678,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-248 passed, 8 warnings
+249 passed, 8 warnings
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

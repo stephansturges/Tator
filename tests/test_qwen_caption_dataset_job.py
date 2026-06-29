@@ -5669,7 +5669,7 @@ def test_caption_dataset_job_start_route_rejects_active_same_dataset(monkeypatch
     assert set(api.QWEN_CAPTION_DATASET_JOBS) == {"qcap_running"}
 
 
-def test_caption_dataset_job_start_rejects_active_annotation_lock_before_registering(
+def test_caption_dataset_job_start_rolls_back_reserved_job_on_annotation_lock_conflict(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -5822,6 +5822,64 @@ def test_caption_dataset_job_start_allows_matching_annotation_lock_session(
 
     try:
         assert job.job_id in api.QWEN_CAPTION_DATASET_JOBS
+        assert started and started[0]["target"] is api._run_qwen_caption_dataset_job
+    finally:
+        api.QWEN_CAPTION_DATASET_JOBS.pop(job.job_id, None)
+
+
+def test_caption_dataset_job_start_reserves_job_before_write_preflight(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import localinferenceapi as api
+
+    dataset_root = tmp_path / "dataset"
+    dataset_root.mkdir()
+    record_root = tmp_path / "registry" / "ds"
+    record_root.mkdir(parents=True)
+    (record_root / api.DATASET_META_NAME).write_text(
+        json.dumps({"id": "ds", "annotation_lock": {}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(api, "QWEN_CAPTION_DATASET_JOBS", {})
+    observed = {}
+
+    def resolve_dataset(_dataset_id):
+        with api.QWEN_CAPTION_DATASET_JOBS_LOCK:
+            active = api._qwen_caption_dataset_active_job_from_jobs(
+                "ds",
+                list(api.QWEN_CAPTION_DATASET_JOBS.values()),
+            )
+        observed["active"] = active
+        return {
+            "id": "ds",
+            "dataset_root": str(dataset_root),
+            "registry_root": str(record_root),
+            "storage_mode": "linked",
+        }
+
+    monkeypatch.setattr(api, "_resolve_dataset_entry", resolve_dataset)
+    started = []
+
+    class DummyThread:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def start(self):
+            started.append(self.kwargs)
+
+    monkeypatch.setattr(api.threading, "Thread", DummyThread)
+    payload = QwenCaptionDatasetJobRequest(
+        dataset_id="ds",
+        caption_request={"user_prompt": "Describe it."},
+        save_text_labels=True,
+    )
+
+    job = api._start_qwen_caption_dataset_job(payload)
+
+    try:
+        assert observed["active"]["job_id"] == job.job_id
+        assert observed["active"]["status"] == "queued"
         assert started and started[0]["target"] is api._run_qwen_caption_dataset_job
     finally:
         api.QWEN_CAPTION_DATASET_JOBS.pop(job.job_id, None)

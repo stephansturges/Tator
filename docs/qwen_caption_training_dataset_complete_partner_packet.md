@@ -502,12 +502,16 @@ orphan a running caption dataset job or detach it from the archive it is
 mutating. Active caption dataset jobs therefore participate in the generic
 active-job deletion guard. Completed caption jobs do not block deletion.
 
-Caption dataset job launch now performs the annotation-lock check synchronously
-for write-owning runs. If a job will save text labels or instruction records
-and the dataset has an active annotation lock, the start route returns the same
-annotation-lock `409` that the worker would have produced. A matching
-`annotation_session_id` is accepted. The worker still repeats the check after
-launch to close the race where a lock appears between preflight and execution.
+Caption dataset job launch now reserves the dataset in the active-job registry
+before the write-owning annotation-lock preflight. If a job will save text
+labels or instruction records and the dataset has an active annotation lock,
+the start route returns the same annotation-lock `409` that the worker would
+have produced, then rolls back the reservation. A matching
+`annotation_session_id` is accepted. Registering before preflight matters
+because dataset deletion, export, download, and metadata-write guards can see
+the queued job while preflight resolves metadata. The worker still repeats the
+lock check after launch to close the race where a lock appears between
+preflight and execution.
 
 ### Trainer JSONL Is Gated Twice
 
@@ -1342,7 +1346,7 @@ node --check ybat-master/ybat.js
 Result:
 
 ```text
-248 passed, 8 warnings
+249 passed, 8 warnings
 ```
 
 Additional focused validation recorded in the supporting hardening docs covers:
@@ -1378,7 +1382,9 @@ Additional focused validation recorded in the supporting hardening docs covers:
 - dataset glossary save rejecting with `caption_metadata_busy` before metadata
   reads or writes while a dataset job is active
 - caption dataset job launch rejecting active annotation locks before job
-  registration, while still allowing a matching `annotation_session_id`
+  execution, rolling back failed reservations, reserving before write preflight
+  to close delete/export races, and still allowing a matching
+  `annotation_session_id`
 - reviewed JSONL import rejecting with `caption_review_import_busy` before
   dataset/archive reads while a dataset job is active
 - text-label save and caption add/update/delete rejecting with

@@ -334,9 +334,13 @@ An external reviewer should accept the implementation for pilot use only if:
 
 Use these files together:
 
+- `docs/qwen_caption_training_dataset_partner_technical_handoff.md`: primary
+  standalone technical handoff for external reviewers, including what was
+  built, why, how the UI is operated, the artifact contract, bundle semantics,
+  validation gates, hardening rationale, and pilot proof requirements.
 - `docs/qwen_caption_training_dataset_complete_partner_packet.md`: canonical
-  complete packet with requirement mapping, artifact contract, validation
-  commands, acceptance criteria, and pilot checklist.
+  complete packet with broader requirement mapping, artifact contract,
+  validation commands, acceptance criteria, and pilot checklist.
 - `docs/qwen_caption_training_dataset_external_delivery_report.md`: standalone
   delivery report covering what was implemented, why, hardening, validation,
   and pilot gates.

@@ -458,20 +458,30 @@ def test_caption_instruction_strict_export_gate_requires_ready_proofs() -> None:
     ) == "training_readiness"
 
 
-def test_caption_instruction_strict_export_route_blocks_malformed_rows_when_ready_required() -> None:
+@pytest.mark.parametrize(
+    ("row_key", "expected_reason"),
+    (
+        ("instruction_training_rows", "instruction_training_rows"),
+        ("instruction_archive_rows", "instruction_archive_rows"),
+        ("instruction_review_rows", "instruction_review_rows"),
+    ),
+)
+def test_caption_instruction_strict_export_route_blocks_malformed_rows_when_ready_required(
+    row_key, expected_reason
+) -> None:
     payload = {
         **_ready_instruction_export_payload(),
-        "instruction_training_rows": {"bad": True},
+        row_key: {"bad": True},
     }
     client = _dataset_export_route_client(payload)
 
     diagnostic_response = client.get("/datasets/ds/captions/export")
     assert diagnostic_response.status_code == 200
-    assert diagnostic_response.json()["instruction_training_rows"] == {"bad": True}
+    assert diagnostic_response.json()[row_key] == {"bad": True}
 
     strict_response = client.get("/datasets/ds/captions/export?require_ready_instruction_export=true")
     assert strict_response.status_code == 409
-    assert strict_response.json()["detail"] == "instruction_export_not_ready:instruction_training_rows"
+    assert strict_response.json()["detail"] == f"instruction_export_not_ready:{expected_reason}"
 
 
 def test_delete_linked_dataset_only_removes_registry_record(tmp_path, monkeypatch) -> None:

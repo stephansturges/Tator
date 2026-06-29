@@ -360,6 +360,9 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     assert "function downloadCaptionInstructionReview" in js
     assert "function importCaptionInstructionReviewFile" in js
     assert "function downloadCaptionInstructionReport" in js
+    assert "function formatCaptionInstructionExportApiError" in js
+    assert "requireReadyInstructionExport" in js
+    assert "instruction_export_not_ready" in js
     assert "persistableRows" in js
     assert "decisions only for deterministic rows" in js
     assert "rows: persistableRows" in js
@@ -374,6 +377,21 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     assert "function applyQwenCaptionBackendJobCaptions" in js
     assert "result.latest_caption" in js
     assert "/datasets/${encodeURIComponent(datasetId)}/captions/export" in js
+    export_start = js.index("async function downloadCaptionInstructionJsonl")
+    archive_start = js.index("async function downloadCaptionInstructionArchive", export_start)
+    export_fn = js[export_start:archive_start]
+    assert "requireReadyInstructionExport: settings.require_ready_instruction_export === true" in export_fn
+    assert "return;\n            return;" not in export_fn
+    archive_end = js.index("async function downloadCaptionInstructionReview", archive_start)
+    archive_fn = js[archive_start:archive_end]
+    assert "requireReadyInstructionExport" not in archive_fn
+    review_end = js.index("async function importCaptionInstructionReviewFile", archive_end)
+    review_fn = js[archive_end:review_end]
+    assert "requireReadyInstructionExport" not in review_fn
+    report_start = js.index("async function downloadCaptionInstructionReport", review_end)
+    report_end = js.index("function buildSam3TextSnapshot", report_start)
+    report_fn = js[report_start:report_end]
+    assert "requireReadyInstructionExport" not in report_fn
 
 
 def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
@@ -607,6 +625,50 @@ def test_qwen_caption_instruction_review_import_formats_backend_failures():
             "assert(blockedCreate.includes('blocked at row 7'));",
             "assert(blockedCreate.includes('selected dataset, resolved image key, and current text-label caption'));",
             "assert(formatCaptionInstructionReviewImportApiError('plain backend error').includes('plain backend error'));",
+        ]
+    )
+    subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
+
+
+def test_qwen_caption_instruction_export_query_uses_backend_ready_gate_only_when_requested():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            _extract_js_function(js, "captionInstructionExportQuery"),
+            "const settings = {",
+            "  include_caption0_in_training: true,",
+            "  include_generated_qa_in_training: false,",
+            "  include_deterministic_metadata_qa: true,",
+            "  qa_mix: 'object',",
+            "  answer_format: 'json',",
+            "};",
+            "const strictParams = new URLSearchParams(captionInstructionExportQuery(settings, { requireReadyInstructionExport: true }));",
+            "assert.strictEqual(strictParams.get('include_caption0_in_training'), 'true');",
+            "assert.strictEqual(strictParams.get('include_generated_qa_in_training'), 'false');",
+            "assert.strictEqual(strictParams.get('include_deterministic_metadata_qa'), 'true');",
+            "assert.strictEqual(strictParams.get('qa_mix'), 'object');",
+            "assert.strictEqual(strictParams.get('answer_format'), 'json');",
+            "assert.strictEqual(strictParams.get('require_ready_instruction_export'), 'true');",
+            "const diagnosticParams = new URLSearchParams(captionInstructionExportQuery(settings));",
+            "assert.strictEqual(diagnosticParams.has('require_ready_instruction_export'), false);",
+        ]
+    )
+    subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
+
+
+def test_qwen_caption_instruction_export_formats_backend_readiness_failure():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            _extract_js_function(js, "formatCaptionInstructionExportApiError"),
+            "const message = formatCaptionInstructionExportApiError('instruction_export_not_ready:needs_review');",
+            "assert(message.includes('Instruction JSONL export blocked'));",
+            "assert(message.includes('training readiness is needs_review'));",
+            "assert(message.includes('disable Require ready report only for deliberate review-pending diagnostics'));",
+            "assert.strictEqual(formatCaptionInstructionExportApiError('plain backend error'), 'plain backend error');",
+            "assert.strictEqual(formatCaptionInstructionExportApiError(''), 'Instruction export failed.');",
         ]
     )
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)

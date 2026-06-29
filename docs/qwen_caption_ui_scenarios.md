@@ -131,9 +131,13 @@ file. It also validates the instruction report's training-readiness block:
 blocked by default by **Require
 ready report for trainer JSONL**. Operators can disable that gate only for
 deliberate review-pending diagnostics. Scripted exports can use
-`require_ready_instruction_export=true` for the same server-side refusal. A
-selected row that a reviewer marks rejected or needs-revision moves readiness to
-`blocked` until the row is removed, regenerated, or accepted.
+`require_ready_instruction_export=true` for the same server-side refusal; the
+UI sends that backend gate for trainer JSONL when **Require ready report for
+trainer JSONL** is checked. Archive, review, and report downloads deliberately
+do not send the ready gate because those diagnostic artifacts are needed to fix
+a not-ready corpus. A selected row that a reviewer marks rejected or
+needs-revision moves readiness to `blocked` until the row is removed,
+regenerated, or accepted.
 **Download instruction archive** exports one per-image construction archive
 record per JSONL line, keeping caption0, generated QA, optional deterministic
 metadata QA, source annotation provenance, and per-image export metadata separate

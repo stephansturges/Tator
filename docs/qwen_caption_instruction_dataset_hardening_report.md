@@ -258,7 +258,12 @@ row before training.
   blocks instruction JSONL when readiness is blocked and, by default, also
   blocks trainer JSONL when selected language rows or quality gates still need
   review. Operators must deliberately disable the ready-report gate for
-  review-pending diagnostic exports. The caption export API also exposes
+  review-pending diagnostic exports. The trainer JSONL UI path now sends
+  `require_ready_instruction_export=true` to the backend when that ready-report
+  gate is enabled, so browser behavior and API/script behavior share the same
+  server-side refusal boundary. Archive, review, and report downloads do not
+  send that gate because they are diagnostic artifacts needed to repair a
+  not-ready corpus. The caption export API also exposes
   `require_ready_instruction_export=true` for scripts that need server-side
   refusal of non-ready instruction exports. Reviewed-out language rows are
   removed from flattened output; any selected row that still carries a rejected

@@ -22744,7 +22744,12 @@ async function cancelRfDetrTrainingJobRequest() {
             qwenElements.captionDownloadInstructionJsonl.addEventListener("click", () => {
                 downloadCaptionInstructionJsonl().catch((error) => {
                     console.warn("Instruction JSONL download failed", error);
-                    setSamStatus(`Instruction JSONL export failed: ${error.message || error}`, { variant: "error", duration: 4000 });
+                    const message = String(error?.message || error || "Instruction JSONL export failed.").trim();
+                    const exportMessage = message.startsWith("Instruction JSONL export blocked:")
+                        ? message
+                        : `Instruction JSONL export failed: ${message}`;
+                    setCaptionExportHealth(exportMessage, "fail");
+                    setSamStatus(exportMessage, { variant: "error", duration: 6000 });
                 });
             });
         }
@@ -30697,27 +30702,41 @@ async function cancelRfDetrTrainingJobRequest() {
         return records;
     }
 
-    function captionInstructionExportQuery(settings = null) {
+    function captionInstructionExportQuery(settings = null, options = null) {
         const resolved = settings || getCaptionInstructionDatasetSettings(true);
+        const resolvedOptions = options || {};
         const params = new URLSearchParams();
         params.set("include_caption0_in_training", resolved.include_caption0_in_training ? "true" : "false");
         params.set("include_generated_qa_in_training", resolved.include_generated_qa_in_training ? "true" : "false");
         params.set("include_deterministic_metadata_qa", resolved.include_deterministic_metadata_qa ? "true" : "false");
         params.set("qa_mix", resolved.qa_mix || "balanced");
         params.set("answer_format", resolved.answer_format || "natural");
+        if (resolvedOptions.requireReadyInstructionExport === true) {
+            params.set("require_ready_instruction_export", "true");
+        }
         return params.toString();
     }
 
-    async function loadCaptionExportPayload(datasetIdOverride = null, settings = null) {
+    function formatCaptionInstructionExportApiError(message) {
+        const raw = String(message || "").trim();
+        const readyMatch = raw.match(/^instruction_export_not_ready:(.+)$/);
+        if (readyMatch) {
+            const status = readyMatch[1] || "unknown";
+            return `Instruction JSONL export blocked: training readiness is ${status}. Review or regenerate the instruction dataset, or disable Require ready report only for deliberate review-pending diagnostics.`;
+        }
+        return raw || "Instruction export failed.";
+    }
+
+    async function loadCaptionExportPayload(datasetIdOverride = null, settings = null, options = null) {
         const datasetId = datasetIdOverride || getCaptionDatasetId();
         if (!datasetId) {
             throw new Error("Select a caption dataset before exporting instruction rows.");
         }
-        const query = captionInstructionExportQuery(settings);
+        const query = captionInstructionExportQuery(settings, options);
         const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/captions/export?${query}`);
         if (!resp.ok) {
             const detail = await resp.text();
-            throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+            throw new Error(formatCaptionInstructionExportApiError(parseApiError(detail, `HTTP ${resp.status}`)));
         }
         return resp.json();
     }
@@ -35617,7 +35636,9 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         const settings = getCaptionInstructionDatasetSettings(true);
-        const payload = await loadCaptionExportPayload(datasetId, settings);
+        const payload = await loadCaptionExportPayload(datasetId, settings, {
+            requireReadyInstructionExport: settings.require_ready_instruction_export === true,
+        });
         const rows = Array.isArray(payload?.instruction_training_rows) ? payload.instruction_training_rows : [];
         if (!rows.length) {
             setCaptionExportHealth("No instruction rows are ready for export yet.", "warn");

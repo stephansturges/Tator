@@ -401,12 +401,13 @@ It applies only:
 It ignores:
 
 - blank decisions
-- unknown decisions
 - deterministic metadata QA rows, because those are regenerated from labels at
   export time
 
 It fails closed on:
 
+- unsupported non-blank review decisions, such as typoed accepted/rejected
+  values
 - persisted caption0 or generated-QA decisions missing an embedded dataset id
 - rows with an embedded dataset id that does not match the selected dataset
 - persisted caption0 or generated-QA decisions missing a stable QA id
@@ -597,7 +598,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-194 passed
+195 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

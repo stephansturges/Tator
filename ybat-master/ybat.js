@@ -34920,8 +34920,10 @@ async function cancelRfDetrTrainingJobRequest() {
             const validationStatus = String(row.validation_status || "").trim();
             const split = String(row.split || "").trim();
             const normalizedImagePath = normalizeReviewImagePath(imagePath, split);
+            const rawReviewDecision = String(row.review_decision || "").trim();
             const reviewDecision = normalizeCaptionInstructionReviewDecision(row.review_decision);
             const hasActionableDecision = ["accepted", "rejected", "needs_revision"].includes(reviewDecision);
+            const hasSupportedNonActionableDecision = !rawReviewDecision || reviewDecision === "unreviewed";
             if (!imagePath) {
                 errors.push(`review row ${rowNumber} missing image_path`);
             } else {
@@ -34968,6 +34970,9 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             if (!Object.prototype.hasOwnProperty.call(row, "review_notes")) {
                 errors.push(`review row ${rowNumber} missing review_notes field`);
+            }
+            if (rawReviewDecision && !hasActionableDecision && !hasSupportedNonActionableDecision) {
+                errors.push(`review row ${rowNumber} has unsupported review_decision`);
             }
             if (hasActionableDecision && rowOrigin && !["caption0", "generated_qa", "deterministic_metadata_qa"].includes(rowOrigin)) {
                 errors.push(`review row ${rowNumber} has unsupported actionable row_origin`);
@@ -35803,6 +35808,10 @@ async function cancelRfDetrTrainingJobRequest() {
         const unsupportedMatch = raw.match(/^review_rows_unsupported_row_origin:row_(\d+):(.+)$/);
         if (unsupportedMatch) {
             return `Instruction review import blocked at row ${unsupportedMatch[1]}: ${unsupportedMatch[2]} is not a persisted review row type. Only caption0 and generated-QA decisions can be imported.`;
+        }
+        const unsupportedDecisionMatch = raw.match(/^review_rows_unsupported_review_decision:row_(\d+):(.+)$/);
+        if (unsupportedDecisionMatch) {
+            return `Instruction review import blocked at row ${unsupportedDecisionMatch[1]}: ${unsupportedDecisionMatch[2]} is not a supported review decision. Use accepted, rejected, needs-revision, or leave the decision blank.`;
         }
         if (raw === "review_rows_list_required") {
             return "Instruction review import blocked: the file must contain a JSON array, JSONL rows, or an object with review rows.";

@@ -21681,6 +21681,18 @@ def _caption_instruction_review_decision(value: Any) -> str:
     return decision or "unreviewed"
 
 
+def _caption_instruction_review_decision_is_supported(value: Any) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return True
+    return _caption_instruction_review_decision(raw) in {
+        "accepted",
+        "rejected",
+        "needs_revision",
+        "unreviewed",
+    }
+
+
 def _caption_instruction_training_readiness(
     *,
     corpus_quality_metrics: Mapping[str, Any],
@@ -23091,6 +23103,21 @@ def _caption_instruction_reject_dataset_id_mismatches(
         )
 
 
+def _caption_instruction_reject_unsupported_review_decisions(rows: Sequence[Any]) -> None:
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, Mapping):
+            continue
+        if str(row.get("format") or "").strip() != CAPTION_INSTRUCTION_REVIEW_ROWS_FORMAT:
+            continue
+        if _caption_instruction_review_decision_is_supported(row.get("review_decision")):
+            continue
+        raw_decision = str(row.get("review_decision") or "").strip()
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail=f"review_rows_unsupported_review_decision:row_{index}:{raw_decision}",
+        )
+
+
 _CAPTION_INSTRUCTION_REVIEW_SPLITS = ("train", "val", "valid", "test")
 _CAPTION_INSTRUCTION_REVIEW_SPLIT_PREFIX_RE = re.compile(r"^(train|val|valid|test)/(.+)$")
 
@@ -23675,6 +23702,7 @@ def apply_caption_instruction_review(dataset_id: str, payload: Dict[str, Any]):
     entry = _resolve_dataset_entry(dataset_id)
     _require_dataset_annotation_lock_owner_if_active(entry, payload)
     rows = _caption_instruction_review_payload_rows(payload)
+    _caption_instruction_reject_unsupported_review_decisions(rows)
     _caption_instruction_reject_dataset_id_mismatches(rows, dataset_id=dataset_id)
     _caption_instruction_reject_duplicate_review_targets(rows, dataset_id=dataset_id)
     caption_records = _load_dataset_caption_records(entry)

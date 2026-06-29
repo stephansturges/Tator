@@ -691,6 +691,8 @@ The review import is deliberately conservative:
   caption or generated-QA record also fail closed, so API/script imports cannot
   silently let the last duplicate row win.
 - It rejects malformed review rows, unsupported actionable row origins,
+  unsupported non-blank review decisions such as typoed accepted/rejected
+  values,
   actionable rows without an image path, persisted language rows missing stable
   QA ids, generated-QA rows missing reviewed question or answer text, caption0
   rows missing reviewed caption text, stale generated-QA targets, ambiguous
@@ -703,7 +705,7 @@ The review import is deliberately conservative:
   matches the selected dataset, resolved image key, and current text-label
   caption; arbitrary or forged caption0 rows are rejected instead of becoming
   new captions.
-- It ignores blank or unknown decisions instead of inventing a review result.
+- It ignores blank decisions instead of inventing a review result.
 - It applies decisions only to matching caption0 or generated-QA records.
 - It skips deterministic metadata QA decisions because those rows are rebuilt
   from source labels at export time and do not correspond to persisted language
@@ -934,7 +936,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Result:
 
 ```text
-194 passed
+195 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

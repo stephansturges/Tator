@@ -466,12 +466,14 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "requires_manual_review must be boolean" in review_validator
     assert "missing review_decision field" in review_validator
     assert "missing review_notes field" in review_validator
+    assert "unsupported review_decision" in review_validator
     assert "unsupported actionable row_origin" in review_validator
     assert "duplicate actionable review target" in review_validator
     assert "conflicting duplicate actionable review target" in review_validator
     assert "normalizeCaptionInstructionReviewDecision" in js
     assert "formatCaptionInstructionReviewImportApiError" in js
     assert "accepted, rejected, or needs-revision decisions" in js
+    assert "Use accepted, rejected, needs-revision, or leave the decision blank" in js
     assert "captionMutationPayload({ rows: persistableRows })" in js
     assert "Export a fresh review JSONL" in js
     assert "duplicate image_path + question" in js
@@ -921,6 +923,11 @@ def test_qwen_caption_instruction_review_validator_blocks_bad_actionable_rows():
             "const unsupported = validateCaptionInstructionReviewRows([{ ...base, row_origin: 'freeform_review' }]);",
             "assert.strictEqual(unsupported.ok, false);",
             "assert(unsupported.errors.some((error) => error.includes('unsupported actionable row_origin')));",
+            "const typoDecision = validateCaptionInstructionReviewRows([{ ...base, review_decision: 'acceppted' }]);",
+            "assert.strictEqual(typoDecision.ok, false);",
+            "assert(typoDecision.errors.some((error) => error.includes('unsupported review_decision')));",
+            "const blankDecision = validateCaptionInstructionReviewRows([{ ...base, review_decision: '' }]);",
+            "assert.strictEqual(blankDecision.ok, true);",
             "const duplicate = validateCaptionInstructionReviewRows([base, { ...base, row_type: 'external_edit' }]);",
             "assert.strictEqual(duplicate.ok, false);",
             "assert(duplicate.errors.some((error) => error.includes('duplicate actionable review target')));",

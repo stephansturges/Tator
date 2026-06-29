@@ -301,6 +301,8 @@ Review import fails closed on:
 
 - missing embedded dataset id on persisted caption0 or generated-QA decisions
 - embedded dataset id mismatch
+- unsupported non-blank review decisions, such as typoed accepted/rejected
+  values
 - missing or mismatched stable QA id on persisted caption0 or generated-QA
   decisions
 - malformed actionable rows
@@ -553,7 +555,7 @@ Result:
 Result:
 
 ```text
-194 passed
+195 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

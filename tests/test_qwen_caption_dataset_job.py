@@ -871,6 +871,45 @@ def test_caption_instruction_review_decision_normalizes_external_review_values()
     assert api._caption_instruction_review_decision("needs-revision") == "needs_revision"
     assert api._caption_instruction_review_decision("needs review") == "needs_revision"
     assert api._caption_instruction_review_decision("Needs-Rewrite") == "needs_revision"
+    assert api._caption_instruction_review_decision_is_supported("") is True
+    assert api._caption_instruction_review_decision_is_supported("unreviewed") is True
+    assert api._caption_instruction_review_decision_is_supported("acceppted") is False
+
+
+def test_caption_instruction_review_import_rejects_unsupported_review_decision(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import localinferenceapi as api
+
+    entry = {"id": "ds", "dataset_root": str(tmp_path), "registry_root": str(tmp_path)}
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: entry)
+
+    row = {
+        "format": "tator_caption_instruction_review_rows_v1",
+        "dataset_id": "ds",
+        "image_path": "frame.jpg",
+        "split": "train",
+        "row_origin": "generated_qa",
+        "qa_id": "qa-1",
+        "row_type": "generated_qa",
+        "question": "What is the scene type?",
+        "candidate_answer": "A waterfront area.",
+        "training_answer": "A waterfront area.",
+        "validation_status": "accepted",
+        "selected_for_training": True,
+        "requires_manual_review": True,
+        "review_decision": "acceppted",
+        "review_notes": "typo should block",
+        "rejection_reasons": [],
+        "source_summary": {"status": "empty_label_file"},
+    }
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.apply_caption_instruction_review("ds", {"rows": [row]})
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "review_rows_unsupported_review_decision:row_1:acceppted"
 
 
 @pytest.mark.parametrize("row_origin", ["generated_qa", "caption0"])

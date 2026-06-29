@@ -221,6 +221,10 @@ row before training.
   caption review record only when their synthetic id matches the selected
   dataset, resolved image key, and current text-label caption; arbitrary or
   forged caption0 rows are rejected before any metadata is written.
+- Browser and backend review-import validation now reject unsupported non-blank
+  `review_decision` values before applying any review metadata. A typo such as
+  `acceppted` blocks the import instead of being silently skipped as a missing
+  decision.
 - Caption0 or generated-QA candidates marked rejected or needs-revision by
   manual review remain in the archive and review JSONL but are excluded from
   flattened trainer rows.
@@ -258,7 +262,7 @@ row before training.
   - `node --check ybat-master/ybat.js`
 - Focused instruction-dataset, export, and UI contract tests:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py tests/test_qwen_training_backend.py tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete tests/test_labeling_panel_layout_contract.py tests/test_qwen_caption_ui_smoke_tool.py -q`
-  - Current result: 194 passed.
+  - Current result: 195 passed.
 - Current artifact-consistency UI contract tests:
   - `./.venv-macos/bin/python -m pytest tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports tests/test_labeling_panel_layout_contract.py::test_qwen_caption_export_preserves_saved_alternates_and_primary_rows -q`
   - Result: 2 passed.
@@ -282,7 +286,7 @@ row before training.
   - Result: 2 passed.
 - Additional instruction archive provenance and manifest-gating regression:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py -q`
-  - Result: 109 passed.
+  - Result: 110 passed.
 - Caption0 structured-claim validation and instruction export validator
   regression:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py tests/test_labeling_panel_layout_contract.py -q`

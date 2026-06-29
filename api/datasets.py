@@ -41,6 +41,12 @@ def _instruction_export_nonnegative_int(value: Any) -> Optional[int]:
     return parsed
 
 
+def _instruction_export_settings_signature(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
 def _instruction_export_normalized_image_path(value: Any) -> str:
     raw = str(value or "").strip().replace("\\", "/")
     raw = re.sub(r"/+", "/", raw)
@@ -205,6 +211,8 @@ def _instruction_export_not_ready_reason(result: Any) -> str:
         if not isinstance(values, list) or values:
             return "training_readiness"
 
+    archive = result.get("instruction_archive") if isinstance(result.get("instruction_archive"), dict) else {}
+
     payload_export_validation = result.get("instruction_export_validation")
     report_export_validation = report.get("instruction_export_validation")
     if not _instruction_export_proof_is_ok(payload_export_validation):
@@ -216,7 +224,6 @@ def _instruction_export_not_ready_reason(result: Any) -> str:
 
     payload_consistency = result.get("instruction_artifact_consistency")
     report_consistency = report.get("instruction_artifact_consistency")
-    archive = result.get("instruction_archive") if isinstance(result.get("instruction_archive"), dict) else {}
     archive_consistency = archive.get("instruction_artifact_consistency")
     consistency_format = "tator_caption_instruction_artifact_consistency_v1"
     if not _instruction_export_proof_is_ok(payload_consistency, expected_format=consistency_format):
@@ -227,6 +234,27 @@ def _instruction_export_not_ready_reason(result: Any) -> str:
         return "instruction_artifact_consistency"
     if payload_consistency != report_consistency or payload_consistency != archive_consistency:
         return "instruction_artifact_consistency_mismatch"
+
+    payload_settings = result.get("instruction_settings")
+    report_settings = report.get("instruction_settings")
+    archive_settings = archive.get("settings")
+    settings_signatures = [
+        _instruction_export_settings_signature(payload_settings),
+        _instruction_export_settings_signature(report_settings),
+        _instruction_export_settings_signature(archive_settings),
+    ]
+    if not all(settings_signatures):
+        return "instruction_settings"
+    if len(set(settings_signatures)) != 1:
+        return "instruction_settings_mismatch"
+    payload_settings_fingerprint = str(result.get("instruction_settings_fingerprint") or "").strip()
+    report_settings_fingerprint = str(report.get("instruction_settings_fingerprint") or "").strip()
+    archive_settings_fingerprint = str(archive.get("settings_fingerprint") or "").strip()
+    fingerprints = [payload_settings_fingerprint, report_settings_fingerprint, archive_settings_fingerprint]
+    if not all(fingerprints):
+        return "instruction_settings_fingerprint"
+    if len(set(fingerprints)) != 1:
+        return "instruction_settings_mismatch"
 
     training_rows = result.get("instruction_training_rows")
     archive_rows = result.get("instruction_archive_rows")
@@ -243,6 +271,17 @@ def _instruction_export_not_ready_reason(result: Any) -> str:
         return "instruction_archive_rows"
     if not _instruction_export_review_rows_are_valid(review_rows):
         return "instruction_review_rows"
+    for row in archive_rows:
+        if not isinstance(row, dict):
+            return "instruction_archive_rows"
+        metadata = row.get("export_metadata") if isinstance(row.get("export_metadata"), dict) else {}
+        row_settings_signature = _instruction_export_settings_signature(metadata.get("settings"))
+        if not row_settings_signature:
+            return "instruction_archive_rows"
+        if row_settings_signature != settings_signatures[0]:
+            return "instruction_settings_mismatch"
+        if str(metadata.get("settings_fingerprint") or "").strip() != fingerprints[0]:
+            return "instruction_settings_mismatch"
 
     consistency_counts = payload_consistency.get("counts") if isinstance(payload_consistency.get("counts"), dict) else {}
     report_selected_count = _instruction_export_nonnegative_int(report.get("selected_flattened_row_count"))

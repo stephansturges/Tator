@@ -92,6 +92,7 @@ The implemented work was driven by several concrete product concerns:
 | Exports must not race archive mutation | Locked UI controls and added backend busy guards for archive reads, mutations, exports, review import, and related dataset operations |
 | The model selector must communicate missing local models | Styled download-needed model options distinctly and kept missing-model preflight explicit |
 | External consumers need proof, not only a UI button | Added browser/backend/trainer validation, artifact consistency checks, readiness reports, tests, and this handoff packet |
+| Review packets can be mixed across export settings | Added canonical instruction settings and settings fingerprints to the payload, archive, report, and per-image archive metadata; validators reject mismatches |
 
 ## End-To-End Data Flow
 
@@ -234,7 +235,8 @@ and blank review-decision fields.
 
 `instruction_report` is the run-level readiness and quality report. It records
 counts, row-type distribution, split metrics, rejection reasons, source-field
-provenance, artifact consistency, export validation, and training readiness.
+provenance, artifact consistency, export validation, instruction settings, the
+settings fingerprint, and training readiness.
 
 ### 5. Added A Closed Human Review Loop
 
@@ -257,7 +259,8 @@ The implementation intentionally validates the same artifact family at multiple
 layers:
 
 - the browser validates rows and artifact consistency before downloads;
-- the backend validates exports and review imports for API/script callers;
+- the backend validates exports, settings fingerprints, and review imports for
+  API/script callers;
 - the trainer loader validates flat rows before fine-tuning starts.
 
 The trainer loader is the last safety boundary. It imports flat
@@ -441,6 +444,14 @@ and report JSON are one export set. Exporting or importing while the underlying
 caption records are changing can create a mixed packet that looks valid row by
 row but is not coherent as a training dataset.
 
+Instruction settings are part of that export set. The exported payload,
+instruction archive, instruction report, and each archive row carry the
+canonical instruction settings plus a settings fingerprint. Browser and backend
+consistency checks reject artifacts whose settings or fingerprints disagree, so
+a reviewer can detect trainer JSONL, archive JSONL, review JSONL, and report
+JSON files that were downloaded under different row-family or answer-format
+settings.
+
 ## Review Import Fail-Closed Behavior
 
 Review import accepts JSONL rows, JSON arrays, wrapper objects with
@@ -554,6 +565,7 @@ Additional validation coverage exists for:
 - stale review-row rejection;
 - duplicate actionable review targets;
 - artifact consistency;
+- instruction settings fingerprint consistency;
 - strict trainer-export readiness;
 - trainer loader acceptance and rejection cases;
 - model availability and set-and-forget controls;

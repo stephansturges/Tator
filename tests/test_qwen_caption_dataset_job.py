@@ -540,12 +540,13 @@ def test_caption_instruction_archive_separates_generated_qa_from_source_annotati
         },
     ]
 
+    settings = api._caption_instruction_export_settings({})
     archive = api._dataset_caption_instruction_archive(
         captions,
         generated,
         dataset_id="ds",
         entry={"id": "ds"},
-        settings=api._caption_instruction_export_settings({}),
+        settings=settings,
         exported_at="2026-01-01T00:00:00Z",
     )
     image = archive["images"][0]
@@ -573,7 +574,13 @@ def test_caption_instruction_archive_separates_generated_qa_from_source_annotati
     assert archive_row["export_metadata"]["selected_training_row_count"] == 2
     assert archive_row["export_metadata"]["generated_qa_candidate_count"] == 2
     assert archive_row["export_metadata"]["accepted_generated_qa_count"] == 2
+    assert archive_row["export_metadata"]["settings"] == settings
+    assert archive_row["export_metadata"]["settings_fingerprint"] == archive["settings_fingerprint"]
     assert report["format"] == "tator_caption_instruction_report_v1"
+    assert report["instruction_settings"] == settings
+    assert report["instruction_settings_fingerprint"] == archive["settings_fingerprint"]
+    assert archive["settings"] == settings
+    assert archive["settings_fingerprint"]
     assert report["image_count"] == 1
     assert report["generated_qa_candidate_count"] == 2
     assert report["accepted_generated_qa_count"] == 2
@@ -647,20 +654,24 @@ def test_caption_instruction_archive_separates_generated_qa_from_source_annotati
     )
     assert archive["rejections"][0]["reason"] == "duplicate_image_question"
 
+    deterministic_settings = api._caption_instruction_export_settings(
+        {
+            "include_caption0_in_training": False,
+            "include_generated_qa_in_training": False,
+            "include_deterministic_metadata_qa": True,
+        }
+    )
     deterministic = api._dataset_caption_instruction_archive(
         captions,
         generated,
         dataset_id="ds",
         entry={"id": "ds"},
-        settings=api._caption_instruction_export_settings(
-            {
-                "include_caption0_in_training": False,
-                "include_generated_qa_in_training": False,
-                "include_deterministic_metadata_qa": True,
-            }
-        ),
+        settings=deterministic_settings,
         exported_at="2026-01-01T00:00:00Z",
     )
+    assert deterministic["settings"] == deterministic_settings
+    assert deterministic["captioning_report"]["instruction_settings"] == deterministic_settings
+    assert deterministic["captioning_report"]["instruction_settings_fingerprint"] == deterministic["settings_fingerprint"]
     assert deterministic["deterministic_metadata_qa_pair_count"] == 8
     assert deterministic["training_row_count"] == 8
     row_types = {row["metadata"]["row_type"] for row in deterministic["training_rows"]}
@@ -2639,6 +2650,8 @@ def test_caption_instruction_artifact_consistency_validator_blocks_mismatched_ba
 def test_caption_instruction_artifact_consistency_validator_blocks_same_count_identity_mismatches() -> None:
     import localinferenceapi as api
 
+    settings = api._caption_instruction_export_settings({})
+    settings_fingerprint = api._caption_instruction_settings_fingerprint(settings)
     report = {
         "format": "tator_caption_instruction_report_v1",
         "image_count": 1,
@@ -2655,6 +2668,8 @@ def test_caption_instruction_artifact_consistency_validator_blocks_same_count_id
             "errors": [],
             "row_count": 1,
         },
+        "instruction_settings": settings,
+        "instruction_settings_fingerprint": settings_fingerprint,
     }
     validation = api._caption_instruction_artifact_consistency_validation(
         training_rows=[
@@ -2676,7 +2691,11 @@ def test_caption_instruction_artifact_consistency_validator_blocks_same_count_id
                     }
                 },
                 "deterministic_metadata_qa_pairs": [],
-                "export_metadata": {"selected_training_row_count": 1},
+                "export_metadata": {
+                    "selected_training_row_count": 1,
+                    "settings": settings,
+                    "settings_fingerprint": settings_fingerprint,
+                },
             }
         ],
         review_rows=[
@@ -2725,6 +2744,8 @@ def test_caption_instruction_artifact_consistency_validator_blocks_same_count_id
 def test_caption_instruction_artifact_consistency_validator_canonicalizes_image_paths() -> None:
     import localinferenceapi as api
 
+    settings = api._caption_instruction_export_settings({})
+    settings_fingerprint = api._caption_instruction_settings_fingerprint(settings)
     report = {
         "format": "tator_caption_instruction_report_v1",
         "image_count": 1,
@@ -2741,6 +2762,8 @@ def test_caption_instruction_artifact_consistency_validator_canonicalizes_image_
             "errors": [],
             "row_count": 1,
         },
+        "instruction_settings": settings,
+        "instruction_settings_fingerprint": settings_fingerprint,
     }
     validation = api._caption_instruction_artifact_consistency_validation(
         training_rows=[
@@ -2764,7 +2787,11 @@ def test_caption_instruction_artifact_consistency_validator_canonicalizes_image_
                     ]
                 },
                 "deterministic_metadata_qa_pairs": [],
-                "export_metadata": {"selected_training_row_count": 1},
+                "export_metadata": {
+                    "selected_training_row_count": 1,
+                    "settings": settings,
+                    "settings_fingerprint": settings_fingerprint,
+                },
             }
         ],
         review_rows=[
@@ -2797,9 +2824,64 @@ def test_caption_instruction_artifact_consistency_validator_canonicalizes_image_
     assert validation["counts"]["archive_candidate_identity_count"] == 1
 
 
+def test_caption_instruction_artifact_consistency_validator_blocks_settings_mismatches() -> None:
+    import localinferenceapi as api
+
+    settings = api._caption_instruction_export_settings({})
+    settings_fingerprint = api._caption_instruction_settings_fingerprint(settings)
+    report = {
+        "format": "tator_caption_instruction_report_v1",
+        "image_count": 1,
+        "selected_flattened_row_count": 0,
+        "instruction_review_row_count": 0,
+        "manual_review_required_count": 0,
+        "corpus_quality_metrics": {
+            "image_count": 1,
+            "selected_flattened_row_count": 0,
+        },
+        "instruction_export_validation": {
+            "ok": True,
+            "error_count": 0,
+            "errors": [],
+            "row_count": 0,
+        },
+        "instruction_settings": {
+            **settings,
+            "include_generated_qa_in_training": False,
+        },
+        "instruction_settings_fingerprint": settings_fingerprint,
+    }
+    validation = api._caption_instruction_artifact_consistency_validation(
+        training_rows=[],
+        archive_rows=[
+            {
+                "image_path": "frame.jpg",
+                "language_annotations": {},
+                "deterministic_metadata_qa_pairs": [],
+                "export_metadata": {
+                    "selected_training_row_count": 0,
+                    "settings": settings,
+                    "settings_fingerprint": "stale-fingerprint",
+                },
+            }
+        ],
+        review_rows=[],
+        report=report,
+        archive_image_count=1,
+        settings=settings,
+        settings_fingerprint=settings_fingerprint,
+    )
+
+    assert validation["ok"] is False
+    assert "instruction_report.instruction_settings does not match archive settings" in validation["errors"]
+    assert "archive row frame.jpg settings_fingerprint does not match report settings" in validation["errors"]
+
+
 def test_caption_instruction_artifact_consistency_validator_requires_review_dataset_identity() -> None:
     import localinferenceapi as api
 
+    settings = api._caption_instruction_export_settings({})
+    settings_fingerprint = api._caption_instruction_settings_fingerprint(settings)
     report = {
         "format": "tator_caption_instruction_report_v1",
         "image_count": 1,
@@ -2816,6 +2898,8 @@ def test_caption_instruction_artifact_consistency_validator_requires_review_data
             "errors": [],
             "row_count": 0,
         },
+        "instruction_settings": settings,
+        "instruction_settings_fingerprint": settings_fingerprint,
     }
 
     validation = api._caption_instruction_artifact_consistency_validation(
@@ -2825,7 +2909,11 @@ def test_caption_instruction_artifact_consistency_validator_requires_review_data
                 "image_path": "train/frame.jpg",
                 "language_annotations": {},
                 "deterministic_metadata_qa_pairs": [],
-                "export_metadata": {"selected_training_row_count": 0},
+                "export_metadata": {
+                    "selected_training_row_count": 0,
+                    "settings": settings,
+                    "settings_fingerprint": settings_fingerprint,
+                },
             }
         ],
         review_rows=[

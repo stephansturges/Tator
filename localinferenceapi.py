@@ -20865,6 +20865,12 @@ def _caption_instruction_export_settings(options: Optional[Mapping[str, Any]] = 
     }
 
 
+def _caption_instruction_settings_fingerprint(settings: Optional[Mapping[str, Any]] = None) -> str:
+    canonical = _caption_instruction_export_settings(settings or {})
+    payload = json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _caption_instruction_training_row(
     *,
     image_name: str,
@@ -21842,6 +21848,8 @@ def _caption_instruction_artifact_consistency_validation(
     review_rows: Sequence[Mapping[str, Any]],
     report: Mapping[str, Any],
     archive_image_count: Optional[int] = None,
+    settings: Optional[Mapping[str, Any]] = None,
+    settings_fingerprint: Optional[str] = None,
 ) -> Dict[str, Any]:
     errors: List[str] = []
     warnings: List[str] = []
@@ -21910,6 +21918,12 @@ def _caption_instruction_artifact_consistency_validation(
             return None
         return integer
 
+    def _settings_signature(value: Any) -> str:
+        if not isinstance(value, Mapping):
+            return ""
+        canonical = _caption_instruction_export_settings(value)
+        return json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
     report_mapping = report if isinstance(report, Mapping) else {}
     if not report_mapping:
         errors.append("instruction_report is missing")
@@ -21925,6 +21939,22 @@ def _caption_instruction_artifact_consistency_validation(
     export_validation_mapping = export_validation if isinstance(export_validation, Mapping) else {}
     if not export_validation_mapping:
         errors.append("instruction_report.instruction_export_validation is missing")
+
+    expected_settings = _caption_instruction_export_settings(settings or {})
+    expected_settings_signature = _settings_signature(expected_settings)
+    expected_fingerprint = str(
+        settings_fingerprint or _caption_instruction_settings_fingerprint(expected_settings)
+    ).strip()
+    report_settings = report_mapping.get("instruction_settings")
+    if not isinstance(report_settings, Mapping):
+        errors.append("instruction_report.instruction_settings is missing")
+    elif _settings_signature(report_settings) != expected_settings_signature:
+        errors.append("instruction_report.instruction_settings does not match archive settings")
+    report_settings_fingerprint = str(report_mapping.get("instruction_settings_fingerprint") or "").strip()
+    if not report_settings_fingerprint:
+        errors.append("instruction_report.instruction_settings_fingerprint is missing")
+    elif report_settings_fingerprint != expected_fingerprint:
+        errors.append("instruction_report.instruction_settings_fingerprint does not match archive settings")
 
     training_row_count = len(training_rows) if isinstance(training_rows, Sequence) else 0
     archive_row_count = len(archive_rows) if isinstance(archive_rows, Sequence) else 0
@@ -22134,6 +22164,16 @@ def _caption_instruction_artifact_consistency_validation(
             continue
         image_key = _caption_instruction_normalized_image_path(image_path) or image_path
         export_metadata = row.get("export_metadata") if isinstance(row.get("export_metadata"), Mapping) else {}
+        row_settings = export_metadata.get("settings")
+        if not isinstance(row_settings, Mapping):
+            errors.append(f"archive row {image_path} export settings are missing")
+        elif _settings_signature(row_settings) != expected_settings_signature:
+            errors.append(f"archive row {image_path} export settings do not match report settings")
+        row_settings_fingerprint = str(export_metadata.get("settings_fingerprint") or "").strip()
+        if not row_settings_fingerprint:
+            errors.append(f"archive row {image_path} settings_fingerprint is missing")
+        elif row_settings_fingerprint != expected_fingerprint:
+            errors.append(f"archive row {image_path} settings_fingerprint does not match report settings")
         if "selected_training_row_count" in export_metadata:
             try:
                 archive_selected_count = int(export_metadata.get("selected_training_row_count") or 0)
@@ -22205,6 +22245,7 @@ def _caption_instruction_artifact_consistency_validation(
         "error_count": len(errors),
         "errors": errors,
         "warnings": warnings,
+        "settings_fingerprint": expected_fingerprint,
         "counts": {
             "training_row_count": training_row_count,
             "archive_row_count": archive_row_count,
@@ -22234,6 +22275,8 @@ def _dataset_caption_instruction_archive(
     exported_at: Optional[str] = None,
 ) -> Dict[str, Any]:
     exported_at = exported_at or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    settings = _caption_instruction_export_settings(settings)
+    settings_fingerprint = _caption_instruction_settings_fingerprint(settings)
     manifest = _annotation_manifest_for_entry(entry)
     labelmap = [str(label or "").strip() for label in (manifest.get("labelmap") or []) if str(label or "").strip()]
     yolo_layout = str(manifest.get("yolo_layout") or entry.get("yolo_layout") or "flat").strip().lower()
@@ -22438,6 +22481,7 @@ def _dataset_caption_instruction_archive(
                     "qa_mix": str(settings.get("qa_mix") or "balanced"),
                     "answer_format": str(settings.get("answer_format") or "natural"),
                 },
+                "settings_fingerprint": settings_fingerprint,
             },
         }
         if (
@@ -22714,6 +22758,8 @@ def _dataset_caption_instruction_archive(
         "provenance_summary": dict(sorted(provenance_summary.items())),
         "corpus_quality_metrics": corpus_quality_metrics,
         "instruction_export_validation": instruction_export_validation,
+        "instruction_settings": dict(settings),
+        "instruction_settings_fingerprint": settings_fingerprint,
         "training_readiness": training_readiness,
         "instruction_review_row_count": len(review_rows),
         "manual_review_required_count": manual_review_required_count,
@@ -22743,6 +22789,8 @@ def _dataset_caption_instruction_archive(
         review_rows=review_rows,
         report=captioning_report,
         archive_image_count=len(images),
+        settings=settings,
+        settings_fingerprint=settings_fingerprint,
     )
     training_readiness["instruction_artifact_consistency_error_count"] = int(
         instruction_artifact_consistency.get("error_count") or 0
@@ -22766,6 +22814,7 @@ def _dataset_caption_instruction_archive(
         "dataset_id": str(dataset_id or "").strip() or None,
         "exported_at": exported_at,
         "settings": dict(settings),
+        "settings_fingerprint": settings_fingerprint,
         "image_count": len(images),
         "source_annotation_count": source_annotation_count,
         "caption0_count": sum(1 for image in images if (image.get("language_annotations") or {}).get("caption0")),
@@ -23271,6 +23320,8 @@ def export_captions(dataset_id: str, options: Optional[Mapping[str, Any]] = None
         "captions": indexed_records,
         "grouped": dict(grouped),
         "training_rows": training_rows,
+        "instruction_settings": dict(instruction_settings),
+        "instruction_settings_fingerprint": str(instruction_archive.get("settings_fingerprint") or ""),
         "instruction_training_rows": instruction_training_rows,
         "instruction_archive_rows": instruction_archive_rows,
         "instruction_review_rows": instruction_review_rows,

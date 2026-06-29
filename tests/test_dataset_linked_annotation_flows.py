@@ -465,6 +465,14 @@ def test_caption_mutations_block_active_backend_caption_job_before_dataset_read(
 
 
 def _ready_instruction_export_payload():
+    instruction_settings = {
+        "include_caption0_in_training": True,
+        "include_generated_qa_in_training": True,
+        "include_deterministic_metadata_qa": False,
+        "qa_mix": "balanced",
+        "answer_format": "natural",
+    }
+    instruction_settings_fingerprint = "instruction-settings-fingerprint"
     export_validation = {"ok": True, "error_count": 0, "errors": [], "row_count": 1}
     artifact_consistency = {
         "format": "tator_caption_instruction_artifact_consistency_v1",
@@ -506,6 +514,8 @@ def _ready_instruction_export_payload():
         },
         "instruction_export_validation": dict(export_validation),
         "instruction_artifact_consistency": dict(artifact_consistency),
+        "instruction_settings": dict(instruction_settings),
+        "instruction_settings_fingerprint": instruction_settings_fingerprint,
     }
     training_row = {
         "image_path": "frame.jpg",
@@ -526,7 +536,10 @@ def _ready_instruction_export_payload():
         "source_annotations": {},
         "language_annotations": {},
         "deterministic_metadata_qa_pairs": [],
-        "export_metadata": {},
+        "export_metadata": {
+            "settings": dict(instruction_settings),
+            "settings_fingerprint": instruction_settings_fingerprint,
+        },
     }
     review_row = {
         "format": "tator_caption_instruction_review_rows_v1",
@@ -547,9 +560,15 @@ def _ready_instruction_export_payload():
     }
     return {
         "instruction_report": report,
+        "instruction_settings": dict(instruction_settings),
+        "instruction_settings_fingerprint": instruction_settings_fingerprint,
         "instruction_export_validation": dict(export_validation),
         "instruction_artifact_consistency": dict(artifact_consistency),
-        "instruction_archive": {"instruction_artifact_consistency": dict(artifact_consistency)},
+        "instruction_archive": {
+            "settings": dict(instruction_settings),
+            "settings_fingerprint": instruction_settings_fingerprint,
+            "instruction_artifact_consistency": dict(artifact_consistency),
+        },
         "instruction_training_rows": [training_row],
         "instruction_archive_rows": [archive_row],
         "instruction_review_rows": [review_row],
@@ -559,6 +578,14 @@ def _ready_instruction_export_payload():
 def test_caption_instruction_strict_export_gate_requires_ready_proofs() -> None:
     from api.datasets import _instruction_export_not_ready_reason
 
+    instruction_settings = {
+        "include_caption0_in_training": True,
+        "include_generated_qa_in_training": True,
+        "include_deterministic_metadata_qa": False,
+        "qa_mix": "balanced",
+        "answer_format": "natural",
+    }
+    instruction_settings_fingerprint = "instruction-settings-fingerprint"
     export_validation = {"ok": True, "error_count": 0, "errors": [], "row_count": 1}
     artifact_consistency = {
         "format": "tator_caption_instruction_artifact_consistency_v1",
@@ -600,6 +627,8 @@ def test_caption_instruction_strict_export_gate_requires_ready_proofs() -> None:
         },
         "instruction_export_validation": dict(export_validation),
         "instruction_artifact_consistency": dict(artifact_consistency),
+        "instruction_settings": dict(instruction_settings),
+        "instruction_settings_fingerprint": instruction_settings_fingerprint,
     }
     training_row = {
         "image_path": "frame.jpg",
@@ -620,7 +649,10 @@ def test_caption_instruction_strict_export_gate_requires_ready_proofs() -> None:
         "source_annotations": {},
         "language_annotations": {},
         "deterministic_metadata_qa_pairs": [],
-        "export_metadata": {},
+        "export_metadata": {
+            "settings": dict(instruction_settings),
+            "settings_fingerprint": instruction_settings_fingerprint,
+        },
     }
     review_row = {
         "format": "tator_caption_instruction_review_rows_v1",
@@ -641,15 +673,44 @@ def test_caption_instruction_strict_export_gate_requires_ready_proofs() -> None:
     }
     payload = {
         "instruction_report": report,
+        "instruction_settings": dict(instruction_settings),
+        "instruction_settings_fingerprint": instruction_settings_fingerprint,
         "instruction_export_validation": dict(export_validation),
         "instruction_artifact_consistency": dict(artifact_consistency),
-        "instruction_archive": {"instruction_artifact_consistency": dict(artifact_consistency)},
+        "instruction_archive": {
+            "settings": dict(instruction_settings),
+            "settings_fingerprint": instruction_settings_fingerprint,
+            "instruction_artifact_consistency": dict(artifact_consistency),
+        },
         "instruction_training_rows": [training_row],
         "instruction_archive_rows": [archive_row],
         "instruction_review_rows": [review_row],
     }
 
     assert _instruction_export_not_ready_reason(payload) == ""
+    assert _instruction_export_not_ready_reason(
+        {
+            **payload,
+            "instruction_settings": {
+                **instruction_settings,
+                "include_generated_qa_in_training": False,
+            },
+        }
+    ) == "instruction_settings_mismatch"
+    assert _instruction_export_not_ready_reason(
+        {
+            **payload,
+            "instruction_archive_rows": [
+                {
+                    **archive_row,
+                    "export_metadata": {
+                        **archive_row["export_metadata"],
+                        "settings_fingerprint": "stale-settings",
+                    },
+                }
+            ],
+        }
+    ) == "instruction_settings_mismatch"
     assert _instruction_export_not_ready_reason(
         {
             **payload,

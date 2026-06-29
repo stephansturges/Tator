@@ -236,11 +236,11 @@ call.
 The implementation validates the same artifacts at multiple layers:
 
 - **Browser preflight** checks row shape, metadata, readiness, review status,
-  duplicate identities, and report/archive/review/trainer consistency before
-  writing downloads.
+  duplicate identities, settings fingerprints, and
+  report/archive/review/trainer consistency before writing downloads.
 - **Backend export validation** checks flat trainer rows, report readiness,
-  artifact consistency, review-row shape, image alias resolution, and strict
-  export requirements for API/script callers.
+  artifact consistency, settings fingerprints, review-row shape, image alias
+  resolution, and strict export requirements for API/script callers.
 - **Review import validation** rejects stale, ambiguous, duplicate,
   wrong-dataset, unsupported-origin, malformed, or content-mutating review
   files before metadata is changed.
@@ -260,6 +260,7 @@ The current implementation has focused unit and UI-contract coverage for:
 - generated QA parsing, validation, deduplication, rejection, and flattening;
 - deterministic metadata QA from source labels;
 - artifact consistency across trainer, archive, review, and report artifacts;
+- instruction settings fingerprint consistency across export artifacts;
 - browser-side download validation and failure messages;
 - backend strict export gating;
 - review JSONL import shape checks and metadata-only mutation;

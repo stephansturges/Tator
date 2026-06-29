@@ -35789,6 +35789,12 @@ async function cancelRfDetrTrainingJobRequest() {
                 errors.push("instruction_export_validation.row_count does not match selected_flattened_row_count");
             }
         }
+        if (!report.instruction_settings || typeof report.instruction_settings !== "object" || Array.isArray(report.instruction_settings)) {
+            errors.push("report missing instruction_settings");
+        }
+        if (!String(report.instruction_settings_fingerprint || "").trim()) {
+            errors.push("report missing instruction_settings_fingerprint");
+        }
         const reviewRowCount = Number(report.instruction_review_row_count);
         if (!Number.isFinite(reviewRowCount) || reviewRowCount < 0) {
             errors.push("report instruction_review_row_count is missing or invalid");
@@ -35889,6 +35895,47 @@ async function cancelRfDetrTrainingJobRequest() {
                 errors.push(`instruction_artifact_consistency objects disagree between ${baselineConsistency.source} and ${source}`);
             }
         });
+        const settingsObjects = [];
+        const addSettingsObject = (source, value) => {
+            if (value === undefined || value === null) {
+                errors.push(`${source} instruction settings are missing`);
+                return;
+            }
+            if (typeof value !== "object" || Array.isArray(value)) {
+                errors.push(`${source} instruction settings are invalid`);
+                return;
+            }
+            settingsObjects.push({ source, signature: stableStringify(value) });
+        };
+        addSettingsObject("payload", payload?.instruction_settings);
+        addSettingsObject("report", report?.instruction_settings);
+        addSettingsObject("archive", payload?.instruction_archive?.settings);
+        let baselineSettings = null;
+        settingsObjects.forEach(({ source, signature }) => {
+            if (!baselineSettings) {
+                baselineSettings = { source, signature };
+            } else if (signature !== baselineSettings.signature) {
+                errors.push(`instruction settings disagree between ${baselineSettings.source} and ${source}`);
+            }
+        });
+        const fingerprints = [
+            ["payload", payload?.instruction_settings_fingerprint],
+            ["report", report?.instruction_settings_fingerprint],
+            ["archive", payload?.instruction_archive?.settings_fingerprint],
+        ];
+        let baselineFingerprint = null;
+        fingerprints.forEach(([source, value]) => {
+            const fingerprint = String(value || "").trim();
+            if (!fingerprint) {
+                errors.push(`${source} instruction_settings_fingerprint is missing`);
+                return;
+            }
+            if (!baselineFingerprint) {
+                baselineFingerprint = { source, fingerprint };
+            } else if (fingerprint !== baselineFingerprint.fingerprint) {
+                errors.push(`instruction settings fingerprints disagree between ${baselineFingerprint.source} and ${source}`);
+            }
+        });
         const normalizeQuestion = (value) => String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
         const normalizeImagePath = (value) => String(value || "")
             .trim()
@@ -35968,6 +36015,18 @@ async function cancelRfDetrTrainingJobRequest() {
                 const imagePath = normalizeImagePath(rawImagePath) || rawImagePath;
                 if (!rawImagePath) {
                     return;
+                }
+                const exportMetadata = row?.export_metadata && typeof row.export_metadata === "object" ? row.export_metadata : {};
+                if (!exportMetadata.settings || typeof exportMetadata.settings !== "object" || Array.isArray(exportMetadata.settings)) {
+                    errors.push(`archive row ${imagePath} export settings are missing`);
+                } else if (baselineSettings && stableStringify(exportMetadata.settings) !== baselineSettings.signature) {
+                    errors.push(`archive row ${imagePath} export settings do not match report settings`);
+                }
+                const rowSettingsFingerprint = String(exportMetadata.settings_fingerprint || "").trim();
+                if (!rowSettingsFingerprint) {
+                    errors.push(`archive row ${imagePath} settings_fingerprint is missing`);
+                } else if (baselineFingerprint && rowSettingsFingerprint !== baselineFingerprint.fingerprint) {
+                    errors.push(`archive row ${imagePath} settings_fingerprint does not match report settings`);
                 }
                 const selectedCount = Number(row?.export_metadata?.selected_training_row_count);
                 if (Number.isFinite(selectedCount) && selectedCount !== (trainingRowsByImage.get(imagePath) || 0)) {

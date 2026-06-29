@@ -259,7 +259,8 @@ Implemented protections include:
   before importing a selected file;
 - export failures use shared operator-facing status formatting;
 - report export validates sibling trainer, archive, and review row shapes plus
-  cross-artifact consistency before saving the run summary;
+  cross-artifact consistency and instruction settings fingerprints before
+  saving the run summary;
 - custom output directories mirror `job.json` into the default discovery root
   so active jobs are visible after restart or auto-resume.
 
@@ -296,7 +297,7 @@ The workflow validates at several boundaries:
 | Backend job request | normalized instruction settings, same-dataset active job conflicts, persisted runner conflicts |
 | Archive construction | source/generated separation, label-count contradictions, structured rewrite rules, manifest membership |
 | Review import | stable ids, dataset identity, image aliases, stale text, duplicate actionable rows, malformed rows |
-| Artifact export | trainer rows, review rows, report counts, archive/report/review consistency |
+| Artifact export | trainer rows, review rows, report counts, archive/report/review consistency, instruction settings fingerprint consistency |
 | Trainer loader | flat row shape, image resolution, duplicate image/question pairs, invalid review states, required metadata |
 | Soak/readiness tools | runtime trace binding, loop recovery evidence, unattended certification gates |
 
@@ -325,8 +326,9 @@ Important coverage areas include:
   handling in `tests/test_qwen_caption_prompt.py`;
 - instruction dataset request normalization, row-family validation,
   source/generated separation, deterministic metadata QA, review import,
-  artifact consistency, trainer-row validation, structured rewrites, empty
-  labels, and pilot certification gates in
+  artifact consistency, instruction settings fingerprint consistency,
+  trainer-row validation, structured rewrites, empty labels, and pilot
+  certification gates in
   `tests/test_qwen_caption_dataset_job.py`;
 - UI contract checks for instruction controls, busy-state locks, export gates,
   review-import blocking, prompt preview, model selector behavior, and caption

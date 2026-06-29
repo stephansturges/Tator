@@ -35868,14 +35868,30 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const lines = raw.split(/\r?\n/).filter((line) => line.trim());
         if (raw.startsWith("[") || raw.startsWith("{")) {
+            let parsed = null;
+            let parsedJson = false;
             try {
-                const parsed = JSON.parse(raw);
+                parsed = JSON.parse(raw);
+                parsedJson = true;
+            } catch (error) {
+                if (raw.startsWith("[") || lines.length === 1) {
+                    throw error;
+                }
+            }
+            if (parsedJson) {
                 if (Array.isArray(parsed)) {
                     return parsed;
                 }
                 if (parsed && typeof parsed === "object") {
-                    const rows = parsed.rows || parsed.review_rows || parsed.instruction_review_rows;
-                    if (Array.isArray(rows)) {
+                    const rowContainerFields = ["rows", "review_rows", "instruction_review_rows"];
+                    for (const field of rowContainerFields) {
+                        if (!Object.prototype.hasOwnProperty.call(parsed, field)) {
+                            continue;
+                        }
+                        const rows = parsed[field];
+                        if (!Array.isArray(rows)) {
+                            throw new Error(`Review JSON ${field} must be an array.`);
+                        }
                         return rows;
                     }
                     if (String(parsed.format || "").trim() === "tator_caption_instruction_review_rows_v1") {
@@ -35883,10 +35899,6 @@ async function cancelRfDetrTrainingJobRequest() {
                     }
                 }
                 throw new Error("Review JSON must be an array, a review row, or an object with rows.");
-            } catch (error) {
-                if (raw.startsWith("[") || lines.length === 1) {
-                    throw error;
-                }
             }
         }
         const rows = [];

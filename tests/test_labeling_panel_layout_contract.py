@@ -591,6 +591,7 @@ def test_qwen_caption_instruction_review_import_parser_accepts_reviewer_file_sha
             "assert.strictEqual(parseCaptionInstructionReviewRowsText(JSON.stringify({ instruction_review_rows: [row] }, null, 2))[0].qa_id, 'qa-1');",
             "assert.strictEqual(parseCaptionInstructionReviewRowsText(JSON.stringify(row, null, 2))[0].qa_id, 'qa-1');",
             "assert.strictEqual(parseCaptionInstructionReviewRowsText(JSON.stringify({ rows: [], instruction_review_rows: [row] }, null, 2)).length, 0);",
+            "assert.throws(() => parseCaptionInstructionReviewRowsText(JSON.stringify({ rows: null, instruction_review_rows: [row] }, null, 2)), /rows must be an array/);",
             "const jsonl = JSON.stringify(row) + '\\n' + JSON.stringify({ ...row, qa_id: 'qa-2', review_decision: 'accepted' });",
             "assert.strictEqual(parseCaptionInstructionReviewRowsText(jsonl).length, 2);",
             "assert.deepStrictEqual(captionInstructionReviewDatasetMismatches([{ ...row, dataset_id: 'ds' }], 'ds'), []);",

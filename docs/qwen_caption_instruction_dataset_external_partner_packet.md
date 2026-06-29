@@ -270,8 +270,10 @@ the same versioned `instruction_artifact_consistency` object in the archive,
 report, API payload, and summary. The browser report validator requires that
 embedded object to be present, versioned as
 `tator_caption_instruction_artifact_consistency_v1`, boolean-OK, and
-error-free. If the object is not OK, training readiness is forced to `blocked`
-with `instruction_artifacts_inconsistent`. The UI also
+error-free. For trainer, archive, and review downloads, the browser validates
+every embedded copy it receives and blocks the export if the payload, report,
+and archive copies disagree. If the object is not OK, training readiness is
+forced to `blocked` with `instruction_artifacts_inconsistent`. The UI also
 canonicalizes image paths before archive duplicate checks, selected-row counts,
 review-target identity checks, and trainer/archive/review comparisons, so path
 aliases such as `./frame.jpg`, `frame.jpg`, and split-prefixed forms cannot

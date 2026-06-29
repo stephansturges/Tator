@@ -35182,18 +35182,58 @@ async function cancelRfDetrTrainingJobRequest() {
             return { ok: false, errors, warnings };
         }
         const report = payload.instruction_report;
-        const backendConsistency = payload?.instruction_artifact_consistency
-            || report?.instruction_artifact_consistency
-            || payload?.instruction_archive?.instruction_artifact_consistency;
-        if (backendConsistency && typeof backendConsistency === "object") {
-            const backendErrors = Array.isArray(backendConsistency.errors) ? backendConsistency.errors : [];
-            const backendErrorCount = Number(backendConsistency.error_count || backendErrors.length || 0);
-            if (backendConsistency.ok === false || backendErrorCount > 0) {
+        const stableStringify = (value) => {
+            if (Array.isArray(value)) {
+                return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+            }
+            if (value && typeof value === "object") {
+                return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
+            }
+            return JSON.stringify(value);
+        };
+        const consistencyObjects = [];
+        const addConsistencyObject = (source, value) => {
+            if (value === undefined || value === null) {
+                return;
+            }
+            if (typeof value !== "object" || Array.isArray(value)) {
+                errors.push(`${source} instruction_artifact_consistency is invalid`);
+                return;
+            }
+            consistencyObjects.push({ source, value });
+        };
+        addConsistencyObject("payload", payload?.instruction_artifact_consistency);
+        addConsistencyObject("report", report?.instruction_artifact_consistency);
+        addConsistencyObject("archive", payload?.instruction_archive?.instruction_artifact_consistency);
+        let baselineConsistency = null;
+        consistencyObjects.forEach(({ source, value }) => {
+            const consistencyFormat = String(value.format || "").trim();
+            if (consistencyFormat !== "tator_caption_instruction_artifact_consistency_v1") {
+                errors.push(`${source} instruction_artifact_consistency format is invalid`);
+            }
+            if (typeof value.ok !== "boolean") {
+                errors.push(`${source} instruction_artifact_consistency.ok must be boolean`);
+            }
+            const backendErrors = Array.isArray(value.errors) ? value.errors : [];
+            const backendErrorCount = Number(value.error_count);
+            if (!Number.isFinite(backendErrorCount) || backendErrorCount < 0) {
+                errors.push(`${source} instruction_artifact_consistency.error_count is invalid`);
+            }
+            if (!Array.isArray(value.errors)) {
+                errors.push(`${source} instruction_artifact_consistency.errors must be an array`);
+            }
+            if (value.ok === false || (Number.isFinite(backendErrorCount) && backendErrorCount > 0)) {
                 const firstErrors = backendErrors.slice(0, 3).join("; ");
                 const suffix = backendErrors.length > 3 ? `; +${backendErrors.length - 3} more` : "";
-                errors.push(`backend artifact consistency failed${firstErrors ? `: ${firstErrors}${suffix}` : ""}`);
+                errors.push(`backend artifact consistency failed${firstErrors ? `: ${firstErrors}${suffix}` : ""}${source ? ` (${source})` : ""}`);
             }
-        }
+            const signature = stableStringify(value);
+            if (!baselineConsistency) {
+                baselineConsistency = { source, signature };
+            } else if (signature !== baselineConsistency.signature) {
+                errors.push(`instruction_artifact_consistency objects disagree between ${baselineConsistency.source} and ${source}`);
+            }
+        });
         const normalizeQuestion = (value) => String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
         const normalizeImagePath = (value) => String(value || "")
             .trim()

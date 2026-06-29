@@ -150,6 +150,11 @@ row before training.
   error-free. Report downloads therefore fail closed instead of presenting a
   report as valid when the run-level artifact-consistency proof is absent or
   failed.
+- The browser-side artifact-consistency validator now validates every embedded
+  consistency proof it receives in the payload, report, and archive, and blocks
+  trainer, archive, or review downloads when those replicated proof objects
+  disagree. A stale or hand-edited archive can no longer hide behind an OK
+  top-level consistency object.
 - Flat-layout instruction exports now canonicalize split-prefixed and
   non-split-prefixed image keys before merging manifest rows, saved captions,
   text-label mirrors, and generated QA. This prevents nested images such as

@@ -630,7 +630,9 @@ the current reviewed export set. The backend emits the same versioned
 payload, and summary. The browser report validator requires the embedded report
 object to be present, versioned as
 `tator_caption_instruction_artifact_consistency_v1`, boolean-OK, and
-error-free; failures force readiness to `blocked` with
+error-free. For trainer, archive, and review downloads, the browser validates
+every embedded copy it receives and blocks the export if the payload, report,
+and archive copies disagree; failures force readiness to `blocked` with
 `instruction_artifacts_inconsistent`.
 
 The consistency check also compares row identities, not only totals. Flattened

@@ -353,6 +353,7 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     assert "instruction_export_validation" in js
     assert "artifact consistency failed" in js
     assert "backend artifact consistency failed" in js
+    assert "instruction_artifact_consistency objects disagree" in js
     assert "does not match report selected row count" in js
     assert "function downloadCaptionInstructionJsonl" in js
     assert "function downloadCaptionInstructionArchive" in js
@@ -767,6 +768,7 @@ def test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports
             "    errors: [],",
             "  },",
             "};",
+            "const consistencyOk = report.instruction_artifact_consistency;",
             "assert.strictEqual(validateCaptionInstructionReport(report).ok, true);",
             "const missingReportConsistency = validateCaptionInstructionReport({ ...report, instruction_artifact_consistency: undefined });",
             "assert.strictEqual(missingReportConsistency.ok, false);",
@@ -816,7 +818,8 @@ def test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports
             "};",
             "const completePayload = {",
             "  instruction_report: report,",
-            "  instruction_archive: { image_count: 1 },",
+            "  instruction_artifact_consistency: consistencyOk,",
+            "  instruction_archive: { image_count: 1, instruction_artifact_consistency: consistencyOk },",
             "  instruction_training_rows: [trainingRow],",
             "  instruction_archive_rows: [archiveRow],",
             "  instruction_review_rows: [reviewRow],",
@@ -857,7 +860,10 @@ def test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports
             "const staleArchive = validateCaptionInstructionArtifactConsistency({ ...completePayload, instruction_archive_rows: [{ ...archiveRow, language_annotations: { generated_qa_pairs: [{ qa_id: 'qa-1', question: 'What is shown?', answer: 'A stale answer.' }] } }] }, 'training', { rowCount: 1 });",
             "assert.strictEqual(staleArchive.ok, false);",
             "assert(staleArchive.errors.some((error) => error.includes('archive candidate qa_id qa-1 image frame.jpg question \"what is shown?\" answer does not match training row answer')));",
-            "const backendMismatch = validateCaptionInstructionArtifactConsistency({ instruction_report: report, instruction_artifact_consistency: { ok: false, error_count: 1, errors: ['server mismatch'] } }, 'training', { rowCount: 1 });",
+            "const archiveConsistencyMismatch = validateCaptionInstructionArtifactConsistency({ ...completePayload, instruction_archive: { ...completePayload.instruction_archive, instruction_artifact_consistency: { ...consistencyOk, counts: { archive_row_count: 99 } } } }, 'training', { rowCount: 1 });",
+            "assert.strictEqual(archiveConsistencyMismatch.ok, false);",
+            "assert(archiveConsistencyMismatch.errors.some((error) => error.includes('instruction_artifact_consistency objects disagree between payload and archive')));",
+            "const backendMismatch = validateCaptionInstructionArtifactConsistency({ instruction_report: report, instruction_artifact_consistency: { format: 'tator_caption_instruction_artifact_consistency_v1', ok: false, error_count: 1, errors: ['server mismatch'] } }, 'training', { rowCount: 1 });",
             "assert.strictEqual(backendMismatch.ok, false);",
             "assert(backendMismatch.errors.some((error) => error.includes('backend artifact consistency failed: server mismatch')));",
         ]

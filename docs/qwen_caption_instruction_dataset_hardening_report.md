@@ -169,6 +169,10 @@ row before training.
   actionable row origins and duplicate or conflicting actionable review targets
   before calling the backend, giving operators immediate feedback on review
   packets that would fail the server-side transactional import.
+- Browser and backend artifact-consistency validation now require caption0 and
+  generated-QA review rows to carry dataset identity before export/import, even
+  while `review_decision` is blank. Review packets therefore fail before
+  download if they would become impossible to import after human review.
 - Review-import backend failures are formatted into row-specific operator
   messages instead of raw `review_rows_*` codes. Stale caption0/generated-QA
   text, dataset mismatch, duplicate actionable decisions, unsupported row
@@ -266,7 +270,7 @@ row before training.
   - `node --check ybat-master/ybat.js`
 - Focused instruction-dataset, export, and UI contract tests:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py tests/test_qwen_training_backend.py tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete tests/test_labeling_panel_layout_contract.py tests/test_qwen_caption_ui_smoke_tool.py -q`
-  - Current result: 197 passed.
+  - Current result: 198 passed.
 - Current artifact-consistency UI contract tests:
   - `./.venv-macos/bin/python -m pytest tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports tests/test_labeling_panel_layout_contract.py::test_qwen_caption_export_preserves_saved_alternates_and_primary_rows -q`
   - Result: 2 passed.
@@ -279,6 +283,9 @@ row before training.
 - Current no-op review-import guard:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_no_actionable_persisted_decisions tests/test_qwen_caption_dataset_job.py::test_caption_instruction_review_import_rejects_unsupported_review_decision tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_review_import_formats_backend_failures -q`
   - Result: 4 passed.
+- Current review-export dataset identity guard:
+  - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_requires_review_dataset_identity tests/test_qwen_caption_dataset_job.py::test_caption_instruction_artifact_consistency_validator_canonicalizes_image_paths tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_review_validator_blocks_bad_actionable_rows tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports tests/test_labeling_panel_layout_contract.py::test_qwen_caption_instruction_review_import_parser_accepts_reviewer_file_shapes -q`
+  - Result: 5 passed.
 - Current trainer-import fail-closed boundary tests:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_imports_flat_question_answer_rows tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_non_trainable_flat_rows tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_duplicate_flat_questions tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_normalized_duplicate_flat_questions tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_rejects_resolved_duplicate_flat_image_aliases tests/test_qwen_training_backend.py::test_qwen_conversation_dataset_ignores_blank_flat_rows_before_duplicate_check -q`
   - Result: 9 passed.
@@ -293,7 +300,7 @@ row before training.
   - Result: 2 passed.
 - Additional instruction archive provenance and manifest-gating regression:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py -q`
-  - Result: 112 passed.
+  - Result: 113 passed.
 - Caption0 structured-claim validation and instruction export validator
   regression:
   - `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py tests/test_labeling_panel_layout_contract.py -q`

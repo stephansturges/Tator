@@ -2639,7 +2639,9 @@ def test_caption_instruction_artifact_consistency_validator_canonicalizes_image_
         ],
         review_rows=[
             {
+                "dataset_id": "ds",
                 "image_path": "train/frame.jpg",
+                "row_origin": "generated_qa",
                 "qa_id": "qa-1",
                 "question": "What is shown?",
                 "training_answer": "A building.",
@@ -2655,6 +2657,58 @@ def test_caption_instruction_artifact_consistency_validator_canonicalizes_image_
     assert validation["error_count"] == 0
     assert validation["counts"]["training_identity_count"] == 1
     assert validation["counts"]["archive_candidate_identity_count"] == 1
+
+
+def test_caption_instruction_artifact_consistency_validator_requires_review_dataset_identity() -> None:
+    import localinferenceapi as api
+
+    report = {
+        "format": "tator_caption_instruction_report_v1",
+        "image_count": 1,
+        "selected_flattened_row_count": 0,
+        "instruction_review_row_count": 1,
+        "manual_review_required_count": 1,
+        "corpus_quality_metrics": {
+            "image_count": 1,
+            "selected_flattened_row_count": 0,
+        },
+        "instruction_export_validation": {
+            "ok": True,
+            "error_count": 0,
+            "errors": [],
+            "row_count": 0,
+        },
+    }
+
+    validation = api._caption_instruction_artifact_consistency_validation(
+        training_rows=[],
+        archive_rows=[
+            {
+                "image_path": "train/frame.jpg",
+                "language_annotations": {},
+                "deterministic_metadata_qa_pairs": [],
+                "export_metadata": {"selected_training_row_count": 0},
+            }
+        ],
+        review_rows=[
+            {
+                "image_path": "train/frame.jpg",
+                "row_origin": "generated_qa",
+                "qa_id": "qa-1",
+                "question": "What is shown?",
+                "candidate_answer": "A building.",
+                "selected_for_training": False,
+                "requires_manual_review": True,
+                "review_decision": "",
+            }
+        ],
+        report=report,
+        archive_image_count=1,
+    )
+
+    assert validation["ok"] is False
+    assert validation["error_count"] == 1
+    assert "review row 1 missing dataset_id for persisted language review row" in validation["errors"]
 
 
 def test_caption_instruction_training_validator_requires_complete_row_metadata() -> None:

@@ -413,6 +413,8 @@ being reported as applied with zero persisted decisions.
 
 It fails closed on:
 
+- caption0 or generated-QA review rows missing dataset identity, even before a
+  reviewer fills a decision
 - unsupported non-blank review decisions, such as typoed accepted/rejected
   values
 - persisted caption0 or generated-QA decisions missing an embedded dataset id
@@ -605,7 +607,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Latest recorded result:
 
 ```text
-197 passed
+198 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

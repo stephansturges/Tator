@@ -467,6 +467,7 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "missing review_decision field" in review_validator
     assert "missing review_notes field" in review_validator
     assert "unsupported review_decision" in review_validator
+    assert "missing dataset_id for persisted language review row" in review_validator
     assert "unsupported actionable row_origin" in review_validator
     assert "duplicate actionable review target" in review_validator
     assert "conflicting duplicate actionable review target" in review_validator
@@ -545,7 +546,7 @@ def test_qwen_caption_instruction_review_import_parser_accepts_reviewer_file_sha
             "assert.deepStrictEqual(captionInstructionReviewDatasetMismatches([{ ...row, dataset_id: 'ds' }], 'ds'), []);",
             "assert.deepStrictEqual(captionInstructionReviewDatasetMismatches([{ ...row, dataset_id: 'other' }], 'ds'), ['other']);",
             "const actionableRow = { ...row, row_origin: 'generated_qa', question: 'What is shown?', candidate_answer: 'A scene.', training_answer: 'A scene.', validation_status: 'accepted', selected_for_training: true, requires_manual_review: true, source_summary: {}, rejection_reasons: [], review_notes: '' };",
-            "assert(validateCaptionInstructionReviewRows([actionableRow]).errors.some((error) => error.includes('missing dataset_id')));",
+            "assert(validateCaptionInstructionReviewRows([actionableRow]).errors.some((error) => error.includes('missing dataset_id for persisted language review row')));",
             "assert(!validateCaptionInstructionReviewRows([{ ...actionableRow, dataset_id: 'ds' }]).errors.some((error) => error.includes('missing dataset_id')));",
         ]
     )
@@ -830,6 +831,7 @@ def test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports
             "};",
             "const reviewRow = {",
             "  format: 'tator_caption_instruction_review_rows_v1',",
+            "  dataset_id: 'ds',",
             "  image_path: 'frame.jpg',",
             "  qa_id: 'qa-1',",
             "  row_origin: 'generated_qa',",
@@ -933,6 +935,9 @@ def test_qwen_caption_instruction_review_validator_blocks_bad_actionable_rows():
             "assert(typoDecision.errors.some((error) => error.includes('unsupported review_decision')));",
             "const blankDecision = validateCaptionInstructionReviewRows([{ ...base, review_decision: '' }]);",
             "assert.strictEqual(blankDecision.ok, true);",
+            "const blankWithoutDataset = validateCaptionInstructionReviewRows([{ ...base, dataset_id: '', review_decision: '' }]);",
+            "assert.strictEqual(blankWithoutDataset.ok, false);",
+            "assert(blankWithoutDataset.errors.some((error) => error.includes('missing dataset_id for persisted language review row')));",
             "const duplicate = validateCaptionInstructionReviewRows([base, { ...base, row_type: 'external_edit' }]);",
             "assert.strictEqual(duplicate.ok, false);",
             "assert(duplicate.errors.some((error) => error.includes('duplicate actionable review target')));",

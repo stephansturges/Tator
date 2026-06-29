@@ -21988,6 +21988,14 @@ def _caption_instruction_artifact_consistency_validation(
             f"manual review row count {manual_review_required_count} does not match report manual review count {report_manual_review_count}"
         )
 
+    for index, row in enumerate(review_rows, start=1):
+        if not isinstance(row, Mapping):
+            errors.append(f"review row {index} is not an object")
+            continue
+        row_origin = str(row.get("row_origin") or "").strip()
+        if row_origin in {"caption0", "generated_qa"} and not str(row.get("dataset_id") or "").strip():
+            errors.append(f"review row {index} missing dataset_id for persisted language review row")
+
     image_paths: Set[str] = set()
     duplicate_image_paths: Set[str] = set()
     for index, row in enumerate(archive_rows, start=1):

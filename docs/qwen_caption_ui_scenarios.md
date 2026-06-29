@@ -169,7 +169,10 @@ import preflight also catches
 unsupported actionable row
 origins and duplicate or conflicting actionable review targets before sending
 the packet, while the backend also rejects rows that use different row
-identities but resolve to the same saved caption or generated-QA record. It
+identities but resolve to the same saved caption or generated-QA record. Review
+exports are blocked if caption0 or generated-QA rows are missing dataset
+identity, even before a reviewer fills a decision, so exported packets are
+import-ready by construction. It
 filters deterministic-only review files because deterministic
 rows are rebuilt from source labels rather than persisted; backend API/script
 imports also reject blank-decision or deterministic-only packets instead of

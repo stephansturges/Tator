@@ -304,6 +304,8 @@ Accepted decisions are:
 
 Review import fails closed on:
 
+- caption0 or generated-QA review rows missing dataset identity, even before a
+  reviewer fills a decision
 - missing embedded dataset id on persisted caption0 or generated-QA decisions
 - embedded dataset id mismatch
 - unsupported non-blank review decisions, such as typoed accepted/rejected
@@ -563,7 +565,7 @@ Result:
 Result:
 
 ```text
-197 passed
+198 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

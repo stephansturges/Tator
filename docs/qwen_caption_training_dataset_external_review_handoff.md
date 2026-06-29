@@ -688,6 +688,9 @@ at export time rather than persisted language records.
 The review import is deliberately conservative:
 
 - It accepts JSON arrays, JSON objects containing row arrays, and JSONL files.
+- It requires caption0 and generated-QA review rows to carry dataset identity
+  before export/import, even while `review_decision` is still blank, so review
+  packets are import-ready before a reviewer spends time on them.
 - It refuses to apply persisted caption0 or generated-QA decisions without an
   embedded dataset id, or with an embedded dataset id that does not match the
   selected dataset, and this rejection happens before any review metadata is
@@ -946,7 +949,7 @@ Current combined caption/instruction/trainer/UI contract suite:
 Result:
 
 ```text
-197 passed
+198 passed
 ```
 
 Focused artifact-consistency contract, including same-count identity mismatch

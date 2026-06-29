@@ -364,6 +364,8 @@ language records.
 
 Review import fails closed on:
 
+- caption0 or generated-QA review rows missing dataset identity, even before a
+  reviewer fills a decision
 - missing embedded dataset id for persisted language decisions
 - dataset id mismatch
 - unsupported non-blank review decisions
@@ -598,11 +600,13 @@ node --check ybat-master/ybat.js
 Result:
 
 ```text
-197 passed
+198 passed
 ```
 
 Additional focused validation recorded in the supporting hardening docs covers:
 
+- review-export refusal when persisted language review rows lack dataset
+  identity
 - zero-action review import refusal for blank-decision and deterministic-only
   API packets
 - artifact consistency and same-count identity mismatches

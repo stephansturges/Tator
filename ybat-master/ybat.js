@@ -34977,8 +34977,8 @@ async function cancelRfDetrTrainingJobRequest() {
             if (hasActionableDecision && rowOrigin && !["caption0", "generated_qa", "deterministic_metadata_qa"].includes(rowOrigin)) {
                 errors.push(`review row ${rowNumber} has unsupported actionable row_origin`);
             }
-            if (hasActionableDecision && ["caption0", "generated_qa"].includes(rowOrigin) && !rowDatasetId) {
-                errors.push(`review row ${rowNumber} missing dataset_id`);
+            if (["caption0", "generated_qa"].includes(rowOrigin) && !rowDatasetId) {
+                errors.push(`review row ${rowNumber} missing dataset_id for persisted language review row`);
             }
             if (hasActionableDecision && ["caption0", "generated_qa"].includes(rowOrigin)) {
                 const normalizedQuestion = question.replace(/\s+/g, " ").toLowerCase();

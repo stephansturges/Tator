@@ -22360,6 +22360,62 @@ def _caption_instruction_artifact_consistency_validation(
         if review_answer and training_answer and review_answer != training_answer:
             errors.append(f"selected review row {_identity_label(identity)} training_answer does not match training row answer")
 
+    actual_counts = {
+        "training_row_count": training_row_count,
+        "archive_row_count": archive_row_count,
+        "review_row_count": review_row_count,
+        "selected_review_row_count": selected_review_row_count,
+        "selected_manual_review_row_count": len(selected_manual_review_rows),
+        "accepted_manual_review_row_count": accepted_manual_review_count,
+        "pending_manual_review_row_count": pending_manual_review_count,
+        "rejected_manual_review_row_count": rejected_manual_review_count,
+        "needs_revision_manual_review_row_count": needs_revision_manual_review_count,
+        "manual_review_required_count": manual_review_required_count,
+        "report_image_count": report_image_count,
+        "report_selected_flattened_row_count": report_selected_count,
+        "report_instruction_review_row_count": report_review_row_count,
+        "report_manual_review_required_count": report_manual_review_count,
+        "archive_image_count": archive_image_count,
+        "instruction_export_validation_row_count": export_row_count,
+        "training_identity_count": len(training_identities),
+        "selected_review_identity_count": len(selected_review_identities),
+        "archive_candidate_identity_count": len(archive_candidate_identities),
+    }
+    report_consistency = report_mapping.get("instruction_artifact_consistency")
+    if report_consistency is not None:
+        report_consistency_mapping = report_consistency if isinstance(report_consistency, Mapping) else {}
+        if not report_consistency_mapping:
+            errors.append("instruction_report.instruction_artifact_consistency is invalid")
+        else:
+            if str(report_consistency_mapping.get("format") or "").strip() != CAPTION_INSTRUCTION_ARTIFACT_CONSISTENCY_FORMAT:
+                errors.append("instruction_report.instruction_artifact_consistency format is invalid")
+            if not isinstance(report_consistency_mapping.get("ok"), bool):
+                errors.append("instruction_report.instruction_artifact_consistency.ok is invalid")
+            elif report_consistency_mapping.get("ok") is not True:
+                errors.append("instruction_report.instruction_artifact_consistency is not ok")
+            embedded_error_count = _optional_nonnegative_int(
+                report_consistency_mapping.get("error_count"),
+                "instruction_report.instruction_artifact_consistency.error_count",
+            )
+            if embedded_error_count and embedded_error_count > 0:
+                errors.append("instruction_report.instruction_artifact_consistency has errors")
+            if not isinstance(report_consistency_mapping.get("errors"), list):
+                errors.append("instruction_report.instruction_artifact_consistency.errors is invalid")
+            embedded_counts = report_consistency_mapping.get("counts")
+            if isinstance(embedded_counts, Mapping):
+                for count_key, actual_value in actual_counts.items():
+                    if count_key not in embedded_counts or actual_value is None:
+                        continue
+                    embedded_count = _optional_nonnegative_int(
+                        embedded_counts.get(count_key),
+                        f"instruction_report.instruction_artifact_consistency.counts.{count_key}",
+                    )
+                    if embedded_count is not None and embedded_count != actual_value:
+                        errors.append(
+                            f"instruction_report.instruction_artifact_consistency.counts.{count_key} "
+                            f"{embedded_count} does not match actual count {actual_value}"
+                        )
+
     return {
         "format": CAPTION_INSTRUCTION_ARTIFACT_CONSISTENCY_FORMAT,
         "ok": not errors,
@@ -22367,27 +22423,7 @@ def _caption_instruction_artifact_consistency_validation(
         "errors": errors,
         "warnings": warnings,
         "settings_fingerprint": expected_fingerprint,
-        "counts": {
-            "training_row_count": training_row_count,
-            "archive_row_count": archive_row_count,
-            "review_row_count": review_row_count,
-            "selected_review_row_count": selected_review_row_count,
-            "selected_manual_review_row_count": len(selected_manual_review_rows),
-            "accepted_manual_review_row_count": accepted_manual_review_count,
-            "pending_manual_review_row_count": pending_manual_review_count,
-            "rejected_manual_review_row_count": rejected_manual_review_count,
-            "needs_revision_manual_review_row_count": needs_revision_manual_review_count,
-            "manual_review_required_count": manual_review_required_count,
-            "report_image_count": report_image_count,
-            "report_selected_flattened_row_count": report_selected_count,
-            "report_instruction_review_row_count": report_review_row_count,
-            "report_manual_review_required_count": report_manual_review_count,
-            "archive_image_count": archive_image_count,
-            "instruction_export_validation_row_count": export_row_count,
-            "training_identity_count": len(training_identities),
-            "selected_review_identity_count": len(selected_review_identities),
-            "archive_candidate_identity_count": len(archive_candidate_identities),
-        },
+        "counts": actual_counts,
     }
 
 

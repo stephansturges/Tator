@@ -2859,6 +2859,126 @@ def test_caption_instruction_artifact_consistency_validator_canonicalizes_image_
     assert validation["counts"]["training_identity_count"] == 1
     assert validation["counts"]["archive_candidate_identity_count"] == 1
 
+    failed_embedded_consistency = api._caption_instruction_artifact_consistency_validation(
+        training_rows=[
+            {
+                "image_path": "./train//frame.jpg",
+                "question": "What is shown?",
+                "answer": "A building.",
+                "metadata": {"qa_id": "qa-1"},
+            }
+        ],
+        archive_rows=[
+            {
+                "image_path": "train/frame.jpg",
+                "source_annotations": {},
+                "language_annotations": {
+                    "generated_qa_pairs": [
+                        {
+                            "qa_id": "qa-1",
+                            "question": "What is shown?",
+                            "answer": "A building.",
+                        }
+                    ]
+                },
+                "deterministic_metadata_qa_pairs": [],
+                "export_metadata": {
+                    "selected_training_row_count": 1,
+                    "settings": settings,
+                    "settings_fingerprint": settings_fingerprint,
+                },
+            }
+        ],
+        review_rows=[
+            {
+                "format": "tator_caption_instruction_review_rows_v1",
+                "dataset_id": "ds",
+                "image_path": "train/frame.jpg",
+                "row_origin": "generated_qa",
+                "qa_id": "qa-1",
+                "row_type": "generated_qa",
+                "question": "What is shown?",
+                "candidate_answer": "A building.",
+                "training_answer": "A building.",
+                "validation_status": "accepted",
+                "selected_for_training": True,
+                "requires_manual_review": True,
+                "review_decision": "accepted",
+                "review_notes": "",
+                "rejection_reasons": [],
+                "source_summary": {"status": "empty_label_file"},
+            }
+        ],
+        report={
+            **report,
+            "instruction_artifact_consistency": {
+                "format": api.CAPTION_INSTRUCTION_ARTIFACT_CONSISTENCY_FORMAT,
+                "ok": False,
+                "error_count": 1,
+                "errors": ["previous mismatch"],
+                "counts": dict(validation["counts"]),
+            },
+        },
+        archive_image_count=1,
+    )
+    stale_embedded_consistency = api._caption_instruction_artifact_consistency_validation(
+        training_rows=[],
+        archive_rows=[],
+        review_rows=[],
+        report={
+            **report,
+            "image_count": 0,
+            "selected_flattened_row_count": 0,
+            "instruction_review_row_count": 0,
+            "manual_review_required_count": 0,
+            "corpus_quality_metrics": {
+                **report["corpus_quality_metrics"],
+                "image_count": 0,
+                "selected_flattened_row_count": 0,
+            },
+            "instruction_export_validation": {"ok": True, "error_count": 0, "errors": [], "row_count": 0},
+            "training_readiness": {
+                "status": "ready",
+                "ready_for_training": True,
+                "blocking_reasons": [],
+                "required_actions": [],
+                "quality_warnings": [],
+                "thresholds": {},
+                "selected_training_row_count": 0,
+                "selected_review_row_count": 0,
+                "selected_manual_review_row_count": 0,
+                "accepted_manual_review_row_count": 0,
+                "pending_manual_review_row_count": 0,
+                "rejected_manual_review_row_count": 0,
+                "needs_revision_manual_review_row_count": 0,
+                "instruction_export_validation_error_count": 0,
+            },
+            "instruction_artifact_consistency": {
+                "format": api.CAPTION_INSTRUCTION_ARTIFACT_CONSISTENCY_FORMAT,
+                "ok": True,
+                "error_count": 0,
+                "errors": [],
+                "counts": {
+                    "training_row_count": 1,
+                    "archive_row_count": 0,
+                    "review_row_count": 0,
+                },
+            },
+        },
+        archive_image_count=0,
+        settings=settings,
+        settings_fingerprint=settings_fingerprint,
+    )
+
+    assert failed_embedded_consistency["ok"] is False
+    assert "instruction_report.instruction_artifact_consistency is not ok" in failed_embedded_consistency["errors"]
+    assert "instruction_report.instruction_artifact_consistency has errors" in failed_embedded_consistency["errors"]
+    assert stale_embedded_consistency["ok"] is False
+    assert (
+        "instruction_report.instruction_artifact_consistency.counts.training_row_count "
+        "1 does not match actual count 0"
+    ) in stale_embedded_consistency["errors"]
+
 
 def test_caption_instruction_artifact_consistency_validator_blocks_settings_mismatches() -> None:
     import localinferenceapi as api

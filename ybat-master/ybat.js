@@ -36117,6 +36117,7 @@ async function cancelRfDetrTrainingJobRequest() {
             : {};
         const selectedReviewRowsForReadiness = reviewRows.filter((row) => row?.selected_for_training === true);
         const selectedManualReviewRowsForReadiness = selectedReviewRowsForReadiness.filter((row) => row?.requires_manual_review === true);
+        const manualReviewRequiredRowsForConsistency = reviewRows.filter((row) => row?.requires_manual_review === true);
         const acceptedManualReviewCount = selectedManualReviewRowsForReadiness.filter((row) => normalizeCaptionInstructionReviewDecision(row?.review_decision) === "accepted").length;
         const rejectedManualReviewCount = selectedManualReviewRowsForReadiness.filter((row) => normalizeCaptionInstructionReviewDecision(row?.review_decision) === "rejected").length;
         const needsRevisionManualReviewCount = selectedManualReviewRowsForReadiness.filter((row) => normalizeCaptionInstructionReviewDecision(row?.review_decision) === "needs_revision").length;
@@ -36142,6 +36143,28 @@ async function cancelRfDetrTrainingJobRequest() {
                 errors.push(`training_readiness.${key} ${reported} does not match actual count ${actual}`);
             }
         });
+        const optionalCount = (value) => {
+            const count = Number(value);
+            return Number.isInteger(count) && count >= 0 ? count : null;
+        };
+        const actualConsistencyCounts = {
+            training_row_count: trainingRows.length,
+            archive_row_count: archiveRows.length,
+            review_row_count: reviewRows.length,
+            selected_review_row_count: selectedReviewRowsForReadiness.length,
+            selected_manual_review_row_count: selectedManualReviewRowsForReadiness.length,
+            accepted_manual_review_row_count: acceptedManualReviewCount,
+            pending_manual_review_row_count: pendingManualReviewCount,
+            rejected_manual_review_row_count: rejectedManualReviewCount,
+            needs_revision_manual_review_row_count: needsRevisionManualReviewCount,
+            manual_review_required_count: manualReviewRequiredRowsForConsistency.length,
+            report_image_count: optionalCount(report?.image_count),
+            report_selected_flattened_row_count: optionalCount(report?.selected_flattened_row_count),
+            report_instruction_review_row_count: optionalCount(report?.instruction_review_row_count),
+            report_manual_review_required_count: optionalCount(report?.manual_review_required_count),
+            archive_image_count: optionalCount(payload?.instruction_archive?.image_count),
+            instruction_export_validation_row_count: optionalCount(report?.instruction_export_validation?.row_count),
+        };
         if (trainingRows.length || reviewRows.length || archiveRows.length) {
             const trainingByIdentity = new Map();
             const selectedReviewByIdentity = new Map();
@@ -36222,7 +36245,27 @@ async function cancelRfDetrTrainingJobRequest() {
                     errors.push(`selected review row ${identityLabel(identity)} training_answer does not match training row answer`);
                 }
             });
+            actualConsistencyCounts.training_identity_count = trainingByIdentity.size;
+            actualConsistencyCounts.selected_review_identity_count = selectedReviewByIdentity.size;
+            actualConsistencyCounts.archive_candidate_identity_count = archiveCandidateByIdentity.size;
         }
+        consistencyObjects.forEach(({ source, value }) => {
+            const counts = value?.counts;
+            if (!counts || typeof counts !== "object" || Array.isArray(counts)) {
+                return;
+            }
+            Object.entries(actualConsistencyCounts).forEach(([key, actual]) => {
+                if (actual === null || !Object.prototype.hasOwnProperty.call(counts, key)) {
+                    return;
+                }
+                const reported = Number(counts[key]);
+                if (!Number.isInteger(reported) || reported < 0) {
+                    errors.push(`${source} instruction_artifact_consistency.counts.${key} is invalid`);
+                } else if (reported !== actual) {
+                    errors.push(`${source} instruction_artifact_consistency.counts.${key} ${reported} does not match actual count ${actual}`);
+                }
+            });
+        });
         const metrics = report?.corpus_quality_metrics || {};
         const rowCount = Number(rowValidation?.rowCount);
         const selectedCount = Number(metrics.selected_flattened_row_count);

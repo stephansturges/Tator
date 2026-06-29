@@ -20,6 +20,8 @@ annotation-assisted VLM training-data workflow.
 
 Supporting documents:
 
+- `docs/qwen_caption_training_dataset_external_implementation_report.md`
+  explains what was built and why in a compact external-review narrative.
 - `docs/qwen_caption_training_dataset_complete_partner_packet.md` is the
   complete partner-facing overview, requirement mapping, workflow explanation,
   and review checklist.

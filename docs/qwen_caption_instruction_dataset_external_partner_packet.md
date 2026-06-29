@@ -9,6 +9,9 @@ The newest canonical partner packet is
 as the external starting point; this packet remains a supporting implementation
 detail document for the instruction-dataset feature.
 
+For a compact external-review narrative of what was built and why, start with
+`docs/qwen_caption_training_dataset_external_implementation_report.md`.
+
 This packet explains what was implemented in the caption-to-instruction-dataset
 work, why those choices were made, what artifacts the workflow produces, and
 what still needs real-data validation before the generated corpus is treated as

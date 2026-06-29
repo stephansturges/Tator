@@ -33,6 +33,9 @@ history from commits:
 
 The companion documents are supporting references:
 
+- `docs/qwen_caption_training_dataset_external_implementation_report.md`
+  provides the external narrative of what was built, why each major design
+  choice was made, and how the workflow should be reviewed.
 - `docs/qwen_caption_ui_scenarios.md` describes UI behavior and operator
   scenarios.
 - `docs/qwen_caption_prompt_stack.md` describes prompt construction, token

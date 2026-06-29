@@ -24074,6 +24074,12 @@ def _caption_instruction_review_image_candidates(
     if not image_path:
         return image_names, image_keys
 
+    original_image_path = str(row.get("original_image_path") or "").strip()
+    if original_image_path and original_image_path != image_path:
+        original_names, original_keys = _caption_instruction_review_path_aliases(original_image_path, split)
+        image_names.update(original_names)
+        image_keys.update(original_keys)
+
     normalized_path = _caption_instruction_normalized_image_path(image_path)
     names_to_try = sorted(image_names or {image_path, normalized_path})
     inferred_split = ""
@@ -24112,7 +24118,13 @@ def _caption_instruction_review_image_candidates(
 def _caption_instruction_review_target_key(row: Mapping[str, Any]) -> Tuple[str, str, str, str, str]:
     row_origin = str(row.get("row_origin") or "").strip()
     qa_id = str(row.get("qa_id") or "").strip()
-    image_path = str(row.get("image_path") or row.get("image_name") or row.get("image") or "").strip()
+    image_path = str(
+        row.get("original_image_path")
+        or row.get("image_path")
+        or row.get("image_name")
+        or row.get("image")
+        or ""
+    ).strip()
     split = str(row.get("split") or "").strip()
     image_key = _caption_instruction_normalized_image_path(image_path)
     if split and image_key and not re.match(r"^(?:train|val|valid|test)/", image_key):

@@ -3671,6 +3671,15 @@ def test_caption_alternate_routes_append_update_export_and_delete(
         archive_sub = next(item for item in archive_lines if item.get("original_image_path") == "sub/img.jpg")
         assert archive_sub["image_path"] == "images/train/sub/img.jpg"
         assert archive_sub["export_metadata"]["original_image_path"] == "sub/img.jpg"
+        bundle_review_lines = [
+            json.loads(line)
+            for line in zf.read("caption_instruction_review.jsonl").decode("utf-8").splitlines()
+            if line.strip()
+        ]
+        bundle_review_row = next(row for row in bundle_review_lines if row["selected_for_training"])
+        assert bundle_review_row["image_path"] == "images/train/sub/img.jpg"
+        assert bundle_review_row["original_image_path"] == "sub/img.jpg"
+        assert bundle_review_row["bundle_image_sha256"] == image_asset["sha256"]
     assert all(
         row["format"] == "tator_caption_instruction_review_rows_v1"
         and "review_decision" in row
@@ -3717,6 +3726,17 @@ def test_caption_alternate_routes_append_update_export_and_delete(
     )
     assert malformed_review_response.status_code == 400
     assert "review_rows_list_required" in malformed_review_response.text
+    bundled_review_row = {
+        **bundle_review_row,
+        "review_decision": "accepted",
+        "review_notes": "bundle review import resolves original image path",
+    }
+    bundled_review_response = client.post(
+        "/datasets/ds/captions/instruction_review",
+        json=[bundled_review_row],
+    )
+    assert bundled_review_response.status_code == 200
+    assert bundled_review_response.json()["applied_count"] == 1
     array_review_row = {
         **selected_review_row,
         "review_decision": "accepted",

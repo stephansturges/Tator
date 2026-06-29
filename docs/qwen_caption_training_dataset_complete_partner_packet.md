@@ -139,7 +139,25 @@ For external review, provide this file plus the following supporting files:
 - `docs/qwen_caption_prompt_stack.md`
 - `docs/qwen_caption_ui_scenarios.md`
 
-If sample artifacts are shared with the documentation, include the complete
+If sample artifacts are shared with the documentation, the preferred handoff is
+the self-contained training bundle from the same run. That bundle contains:
+
+- copied image bytes under `images/...`;
+- effective label files under `labels/...`;
+- `caption_instruction_training.jsonl`;
+- `caption_instruction_archive.jsonl`;
+- `caption_instruction_review.jsonl`;
+- `caption_instruction_report.json`;
+- `labelmap.txt`;
+- `caption_instruction_bundle_manifest.json`.
+
+The bundle manifest records row counts, instruction settings, copied image
+assets, copied label assets, file sizes, and SHA-256 checksums for bundle
+contents. The manifest's `files` list covers payload files written before the
+manifest itself; the manifest is still present in the zip but is not
+self-checksummed by that list.
+
+If individual artifacts are shared instead of the bundle, include the complete
 artifact set from the same run:
 
 - trainer JSONL
@@ -150,7 +168,9 @@ artifact set from the same run:
 
 Do not share trainer JSONL alone as proof of correctness. The trainer file is
 the model-input artifact; the archive, review file, and report are the evidence
-that explain whether those model-input rows should be trusted.
+that explain whether those model-input rows should be trusted. Do not share
+JSONL rows without the images when the external reviewer is expected to run a
+loader or training dry run.
 
 ## One-Page Decision Summary
 
@@ -171,6 +191,8 @@ What exists now:
   defaults for long jobs.
 - Four export artifacts: flat trainer JSONL, per-image archive JSONL,
   candidate-level review JSONL, and report JSON.
+- A self-contained training bundle ZIP that packages copied images, effective
+  labels, JSONL/JSON artifacts, `labelmap.txt`, and a checksum manifest.
 - Browser-side, backend-side, and trainer-side validation gates.
 - Review JSONL import that applies review metadata only.
 
@@ -206,6 +228,9 @@ caption-derived VLM instruction datasets:
 - Multi-row output per image: `caption0`, generated visual QA, and optional
   deterministic label-derived QA.
 - Separate trainer, archive, review, and report artifacts.
+- Self-contained bundle export for external handoff, with copied images,
+  effective labels, path rewriting, original-path metadata, and SHA-256 image
+  provenance.
 - Browser validation, server validation, and trainer-import validation.
 - Review JSONL download and reviewed JSONL import.
 - API/script strict export mode for trainer-ready exports.
@@ -523,6 +548,7 @@ below.
 | Source/generated separation | `source_annotations`, `language_annotations`, `deterministic_metadata_qa_pairs`, `flattened_training_rows` | Implemented |
 | Human review loop | **Download review JSONL** and **Import reviewed JSONL** | Implemented |
 | Trainer import compatibility | Qwen training loader imports flat rows directly | Implemented |
+| Self-contained external handoff | **Download training bundle** creates a ZIP with copied images, effective labels, trainer/archive/review/report artifacts, `labelmap.txt`, and a checksum manifest | Implemented |
 | Set-and-forget operation | persisted backend jobs, recovery controls, progress mirroring, crash-supervision checks | Implemented |
 | Dense prompt safety | prompt budget accounting and representative box subsets | Implemented |
 | Repetition or loop safety | streaming loop inspector, controlled retry, fallback, deterministic recovery | Implemented |
@@ -891,15 +917,15 @@ The intended operator workflow is:
    - give the generator read-only label context
    - strict QA grounding
 4. Click **Create VLM training dataset**.
-5. Download the generated artifacts:
-   - instruction JSONL for trainer import
-   - instruction archive JSONL for audit
-   - review JSONL for human decisions
-   - instruction report JSON for readiness and metrics
-6. Review generated-language rows outside the app.
-7. Import reviewed JSONL decisions.
-8. Re-export the final trainable instruction JSONL.
-9. Import the final flat JSONL into the Qwen trainer.
+5. Download the training bundle as the preferred self-contained handoff.
+6. If the bundle is not yet ready, download diagnostic archive/review/report
+   artifacts to understand what needs review or repair.
+7. Review generated-language rows outside the app.
+8. Import reviewed JSONL decisions.
+9. Re-export the final trainable training bundle or instruction JSONL with
+   **Require ready report for trainer JSONL** enabled.
+10. Import the final flat JSONL into the Qwen trainer or run a dry run from the
+    extracted bundle.
 
 Ordinary **Caption image**, **Caption next N**, and **Caption all images**
 remain captioning workflows. They are not silently converted into training-data
@@ -918,16 +944,26 @@ For a normal UI run:
 5. Click **Create VLM training dataset**.
 6. Leave the browser open if convenient, but rely on the backend job and
    attach/recover controls for durability.
-7. Download all four artifacts:
+7. Download the training bundle:
+   - `images/...`
+   - `labels/...`
    - `caption_instruction_training.jsonl`
    - `caption_instruction_archive.jsonl`
    - `caption_instruction_review.jsonl`
    - `caption_instruction_report.json`
-8. Review generated-language rows in the review JSONL.
-9. Import the reviewed JSONL.
-10. Re-export trainer JSONL with **Require ready report for trainer JSONL**
+   - `labelmap.txt`
+   - `caption_instruction_bundle_manifest.json`
+8. If a reviewer needs individual files rather than the ZIP, download all four
+   JSON/JSONL artifacts from the same run:
+   - `caption_instruction_training.jsonl`
+   - `caption_instruction_archive.jsonl`
+   - `caption_instruction_review.jsonl`
+   - `caption_instruction_report.json`
+9. Review generated-language rows in the review JSONL.
+10. Import the reviewed JSONL.
+11. Re-export the training bundle or trainer JSONL with **Require ready report for trainer JSONL**
     enabled.
-11. Run the trainer loader or a small fine-tuning dry run.
+12. Run the trainer loader or a small fine-tuning dry run.
 
 For scripted export checks, call the caption export endpoint with the same row
 family settings used by the UI. The strict trainer-export gate is:
@@ -984,6 +1020,7 @@ The caption panel now includes a compact instruction-dataset section with:
 - **Give generator read-only label context**
 - **Strict QA grounding**
 - **Require ready report for trainer JSONL**
+- **Download training bundle**
 - **Download instruction JSONL**
 - **Download instruction archive**
 - **Download review JSONL**
@@ -1008,7 +1045,8 @@ The main implementation responsibilities are split as follows.
 | Dataset job launch | `localinferenceapi.py` | Starts persisted caption jobs, passes instruction settings to the runner, mirrors job progress, and applies backend job lifecycle rules |
 | Source annotation and archive construction | `localinferenceapi.py` | Builds source summaries, generated-QA records, deterministic metadata QA, flattened rows, archive rows, review rows, report, export validation, artifact consistency, and readiness |
 | Review import | `localinferenceapi.py` and `api/datasets.py` | Accepts JSON arrays, wrapper objects, or single review-row objects; applies metadata-only review decisions to saved caption0/generated-QA records; and rejects malformed, stale, ambiguous, duplicate, scalar, or wrong-dataset packets |
-| Export API | `api/datasets.py` | Exposes caption exports and the optional `require_ready_instruction_export` server-side gate |
+| Export API | `api/datasets.py` | Exposes caption exports, the optional `require_ready_instruction_export` server-side gate, and `/captions/instruction_bundle` for self-contained handoff ZIPs |
+| Bundle packaging | `localinferenceapi.py` | Copies image bytes and effective label files, rewrites bundled artifact image paths to `images/...`, preserves original image paths and image SHA-256 metadata, validates rows and artifact consistency, and writes a manifest |
 | UI workflow | `ybat-master/ybat.js` and `ybat-master/ybat.css` | Exposes controls, validates exports before download, formats operator errors, imports reviewed JSONL, and keeps the panel usable at narrow widths |
 | Trainer import | `tools/qwen_training.py` | Imports flat image/question/answer rows, preserves metadata, resolves image paths, and rejects non-trainable rows |
 | Runtime hardening | `localinferenceapi.py`, runner tooling, and caption docs | Handles prompt pressure, representative box lists, output-loop detection, recovery, set-and-forget supervision, and progress artifacts |
@@ -1102,30 +1140,101 @@ Reviewers fill `accepted`, `rejected`, or `needs_revision` in
 - export validation
 - training readiness
 
+### Self-Contained Training Bundle
+
+The self-contained bundle is the preferred external handoff artifact. It is
+downloaded from the UI with **Download training bundle** or from:
+
+```text
+GET /datasets/{dataset_id}/captions/instruction_bundle
+```
+
+The endpoint uses the same instruction settings as trainer JSONL export:
+
+- `include_caption0_in_training`
+- `include_generated_qa_in_training`
+- `include_deterministic_metadata_qa`
+- `qa_mix`
+- `answer_format`
+- `require_ready_instruction_export`
+
+`require_ready_instruction_export` defaults to `true`. With that default, the
+bundle refuses to download when the instruction report is blocked or still
+needs review. A reviewer can request a diagnostic bundle with
+`require_ready_instruction_export=false`, but that bundle is for audit and
+repair, not for training use.
+
+The ZIP contains:
+
+| Path | Purpose |
+| --- | --- |
+| `images/...` | Copied image bytes from the selected dataset |
+| `labels/...` | Effective label files at export time, including empty files when the source state is empty |
+| `caption_instruction_training.jsonl` | Flat trainer rows with image paths rewritten to bundled `images/...` paths |
+| `caption_instruction_archive.jsonl` | Per-image archive rows with bundled paths plus original-path metadata |
+| `caption_instruction_review.jsonl` | Candidate-level review rows with bundled paths plus original-path metadata |
+| `caption_instruction_report.json` | Run-level readiness and consistency report |
+| `labelmap.txt` | Exported label map from the dataset manifest |
+| `caption_instruction_bundle_manifest.json` | Bundle inventory, settings, row counts, assets, and checksums |
+
+The bundle rewrites training row `image_path` values to the copied image paths
+so a trainer can consume the ZIP after extraction without depending on the
+original workstation image root. It also preserves the original image path and
+image SHA-256 in row metadata. Archive and review rows carry the same
+provenance so reviewers can trace a bundled path back to the application image
+record. Reviewed rows from the bundle can be imported back into the application
+because the review importer resolves `original_image_path` as an image identity
+alias while keeping the bundled path visible for external inspection.
+
+The exporter validates the bundle before returning it:
+
+- at least one archive row must exist;
+- every selected trainer row must resolve to a copied image;
+- rewritten training rows must satisfy the instruction training-row validator;
+- rewritten trainer, archive, review, and report artifacts must satisfy the
+  artifact-consistency validator;
+- copied image files must stay inside the resolved dataset image root;
+- the ZIP must contain every file the bundle writer declares required.
+
+This bundle exists because external review and trainer dry runs should not
+depend on a mutable local image folder. The JSONL files remain useful on their
+own for inspection, but the bundle is the reproducible handoff unit.
+
 ## How To Inspect A Generated Packet
 
-An external reviewer should inspect artifacts in this order:
+An external reviewer should inspect the training bundle in this order:
 
-1. **Instruction report JSON**: check `training_readiness`, row counts,
+1. **Bundle manifest**: confirm the manifest format, row counts, instruction
+   settings, image count, label count, file inventory, and SHA-256 checksums.
+   Verify that `caption_instruction_training.jsonl`,
+   `caption_instruction_archive.jsonl`, `caption_instruction_review.jsonl`,
+   `caption_instruction_report.json`, `labelmap.txt`, copied images, and copied
+   labels are present.
+2. **Copied images and labels**: confirm that trainer rows point to bundled
+   `images/...` paths and that effective labels under `labels/...` reflect the
+   source state used for export. Empty label files are valid when the effective
+   source evidence for that image is empty.
+3. **Instruction report JSON**: check `training_readiness`, row counts,
    rejection reasons, corpus quality metrics, `instruction_export_validation`,
    and `instruction_artifact_consistency`.
-2. **Archive JSONL**: choose a few images and verify that source annotations,
+4. **Archive JSONL**: choose a few images and verify that source annotations,
    `caption0`, generated QA candidates, deterministic QA, rejected rows, and
    selected flattened rows are separated.
-3. **Review JSONL**: confirm that generated-language rows needing review expose
+5. **Review JSONL**: confirm that generated-language rows needing review expose
    stable QA ids, image paths, row origins, candidate answers, selected training
    answers, validation state, review state, and rejection reasons.
-4. **Trainer JSONL**: verify that the flattened training rows contain the
+6. **Trainer JSONL**: verify that the flattened training rows contain the
    model-visible signal only: image path, question, answer, and optional audit
    metadata.
-5. **Trainer loader dry run**: import the flattened JSONL with the Qwen trainer
-   loader and confirm the loader accepts the same rows the report declares
-   trainable.
+7. **Trainer loader dry run**: extract the bundle, import the flattened JSONL
+   with the Qwen trainer loader, and confirm the loader accepts the same rows
+   the report declares trainable.
 
 The archive is the evidence artifact. The review JSONL is the human-decision
 artifact. The report is the run-certification artifact. The trainer JSONL is
-the model-input artifact. Treating one of these as a replacement for the others
-would hide either evidence, review state, or trainer simplicity.
+the model-input artifact. The bundle manifest is the reproducibility artifact.
+Treating one of these as a replacement for the others would hide either
+evidence, review state, checksum provenance, or trainer simplicity.
 
 ## Example Failure Modes The Packet Should Expose
 
@@ -1500,6 +1609,44 @@ Result:
 262 passed, 8 warnings
 ```
 
+Current verification after the self-contained bundle review-import hardening:
+
+```bash
+./.venv-macos/bin/python -m py_compile \
+  localinferenceapi.py \
+  api/datasets.py \
+  tests/test_dataset_linked_annotation_flows.py \
+  tests/test_labeling_panel_layout_contract.py
+node --check ybat-master/ybat.js
+git diff --check
+```
+
+```bash
+./.venv-macos/bin/python -m pytest \
+  tests/test_dataset_linked_annotation_flows.py \
+  tests/test_labeling_panel_layout_contract.py \
+  -q
+```
+
+Result:
+
+```text
+204 passed, 8 warnings
+```
+
+```bash
+./.venv-macos/bin/python -m pytest tests/test_qwen_caption_dataset_job.py -q
+```
+
+Result:
+
+```text
+143 passed, 8 warnings
+```
+
+The restricted-name scan across docs, UI, backend, API, models, tests, and tools
+returned no matches for the internal restricted terms.
+
 Additional focused validation recorded in the supporting hardening docs covers:
 
 - caption dataset job start and route start rejecting same-dataset active jobs
@@ -1521,6 +1668,18 @@ Additional focused validation recorded in the supporting hardening docs covers:
   export-validation proof fails, or versioned artifact-consistency proofs are
   missing, wrong-version, inconsistent, or paired with missing, malformed,
   stale, or mismatched returned artifact arrays
+- self-contained training bundle export refusing by default when the ready gate
+  reports `needs_review`, allowing an explicit diagnostic override, packaging
+  copied image bytes, packaging empty effective label files when the effective
+  label state is empty, rewriting trainer/archive/review image paths to
+  `images/...`, preserving original image paths, and recording image SHA-256
+  metadata in both row metadata and the bundle manifest
+- reviewed JSONL imported from the training bundle resolving bundled
+  `images/...` paths back to the saved dataset image through
+  `original_image_path`
+- UI contract for **Download training bundle**, including visible button text,
+  help text, query construction, shared busy/disabled state, shared failure
+  reporter, and `caption_instruction_training_bundle.zip` save behavior
 - ordinary caption exports and instruction artifact actions refusing to run
   while a backend caption job id is still active
 - the caption export HTTP route opting into the backend active-job guard and
@@ -1596,6 +1755,16 @@ node --check ybat-master/ybat.js
   tests/test_dataset_linked_annotation_flows.py::test_caption_alternate_routes_append_update_export_and_delete \
   tests/test_labeling_panel_layout_contract.py \
   tests/test_qwen_caption_ui_smoke_tool.py \
+  -q
+```
+
+For the current self-contained bundle checkpoint, run the focused full-file
+checks:
+
+```bash
+./.venv-macos/bin/python -m pytest \
+  tests/test_dataset_linked_annotation_flows.py \
+  tests/test_labeling_panel_layout_contract.py \
   -q
 ```
 

@@ -627,7 +627,10 @@ total review-row count, selected review-row count, and manual-review count. This
 prevents stale, partial, mixed, or hand-edited artifacts from being mistaken for
 the current reviewed export set. The backend emits the same versioned
 `instruction_artifact_consistency` object in the archive, report, API export
-payload, and summary; failures force readiness to `blocked` with
+payload, and summary. The browser report validator requires the embedded report
+object to be present, versioned as
+`tator_caption_instruction_artifact_consistency_v1`, boolean-OK, and
+error-free; failures force readiness to `blocked` with
 `instruction_artifacts_inconsistent`.
 
 The consistency check also compares row identities, not only totals. Flattened

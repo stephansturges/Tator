@@ -292,9 +292,12 @@ This guard exists to catch stale, partial, mixed, or hand-edited artifacts
 before a reviewer or trainer consumes them. Row validation still checks content;
 artifact consistency checks whether the files agree with the run report.
 The backend emits this check as `instruction_artifact_consistency` in the
-archive, report, API payload, and summary. A failed backend consistency check
-blocks training readiness with `instruction_artifacts_inconsistent`, and the UI
-also refuses the corresponding download.
+archive, report, API payload, and summary. The browser report validator requires
+the embedded report object to be present, versioned as
+`tator_caption_instruction_artifact_consistency_v1`, boolean-OK, and
+error-free. A failed backend consistency check blocks training readiness with
+`instruction_artifacts_inconsistent`, and the UI also refuses the corresponding
+download.
 
 This is not only a count check. It also verifies that flattened trainer rows,
 selected review rows, and archive candidates refer to the same image path, QA

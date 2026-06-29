@@ -144,6 +144,12 @@ row before training.
   object in the instruction archive, instruction report, API export payload, and
   instruction summary. If this object is not OK, training readiness is forced to
   `blocked` with `instruction_artifacts_inconsistent`.
+- The browser-side instruction report validator now requires the embedded
+  `instruction_artifact_consistency` object to be present, versioned as
+  `tator_caption_instruction_artifact_consistency_v1`, boolean-OK, and
+  error-free. Report downloads therefore fail closed instead of presenting a
+  report as valid when the run-level artifact-consistency proof is absent or
+  failed.
 - Flat-layout instruction exports now canonicalize split-prefixed and
   non-split-prefixed image keys before merging manifest rows, saved captions,
   text-label mirrors, and generated QA. This prevents nested images such as

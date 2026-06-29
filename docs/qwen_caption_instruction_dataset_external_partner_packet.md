@@ -261,13 +261,17 @@ The additional consistency checks are:
 - Selected review-row count must match the report selected flattened-row count.
 - Manual-review row count must match the report manual-review count.
 - The instruction report itself must contain valid export validation,
-  review-row, manual-review, readiness, and corpus-quality fields.
+  artifact-consistency, review-row, manual-review, readiness, and
+  corpus-quality fields.
 
 This matters because reviewers should not need to infer whether a hand-edited,
 stale, partial, or mixed artifact belongs to the current run. The backend emits
 the same versioned `instruction_artifact_consistency` object in the archive,
-report, API payload, and summary. If the object is not OK, training readiness is
-forced to `blocked` with `instruction_artifacts_inconsistent`. The UI also
+report, API payload, and summary. The browser report validator requires that
+embedded object to be present, versioned as
+`tator_caption_instruction_artifact_consistency_v1`, boolean-OK, and
+error-free. If the object is not OK, training readiness is forced to `blocked`
+with `instruction_artifacts_inconsistent`. The UI also
 canonicalizes image paths before archive duplicate checks, selected-row counts,
 review-target identity checks, and trainer/archive/review comparisons, so path
 aliases such as `./frame.jpg`, `frame.jpg`, and split-prefixed forms cannot

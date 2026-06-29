@@ -35142,6 +35142,28 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!Number.isFinite(manualReviewCount) || manualReviewCount < 0) {
             errors.push("report manual_review_required_count is missing or invalid");
         }
+        const artifactConsistency = report.instruction_artifact_consistency;
+        if (!artifactConsistency || typeof artifactConsistency !== "object") {
+            errors.push("report missing instruction_artifact_consistency");
+        } else {
+            const consistencyFormat = String(artifactConsistency.format || "").trim();
+            if (consistencyFormat !== "tator_caption_instruction_artifact_consistency_v1") {
+                errors.push("instruction_artifact_consistency format is invalid");
+            }
+            if (typeof artifactConsistency.ok !== "boolean") {
+                errors.push("instruction_artifact_consistency.ok must be boolean");
+            }
+            const consistencyErrorCount = Number(artifactConsistency.error_count);
+            if (!Number.isFinite(consistencyErrorCount) || consistencyErrorCount < 0) {
+                errors.push("instruction_artifact_consistency.error_count is invalid");
+            }
+            if (!Array.isArray(artifactConsistency.errors)) {
+                errors.push("instruction_artifact_consistency.errors must be an array");
+            }
+            if (artifactConsistency.ok === false || consistencyErrorCount > 0) {
+                errors.push("instruction_artifact_consistency is not ok");
+            }
+        }
         return {
             ok: errors.length === 0,
             errors,

@@ -7,10 +7,164 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
 
 import localinferenceapi as api
+
+
+def _dataset_export_route_client(export_payload):
+    from api.datasets import build_datasets_router
+
+    def export_captions(dataset_id, options):
+        return export_payload
+
+    def noop(*_args, **_kwargs):
+        return {}
+
+    app = FastAPI()
+    app.include_router(
+        build_datasets_router(
+            list_fn=lambda: [],
+            list_trash_fn=lambda: [],
+            upload_fn=noop,
+            upload_session_list_fn=lambda: [],
+            upload_session_get_fn=noop,
+            upload_session_start_fn=noop,
+            upload_session_batch_fn=noop,
+            upload_session_finalize_fn=noop,
+            upload_session_cancel_fn=noop,
+            delete_fn=noop,
+            restore_fn=noop,
+            download_fn=noop,
+            build_qwen_fn=noop,
+            check_fn=noop,
+            get_glossary_fn=noop,
+            set_glossary_fn=noop,
+            get_text_label_fn=noop,
+            get_text_labels_fn=noop,
+            set_text_label_fn=noop,
+            get_captions_fn=noop,
+            get_captions_batch_fn=noop,
+            add_caption_fn=noop,
+            update_caption_fn=noop,
+            delete_caption_fn=noop,
+            export_captions_fn=export_captions,
+            apply_caption_instruction_review_fn=noop,
+            register_path_fn=noop,
+            open_path_fn=noop,
+            save_transient_fn=noop,
+            delete_transient_fn=noop,
+            annotation_session_start_fn=noop,
+            annotation_session_heartbeat_fn=noop,
+            annotation_session_stop_fn=noop,
+            annotation_manifest_fn=noop,
+            annotation_image_fn=noop,
+            annotation_snapshot_fn=noop,
+            annotation_meta_patch_fn=noop,
+            transient_annotation_manifest_fn=noop,
+            transient_annotation_image_fn=noop,
+            transient_annotation_snapshot_fn=noop,
+            transient_annotation_meta_patch_fn=noop,
+            transient_annotation_session_start_fn=noop,
+            transient_annotation_session_heartbeat_fn=noop,
+            transient_annotation_session_stop_fn=noop,
+        )
+    )
+    return TestClient(app)
+
+
+def _ready_instruction_export_payload():
+    export_validation = {"ok": True, "error_count": 0, "errors": [], "row_count": 1}
+    artifact_consistency = {
+        "format": "tator_caption_instruction_artifact_consistency_v1",
+        "ok": True,
+        "error_count": 0,
+        "errors": [],
+        "counts": {
+            "training_row_count": 1,
+            "archive_row_count": 1,
+            "review_row_count": 1,
+            "selected_review_row_count": 1,
+            "manual_review_required_count": 0,
+            "report_image_count": 1,
+            "report_selected_flattened_row_count": 1,
+            "report_instruction_review_row_count": 1,
+            "report_manual_review_required_count": 0,
+            "instruction_export_validation_row_count": 1,
+        },
+    }
+    report = {
+        "format": "tator_caption_instruction_report_v1",
+        "selected_flattened_row_count": 1,
+        "image_count": 1,
+        "instruction_review_row_count": 1,
+        "manual_review_required_count": 0,
+        "corpus_quality_metrics": {"selected_flattened_row_count": 1, "image_count": 1},
+        "training_readiness": {
+            "status": "ready",
+            "ready_for_training": True,
+            "blocking_reasons": [],
+            "required_actions": [],
+            "quality_warnings": [],
+            "selected_training_row_count": 1,
+            "selected_review_row_count": 1,
+            "selected_manual_review_row_count": 0,
+            "pending_manual_review_row_count": 0,
+            "rejected_manual_review_row_count": 0,
+            "needs_revision_manual_review_row_count": 0,
+        },
+        "instruction_export_validation": dict(export_validation),
+        "instruction_artifact_consistency": dict(artifact_consistency),
+    }
+    training_row = {
+        "image_path": "frame.jpg",
+        "question": "What is shown?",
+        "answer": "A building.",
+        "metadata": {
+            "qa_id": "qa-1",
+            "row_type": "generated_qa",
+            "answer_source": "generated_qa_record",
+            "source_archive": "tator_caption_instruction_archive_v1",
+            "answer_format": "natural",
+            "validation_status": "accepted",
+            "review_status": "accepted",
+        },
+    }
+    archive_row = {
+        "image_path": "frame.jpg",
+        "source_annotations": {},
+        "language_annotations": {},
+        "deterministic_metadata_qa_pairs": [],
+        "export_metadata": {},
+    }
+    review_row = {
+        "format": "tator_caption_instruction_review_rows_v1",
+        "dataset_id": "ds",
+        "image_path": "frame.jpg",
+        "row_origin": "generated_qa",
+        "qa_id": "qa-1",
+        "question": "What is shown?",
+        "candidate_answer": "A building.",
+        "training_answer": "A building.",
+        "validation_status": "accepted",
+        "selected_for_training": True,
+        "requires_manual_review": False,
+        "review_decision": "",
+        "review_notes": "",
+        "source_summary": {},
+        "rejection_reasons": [],
+    }
+    return {
+        "instruction_report": report,
+        "instruction_export_validation": dict(export_validation),
+        "instruction_artifact_consistency": dict(artifact_consistency),
+        "instruction_archive": {"instruction_artifact_consistency": dict(artifact_consistency)},
+        "instruction_training_rows": [training_row],
+        "instruction_archive_rows": [archive_row],
+        "instruction_review_rows": [review_row],
+    }
 
 
 def test_caption_instruction_strict_export_gate_requires_ready_proofs() -> None:
@@ -302,6 +456,22 @@ def test_caption_instruction_strict_export_gate_requires_ready_proofs() -> None:
             },
         }
     ) == "training_readiness"
+
+
+def test_caption_instruction_strict_export_route_blocks_malformed_rows_when_ready_required() -> None:
+    payload = {
+        **_ready_instruction_export_payload(),
+        "instruction_training_rows": {"bad": True},
+    }
+    client = _dataset_export_route_client(payload)
+
+    diagnostic_response = client.get("/datasets/ds/captions/export")
+    assert diagnostic_response.status_code == 200
+    assert diagnostic_response.json()["instruction_training_rows"] == {"bad": True}
+
+    strict_response = client.get("/datasets/ds/captions/export?require_ready_instruction_export=true")
+    assert strict_response.status_code == 409
+    assert strict_response.json()["detail"] == "instruction_export_not_ready:instruction_training_rows"
 
 
 def test_delete_linked_dataset_only_removes_registry_record(tmp_path, monkeypatch) -> None:

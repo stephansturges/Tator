@@ -35656,6 +35656,9 @@ async function cancelRfDetrTrainingJobRequest() {
             const rowOrigin = String(row.row_origin || "").trim();
             const rowDatasetId = String(row.dataset_id || "").trim();
             const validationStatus = String(row.validation_status || "").trim();
+            const originalImagePath = String(row.original_image_path || "").trim();
+            const bundleImagePath = String(row.bundle_image_path || "").trim();
+            const bundleImageSha256 = String(row.bundle_image_sha256 || "").trim();
             const split = String(row.split || "").trim();
             const normalizedImagePath = normalizeReviewImagePath(imagePath, split);
             const rawReviewDecision = String(row.review_decision || "").trim();
@@ -35667,6 +35670,9 @@ async function cancelRfDetrTrainingJobRequest() {
                 ["image_path", CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_PATH_CHARS],
                 ["image_name", CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_PATH_CHARS],
                 ["image", CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_PATH_CHARS],
+                ["original_image_path", CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_PATH_CHARS],
+                ["bundle_image_path", CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_PATH_CHARS],
+                ["bundle_image_sha256", 128],
                 ["qa_id", CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ID_CHARS],
                 ["row_origin", CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ID_CHARS],
                 ["split", CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_ID_CHARS],
@@ -35692,6 +35698,12 @@ async function cancelRfDetrTrainingJobRequest() {
                 errors.push(`review row ${rowNumber} missing image_path`);
             } else {
                 imagePaths.add(normalizedImagePath || imagePath);
+            }
+            if (bundleImageSha256 && !/^[0-9a-fA-F]{64}$/.test(bundleImageSha256)) {
+                errors.push(`review row ${rowNumber} bundle_image_sha256 must be a 64-character SHA-256 digest`);
+            }
+            if ((bundleImagePath || bundleImageSha256) && !originalImagePath) {
+                errors.push(`review row ${rowNumber} is from a copied bundle image but missing original_image_path`);
             }
             if (!qaId) {
                 errors.push(`review row ${rowNumber} missing qa_id`);
@@ -36864,6 +36876,9 @@ async function cancelRfDetrTrainingJobRequest() {
             "image_path",
             "image_name",
             "image",
+            "original_image_path",
+            "bundle_image_path",
+            "bundle_image_sha256",
             "qa_id",
             "row_origin",
             "split",
@@ -36875,6 +36890,9 @@ async function cancelRfDetrTrainingJobRequest() {
             "review_notes",
         ]);
         if (invalidTextFieldMatch && textReviewFields.has(invalidTextFieldMatch[1])) {
+            if (invalidTextFieldMatch[1] === "bundle_image_sha256") {
+                return `Instruction review import blocked at row ${invalidTextFieldMatch[2]}: bundle_image_sha256 must be a 64-character SHA-256 digest from the exported bundle.`;
+            }
             return `Instruction review import blocked at row ${invalidTextFieldMatch[2]}: ${invalidTextFieldMatch[1]} must be a text field from the exported review JSONL.`;
         }
         const unsupportedMatch = raw.match(/^review_rows_unsupported_row_origin:row_(\d+):(.+)$/);
@@ -36911,6 +36929,7 @@ async function cancelRfDetrTrainingJobRequest() {
             review_rows_rejection_reasons_invalid: "rejection_reasons must be an array from the exported review packet",
             review_rows_review_decision_missing: "the row is missing the review_decision column",
             review_rows_review_notes_missing: "the row is missing the review_notes column",
+            review_rows_original_image_path_missing_for_bundle: "the row came from a copied bundle image but is missing the original image path needed to match the selected dataset safely",
             review_rows_generated_qa_text_missing: "the generated-QA row is missing the reviewed question or answer text needed to verify it still matches the saved record",
             review_rows_generated_qa_not_found: "the generated-QA row no longer matches a saved generated-QA record for that image, question, and answer",
             review_rows_generated_qa_training_answer_stale: "the generated-QA training answer no longer matches the current selected training answer; export a fresh review JSONL before importing decisions",

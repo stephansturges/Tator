@@ -990,6 +990,13 @@ def test_caption_instruction_review_import_rejects_unsupported_review_decision(
         ({"candidate_answer": "x" * 65537}, "review_rows_field_too_long:row_1:candidate_answer:65536"),
         ({"original_image_path": 123}, "review_rows_original_image_path_invalid:row_1"),
         ({"original_image_path": "x" * 4097}, "review_rows_field_too_long:row_1:original_image_path:4096"),
+        ({"bundle_image_path": 123}, "review_rows_bundle_image_path_invalid:row_1"),
+        ({"bundle_image_path": "x" * 4097}, "review_rows_field_too_long:row_1:bundle_image_path:4096"),
+        ({"bundle_image_path": "images/train/frame.jpg"}, "review_rows_original_image_path_missing_for_bundle:row_1"),
+        ({"bundle_image_sha256": 123}, "review_rows_bundle_image_sha256_invalid:row_1"),
+        ({"bundle_image_sha256": "not-a-sha"}, "review_rows_bundle_image_sha256_invalid:row_1"),
+        ({"bundle_image_sha256": "a" * 129}, "review_rows_field_too_long:row_1:bundle_image_sha256:128"),
+        ({"bundle_image_sha256": "a" * 64}, "review_rows_original_image_path_missing_for_bundle:row_1"),
     ],
 )
 def test_caption_instruction_review_import_rejects_malformed_review_row_shape(
@@ -1218,6 +1225,78 @@ def test_caption_instruction_review_import_accepts_canonical_image_path_aliases(
         records = api._load_dataset_caption_records(entry)
         assert records[0]["review_status"] == "rejected"
         assert records[0]["metadata"]["review_notes"] == "path alias still matches"
+
+
+def test_caption_instruction_review_import_accepts_bundle_review_row_original_alias(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import localinferenceapi as api
+
+    entry = {"id": "ds", "dataset_root": str(tmp_path), "registry_root": str(tmp_path)}
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: entry)
+    monkeypatch.setattr(
+        api,
+        "_annotation_manifest_for_entry",
+        lambda _entry: {
+            "labelmap": [],
+            "images": [
+                {
+                    "image_name": "sub/img.jpg",
+                    "image_relpath": "sub/img.jpg",
+                    "split": "train",
+                    "label_source_present": True,
+                    "label_lines": [],
+                }
+            ],
+        },
+    )
+    api._write_dataset_caption_instruction_records(
+        entry,
+        [
+            {
+                "id": "qa-1",
+                "image_name": "sub/img.jpg",
+                "image_key": "train/sub/img.jpg",
+                "split": "train",
+                "question": "What is the scene type?",
+                "answer": "A waterfront area.",
+                "row_type": "generated_qa",
+                "answer_source": "vlm_generated",
+                "validation_status": "accepted",
+            }
+        ],
+    )
+    row = {
+        "format": "tator_caption_instruction_review_rows_v1",
+        "dataset_id": "ds",
+        "image_path": "images/train/sub/img.jpg",
+        "original_image_path": "sub/img.jpg",
+        "bundle_image_sha256": "a" * 64,
+        "split": "train",
+        "row_origin": "generated_qa",
+        "qa_id": "qa-1",
+        "row_type": "generated_qa",
+        "question": "What is the scene type?",
+        "candidate_answer": "A waterfront area.",
+        "training_answer": "A waterfront area.",
+        "validation_status": "accepted",
+        "selected_for_training": True,
+        "requires_manual_review": True,
+        "review_decision": "accepted",
+        "review_notes": "bundle review row still resolves through original path",
+        "rejection_reasons": [],
+        "source_summary": {"status": "empty_label_file"},
+    }
+
+    result = api.apply_caption_instruction_review("ds", {"rows": [row]})
+
+    assert result["status"] == "applied"
+    assert result["applied_count"] == 1
+    assert result["skipped_count"] == 0
+    records = api._load_dataset_caption_instruction_records(entry)
+    assert records[0]["review_status"] == "accepted"
+    assert records[0]["metadata"]["review_notes"] == "bundle review row still resolves through original path"
 
 
 def test_caption_instruction_review_import_rejects_conflicting_split_alias(

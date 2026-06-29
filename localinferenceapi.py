@@ -24348,14 +24348,45 @@ def _caption_instruction_reject_malformed_review_rows(rows: Sequence[Any]) -> No
                 status_code=HTTP_400_BAD_REQUEST,
                 detail=f"review_rows_missing_image_path:row_{index}",
             )
+        original_image_path = ""
         if "original_image_path" in row:
-            _require_text_field(
+            original_image_path = _require_text_field(
                 row,
                 "original_image_path",
                 index,
                 max_chars=CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_PATH_CHARS,
                 detail_code="review_rows_original_image_path_invalid",
                 required=False,
+            )
+        bundle_image_path = ""
+        if "bundle_image_path" in row:
+            bundle_image_path = _require_text_field(
+                row,
+                "bundle_image_path",
+                index,
+                max_chars=CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_PATH_CHARS,
+                detail_code="review_rows_bundle_image_path_invalid",
+                required=False,
+            )
+        bundle_image_sha256 = ""
+        if "bundle_image_sha256" in row:
+            bundle_image_sha256 = _require_text_field(
+                row,
+                "bundle_image_sha256",
+                index,
+                max_chars=128,
+                detail_code="review_rows_bundle_image_sha256_invalid",
+                required=False,
+            )
+            if bundle_image_sha256 and not re.fullmatch(r"[0-9a-fA-F]{64}", bundle_image_sha256):
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail=f"review_rows_bundle_image_sha256_invalid:row_{index}",
+                )
+        if (bundle_image_path or bundle_image_sha256) and not original_image_path:
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"review_rows_original_image_path_missing_for_bundle:row_{index}",
             )
         qa_id = _require_text_field(
             row,

@@ -771,7 +771,7 @@ an oversized all-whitespace field is still rejected:
 | Field family | Limit |
 | --- | --- |
 | dataset id, QA id, row origin, split, validation status, review decision | 512 characters |
-| image path, image name, image alias | 4096 characters |
+| image path, original image path, image name, image alias | 4096 characters |
 | question | 4096 characters |
 | candidate answer, selected training answer | 65536 characters |
 | review notes | 8192 characters |
@@ -1355,8 +1355,9 @@ Review import fails closed on:
 - wrapper objects whose row container is missing or not a list
 - caption0 or generated-QA review rows missing dataset identity, even before a
   reviewer fills a decision
-- non-text values in text fields such as image path, QA id, question, candidate
-  answer, selected training answer, review decision, or review notes
+- non-text values in text fields such as image path, original image path, QA
+  id, question, candidate answer, selected training answer, review decision, or
+  review notes
 - text fields that exceed the documented import limits
 - missing embedded dataset id for persisted language decisions
 - dataset id mismatch

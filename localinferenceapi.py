@@ -23932,6 +23932,15 @@ def _caption_instruction_reject_malformed_review_rows(rows: Sequence[Any]) -> No
                 status_code=HTTP_400_BAD_REQUEST,
                 detail=f"review_rows_missing_image_path:row_{index}",
             )
+        if "original_image_path" in row:
+            _require_text_field(
+                row,
+                "original_image_path",
+                index,
+                max_chars=CAPTION_INSTRUCTION_REVIEW_IMPORT_MAX_PATH_CHARS,
+                detail_code="review_rows_original_image_path_invalid",
+                required=False,
+            )
         qa_id = _require_text_field(
             row,
             "qa_id",

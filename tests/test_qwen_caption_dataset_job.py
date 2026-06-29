@@ -987,6 +987,8 @@ def test_caption_instruction_review_import_rejects_unsupported_review_decision(
         ({"question": "x" * 4097}, "review_rows_field_too_long:row_1:question:4096"),
         ({"question": " " * 4097}, "review_rows_field_too_long:row_1:question:4096"),
         ({"candidate_answer": "x" * 65537}, "review_rows_field_too_long:row_1:candidate_answer:65536"),
+        ({"original_image_path": 123}, "review_rows_original_image_path_invalid:row_1"),
+        ({"original_image_path": "x" * 4097}, "review_rows_field_too_long:row_1:original_image_path:4096"),
     ],
 )
 def test_caption_instruction_review_import_rejects_malformed_review_row_shape(

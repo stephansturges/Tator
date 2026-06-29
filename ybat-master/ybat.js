@@ -3087,6 +3087,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         loadRequestId: 0,
         saveInFlight: false,
         source: "",
+        text: "",
     };
     const qwenCaptionPromptStackState = {
         initialized: false,
@@ -22313,6 +22314,9 @@ async function cancelRfDetrTrainingJobRequest() {
         Object.entries(getCaptionPromptStackEditors()).forEach(([key, el]) => {
             if (el) {
                 el.addEventListener("input", () => {
+                    if (!guardQwenCaptionArchiveIdle("editing caption prompt settings")) {
+                        return;
+                    }
                     const previousDefault = qwenCaptionPromptStackState.lastDefaults[key] || "";
                     qwenCaptionPromptStackState.dirty[key] = String(el.value || "").trim() !== previousDefault;
                     updateQwenCaptionWorkflow();
@@ -22357,7 +22361,12 @@ async function cancelRfDetrTrainingJobRequest() {
         ];
         captionPromptStackInputs.forEach((el) => {
             if (el) {
-                el.addEventListener("input", updateQwenCaptionWorkflow);
+                el.addEventListener("input", () => {
+                    if (!guardQwenCaptionArchiveIdle("editing caption run settings")) {
+                        return;
+                    }
+                    updateQwenCaptionWorkflow();
+                });
             }
         });
         [
@@ -22382,6 +22391,9 @@ async function cancelRfDetrTrainingJobRequest() {
         ].forEach((el) => {
             if (el) {
                 el.addEventListener("change", () => {
+                    if (!guardQwenCaptionArchiveIdle("editing caption run settings")) {
+                        return;
+                    }
                     styleQwenCaptionModelSelects();
                     updateQwenCaptionWorkflow();
                 });
@@ -22512,6 +22524,12 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (qwenElements.captionGlossary) {
             qwenElements.captionGlossary.addEventListener("input", () => {
+                if (!guardQwenCaptionArchiveIdle("editing the caption glossary")) {
+                    qwenElements.captionGlossary.value = qwenCaptionGlossaryState.text || "";
+                    updateCaptionGlossaryControls();
+                    return;
+                }
+                qwenCaptionGlossaryState.text = String(qwenElements.captionGlossary.value || "");
                 qwenCaptionGlossaryState.dirty = true;
                 setCaptionGlossaryStatus("Edited. Save to dataset to make this glossary canonical.");
                 updateCaptionGlossaryControls();
@@ -25164,6 +25182,77 @@ async function cancelRfDetrTrainingJobRequest() {
         return false;
     }
 
+    function captionRunConfigurationElements() {
+        return [
+            ...Object.values(getCaptionPromptStackEditors()),
+            qwenElements.captionPreset,
+            qwenElements.captionPresetRandom,
+            qwenElements.captionStyleText,
+            qwenElements.captionVaryOpening,
+            qwenElements.captionOpeningList,
+            qwenElements.captionMode,
+            qwenElements.captionWindowSize,
+            qwenElements.captionWindowOverlap,
+            qwenElements.captionWindowMinSentences,
+            qwenElements.captionWindowMaxSentences,
+            qwenElements.captionWindowFullImageStrategy,
+            qwenElements.captionModel,
+            qwenElements.captionVariant,
+            qwenElements.captionRefinementModel,
+            qwenElements.captionFallbackModel,
+            qwenElements.captionMaxTokens,
+            qwenElements.captionFinalSentences,
+            qwenElements.captionMaxBoxes,
+            qwenElements.captionIncludeCounts,
+            qwenElements.captionIncludeCoords,
+            qwenElements.captionFinalOnly,
+            qwenElements.captionTwoStage,
+            qwenElements.captionHighVram,
+            qwenElements.captionSamplingPreset,
+            qwenElements.captionLoopRecovery,
+            qwenElements.captionLoopCooldown,
+            qwenElements.captionTemperature,
+            qwenElements.captionTopP,
+            qwenElements.captionTopK,
+            qwenElements.captionPresencePenalty,
+            qwenElements.captionAttempts,
+            qwenElements.captionArtifactLogMb,
+            qwenElements.captionMaxFailedCaseRate,
+            qwenElements.captionMaxQualityFailureRate,
+            qwenElements.captionMaxRecoveryRate,
+            qwenElements.captionMaxLoopRecoveryRate,
+            qwenElements.captionMaxDeterministicRecoveryRate,
+            qwenElements.captionMaxFailedAttemptRate,
+            qwenElements.captionMaxSignalExitRate,
+            qwenElements.captionMinRateCases,
+            qwenElements.captionSaveText,
+            qwenElements.captionGeneratedPrimary,
+            qwenElements.captionSetAndForget,
+            qwenElements.captionRequirePilotCertification,
+            qwenElements.captionPilotOutputDir,
+            qwenElements.captionPilotTargetCases,
+            qwenElements.captionPilotMaxDurationHours,
+            qwenElements.captionPilotMaxP95DurationHours,
+            qwenElements.captionPilotMinCases,
+            qwenElements.captionPilotSafetyFactor,
+            qwenElements.captionPilotDeterministicRecoveryConfidence,
+            qwenElements.captionPilotRequirePromptBudget,
+            qwenElements.captionPilotMaxPromptTokens,
+            qwenElements.captionPilotPromptAdaptedRate,
+            qwenElements.captionAllowModelDownload,
+            qwenElements.captionBatchCount,
+            qwenElements.captionBatchIncludeCurrent,
+            qwenElements.captionBatchOverwrite,
+        ].filter(Boolean);
+    }
+
+    function updateCaptionRunConfigurationControls() {
+        const busy = qwenCaptionArchiveMutationActive();
+        captionRunConfigurationElements().forEach((el) => {
+            el.disabled = busy;
+        });
+    }
+
     function updateCaptionInstructionDatasetOptionControls() {
         const busy = qwenCaptionArchiveMutationActive();
         [
@@ -25249,7 +25338,9 @@ async function cancelRfDetrTrainingJobRequest() {
             qwenElements.captionRecipeUpload.disabled = busy;
         }
         syncQwenCaptionDatasetControls();
+        updateCaptionRunConfigurationControls();
         updateCaptionInstructionDatasetOptionControls();
+        updateCaptionGlossaryControls();
         updateCaptionArchiveActionControls();
     }
 
@@ -25275,7 +25366,10 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function applyCaptionPreset({ randomize = false, forceStyleText = true } = {}) {
         if (!qwenElements.captionPreset) {
-            return;
+            return false;
+        }
+        if (!guardQwenCaptionArchiveIdle(randomize ? "randomizing caption style preset" : "changing caption style preset")) {
+            return false;
         }
         if (randomize) {
             const selectable = CAPTION_PRESETS.filter((preset) => preset.id !== "custom");
@@ -25284,6 +25378,8 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         syncCaptionStyleTextFromPreset({ force: forceStyleText });
         updateQwenCaptionWorkflow();
+        updateQwenCaptionButton();
+        return true;
     }
 
     function getCaptionStyleText() {
@@ -29189,8 +29285,16 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function updateCaptionGlossaryControls() {
         const datasetId = getCaptionGlossaryDatasetId();
+        const busy = qwenCaptionArchiveMutationActive();
+        const locked = busy || qwenCaptionGlossaryState.saveInFlight;
+        if (qwenElements.captionGlossary) {
+            qwenElements.captionGlossary.disabled = locked;
+        }
+        if (qwenElements.captionGlossaryReset) {
+            qwenElements.captionGlossaryReset.disabled = locked;
+        }
         if (qwenElements.captionGlossarySave) {
-            qwenElements.captionGlossarySave.disabled = qwenCaptionGlossaryState.saveInFlight || !datasetId;
+            qwenElements.captionGlossarySave.disabled = locked || !datasetId;
             qwenElements.captionGlossarySave.textContent = qwenCaptionGlossaryState.saveInFlight
                 ? "Saving..."
                 : "Save to dataset";
@@ -29205,6 +29309,7 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenCaptionGlossaryState.datasetId = String(datasetId || "");
         qwenCaptionGlossaryState.source = source;
         qwenCaptionGlossaryState.dirty = false;
+        qwenCaptionGlossaryState.text = String(text || "");
         const classCount = getCaptionGlossaryLabelmap().length;
         const sourceText = source === "dataset"
             ? "Loaded saved dataset glossary"
@@ -29288,22 +29393,30 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function resetCaptionGlossaryFromClasses() {
+        if (!guardQwenCaptionArchiveIdle("resetting the caption glossary")) {
+            return false;
+        }
         const text = buildDefaultCaptionGlossary(getCaptionGlossaryLabelmap());
         setCaptionGlossaryText(text, {
             datasetId: getCaptionGlossaryDatasetId(),
             source: "default",
         });
         qwenCaptionGlossaryState.dirty = true;
+        qwenCaptionGlossaryState.text = text;
         setCaptionGlossaryStatus("Reset from current classes. Save to dataset to make this canonical.");
         updateCaptionGlossaryControls();
+        return true;
     }
 
     async function saveCaptionGlossaryToDataset() {
+        if (!guardQwenCaptionArchiveIdle("saving the caption glossary")) {
+            return false;
+        }
         const datasetId = getCaptionGlossaryDatasetId();
         if (!datasetId || !qwenElements.captionGlossary) {
             setCaptionGlossaryStatus("Select or open a dataset before saving a caption glossary.");
             updateCaptionGlossaryControls();
-            return;
+            return false;
         }
         qwenCaptionGlossaryState.saveInFlight = true;
         updateCaptionGlossaryControls();
@@ -29322,12 +29435,15 @@ async function cancelRfDetrTrainingJobRequest() {
             qwenCaptionGlossaryState.datasetId = datasetId;
             qwenCaptionGlossaryState.source = "dataset";
             qwenCaptionGlossaryState.dirty = false;
+            qwenCaptionGlossaryState.text = glossary;
             setCaptionGlossaryStatus("Saved dataset glossary. Captioning will use these class meanings.");
             setSamStatus("Caption glossary saved.", { variant: "success", duration: 2500 });
+            return true;
         } catch (error) {
             console.warn("Caption glossary save failed", error);
             setCaptionGlossaryStatus(`Save failed: ${error.message || error}`);
             setSamStatus(`Caption glossary save failed: ${error.message || error}`, { variant: "error", duration: 4000 });
+            return false;
         } finally {
             qwenCaptionGlossaryState.saveInFlight = false;
             updateCaptionGlossaryControls();

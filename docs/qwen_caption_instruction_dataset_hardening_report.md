@@ -100,6 +100,17 @@ row before training.
   caption or instruction job is mutating the caption archive, so mid-run edits
   do not appear to affect the backend job that has already captured its
   settings.
+- Caption run-configuration controls now use the same lock while the archive is
+  mutating. This includes editable prompt-stack layers, caption style/opening
+  text, windowing, model choices, output-token and box limits, decode settings,
+  health gates, set-and-forget and pilot settings, save/promote behavior, and
+  batch scope controls. Disabled controls are backed by action-time guards so
+  stale input/change events cannot refresh the prompt preview or dirty-state for
+  a job that has already started.
+- Caption glossary editing, reset, and save now also lock during active archive
+  mutation. A stale edit event restores the last captured glossary text, while
+  reset/save return before rebuilding or posting glossary metadata. The backend
+  metadata route still fails closed for script/API callers.
 - Caption image, caption batch, caption-all, and training-dataset launch paths
   now repeat the archive-idle guard at action time. Disabled buttons are
   therefore backed by runtime checks, and stale or scripted clicks cannot start

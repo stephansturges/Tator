@@ -537,6 +537,7 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     update_caption_helper = js[update_caption_start:update_caption_end]
     assert "const hasCaptionDataset = !!getCaptionDatasetId();" in update_caption_helper
     assert "function qwenCaptionArchiveMutationActive" in js
+    assert "function updateCaptionRunConfigurationControls" in js
     assert "function updateCaptionInstructionDatasetOptionControls" in js
     assert "function updateCaptionArchiveActionControls" in js
     assert "const busy = qwenCaptionArchiveMutationActive();" in update_caption_helper
@@ -553,8 +554,27 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "qwenElements.captionRecipeLoad.disabled = busy" in update_caption_helper
     assert "qwenElements.captionRecipeUploadButton.disabled = busy" in update_caption_helper
     assert "qwenElements.captionRecipeUpload.disabled = busy" in update_caption_helper
+    assert "updateCaptionRunConfigurationControls();" in update_caption_helper
     assert "updateCaptionInstructionDatasetOptionControls();" in update_caption_helper
+    assert "updateCaptionGlossaryControls();" in update_caption_helper
     assert "updateCaptionArchiveActionControls();" in update_caption_helper
+    run_config_helper = _extract_js_function(js, "updateCaptionRunConfigurationControls")
+    assert "captionRunConfigurationElements().forEach" in run_config_helper
+    assert "el.disabled = busy;" in run_config_helper
+    assert "qwenElements.captionStyleText" in js
+    assert "qwenElements.captionModel" in js
+    assert "qwenElements.captionSetAndForget" in js
+    assert "qwenElements.captionBatchCount" in js
+    glossary_helper = _extract_js_function(js, "updateCaptionGlossaryControls")
+    assert "const busy = qwenCaptionArchiveMutationActive();" in glossary_helper
+    assert "qwenElements.captionGlossary.disabled = locked;" in glossary_helper
+    assert "qwenElements.captionGlossaryReset.disabled = locked;" in glossary_helper
+    assert "qwenElements.captionGlossarySave.disabled = locked || !datasetId;" in glossary_helper
+    assert 'guardQwenCaptionArchiveIdle("editing caption prompt settings")' in js
+    assert 'guardQwenCaptionArchiveIdle("editing caption run settings")' in js
+    assert 'guardQwenCaptionArchiveIdle("editing the caption glossary")' in js
+    assert 'guardQwenCaptionArchiveIdle("resetting the caption glossary")' in js
+    assert 'guardQwenCaptionArchiveIdle("saving the caption glossary")' in js
     instruction_option_helper = _extract_js_function(js, "updateCaptionInstructionDatasetOptionControls")
     assert "qwenElements.captionSubcaptionsPerImage" in instruction_option_helper
     assert "qwenElements.captionQaMix" in instruction_option_helper
@@ -635,6 +655,17 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             "  captionRecipeLoad: button(),",
             "  captionRecipeUploadButton: button(),",
             "  captionRecipeUpload: button(),",
+            "  captionPromptUser: button(),",
+            "  captionStyleText: button(),",
+            "  captionMode: button(),",
+            "  captionModel: button(),",
+            "  captionMaxTokens: button(),",
+            "  captionSetAndForget: button(),",
+            "  captionBatchCount: button(),",
+            "  captionBatchOverwrite: button(),",
+            "  captionGlossary: { disabled: false, value: 'stable glossary' },",
+            "  captionGlossaryReset: button(),",
+            "  captionGlossarySave: button(),",
             "  captionSubcaptionsPerImage: button(),",
             "  captionQaMix: button(),",
             "  captionAnswerFormat: button(),",
@@ -649,8 +680,14 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             "  captionSetPrimary: button(),",
             "  captionDeleteSelected: button(),",
             "};",
+            "const qwenCaptionGlossaryState = { saveInFlight: false };",
+            "function getCaptionGlossaryDatasetId() { return 'ds'; }",
             _extract_js_function(js, "qwenCaptionArchiveMutationActive"),
             _extract_js_function(js, "captionInstructionArtifactBusyMessage"),
+            _extract_js_function(js, "getCaptionPromptStackEditors"),
+            _extract_js_function(js, "captionRunConfigurationElements"),
+            _extract_js_function(js, "updateCaptionRunConfigurationControls"),
+            _extract_js_function(js, "updateCaptionGlossaryControls"),
             _extract_js_function(js, "updateCaptionInstructionDatasetOptionControls"),
             _extract_js_function(js, "updateCaptionArchiveActionControls"),
             _extract_js_function(js, "updateQwenCaptionButton"),
@@ -678,6 +715,17 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             "assert.strictEqual(qwenElements.captionRecipeLoad.disabled, true);",
             "assert.strictEqual(qwenElements.captionRecipeUploadButton.disabled, true);",
             "assert.strictEqual(qwenElements.captionRecipeUpload.disabled, true);",
+            "assert.strictEqual(qwenElements.captionPromptUser.disabled, true);",
+            "assert.strictEqual(qwenElements.captionStyleText.disabled, true);",
+            "assert.strictEqual(qwenElements.captionMode.disabled, true);",
+            "assert.strictEqual(qwenElements.captionModel.disabled, true);",
+            "assert.strictEqual(qwenElements.captionMaxTokens.disabled, true);",
+            "assert.strictEqual(qwenElements.captionSetAndForget.disabled, true);",
+            "assert.strictEqual(qwenElements.captionBatchCount.disabled, true);",
+            "assert.strictEqual(qwenElements.captionBatchOverwrite.disabled, true);",
+            "assert.strictEqual(qwenElements.captionGlossary.disabled, true);",
+            "assert.strictEqual(qwenElements.captionGlossaryReset.disabled, true);",
+            "assert.strictEqual(qwenElements.captionGlossarySave.disabled, true);",
             "assert.strictEqual(qwenElements.captionQaMix.disabled, true);",
             "assert.strictEqual(qwenElements.captionAnswerFormat.disabled, true);",
             "assert.strictEqual(qwenElements.captionIncludeCaption0Training.disabled, true);",
@@ -710,6 +758,17 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             "assert.strictEqual(qwenElements.captionRecipeLoad.disabled, false);",
             "assert.strictEqual(qwenElements.captionRecipeUploadButton.disabled, false);",
             "assert.strictEqual(qwenElements.captionRecipeUpload.disabled, false);",
+            "assert.strictEqual(qwenElements.captionPromptUser.disabled, false);",
+            "assert.strictEqual(qwenElements.captionStyleText.disabled, false);",
+            "assert.strictEqual(qwenElements.captionMode.disabled, false);",
+            "assert.strictEqual(qwenElements.captionModel.disabled, false);",
+            "assert.strictEqual(qwenElements.captionMaxTokens.disabled, false);",
+            "assert.strictEqual(qwenElements.captionSetAndForget.disabled, false);",
+            "assert.strictEqual(qwenElements.captionBatchCount.disabled, false);",
+            "assert.strictEqual(qwenElements.captionBatchOverwrite.disabled, false);",
+            "assert.strictEqual(qwenElements.captionGlossary.disabled, false);",
+            "assert.strictEqual(qwenElements.captionGlossaryReset.disabled, false);",
+            "assert.strictEqual(qwenElements.captionGlossarySave.disabled, false);",
             "assert.strictEqual(qwenElements.captionQaMix.disabled, false);",
             "assert.strictEqual(qwenElements.captionAnswerFormat.disabled, false);",
             "assert.strictEqual(qwenElements.captionIncludeCaption0Training.disabled, false);",
@@ -1957,6 +2016,69 @@ def test_qwen_caption_recipe_load_and_upload_block_while_archive_is_mutating():
             "assert(recipeStatus.includes('uploading a caption recipe'));",
             "assert(backendStatuses.some((message) => message.includes('caption archive is changing')));",
             "assert(samStatuses.some((entry) => entry.message.includes('caption archive is changing')));",
+            "assert(updateCalls >= 2);",
+        ]
+    )
+    subprocess.run(
+        [
+            "node",
+            "-e",
+            f"(async () => {{\n{script}\n}})().catch((error) => {{ console.error(error); process.exit(1); }});",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+    )
+
+
+def test_qwen_caption_glossary_actions_block_while_archive_is_mutating():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            "let qwenCaptionActive = false;",
+            "let qwenCaptionBatchActive = false;",
+            "let qwenCaptionBatchBackendJobId = 'job-1';",
+            "let updateCalls = 0;",
+            "let fetchCalls = 0;",
+            "const captionStatuses = [];",
+            "const backendStatuses = [];",
+            "const samStatuses = [];",
+            "const qwenCaptionGlossaryState = { datasetId: 'ds', dirty: false, loadRequestId: 0, saveInFlight: false, source: 'dataset', text: 'stable glossary' };",
+            "const qwenElements = {",
+            "  captionGlossary: { value: 'stable glossary', disabled: false },",
+            "  captionGlossaryStatus: { textContent: '' },",
+            "  captionGlossaryReset: { disabled: false },",
+            "  captionGlossarySave: { disabled: false, textContent: '' },",
+            "};",
+            "function getCaptionGlossaryDatasetId() { return 'ds'; }",
+            "function getCaptionGlossaryLabelmap() { return ['Boat']; }",
+            "function buildDefaultCaptionGlossary() { return '{\"Boat\":[\"boat\"]}'; }",
+            "function setQwenCaptionStatus(message) { captionStatuses.push(message); }",
+            "function setQwenCaptionBackendJobStatus(message) { backendStatuses.push(message); }",
+            "function setSamStatus(message, options) { samStatuses.push({ message, options }); }",
+            "function updateQwenCaptionButton() { updateCalls += 1; }",
+            "function updateQwenCaptionPromptStack() { throw new Error('prompt stack should not update while blocked'); }",
+            "function naturalizeCaptionGlossaryLabel(label) { return label; }",
+            "function dedupeCaptionGlossaryTerms(terms) { return terms; }",
+            "function parseApiError(detail) { return detail; }",
+            "global.fetch = async () => { fetchCalls += 1; throw new Error('fetch should be blocked'); };",
+            _extract_js_function(js, "qwenCaptionArchiveMutationActive"),
+            _extract_js_function(js, "captionArchiveMutationBusyMessage"),
+            _extract_js_function(js, "guardQwenCaptionArchiveIdle"),
+            _extract_js_function(js, "setCaptionGlossaryStatus"),
+            _extract_js_function(js, "updateCaptionGlossaryControls"),
+            _extract_js_function(js, "resetCaptionGlossaryFromClasses"),
+            "async " + _extract_js_function(js, "saveCaptionGlossaryToDataset"),
+            "const resetResult = resetCaptionGlossaryFromClasses();",
+            "assert.strictEqual(resetResult, false);",
+            "assert.strictEqual(qwenElements.captionGlossary.value, 'stable glossary');",
+            "assert(captionStatuses.includes('Caption archive busy'));",
+            "assert(backendStatuses.some((message) => message.includes('resetting the caption glossary')));",
+            "assert(samStatuses.some((entry) => entry.message.includes('caption archive is changing')));",
+            "const saveResult = await saveCaptionGlossaryToDataset();",
+            "assert.strictEqual(saveResult, false);",
+            "assert.strictEqual(fetchCalls, 0);",
+            "assert(backendStatuses.some((message) => message.includes('saving the caption glossary')));",
             "assert(updateCalls >= 2);",
         ]
     )

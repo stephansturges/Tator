@@ -29,6 +29,12 @@ selected caption state are available.
 The caption dataset picker and dataset-refresh control are also disabled while
 the archive is mutating, so the panel cannot switch to a different caption
 dataset context while a backend job is still writing to the current archive.
+The caption run-configuration surface is frozen for the same reason: prompt
+layers, style/opening text, glossary edit/reset/save controls, windowing,
+models, token and box limits, decode controls, set-and-forget/pilot settings,
+health gates, save/promote behavior, and batch scope controls are disabled
+while the archive is changing. Mid-run settings edits therefore cannot look as
+if they will alter a backend job that already captured its request payload.
 
 ## 2. Run A Direct Diagnostic Caption
 

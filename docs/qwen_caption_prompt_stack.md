@@ -485,6 +485,15 @@ not the transient backend metadata paths used to pass generated `cases.json` or
 `request_fields.json` files to the runner.
 This prevents a set-and-forget run from appending captions generated under a
 different prompt, model, or decode policy into the same artifact directory.
+The browser UI mirrors that rule while a caption or instruction job is actively
+mutating the selected caption archive: prompt-stack editors, style/opening
+text, glossary edit/reset/save controls, window/model/decode/token/box settings,
+health gates, set-and-forget and pilot settings, save/promote behavior, and
+batch scope controls are disabled until the archive is stable. Stale
+input/change events also hit the archive-idle guard before they can refresh the
+prompt preview or dirty-state, so the visible configuration does not imply that
+mid-run edits will affect a backend job whose request fields are already
+captured.
 Legacy manifests that lack a fingerprint are warnings; a mismatched fingerprint
 is an error. Preflight also rejects live runner locks in the output directory,
 audits existing run artifacts when they exist, and estimates disk needs from the

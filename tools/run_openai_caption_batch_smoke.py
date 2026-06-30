@@ -40,6 +40,27 @@ FINAL_BATCH_STATUSES = {"completed", "failed", "expired", "cancelled"}
 DEFAULT_POLL_SECONDS = 30.0
 
 
+class OpenAIRequestError(RuntimeError):
+    def __init__(self, *, operation: str, status_code: int, detail: str, headers: Mapping[str, str] | None = None) -> None:
+        super().__init__(f"{operation}:{status_code}:{detail}")
+        self.operation = operation
+        self.status_code = status_code
+        self.detail = detail
+        self.headers = dict(headers or {})
+
+    def payload(self) -> dict[str, Any]:
+        try:
+            parsed = json.loads(self.detail)
+        except Exception:
+            parsed = self.detail
+        return {
+            "operation": self.operation,
+            "status_code": self.status_code,
+            "detail": parsed,
+            "headers": self.headers,
+        }
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -134,7 +155,12 @@ def request_json(
             headers = relevant_headers(getattr(resp, "headers", None))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"openai_http_error:{exc.code}:{detail}") from exc
+        raise OpenAIRequestError(
+            operation="openai_http_error",
+            status_code=exc.code,
+            detail=detail,
+            headers=relevant_headers(getattr(exc, "headers", None)),
+        ) from exc
     data = json.loads(text) if text.strip() else {}
     return (dict(data) if isinstance(data, Mapping) else {"raw": data}), headers
 
@@ -150,7 +176,12 @@ def request_file_content(*, key: str, file_id: str, timeout: float = 300.0) -> s
             return resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"openai_file_content_error:{exc.code}:{detail}") from exc
+        raise OpenAIRequestError(
+            operation="openai_file_content_error",
+            status_code=exc.code,
+            detail=detail,
+            headers=relevant_headers(getattr(exc, "headers", None)),
+        ) from exc
 
 
 def multipart_upload(
@@ -194,7 +225,12 @@ def multipart_upload(
             headers = relevant_headers(getattr(resp, "headers", None))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"openai_file_upload_error:{exc.code}:{detail}") from exc
+        raise OpenAIRequestError(
+            operation="openai_file_upload_error",
+            status_code=exc.code,
+            detail=detail,
+            headers=relevant_headers(getattr(exc, "headers", None)),
+        ) from exc
     data = json.loads(text)
     return (dict(data) if isinstance(data, Mapping) else {"raw": data}), headers
 
@@ -526,37 +562,51 @@ def submit_batch(
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     existing = read_json(output_dir / "batch.json")
-    if existing.get("id"):
+    existing_response = existing.get("response") if isinstance(existing.get("response"), Mapping) else {}
+    if existing_response.get("id"):
         return existing
-    file_response, file_headers = multipart_upload(
-        key=key,
-        path="/files",
-        file_path=batch_input,
-        purpose="batch",
-        timeout=args.timeout,
-    )
-    atomic_write_json(
-        output_dir / "batch_input_file.json",
-        {"response": file_response, "headers": file_headers, "uploaded_at": utc_now()},
-    )
-    batch_response, batch_headers = request_json(
-        key=key,
-        method="POST",
-        path="/batches",
-        body={
-            "input_file_id": file_response["id"],
-            "endpoint": "/v1/responses",
-            "completion_window": "24h",
-            "metadata": {
-                "kind": "caption_qa_smoke",
-                "model": args.model,
-                "reasoning_effort": args.reasoning_effort,
-                "image_detail": args.image_detail,
-                "qa_count": str(args.qa_count),
+    existing_file = read_json(output_dir / "batch_input_file.json")
+    file_response = existing_file.get("response") if isinstance(existing_file.get("response"), Mapping) else {}
+    if not file_response.get("id"):
+        file_response, file_headers = multipart_upload(
+            key=key,
+            path="/files",
+            file_path=batch_input,
+            purpose="batch",
+            timeout=args.timeout,
+        )
+        atomic_write_json(
+            output_dir / "batch_input_file.json",
+            {"response": file_response, "headers": file_headers, "uploaded_at": utc_now()},
+        )
+    try:
+        batch_response, batch_headers = request_json(
+            key=key,
+            method="POST",
+            path="/batches",
+            body={
+                "input_file_id": file_response["id"],
+                "endpoint": "/v1/responses",
+                "completion_window": "24h",
+                "metadata": {
+                    "kind": "caption_qa_smoke",
+                    "model": args.model,
+                    "reasoning_effort": args.reasoning_effort,
+                    "image_detail": args.image_detail,
+                    "qa_count": str(args.qa_count),
+                },
             },
-        },
-        timeout=args.timeout,
-    )
+            timeout=args.timeout,
+        )
+    except OpenAIRequestError as exc:
+        payload = {
+            "created_at": utc_now(),
+            "input_file_id": file_response.get("id"),
+            **exc.payload(),
+        }
+        atomic_write_json(output_dir / "batch_create_error.json", payload)
+        print(json.dumps({"event": "batch_create_error", "status_code": exc.status_code, "detail": payload["detail"]}, sort_keys=True), flush=True)
+        raise
     payload = {"response": batch_response, "headers": batch_headers, "created_at": utc_now()}
     atomic_write_json(output_dir / "batch.json", payload)
     return payload
@@ -771,4 +821,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except OpenAIRequestError as exc:
+        raise SystemExit(2) from exc

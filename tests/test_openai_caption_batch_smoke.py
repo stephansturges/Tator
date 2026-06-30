@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from PIL import Image
+import pytest
 
 from tools import run_openai_caption_batch_smoke as batch_smoke
 
@@ -62,3 +63,55 @@ def test_batch_line_uses_responses_vision_file_and_glossary_terms(tmp_path: Path
     assert "canonical object" in prompt
     assert '"canonical object": 1' in prompt
     assert '"RawThing": 1' not in prompt
+
+
+def test_submit_batch_reuses_uploaded_input_file_and_records_create_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    batch_input = output_dir / "batch_input.jsonl"
+    batch_input.write_text("{}\n", encoding="utf-8")
+    batch_smoke.atomic_write_json(
+        output_dir / "batch_input_file.json",
+        {"response": {"id": "file_batch_existing"}},
+    )
+    uploads: list[str] = []
+
+    def fail_upload(**kwargs):
+        uploads.append(str(kwargs.get("file_path")))
+        raise AssertionError("batch input should not be uploaded again")
+
+    def fail_create(**kwargs):
+        assert kwargs["path"] == "/batches"
+        assert kwargs["body"]["input_file_id"] == "file_batch_existing"
+        raise batch_smoke.OpenAIRequestError(
+            operation="openai_http_error",
+            status_code=400,
+            detail=json.dumps({"error": {"code": "billing_hard_limit_reached"}}),
+            headers={"x-request-id": "req_123"},
+        )
+
+    monkeypatch.setattr(batch_smoke, "multipart_upload", fail_upload)
+    monkeypatch.setattr(batch_smoke, "request_json", fail_create)
+
+    with pytest.raises(batch_smoke.OpenAIRequestError):
+        batch_smoke.submit_batch(
+            key="sk-test",
+            batch_input=batch_input,
+            output_dir=output_dir,
+            args=SimpleNamespace(
+                timeout=10,
+                model="gpt-5.5",
+                reasoning_effort="high",
+                image_detail="original",
+                qa_count=8,
+            ),
+        )
+
+    assert uploads == []
+    error = json.loads((output_dir / "batch_create_error.json").read_text(encoding="utf-8"))
+    assert error["input_file_id"] == "file_batch_existing"
+    assert error["detail"]["error"]["code"] == "billing_hard_limit_reached"
+    assert error["headers"]["x-request-id"] == "req_123"

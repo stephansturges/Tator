@@ -815,6 +815,7 @@ def test_caption_prompt_uses_glossary_as_semantic_class_meaning():
     assert 'light_vehicle: broad term "small vehicle"' in prompt
     assert "possible variants include car, van, pickup truck" in prompt
     assert 'gas_tank: broad term "storage tank"' in prompt
+    assert "Use each broad term as the canonical name for that labeled class" in prompt
     assert "Glossary variants are possible members of a class, not assertions" in prompt
     assert "Do not choose a subtype from the glossary unless the image clearly supports that subtype" in prompt
     assert "COUNTS (state exactly in final caption): small vehicle: 1, storage tank: 1" in prompt
@@ -823,11 +824,12 @@ def test_caption_prompt_uses_glossary_as_semantic_class_meaning():
 
 
 def test_default_caption_glossary_matches_camelcase_labelmap_names():
-    glossary = _default_agent_glossary_for_labelmap(["SmallVehicle", "PoleFixture", "StorageTank"])
+    glossary = _default_agent_glossary_for_labelmap(["SmallVehicle", "PoleFixture", "StorageTank", "UPole"])
 
     assert '"SmallVehicle": [\n    "Small Vehicle"' in glossary
     assert '"PoleFixture": [\n    "Pole Fixture"' in glossary
     assert '"StorageTank": [\n    "Storage Tank"' in glossary
+    assert '"UPole": [\n    "UPole"' in glossary
 
 
 def test_window_caption_prompt_applies_max_boxes_after_window_clipping():
@@ -1129,6 +1131,20 @@ def test_caption_request_drops_nonfinite_numeric_controls():
     assert payload.image_width is None
     assert payload.image_height is None
     assert payload.max_new_tokens is None
+
+
+def test_caption_request_accepts_json_object_glossary_template():
+    payload = QwenCaptionRequest(
+        image_base64="data:image/png;base64,AA==",
+        labelmap_glossary={
+            "UPole": ["utility pole", "power pole"],
+            "LightVehicle": ["light vehicle"],
+        },
+    )
+
+    assert isinstance(payload.labelmap_glossary, str)
+    assert '"UPole"' in payload.labelmap_glossary
+    assert "utility pole" in payload.labelmap_glossary
 
 
 def test_caption_request_normalizes_loop_recovery_controls():
@@ -1509,7 +1525,7 @@ def test_qwen_caption_prompt_preview_hardens_windowed_evidence_contract(monkeypa
     assert "utility pole" in preview.full_text
     assert preview.full_text.count("Overlap deduplication guidance") <= 2
     assert "global region middle-center" not in preview.full_text
-    assert "Use the class meaning glossary above" in preview.full_text
+    assert "Use each glossary broad term as the canonical name" in preview.full_text
     assert "Conditional cleanup / guard prompt template" in preview.full_text
     assert "Authoritative object counts" in preview.full_text
 
@@ -1952,7 +1968,7 @@ def test_mlx_caption_loop_raises_controlled_error_without_blocking_retry(monkeyp
         model_id="mlx-community/Qwen3-VL-4B-Instruct-4bit",
     )
 
-    with pytest.raises(api.QwenCaptionLoopDetected):
+    with pytest.raises(api.QwenCaptionLoopDetected) as exc_info:
         api._run_qwen_chat_mlx(
             runtime,
             [{"role": "user", "content": [{"type": "text", "text": "Caption."}]}],
@@ -1960,7 +1976,13 @@ def test_mlx_caption_loop_raises_controlled_error_without_blocking_retry(monkeyp
         )
 
     assert stream.closed is True
+    assert exc_info.value.generated_chars == 40
+    assert exc_info.value.raw_output == "!" * 40
+    assert exc_info.value.degenerate_reason == "punctuation_loop"
+    assert exc_info.value.diagnostic_payload()["raw_output_tail"] == "!" * 40
     assert any(event.get("event") == "stream_loop_detected" for event in events)
+    stream_event = next(event for event in events if event.get("event") == "stream_loop_detected")
+    assert stream_event["raw_output_tail"] == "!" * 40
     assert any(event.get("event") == "loop_trim" for event in events)
 
 
@@ -2220,6 +2242,122 @@ def test_full_caption_double_visual_loop_recovers_from_text_prompt_context(monke
         and event.get("stage_label") == "Compose full-image caption"
         for event in response.recovery_events
     )
+
+
+def test_full_caption_semantic_loop_output_is_salvaged_by_editor(monkeypatch):
+    runtime = ("runtime", None)
+    calls = {"visual": 0, "text_prompts": []}
+    looped_output = (
+        "Plan: describe the image. Final Polish: A high-angle view shows a dense green "
+        "forest canopy filling the frame, with varied tree crowns forming a textured surface. "
+        "The foliage ranges from bright green patches to darker shadowed clusters, and no "
+        "people or vehicles are apparent. Let's check constraints. Final Polish: A high-angle "
+        "view shows a dense green forest canopy filling the frame, with varied tree crowns "
+        "forming a textured surface."
+    )
+
+    monkeypatch.setattr(api, "_ensure_qwen_ready_for_caption", lambda *_args, **_kwargs: runtime)
+    monkeypatch.setattr(api, "_unload_qwen_runtime", lambda: None)
+
+    def fake_visual(*_args, **_kwargs):
+        calls["visual"] += 1
+        raise api.QwenCaptionLoopDetected(
+            "qwen_caption_repetition_loop",
+            raw_output=looped_output,
+            trimmed_output=looped_output,
+            degenerate_reason="repetition_loop",
+        )
+
+    def fake_text(prompt, *_args, **_kwargs):
+        calls["text_prompts"].append(prompt)
+        assert "Loop-output salvage instruction" in prompt
+        assert "Final Polish" in prompt
+        return (
+            "A high-angle view shows a dense green forest canopy filling the frame, "
+            "with varied tree crowns forming a textured surface.",
+            0,
+            0,
+        )
+
+    monkeypatch.setattr(api, "_run_qwen_inference", fake_visual)
+    monkeypatch.setattr(api, "_run_qwen_text_inference", fake_text)
+
+    payload = QwenCaptionRequest(
+        image_base64=_caption_test_image_data_url(width=64, height=64),
+        image_width=64,
+        image_height=64,
+        user_prompt="Write a caption from a high angle.",
+        caption_mode="full",
+        include_counts=False,
+        include_coords=False,
+        max_boxes=0,
+        model_id="mlx-community/Qwen3-VL-2B-Instruct-4bit",
+        caption_loop_recovery_mode="safe_retry_fallback",
+        unload_others=False,
+        force_unload=False,
+        fast_mode=True,
+    )
+
+    response = api.qwen_caption(payload)
+
+    assert response.caption.startswith("A high-angle view shows a dense green forest")
+    assert calls["visual"] == 1
+    assert len(calls["text_prompts"]) == 1
+    assert any(
+        event.get("action") == "loop_salvage_succeeded"
+        and event.get("stage_label") == "Compose full-image caption"
+        for event in response.recovery_events
+    )
+
+
+def test_full_caption_punctuation_loop_skips_editor_salvage(monkeypatch):
+    runtime = ("runtime", None)
+    calls = {"visual": 0, "text_prompts": []}
+
+    monkeypatch.setattr(api, "_ensure_qwen_ready_for_caption", lambda *_args, **_kwargs: runtime)
+    monkeypatch.setattr(api, "_unload_qwen_runtime", lambda: None)
+
+    def fake_visual(*_args, **_kwargs):
+        calls["visual"] += 1
+        if calls["visual"] == 1:
+            raise api.QwenCaptionLoopDetected(
+                "qwen_caption_repetition_loop",
+                raw_output="!" * 200,
+                trimmed_output="!",
+                degenerate_reason="punctuation_loop",
+            )
+        return "A top-down view shows a quiet green field.", 0, 0
+
+    def fake_text(prompt, *_args, **_kwargs):
+        calls["text_prompts"].append(prompt)
+        raise AssertionError("punctuation-only loops must not invoke text salvage")
+
+    monkeypatch.setattr(api, "_run_qwen_inference", fake_visual)
+    monkeypatch.setattr(api, "_run_qwen_text_inference", fake_text)
+
+    payload = QwenCaptionRequest(
+        image_base64=_caption_test_image_data_url(width=64, height=64),
+        image_width=64,
+        image_height=64,
+        user_prompt="Write a caption from above.",
+        caption_mode="full",
+        include_counts=False,
+        include_coords=False,
+        max_boxes=0,
+        model_id="mlx-community/Qwen3-VL-2B-Instruct-4bit",
+        caption_loop_recovery_mode="safe_retry_fallback",
+        unload_others=False,
+        force_unload=False,
+        fast_mode=True,
+    )
+
+    response = api.qwen_caption(payload)
+
+    assert response.caption == "A top-down view shows a quiet green field."
+    assert calls["visual"] == 2
+    assert calls["text_prompts"] == []
+    assert any(event.get("action") == "loop_salvage_skipped" for event in response.recovery_events)
+    assert any(event.get("action") == "safe_retry_succeeded" for event in response.recovery_events)
 
 
 def test_full_caption_recoverable_generation_error_uses_text_recovery(monkeypatch):

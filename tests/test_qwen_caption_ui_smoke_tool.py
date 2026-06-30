@@ -45,11 +45,19 @@ def test_qwen_caption_ui_smoke_tool_covers_critical_controls() -> None:
         "qwenCaptionIncludeSourceAnnotationsContext",
         "qwenCaptionStrictGrounding",
         "qwenCaptionBuildInstructionDataset",
+        "qwenCaptionPreviewInstructionProcess",
+        "qwenCaptionDownloadInstructionBundle",
         "qwenCaptionDownloadInstructionJsonl",
         "qwenCaptionDownloadInstructionArchive",
         "qwenCaptionDownloadInstructionReview",
         "qwenCaptionImportInstructionReview",
         "qwenCaptionDownloadInstructionReport",
+        "qwenCaptionInstructionAdvanced",
+        "qwenCaptionInstructionDatasetStatus",
+        "qwenCaptionInstructionModelStatus",
+        "qwenCaptionInstructionJobStatus",
+        "qwenCaptionInstructionReadinessStatus",
+        "qwenCaptionInstructionActionReason",
         "qwenCaptionExportHealth",
         "qwenCaptionReadinessRun",
         "qwenCaptionReadinessStatus",
@@ -70,17 +78,27 @@ def test_qwen_caption_ui_smoke_tool_covers_critical_controls() -> None:
     assert "VLM export validation has not run yet" in text
     assert "Download grouped JSON" in text
     assert "Download VLM JSONL" in text
-    assert "Create VLM training dataset" in text
-    assert "Download instruction JSONL" in text
-    assert "Download instruction archive" in text
-    assert "Import reviewed JSONL" in text
-    assert "Download instruction report" in text
+    assert "Create training dataset" in text
+    assert "Preview dataset prompts" in text
+    assert "Download training bundle" in text
+    assert "Download trainer JSONL" in text
+    assert "Download construction archive" in text
+    assert "Import review decisions" in text
+    assert "Download readiness report" in text
     assert "Instruction dataset defaults are set for caption0 plus generated QA" in text
-    assert "Generated QA never becomes source annotations" in text
+    assert "Generated Q&A never becomes source annotations" in text
     assert "All-image caption and training-dataset jobs start with the selected image" in text
     assert "all_image_order_help_visible" in text
     assert "vlm_export_button_count" in text
     assert "instruction_build_button_count" in text
+    assert "instruction_bundle_button_count" in text
+    assert "instruction_preview_button_count" in text
+    assert "instruction_preview_before_dataset_create" in text
+    assert "instruction_advanced_exports_collapsed_by_default" in text
+    assert "instruction_status_strip_visible" in text
+    assert "instruction_status_strip_updates_after_readiness" in text
+    assert "instruction_preview_index" in text
+    assert "instruction_build_index" in text
     assert "instruction_review_button_count" in text
     assert "instruction_import_button_count" in text
     assert "instruction_report_button_count" in text

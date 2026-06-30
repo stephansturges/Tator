@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import threading
 import time
+from types import SimpleNamespace
 import zipfile
 
 from fastapi.testclient import TestClient
@@ -45,12 +46,32 @@ def test_caption_dataset_job_request_defaults_runner_watchdog_after_image_timeou
     assert payload.per_image_timeout_seconds == 900.0
     assert payload.runner_no_output_timeout_seconds == 1080.0
     assert payload.runner_heartbeat_interval_seconds == 30.0
-    assert payload.runner_artifact_log_bytes == 1048576
+    assert payload.runner_artifact_log_bytes == 0
     assert payload.runner_min_free_gb == 5.0
     assert payload.runner_disk_safety_factor == 1.25
     assert payload.max_failures == 0
     assert payload.pilot_min_cases == 300
     assert payload.pilot_deterministic_recovery_confidence == 0.95
+
+
+def test_caption_dataset_job_request_normalizes_openai_provider_fields() -> None:
+    payload = QwenCaptionDatasetJobRequest(
+        dataset_id="ds",
+        caption_provider="remote",
+        openai_model="  gpt-5.5  ",
+        openai_image_detail="LOW",
+        openai_api_key_path=" openAI_API_KEY_DoNotCommit ",
+        openai_service_tier="batch",
+        openai_timeout_seconds=9999,
+        caption_request={"user_prompt": "Describe it"},
+    )
+
+    assert payload.caption_provider == "openai"
+    assert payload.openai_model == "gpt-5.5"
+    assert payload.openai_image_detail == "low"
+    assert payload.openai_api_key_path == "openAI_API_KEY_DoNotCommit"
+    assert payload.openai_service_tier == "batch"
+    assert payload.openai_timeout_seconds == 600.0
 
 
 def test_caption_dataset_job_request_normalizes_set_and_forget_controls() -> None:
@@ -183,6 +204,8 @@ def test_caption_dataset_job_request_normalizes_instruction_dataset_controls() -
         include_deterministic_metadata_qa="yes",
         include_source_annotations_in_generator_context="off",
         strict_grounding="no",
+        instruction_qa_restrict_speculative_language="on",
+        instruction_qa_max_topup_attempts=99,
         qa_mix="",
         answer_format="json",
     )
@@ -194,14 +217,230 @@ def test_caption_dataset_job_request_normalizes_instruction_dataset_controls() -
 
     assert payload.instruction_dataset is True
     assert payload.subcaptions_per_image == 20
+    assert payload.target_generated_qa_per_image == 20
+    assert payload.increment_generated_qa_per_image == 20
     assert payload.include_caption0_in_training is False
     assert payload.include_generated_qa_in_training is False
     assert payload.include_deterministic_metadata_qa is True
     assert payload.include_source_annotations_in_generator_context is False
     assert payload.strict_grounding is False
+    assert payload.instruction_qa_restrict_speculative_language is True
+    assert payload.instruction_qa_max_topup_attempts == 12
     assert payload.qa_mix == "balanced"
     assert payload.answer_format == "json"
     assert negative.subcaptions_per_image == 0
+    assert negative.instruction_qa_max_topup_attempts == 6
+
+
+def test_caption_dataset_job_request_normalizes_run_policy_controls() -> None:
+    replace = QwenCaptionDatasetJobRequest(
+        dataset_id="ds",
+        caption_request={"user_prompt": "Describe it"},
+        overwrite=True,
+    )
+    generated = QwenCaptionDatasetJobRequest(
+        dataset_id="ds",
+        caption_request={"user_prompt": "Describe it"},
+        instruction_dataset=True,
+        subcaptions_per_image=4,
+        instruction_qa_imposed_questions=["What is present?"],
+        run_kind="test",
+        completion_mode="bad",
+        write_policy="qa_only_extend",
+        target_base_captions_per_image=999,
+        increment_generated_qa_per_image="",
+        test_outputs_count_toward_completion="off",
+    )
+
+    assert replace.write_policy == "replace_generated"
+    assert generated.run_kind == "test"
+    assert generated.write_policy == "qa_only_extend"
+    assert generated.completion_mode == "per_image_totals"
+    assert generated.target_base_captions_per_image == 20
+    assert generated.target_generated_qa_per_image == 4
+    assert generated.increment_generated_qa_per_image == 4
+    assert generated.test_outputs_count_toward_completion is False
+
+
+def test_caption_dataset_generated_qa_target_uses_imposed_questions_as_floor() -> None:
+    import localinferenceapi as api
+
+    payload = QwenCaptionDatasetJobRequest(
+        dataset_id="ds",
+        caption_request={"user_prompt": "Describe it"},
+        instruction_dataset=True,
+        subcaptions_per_image=4,
+        target_generated_qa_per_image=0,
+        instruction_qa_imposed_questions=[
+            "What object is at the center?",
+            "How are the visible objects arranged?",
+        ],
+    )
+    imposed_heavy = QwenCaptionDatasetJobRequest(
+        dataset_id="ds",
+        caption_request={"user_prompt": "Describe it"},
+        instruction_dataset=True,
+        subcaptions_per_image=1,
+        target_generated_qa_per_image=0,
+        instruction_qa_imposed_questions=[
+            "Question one?",
+            "Question two?",
+            "Question three?",
+        ],
+    )
+
+    assert api._qwen_caption_dataset_generated_qa_target(payload) == 4
+    assert api._qwen_caption_dataset_generated_qa_target(imposed_heavy) == 3
+
+
+def test_caption_dataset_incremental_runner_settings_use_increment_controls(tmp_path: Path) -> None:
+    import localinferenceapi as api
+
+    payload = QwenCaptionDatasetJobRequest(
+        dataset_id="ds",
+        caption_request={"user_prompt": "Describe it"},
+        instruction_dataset=True,
+        completion_mode="incremental",
+        subcaptions_per_image=8,
+        increment_base_captions_per_image=0,
+        increment_generated_qa_per_image=3,
+        include_caption0_in_training=True,
+    )
+    args = api._qwen_caption_dataset_preview_runner_args(
+        payload,
+        request_path=tmp_path / "request.json",
+        caption_request_fields={"caption_windowed_full_image_strategy": "visual"},
+        caption_runner_model_fields={
+            "model_id": "model",
+            "refinement_model_id": "same",
+            "fallback_model_id": "same",
+            "loop_recovery": "safe_retry_fallback",
+        },
+    )
+
+    assert args.subcaptions_per_image == 3
+    assert args.include_caption0_in_training is False
+
+
+def test_caption_dataset_job_requested_runner_settings_match_instruction_runner_manifest(
+    tmp_path: Path,
+) -> None:
+    import localinferenceapi as api
+    from tools import run_qwen_caption_flow_benchmark as runner
+
+    payload = QwenCaptionDatasetJobRequest(
+        dataset_id="ds",
+        caption_request={
+            "user_prompt": "Use a custom dataset-building caption prompt.",
+            "caption_mode": "windowed",
+            "caption_windowed_full_image_strategy": "visual",
+            "top_p": 0.1,
+        },
+        set_and_forget=True,
+        instruction_dataset=True,
+        subcaptions_per_image=8,
+        instruction_qa_max_topup_attempts=9,
+        instruction_qa_restrict_speculative_language=True,
+        include_source_annotations_in_generator_context=False,
+        strict_grounding=False,
+        qa_mix="object",
+        answer_format="json",
+    )
+    request_fields, model_fields = api._qwen_caption_dataset_effective_request_fields(
+        payload.caption_request,
+        set_and_forget=True,
+    )
+    request_path = tmp_path / "request_fields.json"
+    request_path.write_text(json.dumps(request_fields, sort_keys=True))
+    runner_profile = api._qwen_caption_dataset_runner_profile(payload)
+
+    expected = api._qwen_caption_dataset_requested_runner_settings(
+        request_path=request_path,
+        caption_runner_model_fields=model_fields,
+        runner_profile=runner_profile,
+        payload=payload,
+    )
+
+    actual_args = dict(runner.RUN_SETTINGS_ARG_DEFAULTS)
+    actual_args.update(
+        {
+            "request_json": request_path,
+            "windowed_full_image_strategy": "visual",
+            "model_id": model_fields["model_id"],
+            "refinement_model_id": model_fields["refinement_model_id"],
+            "fallback_model_id": model_fields["fallback_model_id"],
+            "loop_recovery": model_fields["loop_recovery"],
+            "mlx_max_image_side": runner_profile["mlx_max_image_side"],
+            "retry_image_side_scale": runner_profile["retry_image_side_scale"],
+            "min_retry_image_side": runner_profile["min_retry_image_side"],
+            "cooldown_after_success": runner_profile["cooldown_after_success"],
+            "instruction_dataset": True,
+            "subcaptions_per_image": 8,
+            "instruction_qa_max_topup_attempts": 9,
+            "instruction_qa_restrict_speculative_language": True,
+            "include_source_annotations_in_generator_context": False,
+            "strict_grounding": False,
+            "qa_mix": "object",
+            "answer_format": "json",
+        }
+    )
+    actual = runner.run_settings_payload(SimpleNamespace(**actual_args))
+
+    assert expected["fingerprint"] == actual["fingerprint"]
+    caption_args = expected["caption_args"]
+    assert caption_args["instruction_dataset"] is True
+    assert caption_args["subcaptions_per_image"] == 8
+    assert caption_args["instruction_qa_max_topup_attempts"] == 9
+    assert caption_args["instruction_qa_restrict_speculative_language"] is True
+    assert caption_args["include_source_annotations_in_generator_context"] is False
+    assert caption_args["strict_grounding"] is False
+    assert caption_args["qa_mix"] == "object"
+    assert caption_args["answer_format"] == "json"
+    assert caption_args["prompt"] == runner.RUN_SETTINGS_ARG_DEFAULTS["prompt"]
+    assert caption_args["top_p"] == runner.RUN_SETTINGS_ARG_DEFAULTS["top_p"]
+
+
+def test_caption_dataset_job_requested_runner_settings_include_openai_provider(
+    tmp_path: Path,
+) -> None:
+    import localinferenceapi as api
+
+    payload = QwenCaptionDatasetJobRequest(
+        dataset_id="ds",
+        caption_request={"user_prompt": "Describe it"},
+        caption_provider="openai",
+        openai_model="gpt-5.5",
+        openai_image_detail="original",
+        openai_api_key_path="openAI_API_KEY_DoNotCommit",
+        openai_service_tier="batch",
+        openai_timeout_seconds=77,
+        set_and_forget=True,
+    )
+    request_path = tmp_path / "request_fields.json"
+    request_path.write_text(json.dumps(payload.caption_request, sort_keys=True))
+    model_fields = {
+        "model_id": "model",
+        "model_variant": "Instruct",
+        "refinement_model_id": "same",
+        "fallback_model_id": "auto",
+        "loop_recovery": "safe_retry_fallback",
+    }
+    runner_profile = api._qwen_caption_dataset_runner_profile(payload)
+
+    settings = api._qwen_caption_dataset_requested_runner_settings(
+        request_path=request_path,
+        caption_runner_model_fields=model_fields,
+        runner_profile=runner_profile,
+        payload=payload,
+    )
+
+    caption_args = settings["caption_args"]
+    assert caption_args["caption_provider"] == "openai"
+    assert caption_args["openai_model"] == "gpt-5.5"
+    assert caption_args["openai_image_detail"] == "original"
+    assert caption_args["openai_api_key_file"] == "openAI_API_KEY_DoNotCommit"
+    assert caption_args["openai_service_tier"] == "batch"
+    assert caption_args["openai_timeout"] == 77.0
 
 
 def test_caption_dataset_job_request_rejects_instruction_dataset_with_no_row_family() -> None:
@@ -222,7 +461,13 @@ def test_caption_dataset_job_request_normalizes_runner_artifact_log_limit() -> N
         caption_request={"user_prompt": "Describe it"},
         runner_artifact_log_bytes="0",
     )
+    null_default = QwenCaptionDatasetJobRequest(
+        dataset_id="ds",
+        caption_request={"user_prompt": "Describe it"},
+        runner_artifact_log_bytes=None,
+    )
     assert payload.runner_artifact_log_bytes == 0
+    assert null_default.runner_artifact_log_bytes == 0
 
     capped = QwenCaptionDatasetJobRequest(
         dataset_id="ds",
@@ -345,6 +590,295 @@ def test_caption_dataset_cases_preserve_requested_image_order(monkeypatch, tmp_p
     ]
 
 
+def test_caption_dataset_cases_skip_images_that_meet_per_image_targets(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import localinferenceapi as api
+
+    dataset_root = tmp_path / "dataset"
+    image_dir = dataset_root / "train" / "images"
+    image_dir.mkdir(parents=True)
+    for name in ("complete.jpg", "todo.jpg"):
+        Image.new("RGB", (16, 16)).save(image_dir / name)
+    entry = {
+        "id": "ds",
+        "label": "Dataset",
+        "yolo_layout": "split",
+        "classes": ["Building"],
+        "linked_root": str(dataset_root),
+    }
+    manifest = {
+        "dataset_id": "ds",
+        "dataset_label": "Dataset",
+        "yolo_layout": "split",
+        "labelmap": ["Building"],
+        "images": [
+            {"split": "train", "image_relpath": "complete.jpg", "image_name": "complete.jpg", "label_lines": []},
+            {"split": "train", "image_relpath": "todo.jpg", "image_name": "todo.jpg", "label_lines": []},
+        ],
+    }
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: entry)
+    monkeypatch.setattr(api, "_annotation_manifest_for_entry", lambda _entry: manifest)
+    monkeypatch.setattr(api, "_dataset_effective_root_from_entry", lambda _entry: dataset_root)
+    monkeypatch.setattr(api, "_resolve_annotation_image_path", lambda _root, _layout, split, rel: image_dir / rel.name)
+    monkeypatch.setattr(
+        api,
+        "_load_dataset_caption_records",
+        lambda _entry: [
+            {
+                "id": "cap-1",
+                "image_name": "complete.jpg",
+                "image_key": "train/complete.jpg",
+                "caption": "done",
+                "source": "qwen_caption_job",
+                "lifecycle_status": "active",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        api,
+        "_load_dataset_caption_instruction_records",
+        lambda _entry: [
+            {
+                "id": f"qa-{idx}",
+                "image_name": "complete.jpg",
+                "image_key": "train/complete.jpg",
+                "question": f"Question {idx}?",
+                "answer": "Answer.",
+                "row_type": "generated_qa",
+                "lifecycle_status": "active",
+            }
+            for idx in range(8)
+        ],
+    )
+
+    payload = QwenCaptionDatasetJobRequest(
+        dataset_id="ds",
+        instruction_dataset=True,
+        save_text_labels=True,
+        subcaptions_per_image=8,
+        target_base_captions_per_image=1,
+        target_generated_qa_per_image=8,
+        write_policy="fill_missing",
+    )
+    _manifest, cases = api._qwen_caption_dataset_cases(payload, output_dir=tmp_path / "job")
+
+    assert [case["image_name"] for case in cases] == ["todo.jpg"]
+
+
+def test_caption_dataset_completion_counts_do_not_double_count_primary_record(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import localinferenceapi as api
+
+    dataset_root = tmp_path / "dataset"
+    image_dir = dataset_root / "train" / "images"
+    image_dir.mkdir(parents=True)
+    Image.new("RGB", (16, 16)).save(image_dir / "frame.jpg")
+    entry = {"id": "ds", "label": "Dataset", "yolo_layout": "split", "linked_root": str(dataset_root)}
+    manifest = {
+        "dataset_id": "ds",
+        "dataset_label": "Dataset",
+        "yolo_layout": "split",
+        "labelmap": ["Building"],
+        "images": [
+            {
+                "split": "train",
+                "image_relpath": "frame.jpg",
+                "image_name": "frame.jpg",
+                "text_label": "A caption.",
+                "label_lines": [],
+            }
+        ],
+    }
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: entry)
+    monkeypatch.setattr(api, "_annotation_manifest_for_entry", lambda _entry: manifest)
+    monkeypatch.setattr(
+        api,
+        "_annotation_effective_text_label",
+        lambda _entry, _image_relpath, _split: "A caption.",
+    )
+    monkeypatch.setattr(
+        api,
+        "_load_dataset_caption_records",
+        lambda _entry: [
+            {
+                "id": "cap-1",
+                "image_name": "frame.jpg",
+                "image_key": "train/frame.jpg",
+                "caption": "A caption.",
+                "source": "qwen_caption_job",
+                "lifecycle_status": "active",
+                "is_primary": True,
+            }
+        ],
+    )
+    monkeypatch.setattr(api, "_load_dataset_caption_instruction_records", lambda _entry: [])
+
+    snapshot = api._qwen_caption_dataset_completion_snapshot(
+        "ds",
+        payload=QwenCaptionDatasetJobRequest(
+            dataset_id="ds",
+            instruction_dataset=True,
+            target_base_captions_per_image=2,
+            target_generated_qa_per_image=0,
+        ),
+    )
+
+    image = snapshot["images"][0]
+    assert image["stored_caption_count"] == 1
+    assert image["primary_text_label"] is True
+    assert image["base_caption_count"] == 1
+    assert image["base_caption_deficit"] == 1
+    assert image["complete"] is False
+
+
+def test_caption_dataset_cases_replace_policy_reprocesses_complete_images(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import localinferenceapi as api
+
+    dataset_root = tmp_path / "dataset"
+    image_dir = dataset_root / "train" / "images"
+    image_dir.mkdir(parents=True)
+    Image.new("RGB", (16, 16)).save(image_dir / "complete.jpg")
+    entry = {"id": "ds", "label": "Dataset", "yolo_layout": "split", "linked_root": str(dataset_root)}
+    manifest = {
+        "dataset_id": "ds",
+        "dataset_label": "Dataset",
+        "yolo_layout": "split",
+        "labelmap": ["Building"],
+        "images": [{"split": "train", "image_relpath": "complete.jpg", "image_name": "complete.jpg", "label_lines": []}],
+    }
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: entry)
+    monkeypatch.setattr(api, "_annotation_manifest_for_entry", lambda _entry: manifest)
+    monkeypatch.setattr(api, "_dataset_effective_root_from_entry", lambda _entry: dataset_root)
+    monkeypatch.setattr(api, "_resolve_annotation_image_path", lambda _root, _layout, _split, rel: image_dir / rel.name)
+    monkeypatch.setattr(
+        api,
+        "_load_dataset_caption_records",
+        lambda _entry: [
+            {
+                "id": "cap-1",
+                "image_name": "complete.jpg",
+                "image_key": "train/complete.jpg",
+                "caption": "done",
+                "source": "qwen_caption_job",
+                "lifecycle_status": "active",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        api,
+        "_load_dataset_caption_instruction_records",
+        lambda _entry: [
+            {
+                "id": f"qa-{idx}",
+                "image_name": "complete.jpg",
+                "image_key": "train/complete.jpg",
+                "question": f"Question {idx}?",
+                "answer": "Answer.",
+                "row_type": "generated_qa",
+                "lifecycle_status": "active",
+            }
+            for idx in range(8)
+        ],
+    )
+
+    payload = QwenCaptionDatasetJobRequest(
+        dataset_id="ds",
+        instruction_dataset=True,
+        save_text_labels=True,
+        subcaptions_per_image=8,
+        write_policy="replace_generated",
+        target_generated_qa_per_image=8,
+    )
+    _manifest, cases = api._qwen_caption_dataset_cases(payload, output_dir=tmp_path / "job")
+
+    assert [case["image_name"] for case in cases] == ["complete.jpg"]
+
+
+def test_caption_dataset_process_preview_includes_caption_and_generated_qa_prompt(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import localinferenceapi as api
+
+    dataset_root = tmp_path / "dataset"
+    image_dir = dataset_root / "train" / "images"
+    image_dir.mkdir(parents=True)
+    (dataset_root / "labelmap.txt").write_text("Building\n", encoding="utf-8")
+    image_path = image_dir / "frame.jpg"
+    Image.new("RGB", (32, 24), color=(64, 80, 96)).save(image_path)
+    entry = {
+        "id": "ds",
+        "label": "Dataset",
+        "yolo_layout": "split",
+        "classes": ["Building"],
+        "linked_root": str(dataset_root),
+    }
+    manifest = {
+        "dataset_id": "ds",
+        "dataset_label": "Dataset",
+        "yolo_layout": "split",
+        "labelmap": ["Building"],
+        "images": [
+            {
+                "split": "train",
+                "image_relpath": "frame.jpg",
+                "image_name": "frame.jpg",
+                "label_lines": ["0 0.5 0.5 0.25 0.25"],
+                "text_label": "",
+            },
+        ],
+    }
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: entry)
+    monkeypatch.setattr(api, "_annotation_manifest_for_entry", lambda _entry: manifest)
+    monkeypatch.setattr(api, "_dataset_effective_root_from_entry", lambda _entry: dataset_root)
+
+    payload = QwenCaptionDatasetJobRequest(
+        dataset_id="ds",
+        caption_request={
+            "user_prompt": "Describe it",
+            "caption_mode": "full",
+            "image_base64": "should-be-stripped",
+        },
+        image_names=["frame.jpg"],
+        overwrite=True,
+        set_and_forget=True,
+        instruction_dataset=True,
+        subcaptions_per_image=2,
+        qa_mix="object",
+    )
+    preview = api._qwen_caption_dataset_process_preview(payload)
+
+    titles = [section.title for section in preview.sections]
+    assert "Full-image caption prompt" in titles
+    assert "Generated QA prompt template" in titles
+    assert "Generated QA verifier prompt template" in titles
+    assert "Create up to 2 diverse visual instruction question/answer pairs" in preview.full_text
+    assert "Verify and, when possible, rewrite generated image QA pairs for training" in preview.full_text
+    assert "caption0 placeholder" in " ".join(preview.warnings)
+    assert preview.meta["dataset_preview"]["total_cases"] == 1
+    assert preview.meta["dataset_preview"]["first_image_name"] == "frame.jpg"
+    assert preview.meta["instruction_qa_prompt"]["requested"] == 2
+    assert preview.meta["instruction_qa_prompt"]["qa_mix"] == "object"
+    assert preview.meta["prompt_budget"]["includes_generated_qa_prompt"] is True
+    assert preview.meta["prompt_budget"]["includes_generated_qa_verifier_prompt"] is True
+    assert preview.meta["instruction_qa_prompt"]["verifier"]["enabled"] is True
+    assert any(
+        section.get("title") == "Generated QA prompt template"
+        for section in preview.meta["prompt_budget"]["sections"]
+    )
+    assert any(
+        section.get("title") == "Generated QA verifier prompt template"
+        for section in preview.meta["prompt_budget"]["sections"]
+    )
+
+
 def test_caption_dataset_save_appends_caption_record_and_primary_text_label(monkeypatch, tmp_path: Path) -> None:
     import localinferenceapi as api
 
@@ -452,7 +986,57 @@ def test_caption_dataset_caption_record_from_row_exposes_job_result(tmp_path: Pa
         "artifact_dir": str(result_dir),
         "caption_quality": {"characters": 10},
         "generated_qa_pair_count": 0,
+        "generated_qa_target_pair_count": 0,
+        "generated_qa_rejected_pair_count": 0,
     }
+
+
+def test_caption_dataset_caption_record_from_row_exposes_generated_qa_pairs(tmp_path: Path) -> None:
+    import localinferenceapi as api
+
+    result_dir = tmp_path / "attempt"
+    result_dir.mkdir()
+    (result_dir / "result.json").write_text(
+        """
+        {
+          "case": {"case_id": "case-1", "image_name": "frame.jpg", "image_path": "/data/frame.jpg"},
+          "response": {
+            "caption": "A caption.",
+            "generated_qa_pairs": [
+              {
+                "id": "qa-1",
+                "question": "What is shown?",
+                "answer": "A building is shown.",
+                "validation_status": "accepted"
+              }
+            ]
+          }
+        }
+        """
+    )
+
+    record = api._qwen_caption_dataset_caption_record_from_row(
+        {"artifact_dir": str(result_dir), "case_id": "row-case", "case": "row-name", "stem": "frame"}
+    )
+
+    assert record is not None
+    assert record["generated_qa_pair_count"] == 1
+    assert record["generated_qa_pairs"] == [
+        {
+            "id": "qa-1",
+            "question": "What is shown?",
+            "answer": "A building is shown.",
+            "row_type": "generated_qa",
+            "answer_source": "vlm_generated",
+            "answer_format": "",
+            "validated_against": [],
+            "source_fields": [],
+            "validation_status": "accepted",
+            "review_status": "",
+            "metadata": {},
+            "validation": {},
+        }
+    ]
 
 
 def test_caption_dataset_save_instruction_records_from_row_persists_generated_qa(
@@ -523,6 +1107,215 @@ def test_caption_dataset_save_instruction_records_from_row_persists_generated_qa
     assert captured[0]["records"][0]["metadata"]["case_id"] == "row-case"
     assert captured[0]["records"][0]["metadata"]["artifact_dir"] == str(result_dir)
     assert job.logs[-1]["generated_qa_rows"] == 2
+
+
+def test_caption_dataset_soft_archives_generated_outputs_without_manual_rows(
+    monkeypatch,
+) -> None:
+    import localinferenceapi as api
+
+    captions = [
+        {
+            "id": "generated-cap",
+            "image_name": "frame.jpg",
+            "image_key": "train/frame.jpg",
+            "caption": "generated",
+            "source": "qwen_caption_job",
+            "lifecycle_status": "active",
+            "is_primary": True,
+        },
+        {
+            "id": "manual-cap",
+            "image_name": "frame.jpg",
+            "image_key": "train/frame.jpg",
+            "caption": "manual",
+            "source": "manual",
+            "lifecycle_status": "active",
+        },
+    ]
+    qa_records = [
+        {
+            "id": "qa-1",
+            "image_name": "frame.jpg",
+            "image_key": "train/frame.jpg",
+            "question": "What is shown?",
+            "answer": "A scene.",
+            "row_type": "generated_qa",
+            "lifecycle_status": "active",
+        }
+    ]
+    written_captions = []
+    written_qa = []
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: {"id": "ds"})
+    monkeypatch.setattr(
+        api,
+        "_dataset_caption_context",
+        lambda _entry, image_name, _payload=None: ("train", Path(image_name), f"train/{image_name}"),
+    )
+    monkeypatch.setattr(api, "_load_dataset_caption_records", lambda _entry: captions)
+    monkeypatch.setattr(api, "_load_dataset_caption_instruction_records", lambda _entry: qa_records)
+    monkeypatch.setattr(api, "_write_dataset_caption_records", lambda _entry, records: written_captions.append(list(records)))
+    monkeypatch.setattr(api, "_write_dataset_caption_instruction_records", lambda _entry, records: written_qa.append(list(records)))
+
+    archived = api._qwen_caption_dataset_soft_archive_generated_outputs(
+        "ds",
+        "frame.jpg",
+        job_id="job-1",
+    )
+
+    assert archived == {"captions": 1, "generated_qa": 1, "split_matched": 1}
+    assert written_captions[-1][0]["lifecycle_status"] == "superseded"
+    assert written_captions[-1][0]["is_primary"] is False
+    assert written_captions[-1][1]["lifecycle_status"] == "active"
+    assert written_qa[-1][0]["lifecycle_status"] == "superseded"
+    assert written_qa[-1][0]["superseded_by_run_id"] == "job-1"
+
+
+def test_caption_dataset_save_instruction_records_marks_overflow_rows(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import localinferenceapi as api
+
+    result_dir = tmp_path / "attempt"
+    result_dir.mkdir()
+    (result_dir / "result.json").write_text(
+        """
+        {
+          "case": {"case_id": "case-1", "image_name": "frame.jpg", "image_path": "/data/frame.jpg", "split": "train"},
+          "response": {
+            "caption": "A broad caption.",
+            "generated_qa_pairs": [
+              {"question": "What is visible?", "answer": "A field is visible.", "validation_status": "accepted"},
+              {"question": "How is it arranged?", "answer": "It is mostly open.", "validation_status": "accepted"}
+            ]
+          }
+        }
+        """
+    )
+    captured = []
+    monkeypatch.setattr(
+        api,
+        "_qwen_caption_dataset_image_completion_counts",
+        lambda *_args, **_kwargs: {"generated_qa_count": 1, "base_caption_count": 1},
+    )
+    monkeypatch.setattr(
+        api,
+        "_dataset_caption_add_instruction_records",
+        lambda dataset_id, image_name, records, split=None: captured.append(list(records)) or len(records),
+    )
+    job = api.QwenCaptionDatasetJob(job_id="job")
+    payload = QwenCaptionDatasetJobRequest(
+        dataset_id="ds",
+        instruction_dataset=True,
+        subcaptions_per_image=2,
+        target_generated_qa_per_image=2,
+        write_policy="fill_missing",
+    )
+
+    added = api._qwen_caption_dataset_save_instruction_records_from_row(
+        dataset_id="ds",
+        row={"artifact_dir": str(result_dir), "case_id": "row-case"},
+        job=job,
+        payload=payload,
+    )
+
+    assert added == 2
+    assert captured[0][0]["lifecycle_status"] == "active"
+    assert captured[0][1]["lifecycle_status"] == "overflow"
+    assert captured[0][1]["superseded_reason"] == "per_image_generated_qa_target_reached"
+
+
+def test_caption_dataset_save_instruction_records_limits_incremental_rows(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import localinferenceapi as api
+
+    result_dir = tmp_path / "attempt"
+    result_dir.mkdir()
+    (result_dir / "result.json").write_text(
+        """
+        {
+          "case": {"case_id": "case-1", "image_name": "frame.jpg", "image_path": "/data/frame.jpg", "split": "train"},
+          "response": {
+            "caption": "A broad caption.",
+            "generated_qa_pairs": [
+              {"question": "What is visible?", "answer": "A field is visible.", "validation_status": "accepted"},
+              {"question": "How is it arranged?", "answer": "It is mostly open.", "validation_status": "accepted"},
+              {"question": "Where is it?", "answer": "It is beside a road.", "validation_status": "accepted"}
+            ]
+          }
+        }
+        """
+    )
+    captured = []
+    monkeypatch.setattr(
+        api,
+        "_dataset_caption_add_instruction_records",
+        lambda dataset_id, image_name, records, split=None: captured.append(list(records)) or len(records),
+    )
+    job = api.QwenCaptionDatasetJob(job_id="job")
+    payload = QwenCaptionDatasetJobRequest(
+        dataset_id="ds",
+        instruction_dataset=True,
+        completion_mode="incremental",
+        subcaptions_per_image=8,
+        increment_generated_qa_per_image=2,
+    )
+
+    added = api._qwen_caption_dataset_save_instruction_records_from_row(
+        dataset_id="ds",
+        row={"artifact_dir": str(result_dir), "case_id": "row-case"},
+        job=job,
+        payload=payload,
+    )
+
+    assert added == 3
+    assert [record["lifecycle_status"] for record in captured[0]] == ["active", "active", "overflow"]
+    assert captured[0][2]["superseded_reason"] == "incremental_generated_qa_increment_reached"
+
+
+def test_caption_dataset_incremental_zero_base_increment_does_not_save_caption(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import localinferenceapi as api
+
+    result_dir = tmp_path / "attempt"
+    result_dir.mkdir()
+    (result_dir / "result.json").write_text(
+        """
+        {
+          "case": {"image_name": "frame.jpg", "split": "train"},
+          "response": {"caption": "A caption."}
+        }
+        """
+    )
+    saved = []
+    monkeypatch.setattr(
+        api,
+        "_add_caption_impl",
+        lambda *args, **kwargs: saved.append({"args": args, "kwargs": kwargs}) or {"status": "saved"},
+    )
+    job = api.QwenCaptionDatasetJob(job_id="job")
+    payload = QwenCaptionDatasetJobRequest(
+        dataset_id="ds",
+        instruction_dataset=True,
+        completion_mode="incremental",
+        increment_base_captions_per_image=0,
+        include_caption0_in_training=True,
+    )
+
+    image_name = api._qwen_caption_dataset_save_caption_from_row(
+        dataset_id="ds",
+        row={"artifact_dir": str(result_dir)},
+        job=job,
+        payload=payload,
+    )
+
+    assert image_name is None
+    assert saved == []
 
 
 def test_caption_dataset_add_instruction_records_persists_validation_metadata(
@@ -970,12 +1763,14 @@ def test_caption_instruction_review_decision_normalizes_external_review_values()
     import localinferenceapi as api
 
     assert api._caption_instruction_review_decision("accepted") == "accepted"
+    assert api._caption_instruction_review_decision("machine_validated") == "accepted"
     assert api._caption_instruction_review_decision("reject") == "rejected"
     assert api._caption_instruction_review_decision("needs-revision") == "needs_revision"
     assert api._caption_instruction_review_decision("needs review") == "needs_revision"
     assert api._caption_instruction_review_decision("Needs-Rewrite") == "needs_revision"
     assert api._caption_instruction_review_decision_is_supported("") is True
     assert api._caption_instruction_review_decision_is_supported("unreviewed") is True
+    assert api._caption_instruction_review_decision_is_supported("machine_validated") is True
     assert api._caption_instruction_review_decision_is_supported("acceppted") is False
 
 
@@ -3815,6 +4610,72 @@ def test_caption_instruction_training_validator_requires_complete_row_metadata()
     assert "row 6 has non-trainable review status" in validation["errors"]
 
 
+def test_caption_instruction_archive_flattens_machine_validated_generated_qa(
+    monkeypatch,
+) -> None:
+    import localinferenceapi as api
+
+    manifest = {
+        "labelmap": ["UPole"],
+        "images": [
+            {
+                "split": "train",
+                "image_relpath": "frame.jpg",
+                "image_name": "frame.jpg",
+                "label_lines": ["0 0.5 0.5 0.1 0.1"],
+                "label_source_present": True,
+                "label_source": "dataset_label_file",
+            }
+        ],
+    }
+    monkeypatch.setattr(api, "_annotation_manifest_for_entry", lambda _entry: manifest)
+    generated = [
+        {
+            "id": "qa-verified",
+            "image_name": "frame.jpg",
+            "image_key": "train/frame.jpg",
+            "split": "train",
+            "question": "What stands beside the road?",
+            "answer": "A utility pole stands beside the road.",
+            "row_type": "generated_qa",
+            "answer_source": "vlm_generated",
+            "validation_status": "machine_validated",
+            "review_status": "machine_validated",
+            "validated_against": ["image", "language_annotations.caption0", "source_annotations", "qa_verifier"],
+            "metadata": {"qa_verifier": {"status": "machine_validated", "decision": "rewrite"}},
+        }
+    ]
+
+    archive = api._dataset_caption_instruction_archive(
+        [],
+        generated,
+        dataset_id="ds",
+        entry={"id": "ds"},
+        settings=api._caption_instruction_export_settings(
+            {
+                "include_caption0_in_training": False,
+                "include_generated_qa_in_training": True,
+                "include_deterministic_metadata_qa": False,
+            }
+        ),
+        exported_at="2026-01-01T00:00:00Z",
+    )
+
+    image = archive["images"][0]
+    archived_pair = image["language_annotations"]["generated_qa_pairs"][0]
+    assert archived_pair["validation_status"] == "machine_validated"
+    assert archived_pair["review_status"] == "machine_validated"
+    assert archive["training_row_count"] == 1
+    row = archive["training_rows"][0]
+    assert row["answer"] == "A utility pole stands beside the road."
+    assert row["metadata"]["validation_status"] == "machine_validated"
+    assert row["metadata"]["review_status"] == "machine_validated"
+    report = archive["captioning_report"]
+    assert report["accepted_generated_qa_count"] == 1
+    assert report["manual_review_required_count"] == 0
+    assert report["training_readiness"]["pending_manual_review_row_count"] == 0
+
+
 def test_caption_instruction_archive_excludes_needs_revision_generated_qa_from_training_rows(
     monkeypatch,
     tmp_path,
@@ -4369,6 +5230,106 @@ def test_caption_instruction_bundle_rejects_uncopied_archive_or_review_images(
     assert exc_info.value.detail == expected_detail
 
 
+def test_caption_dataset_materializes_instruction_bundle_and_report(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import localinferenceapi as api
+
+    dataset_root = tmp_path / "dataset"
+    image_path = dataset_root / "train" / "images" / "current.jpg"
+    image_path.parent.mkdir(parents=True)
+    Image.new("RGB", (16, 16), color=(20, 30, 40)).save(image_path)
+    entry = {
+        "id": "ds",
+        "label": "Dataset",
+        "yolo_layout": "split",
+        "classes": ["Boat"],
+        "linked_root": str(dataset_root),
+    }
+    collect_row = {
+        "split": "train",
+        "image_relpath": "current.jpg",
+        "image_name": "current.jpg",
+        "image_path": str(image_path),
+    }
+    manifest = {
+        "dataset_id": "ds",
+        "dataset_label": "Dataset",
+        "yolo_layout": "split",
+        "labelmap": ["Boat"],
+        "images": [
+            {
+                "split": "train",
+                "image_relpath": "current.jpg",
+                "image_name": "current.jpg",
+                "image_width": 16,
+                "image_height": 16,
+                "label_lines": ["0 0.5 0.5 0.25 0.25"],
+                "label_source_present": True,
+            }
+        ],
+    }
+    caption_records = [
+        {
+            "id": "caption-1",
+            "image_name": "current.jpg",
+            "image_key": "train/current.jpg",
+            "split": "train",
+            "caption": "A boat is shown on the water.",
+            "source": "qwen_caption_job",
+            "is_primary": True,
+        }
+    ]
+
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: entry)
+    monkeypatch.setattr(api, "_dataset_effective_root_from_entry", lambda _entry: dataset_root)
+    monkeypatch.setattr(api, "_annotation_manifest_for_entry", lambda _entry: manifest)
+    monkeypatch.setattr(api, "_annotation_collect_images", lambda _entry: [collect_row])
+    monkeypatch.setattr(api, "_load_dataset_caption_records", lambda _entry: caption_records)
+    monkeypatch.setattr(api, "_load_dataset_caption_instruction_records", lambda _entry: [])
+    monkeypatch.setattr(
+        api,
+        "_annotation_effective_label_payload",
+        lambda *_args, **_kwargs: {
+            "label_lines": ["0 0.5 0.5 0.25 0.25"],
+            "label_source": "dataset_label_file",
+            "label_source_present": True,
+        },
+    )
+
+    result = api._qwen_caption_dataset_materialize_instruction_artifacts(
+        dataset_id="ds",
+        payload=QwenCaptionDatasetJobRequest(
+            dataset_id="ds",
+            instruction_dataset=True,
+            include_generated_qa_in_training=False,
+        ),
+        artifact_dir=tmp_path / "job" / "instruction_artifacts",
+    )
+
+    bundle_path = Path(result["bundle_zip"])
+    report_path = Path(result["report_json"])
+    assert result["status"] == "ok"
+    assert bundle_path.is_file()
+    assert report_path.is_file()
+    assert result["bundle_sha256"] == api._caption_instruction_file_sha256(bundle_path)
+    assert result["report_sha256"] == hashlib.sha256(report_path.read_bytes()).hexdigest()
+    assert result["training_row_count"] == 1
+    assert result["archive_row_count"] == 1
+    assert result["review_row_count"] == 1
+    report = json.loads(report_path.read_text())
+    assert report["format"] == "tator_caption_instruction_report_v1"
+    assert report["instruction_settings"]["include_generated_qa_in_training"] is False
+    with zipfile.ZipFile(bundle_path) as zf:
+        names = set(zf.namelist())
+    assert "caption_instruction_report.json" in names
+    assert "caption_instruction_bundle_manifest.json" in names
+    assert "caption_instruction_training.jsonl" in names
+    assert "images/train/current.jpg" in names
+    assert "labels/train/current.txt" in names
+
+
 def _write_minimal_caption_instruction_bundle(
     tmp_path: Path,
     *,
@@ -4751,12 +5712,20 @@ def test_caption_dataset_runner_summary_counts_completed_cases_not_attempts() ->
         "processed": 3,
         "failed": 1,
         "quality_failed": 1,
+        "generated_qa_warning": 0,
+        "generated_qa_error": 0,
+        "generated_qa_underfilled": 0,
+        "generated_qa_zero_pair": 0,
         "runner_totals": {"ok": 1, "failed": 1, "skipped_existing_caption": 1},
         "degraded_rates": {
             "processed_cases": 3,
             "attempt_rows": 3,
             "failed_cases": 1,
             "quality_failed_cases": 1,
+            "generated_qa_warning_cases": 0,
+            "generated_qa_error_cases": 0,
+            "generated_qa_underfilled_cases": 0,
+            "generated_qa_zero_pair_cases": 0,
             "failed_attempt_rows": 0,
             "signal_exit_attempt_rows": 0,
             "recovery_event_cases": 0,
@@ -4778,6 +5747,10 @@ def test_caption_dataset_runner_summary_counts_completed_cases_not_attempts() ->
             "deterministic_recovery_case_rate": 0.0,
             "stream_loop_detected_case_rate": 0.0,
             "loop_trim_case_rate": 0.0,
+            "generated_qa_warning_case_rate": 0.0,
+            "generated_qa_error_case_rate": 0.0,
+            "generated_qa_underfilled_case_rate": 0.0,
+            "generated_qa_zero_pair_case_rate": 0.0,
         },
     }
 
@@ -4789,6 +5762,10 @@ def test_caption_dataset_runner_summary_uses_totals_when_rows_are_truncated() ->
         {
             "total_cases": 500,
             "quality_failed_cases": 3,
+            "generated_qa_warning_cases": 7,
+            "generated_qa_error_cases": 2,
+            "generated_qa_underfilled_cases": 5,
+            "generated_qa_zero_pair_cases": 2,
             "totals": {
                 "ok": 490,
                 "failed": 8,
@@ -4808,6 +5785,10 @@ def test_caption_dataset_runner_summary_uses_totals_when_rows_are_truncated() ->
         "processed": 500,
         "failed": 8,
         "quality_failed": 3,
+        "generated_qa_warning": 7,
+        "generated_qa_error": 2,
+        "generated_qa_underfilled": 5,
+        "generated_qa_zero_pair": 2,
         "runner_totals": {"ok": 490, "failed": 8, "skipped_existing_caption": 2},
     }
 
@@ -4847,6 +5828,9 @@ def test_caption_dataset_degraded_rates_from_rows_tracks_retries_and_recovery() 
                 "status": "ok",
                 "quality_failures": ["missing counts"],
                 "recovery_events": [{"action": "deterministic_recovery_succeeded"}],
+                "instruction_qa_status": "underfilled",
+                "generated_qa_pair_count": 3,
+                "generated_qa_target_pair_count": 8,
             },
         ]
     )
@@ -4855,6 +5839,10 @@ def test_caption_dataset_degraded_rates_from_rows_tracks_retries_and_recovery() 
     assert rates["attempt_rows"] == 3
     assert rates["failed_cases"] == 0
     assert rates["quality_failed_cases"] == 1
+    assert rates["generated_qa_warning_cases"] == 1
+    assert rates["generated_qa_underfilled_cases"] == 1
+    assert rates["generated_qa_error_cases"] == 0
+    assert rates["generated_qa_zero_pair_cases"] == 0
     assert rates["failed_attempt_rows"] == 1
     assert rates["signal_exit_attempt_rows"] == 1
     assert rates["recovery_event_cases"] == 2
@@ -4875,6 +5863,8 @@ def test_caption_dataset_degraded_rates_from_rows_tracks_retries_and_recovery() 
     assert rates["deterministic_recovery_case_rate"] == 0.5
     assert rates["stream_loop_detected_case_rate"] == 0.5
     assert rates["loop_trim_case_rate"] == 0.5
+    assert rates["generated_qa_warning_case_rate"] == 0.5
+    assert rates["generated_qa_underfilled_case_rate"] == 0.5
 
 
 def test_caption_dataset_degraded_policy_defers_low_sample_loop_rate() -> None:
@@ -5132,6 +6122,7 @@ def test_caption_dataset_job_serializes_live_progress_from_runner_heartbeat() ->
     payload = api._serialize_qwen_caption_dataset_job(job)
     live = payload["live_progress"]
 
+    assert payload["progress"] == 0.25
     assert live["active"] is True
     assert live["kind"] == "caption"
     assert live["phase"] == "generate"
@@ -5164,7 +6155,12 @@ def test_caption_dataset_job_live_progress_does_not_show_stale_caption_while_act
             "total_cases": 3,
             "latest_caption": {
                 "image_name": "previous.jpg",
+                "case_id": "previous-case",
                 "caption": "This caption belongs to the previous image.",
+                "generated_qa_pair_count": 1,
+                "generated_qa_pairs": [
+                    {"id": "qa-1", "question": "What was generated?", "answer": "A generated answer."}
+                ],
             },
             "runner_heartbeat": {
                 "phase": "attempt_running",
@@ -5190,6 +6186,12 @@ def test_caption_dataset_job_live_progress_does_not_show_stale_caption_while_act
     assert live["caption_dataset_progress"]["image_name"] == "current.jpg"
     assert live["token_preview"] == ""
     assert live["live_output"] == ""
+    assert live["latest_generated_qa_pair_count"] == 1
+    assert live["latest_generated_qa_image_name"] == "previous.jpg"
+    assert live["latest_generated_qa_case_id"] == "previous-case"
+    assert live["latest_generated_qa_pairs"] == [
+        {"id": "qa-1", "question": "What was generated?", "answer": "A generated answer."}
+    ]
 
 
 def test_caption_dataset_job_preflight_error_blocks_runner_launch(monkeypatch, tmp_path: Path) -> None:
@@ -6536,6 +7538,112 @@ def test_caption_dataset_job_completes_when_runner_finished_with_failed_cases(mo
     assert job.message == "Caption dataset job complete with 1 failed"
 
 
+def test_caption_dataset_job_auto_materializes_instruction_artifacts_on_completion(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import localinferenceapi as api
+
+    class ScriptedStdout:
+        def __init__(self, rows):
+            self._lines = [json.dumps(row) + "\n" for row in rows]
+
+        def __iter__(self):
+            return iter(self._lines)
+
+    class CompletedProcess:
+        def __init__(self, rows):
+            self.stdout = ScriptedStdout(rows)
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
+
+    rows = [
+        {
+            "case_id": "image:frame.jpg:full",
+            "case": "image_000001",
+            "stem": "frame",
+            "exit_code": 0,
+            "status": "ok",
+            "final_status": "ok",
+            "quality_failures": [],
+            "artifact_dir": None,
+            "final_caption": "A boat is shown.",
+        },
+    ]
+    materialized = []
+
+    def fake_materialize(job, payload, *, artifact_dir):
+        materialized.append({"job_id": job.job_id, "dataset_id": payload.dataset_id, "artifact_dir": artifact_dir})
+        result_data = dict(job.result or {})
+        result_data["instruction_artifacts"] = {
+            "status": "ok",
+            "bundle_zip": str(artifact_dir / "ds_caption_instruction_bundle.zip"),
+            "report_json": str(artifact_dir / "caption_instruction_report.json"),
+        }
+        job.result = result_data
+
+    monkeypatch.setattr(api.subprocess, "Popen", lambda *_args, **_kwargs: CompletedProcess(rows))
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: {"id": dataset_id})
+    monkeypatch.setattr(api, "_dataset_effective_root_from_entry", lambda _entry: tmp_path)
+    monkeypatch.setattr(
+        api,
+        "_qwen_caption_dataset_cases",
+        lambda payload, output_dir: (
+            {"dataset_label": "Dataset"},
+            [
+                {
+                    "case_id": "image:frame.jpg:full",
+                    "name": "image_000001",
+                    "stem": "frame",
+                    "image_path": str(tmp_path / "frame.jpg"),
+                    "label_path": str(tmp_path / "frame.txt"),
+                    "label_count": 1,
+                    "class_counts": {"Boat": 1},
+                    "caption_mode": "full",
+                },
+            ],
+        ),
+    )
+    monkeypatch.setattr(api, "_qwen_caption_dataset_save_instruction_records_from_row", lambda **_kwargs: 2)
+    monkeypatch.setattr(api, "_qwen_caption_dataset_try_materialize_instruction_artifacts", fake_materialize)
+
+    job = api.QwenCaptionDatasetJob(job_id="qcap_instruction_done", output_dir=str(tmp_path / "job"))
+    payload = QwenCaptionDatasetJobRequest(
+        dataset_id="ds",
+        caption_request={"user_prompt": "Write one sentence."},
+        instruction_dataset=True,
+        attempts=1,
+        per_image_timeout_seconds=30,
+        max_failures=0,
+        allow_model_download=True,
+    )
+
+    api._run_qwen_caption_dataset_job(job, payload)
+
+    assert job.status == "completed"
+    assert job.error is None
+    assert materialized == [
+        {
+            "job_id": "qcap_instruction_done",
+            "dataset_id": "ds",
+            "artifact_dir": tmp_path / "job" / "instruction_artifacts",
+        }
+    ]
+    assert job.result["generated_qa_rows"] == 2
+    assert job.result["instruction_artifacts"]["status"] == "ok"
+    assert job.message == "Caption dataset job complete; training dataset artifacts materialized"
+
+
 def test_caption_dataset_job_recovers_caption_from_skipped_completed_row(monkeypatch, tmp_path: Path) -> None:
     import localinferenceapi as api
     from tools import preflight_qwen_caption_soak as preflight
@@ -7584,6 +8692,8 @@ def test_caption_dataset_job_resume_route_exists() -> None:
     }
 
     assert ("POST", "/qwen/caption/jobs/{job_id}/resume") in routes
+    assert ("POST", "/qwen/caption/jobs/preview_process") in routes
+    assert ("GET", "/datasets/{dataset_id}/captions/coverage") in routes
 
 
 def test_caption_dataset_job_list_includes_persisted_interrupted_jobs(monkeypatch, tmp_path: Path) -> None:

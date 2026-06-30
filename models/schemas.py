@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import json
+import re
 from typing import Any, Dict, List, Mapping, Optional, Tuple, Literal
 
 from pydantic import BaseModel, Field
@@ -483,6 +485,12 @@ class QwenCaptionRequest(BaseModel):
         for field in ("image_token", "image_name"):
             if data.get(field) is not None:
                 data[field] = str(data.get(field)).strip() or None
+        glossary = data.get("labelmap_glossary")
+        if glossary is not None and not isinstance(glossary, str):
+            try:
+                data["labelmap_glossary"] = json.dumps(glossary, ensure_ascii=False)
+            except (TypeError, ValueError):
+                data["labelmap_glossary"] = str(glossary)
         return data
 
     @root_validator_compat(skip_on_failure=True)
@@ -668,10 +676,32 @@ class QwenCaptionDatasetJobRequest(BaseModel):
     dataset_id: str
     annotation_session_id: Optional[str] = None
     caption_request: Dict[str, Any] = Field(default_factory=dict)
+    caption_provider: Optional[Literal["local_qwen", "openai"]] = "local_qwen"
+    openai_model: Optional[str] = "gpt-5.5"
+    openai_image_detail: Optional[Literal["original", "auto", "high", "low"]] = "original"
+    openai_api_key_path: Optional[str] = "openAI_API_KEY_DoNotCommit"
+    openai_service_tier: Optional[Literal["standard", "batch"]] = "standard"
+    openai_timeout_seconds: Optional[float] = 120.0
     image_names: List[str] = Field(default_factory=list)
     split: Optional[Literal["all", "train", "val"]] = "all"
     max_images: Optional[int] = None
     overwrite: Optional[bool] = False
+    run_kind: Optional[Literal["production", "test"]] = "production"
+    write_policy: Optional[
+        Literal[
+            "fill_missing",
+            "replace_generated",
+            "append_variants",
+            "qa_only_extend",
+            "qa_only_replace",
+        ]
+    ] = "fill_missing"
+    completion_mode: Optional[Literal["per_image_totals", "incremental"]] = "per_image_totals"
+    target_base_captions_per_image: Optional[int] = 1
+    target_generated_qa_per_image: Optional[int] = 8
+    increment_base_captions_per_image: Optional[int] = 0
+    increment_generated_qa_per_image: Optional[int] = 0
+    test_outputs_count_toward_completion: Optional[bool] = True
     save_text_labels: Optional[bool] = False
     generated_make_primary: Optional[bool] = False
     instruction_dataset: Optional[bool] = False
@@ -679,6 +709,9 @@ class QwenCaptionDatasetJobRequest(BaseModel):
     include_caption0_in_training: Optional[bool] = True
     include_generated_qa_in_training: Optional[bool] = True
     include_deterministic_metadata_qa: Optional[bool] = False
+    instruction_qa_imposed_questions: List[str] = Field(default_factory=list)
+    instruction_qa_max_topup_attempts: Optional[int] = 6
+    instruction_qa_restrict_speculative_language: Optional[bool] = False
     include_source_annotations_in_generator_context: Optional[bool] = True
     strict_grounding: Optional[bool] = True
     qa_mix: Optional[str] = "balanced"
@@ -689,7 +722,7 @@ class QwenCaptionDatasetJobRequest(BaseModel):
     per_image_timeout_seconds: Optional[float] = 900.0
     runner_no_output_timeout_seconds: Optional[float] = None
     runner_heartbeat_interval_seconds: Optional[float] = 30.0
-    runner_artifact_log_bytes: Optional[int] = 1048576
+    runner_artifact_log_bytes: Optional[int] = 0
     runner_min_free_gb: Optional[float] = 5.0
     runner_disk_safety_factor: Optional[float] = 1.25
     cooldown_after_crash_seconds: Optional[float] = 5.0
@@ -781,15 +814,52 @@ class QwenCaptionDatasetJobRequest(BaseModel):
             requested_subcaptions = int(data.get("subcaptions_per_image") or 0)
         except (TypeError, ValueError, OverflowError):
             requested_subcaptions = 0
+        clamped_requested_subcaptions = max(0, min(requested_subcaptions, 20))
+        raw_imposed_for_defaults = data.get("instruction_qa_imposed_questions")
+        if isinstance(raw_imposed_for_defaults, str):
+            imposed_for_defaults = [
+                item
+                for item in raw_imposed_for_defaults.splitlines()
+                if str(item or "").strip()
+            ]
+        elif isinstance(raw_imposed_for_defaults, list):
+            imposed_for_defaults = [
+                item
+                for item in raw_imposed_for_defaults
+                if str(item or "").strip()
+            ]
+        else:
+            imposed_for_defaults = []
         if (
             set_and_forget_requested
             and instruction_dataset_requested
-            and requested_subcaptions > 0
+            and (requested_subcaptions > 0 or bool(imposed_for_defaults))
             and not max_failures_was_provided
         ):
             data["max_failures"] = QWEN_CAPTION_SET_AND_FORGET_INSTRUCTION_MAX_FAILURES
         data["dataset_id"] = str(data.get("dataset_id") or "").strip()
         data["annotation_session_id"] = str(data.get("annotation_session_id") or "").strip() or None
+        provider = str(data.get("caption_provider") or "local_qwen").strip().lower().replace("-", "_")
+        if provider in {"qwen", "local", "localqwen", "local_qwen"}:
+            provider = "local_qwen"
+        elif provider in {"openai", "openai_api", "remote"}:
+            provider = "openai"
+        else:
+            provider = "local_qwen"
+        data["caption_provider"] = provider
+        openai_model = str(data.get("openai_model") or "gpt-5.5").strip()
+        data["openai_model"] = openai_model[:128] or "gpt-5.5"
+        detail = str(data.get("openai_image_detail") or "original").strip().lower()
+        data["openai_image_detail"] = detail if detail in {"original", "auto", "high", "low"} else "original"
+        api_key_path = str(data.get("openai_api_key_path") or "openAI_API_KEY_DoNotCommit").strip()
+        data["openai_api_key_path"] = api_key_path[:1000] or "openAI_API_KEY_DoNotCommit"
+        tier = str(data.get("openai_service_tier") or "standard").strip().lower()
+        data["openai_service_tier"] = tier if tier in {"standard", "batch"} else "standard"
+        try:
+            timeout_seconds = float(data.get("openai_timeout_seconds") or 120.0)
+        except (TypeError, ValueError, OverflowError):
+            timeout_seconds = 120.0
+        data["openai_timeout_seconds"] = max(5.0, min(timeout_seconds, 600.0))
         raw_request = data.get("caption_request")
         if not isinstance(raw_request, Mapping):
             raw_request = {}
@@ -811,8 +881,34 @@ class QwenCaptionDatasetJobRequest(BaseModel):
         ]
         split = str(data.get("split") or "all").strip().lower()
         data["split"] = split if split in {"all", "train", "val"} else "all"
+        run_kind = str(data.get("run_kind") or "production").strip().lower()
+        data["run_kind"] = run_kind if run_kind in {"production", "test"} else "production"
+        overwrite_raw = data.get("overwrite")
+        overwrite_requested = (
+            overwrite_raw is True
+            or str(overwrite_raw or "").strip().lower() in {"1", "true", "yes", "on"}
+        )
+        write_policy_raw = str(data.get("write_policy") or "").strip().lower()
+        write_policy = write_policy_raw if write_policy_raw in {
+            "fill_missing",
+            "replace_generated",
+            "append_variants",
+            "qa_only_extend",
+            "qa_only_replace",
+        } else ""
+        if not write_policy:
+            write_policy = "replace_generated" if overwrite_requested else "fill_missing"
+        data["write_policy"] = write_policy
+        completion_mode = str(data.get("completion_mode") or "per_image_totals").strip().lower()
+        data["completion_mode"] = (
+            completion_mode if completion_mode in {"per_image_totals", "incremental"} else "per_image_totals"
+        )
         for field in (
             "max_images",
+            "target_base_captions_per_image",
+            "target_generated_qa_per_image",
+            "increment_base_captions_per_image",
+            "increment_generated_qa_per_image",
             "attempts",
             "per_image_timeout_seconds",
             "runner_no_output_timeout_seconds",
@@ -842,6 +938,7 @@ class QwenCaptionDatasetJobRequest(BaseModel):
             "pilot_max_prompt_budget_adapted_case_rate",
             "pilot_deterministic_recovery_confidence",
             "subcaptions_per_image",
+            "instruction_qa_max_topup_attempts",
         ):
             if data.get(field) is None:
                 continue
@@ -855,6 +952,57 @@ class QwenCaptionDatasetJobRequest(BaseModel):
         data["pilot_output_dir"] = str(data.get("pilot_output_dir") or "").strip() or None
         data["run_name"] = str(data.get("run_name") or "").strip() or None
         data["output_dir"] = str(data.get("output_dir") or "").strip() or None
+        raw_imposed = data.get("instruction_qa_imposed_questions")
+        if isinstance(raw_imposed, str):
+            stripped = raw_imposed.strip()
+            parsed = None
+            if stripped:
+                try:
+                    parsed = json.loads(stripped)
+                except Exception:
+                    parsed = None
+            raw_items = parsed if isinstance(parsed, list) else stripped.splitlines()
+        elif isinstance(raw_imposed, list):
+            raw_items = raw_imposed
+        else:
+            raw_items = []
+        imposed_questions: List[str] = []
+        seen_questions: set[str] = set()
+        for raw_question in raw_items:
+            question = re.sub(r"\s+", " ", str(raw_question or "").strip())
+            question = question.strip(" \t\r\n\"'`,;")
+            if not question:
+                continue
+            if not question.endswith("?"):
+                question = f"{question}?"
+            key = question.lower()
+            if key in seen_questions:
+                continue
+            seen_questions.add(key)
+            imposed_questions.append(question[:500])
+            if len(imposed_questions) >= 20:
+                break
+        data["instruction_qa_imposed_questions"] = imposed_questions
+        target_qa_was_provided = (
+            "target_generated_qa_per_image" in data
+            and data.get("target_generated_qa_per_image") is not None
+            and str(data.get("target_generated_qa_per_image")).strip() != ""
+        )
+        if not target_qa_was_provided:
+            data["target_generated_qa_per_image"] = max(
+                0,
+                min(max(clamped_requested_subcaptions, len(imposed_questions)), 100),
+            )
+        increment_qa_was_provided = (
+            "increment_generated_qa_per_image" in data
+            and data.get("increment_generated_qa_per_image") is not None
+            and str(data.get("increment_generated_qa_per_image")).strip() != ""
+        )
+        if not increment_qa_was_provided:
+            data["increment_generated_qa_per_image"] = max(
+                0,
+                min(max(clamped_requested_subcaptions, len(imposed_questions)), 100),
+            )
         return data
 
     @root_validator_compat(skip_on_failure=True)
@@ -903,9 +1051,9 @@ class QwenCaptionDatasetJobRequest(BaseModel):
         values["runner_heartbeat_interval_seconds"] = max(0.0, min(heartbeat_float, 3600.0))
         artifact_log_bytes = values.get("runner_artifact_log_bytes")
         try:
-            artifact_log_bytes_int = int(artifact_log_bytes) if artifact_log_bytes is not None else 1048576
+            artifact_log_bytes_int = int(artifact_log_bytes) if artifact_log_bytes is not None else 0
         except (TypeError, ValueError, OverflowError):
-            artifact_log_bytes_int = 1048576
+            artifact_log_bytes_int = 0
         values["runner_artifact_log_bytes"] = max(0, min(artifact_log_bytes_int, 1_073_741_824))
         min_free = values.get("runner_min_free_gb")
         try:
@@ -1082,6 +1230,34 @@ class QwenCaptionDatasetJobRequest(BaseModel):
             return default
 
         values["overwrite"] = _coerce_bool(values.get("overwrite"), False)
+        values["test_outputs_count_toward_completion"] = _coerce_bool(
+            values.get("test_outputs_count_toward_completion"),
+            True,
+        )
+        run_kind = str(values.get("run_kind") or "production").strip().lower()
+        values["run_kind"] = run_kind if run_kind in {"production", "test"} else "production"
+        write_policy = str(values.get("write_policy") or "").strip().lower()
+        values["write_policy"] = (
+            write_policy
+            if write_policy
+            in {"fill_missing", "replace_generated", "append_variants", "qa_only_extend", "qa_only_replace"}
+            else ("replace_generated" if values["overwrite"] else "fill_missing")
+        )
+        completion_mode = str(values.get("completion_mode") or "per_image_totals").strip().lower()
+        values["completion_mode"] = (
+            completion_mode if completion_mode in {"per_image_totals", "incremental"} else "per_image_totals"
+        )
+        for field, default, upper in (
+            ("target_base_captions_per_image", 1, 20),
+            ("target_generated_qa_per_image", 8, 100),
+            ("increment_base_captions_per_image", 0, 20),
+            ("increment_generated_qa_per_image", 0, 100),
+        ):
+            try:
+                parsed = int(values.get(field) if values.get(field) is not None else default)
+            except (TypeError, ValueError, OverflowError):
+                parsed = default
+            values[field] = max(0, min(parsed, upper))
         values["save_text_labels"] = _coerce_bool(values.get("save_text_labels"), False)
         values["generated_make_primary"] = _coerce_bool(values.get("generated_make_primary"), False)
         values["instruction_dataset"] = _coerce_bool(values.get("instruction_dataset"), False)
@@ -1095,6 +1271,10 @@ class QwenCaptionDatasetJobRequest(BaseModel):
         )
         values["include_deterministic_metadata_qa"] = _coerce_bool(
             values.get("include_deterministic_metadata_qa"),
+            False,
+        )
+        values["instruction_qa_restrict_speculative_language"] = _coerce_bool(
+            values.get("instruction_qa_restrict_speculative_language"),
             False,
         )
         if bool(values["instruction_dataset"]) and not (
@@ -1113,6 +1293,12 @@ class QwenCaptionDatasetJobRequest(BaseModel):
         except (TypeError, ValueError, OverflowError):
             subcaptions = 0
         values["subcaptions_per_image"] = max(0, min(subcaptions, 20))
+        raw_qa_topups = values.get("instruction_qa_max_topup_attempts")
+        try:
+            qa_topups = 6 if raw_qa_topups is None else int(raw_qa_topups)
+        except (TypeError, ValueError, OverflowError):
+            qa_topups = 6
+        values["instruction_qa_max_topup_attempts"] = max(0, min(qa_topups, 12))
         qa_mix = str(values.get("qa_mix") or "balanced").strip().lower()
         values["qa_mix"] = qa_mix if qa_mix in {"balanced", "scene", "object", "caption"} else "balanced"
         answer_format = str(values.get("answer_format") or "natural").strip().lower()

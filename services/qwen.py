@@ -347,10 +347,11 @@ def _format_caption_glossary_instruction(
     return (
         "Class meaning glossary: "
         + "; ".join(pieces)
-        + ". Use glossary entries only to understand the broad class meaning of label hints. "
+        + ". Use each broad term as the canonical name for that labeled class. "
+        "If a class has no glossary entry, use a natural English class term instead of the raw label name. "
         "Glossary variants are possible members of a class, not assertions that those variants appear in this image. "
         "Do not choose a subtype from the glossary unless the image clearly supports that subtype; "
-        "when uncertain, use the broad term."
+        "when uncertain, use the broad term. Never output raw labelmap names or odd internal spellings."
     )
 
 
@@ -636,7 +637,7 @@ def _build_qwen_caption_prompt(
             "Mention important concrete details without adding unsupported objects or actions.\n"
             "When authoritative counts are present, state them as ordinary image facts using digits.\n"
             "When box layout matters, convert box positions into natural relative layout words; never mention coordinates.\n"
-            "Use glossary entries as semantic class meanings, not as forced words to copy.\n"
+            "Use glossary broad terms as canonical names for labeled classes; if no glossary term exists, use a natural English class term and do not output raw labelmap names.\n"
             "Final caption length: The final caption may be long when the image contains many visible details; use up to 10 complete sentences when needed to preserve concrete detail."
         )
     return "\n".join(lines), counts, len(selected), truncated

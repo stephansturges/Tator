@@ -133,12 +133,14 @@ The intended operator flow is:
    - generated QA rows per image
    - generated QA mix
    - generated answer format
+   - optional imposed questions, one per line or as a JSON array
    - include caption0
    - include generated QA
    - include deterministic metadata QA
    - provide read-only source-label context
    - strict QA grounding
-4. Click **Create VLM training dataset**.
+   - optional speculative-language restriction for generated QA
+4. Click **Create training dataset**.
 5. Download:
    - instruction JSONL for training
    - instruction archive JSONL for audit
@@ -232,6 +234,11 @@ Implemented controls:
 - **Generated answer format**
   - natural text
   - JSON
+- **Imposed questions**
+  - optional fixed questions that the generator answers first when grounded
+- **Latest generated Q&A output**
+  - read-only JSON view of the most recent live generated-QA rows from the
+    backend job
 - **Include caption0**
 - **Include generated QA**
 - **Include deterministic metadata QA**
@@ -417,11 +424,26 @@ Generated QA is validated before it can be flattened:
 - answer must be present
 - canonical image-path/question pair must be unique
 - JSON answers must parse when JSON format is requested
+- generated QA must pass the verifier/rewrite gate or be deterministically clean
 - row must not be upstream-rejected
 - structured claims must be supported by source annotations or be rejected
 - manual review must not mark the row rejected or needs-revision
 
-Rows that fail flattening remain visible in archive and review artifacts.
+Rows that pass the generated-QA verifier are marked `machine_validated` and are
+trainable unless a later human review rejects them. Rewritten rows preserve the
+original question and answer in metadata. Rows that fail flattening remain
+visible in archive and review artifacts.
+
+Generated-QA failure is not allowed to strand a default training-dataset run
+when caption0 remains selected. If the broad caption succeeds but generated QA
+returns fewer accepted rows than requested, the worker keeps caption0, runs
+additional visual generated-QA top-up prompts with the image still attached, and
+records the accepted/rejected counts for each prompt profile. Top-up prompts
+cycle through caption-grounded and sparse-scene fallback wording until the target
+is reached or the bounded top-up attempt cap is exhausted. If the cap is
+exhausted, the case is kept with an audit warning and the accepted QA total that
+was actually produced. QA-only launches remain strict when there is no valid
+generated-QA row to preserve.
 
 ## Deterministic Metadata QA Contract
 
@@ -614,6 +636,7 @@ Primary implementation files:
 - `tools/run_qwen_caption_flow_benchmark.py`
   - caption runner instruction mode
   - generated-QA pass
+  - generated-QA verifier/rewrite pass
   - prompt/token telemetry
   - loop/recovery audit events
 - `tools/qwen_training.py`

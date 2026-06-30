@@ -456,9 +456,63 @@
                                                 <label><input type="checkbox" id="qwenCaptionIncludeCoords" checked /> Include box coords</label>
                                             </div>
                                         </section>
-                                        <section class="qwen-caption-settings__section" aria-label="Caption models">
-                                            <div class="qwen-caption-settings__title">Models</div>
-                                            <div class="qwen-caption-settings__grid">
+	                                        <section class="qwen-caption-settings__section" aria-label="Caption models">
+	                                            <div class="qwen-caption-settings__title">Provider</div>
+	                                            <div class="qwen-caption-settings__grid">
+	                                                <div class="qwen-caption-settings__field">
+	                                                    <label for="qwenCaptionProvider">Caption provider<span class="help-icon" title="Local Qwen uses the installed local VLM. OpenAI API uses the same prompt, caption guard, generated-QA, resume, and artifact pipeline, but sends model calls to the OpenAI Responses API.">?</span></label>
+	                                                    <select id="qwenCaptionProvider">
+	                                                        <option value="local_qwen" selected>Local Qwen</option>
+	                                                        <option value="openai">OpenAI API</option>
+	                                                    </select>
+	                                                </div>
+	                                                <div class="qwen-caption-settings__field">
+	                                                    <label for="qwenCaptionOpenAiModel">OpenAI model<span class="help-icon" title="Used only when Caption provider is OpenAI API. GPT-5.5 is the default high-quality model; smaller models cost less.">?</span></label>
+	                                                    <select id="qwenCaptionOpenAiModel">
+	                                                        <option value="gpt-5.5" selected>gpt-5.5</option>
+	                                                        <option value="gpt-5.4">gpt-5.4</option>
+	                                                        <option value="gpt-5.4-mini">gpt-5.4-mini</option>
+	                                                        <option value="gpt-5.4-nano">gpt-5.4-nano</option>
+	                                                        <option value="gpt-5.1">gpt-5.1</option>
+	                                                        <option value="gpt-5-mini">gpt-5-mini</option>
+	                                                        <option value="gpt-4.1">gpt-4.1</option>
+	                                                        <option value="gpt-4.1-mini">gpt-4.1-mini</option>
+	                                                        <option value="gpt-4.1-nano">gpt-4.1-nano</option>
+	                                                        <option value="gpt-4o">gpt-4o</option>
+	                                                        <option value="gpt-4o-mini">gpt-4o-mini</option>
+	                                                    </select>
+	                                                </div>
+	                                                <div class="qwen-caption-settings__field">
+	                                                    <label for="qwenCaptionOpenAiImageDetail">Image detail<span class="help-icon" title="OpenAI visual detail for image calls. Original preserves full-resolution behavior by default. Auto, high, and low can reduce cost or latency but may change visual fidelity.">?</span></label>
+	                                                    <select id="qwenCaptionOpenAiImageDetail">
+	                                                        <option value="original" selected>Original full resolution</option>
+	                                                        <option value="auto">Auto</option>
+	                                                        <option value="high">High</option>
+	                                                        <option value="low">Low</option>
+	                                                    </select>
+	                                                </div>
+	                                                <div class="qwen-caption-settings__field">
+	                                                    <label for="qwenCaptionOpenAiServiceTier">Estimate tier<span class="help-icon" title="Pricing tier used for the cost estimate and run provenance. Direct OpenAI provider runs use synchronous Responses API calls; Batch pricing is shown for planning non-interactive future/offline runs.">?</span></label>
+	                                                    <select id="qwenCaptionOpenAiServiceTier">
+	                                                        <option value="standard" selected>Standard</option>
+	                                                        <option value="batch">Batch estimate</option>
+	                                                    </select>
+	                                                </div>
+	                                                <div class="qwen-caption-settings__field qwen-caption-settings__field--wide">
+	                                                    <label for="qwenCaptionOpenAiKeyPath">OpenAI key file<span class="help-icon" title="Backend-local key file used only when OPENAI_API_KEY is not set. The key is read by the backend worker, never inserted into prompts or exports.">?</span></label>
+	                                                    <input type="text" id="qwenCaptionOpenAiKeyPath" value="openAI_API_KEY_DoNotCommit" autocomplete="off" spellcheck="false" />
+	                                                    <div class="training-help">Use an env var or backend-local file. Do not paste the secret into prompts or dataset fields.</div>
+	                                                </div>
+	                                                <div class="qwen-caption-settings__field qwen-caption-settings__field--wide">
+	                                                    <label>Remote run estimate</label>
+	                                                    <div id="qwenCaptionOpenAiCostEstimate" class="qwen-caption-remote-cost">Local provider selected; remote API cost is $0.</div>
+	                                                </div>
+	                                            </div>
+	                                            <div class="training-help">For a small bounded run, set Training dataset → Run kind to Test run and Max images to the desired count before creating the dataset.</div>
+	                                        </section>
+	                                        <section class="qwen-caption-settings__section" aria-label="Caption models">
+	                                            <div class="qwen-caption-settings__title">Local models</div>
+	                                            <div class="qwen-caption-settings__grid">
                                                 <div class="qwen-caption-settings__field qwen-caption-settings__field--wide">
                                                     <label for="qwenCaptionModel">Caption model<span class="help-icon" title="Auto uses the caption-safe default for the current runtime. On MLX this is separate from the heavier general Qwen inference default because captioning can run many model calls. Pick an explicit model here to override it.">?</span></label>
                                                     <select id="qwenCaptionModel">
@@ -557,8 +611,8 @@
                                                     <input type="number" id="qwenCaptionMaxAutoResumes" min="0" max="25" step="1" value="2" />
                                                 </div>
                                                 <div class="qwen-caption-settings__field">
-                                                    <label for="qwenCaptionArtifactLogMb">Attempt log cap (MB)<span class="help-icon" title="Maximum raw stdout/stderr and Qwen prompt-trace bytes to keep per backend caption attempt. Structured results and captions are not capped. Use 0 only when actively debugging and willing to keep full raw logs.">?</span></label>
-                                                    <input type="number" id="qwenCaptionArtifactLogMb" min="0" max="1024" step="0.25" value="1" />
+                                                    <label for="qwenCaptionArtifactLogMb">Attempt log cap (MB)<span class="help-icon" title="Maximum raw stdout/stderr and Qwen prompt-trace bytes to keep per backend caption attempt. Structured results and captions are not capped. Default 0 keeps full raw logs for first-run debugging; set a positive cap for storage-limited long runs.">?</span></label>
+                                                    <input type="number" id="qwenCaptionArtifactLogMb" min="0" max="1024" step="0.25" value="0" />
                                                 </div>
                                                 <div class="qwen-caption-settings__field">
                                                     <label for="qwenCaptionMaxFailedCaseRate">Max failed case rate<span class="help-icon" title="Set-and-forget health gate. Completed backend runs above this failed-case rate are marked unhealthy and can auto-resume. Use -1 to disable this gate.">?</span></label>
@@ -719,67 +773,169 @@
                                         </div>
                                         <div id="qwenCaptionBackendJobsSummary" class="training-help" aria-live="polite">Backend caption jobs have not been checked yet.</div>
                                     </div>
-                                <div class="qwen-caption-options">
-                                    <label for="qwenCaptionBatchCount">Apply captions to next N images</label>
-                                        <div class="qwen-caption-row">
-                                            <input type="number" id="qwenCaptionBatchCount" min="1" value="5" />
-                                            <button type="button" id="qwenCaptionBatchRun" class="training-button secondary">Caption next N</button>
-                                        </div>
-                                        <label><input type="checkbox" id="qwenCaptionBatchIncludeCurrent" checked /> Include current image</label>
-                                        <label><input type="checkbox" id="qwenCaptionBatchOverwrite" /> Overwrite existing captions</label>
-                                        <label><input type="checkbox" id="qwenCaptionBatchFollowActive" checked /> Follow backend image<span class="help-icon" title="During backend caption and training-dataset jobs, switch the image viewer to the image currently being processed. Turn off to inspect another image while the job runs.">?</span></label>
-                                        <div class="qwen-caption-row qwen-caption-actions-row">
-                                            <button type="button" id="qwenCaptionBatchRunAll" class="training-button secondary">Caption all images</button>
-                                            <button type="button" id="qwenCaptionBatchCancel" class="training-button secondary">Cancel batch</button>
-                                            <button type="button" id="qwenCaptionDownloadJsonl" class="training-button secondary">Download captions JSONL</button>
-                                            <button type="button" id="qwenCaptionDownloadGroupedJson" class="training-button secondary">Download grouped JSON</button>
-                                            <button type="button" id="qwenCaptionDownloadVlmJsonl" class="training-button secondary">Download VLM JSONL</button>
-                                        </div>
-                                        <div class="training-help">All-image caption and training-dataset jobs start with the selected image, continue through the loaded list, then wrap to earlier images. With Follow backend image enabled, the viewer advances to each backend case as it runs.</div>
-                                        <div class="qwen-caption-instruction-panel">
-                                            <div class="qwen-caption-settings__grid qwen-caption-settings__grid--compact">
-                                                <div class="qwen-caption-settings__field">
-                                                    <label for="qwenCaptionSubcaptionsPerImage">Generated QA per image<span class="help-icon" title="Additional VLM-created image-specific question/answer rows per image for instruction training. Range 0-20. Use 0 to keep only caption0 rows.">?</span></label>
-                                                    <input type="number" id="qwenCaptionSubcaptionsPerImage" min="0" max="20" step="1" value="8" />
-                                                </div>
-                                                <div class="qwen-caption-settings__field">
-                                                    <label for="qwenCaptionQaMix">Generated QA mix<span class="help-icon" title="Controls the type mix requested from the generated-QA pass. Deterministic metadata QA is controlled separately.">?</span></label>
-                                                    <select id="qwenCaptionQaMix">
-                                                        <option value="balanced" selected>Balanced</option>
-                                                        <option value="scene">Scene-level</option>
-                                                        <option value="object">Object-focused</option>
-                                                        <option value="caption">Caption variants</option>
-                                                    </select>
-                                                </div>
-                                                <div class="qwen-caption-settings__field">
-                                                    <label for="qwenCaptionAnswerFormat">Generated answer format<span class="help-icon" title="Natural text is safest for generated QA. JSON asks the generator to wrap general answers as parseable JSON.">?</span></label>
-                                                    <select id="qwenCaptionAnswerFormat">
-                                                        <option value="natural" selected>Natural text</option>
-                                                        <option value="json">JSON answer</option>
-                                                    </select>
-                                                </div>
-                                            </div>
-                                            <div class="qwen-caption-settings__checks">
-                                                <label><input type="checkbox" id="qwenCaptionIncludeCaption0Training" checked /> Include caption0<span class="help-icon" title="Include the broad caption row in the instruction-training JSONL.">?</span></label>
-                                                <label><input type="checkbox" id="qwenCaptionIncludeGeneratedQaTraining" checked /> Include generated QA<span class="help-icon" title="Include VLM-created question/answer rows that passed structural validation.">?</span></label>
-                                                <label><input type="checkbox" id="qwenCaptionIncludeDeterministicMetadataQa" /> Include deterministic metadata QA<span class="help-icon" title="Add code-generated QA rows from real source labels. This is off by default so source metadata and generated language stay clearly separated.">?</span></label>
-                                                <label><input type="checkbox" id="qwenCaptionIncludeSourceAnnotationsContext" checked /> Give generator read-only label context<span class="help-icon" title="Pass source annotation counts as read-only grounding context for generated QA. The VLM cannot write these source annotations.">?</span></label>
-                                                <label><input type="checkbox" id="qwenCaptionStrictGrounding" checked /> Strict QA grounding<span class="help-icon" title="Ask the generator to answer only from image evidence, caption0, or read-only source context.">?</span></label>
-                                                <label><input type="checkbox" id="qwenCaptionRequireReadyInstructionExport" checked /> Require ready report for trainer JSONL<span class="help-icon" title="Block instruction JSONL download unless the report is ready. Turn off only for deliberate review-pending diagnostics.">?</span></label>
-                                            </div>
-                                            <div class="qwen-caption-row qwen-caption-actions-row qwen-caption-instruction-actions">
-                                                <button type="button" id="qwenCaptionBuildInstructionDataset" class="training-button secondary">Create VLM training dataset</button>
-                                                <button type="button" id="qwenCaptionDownloadInstructionBundle" class="training-button secondary">Download training bundle</button>
-                                                <button type="button" id="qwenCaptionDownloadInstructionJsonl" class="training-button secondary">Download instruction JSONL</button>
-                                                <button type="button" id="qwenCaptionDownloadInstructionArchive" class="training-button secondary">Download instruction archive</button>
-                                                <button type="button" id="qwenCaptionDownloadInstructionReview" class="training-button secondary">Download review JSONL</button>
-                                                <button type="button" id="qwenCaptionImportInstructionReview" class="training-button secondary">Import reviewed JSONL</button>
-                                                <input type="file" id="qwenCaptionImportInstructionReviewFile" accept=".jsonl,.json,application/json,application/jsonl" hidden />
-                                                <button type="button" id="qwenCaptionDownloadInstructionReport" class="training-button secondary">Download instruction report</button>
-                                            </div>
-                                            <div class="training-help">The training-dataset path writes caption0 plus optional generated QA rows into a separate instruction archive. Generated QA never becomes source annotations, deterministic metadata QA is included only when explicitly enabled, and review JSONL can be exported for audit then imported to apply accepted, rejected, or needs-revision decisions before training. The training bundle is the self-contained handoff: it includes copied image bytes, effective labels, trainer JSONL, archive JSONL, review JSONL, report JSON, and a checksum manifest. Trainer JSONL and bundle downloads require a ready instruction report by default; disable that gate only for deliberate review-pending diagnostics.</div>
-                                        </div>
-                                    </div>
+	                                <div class="qwen-caption-options">
+	                                    <section class="qwen-caption-flow-section" aria-labelledby="qwenCaptionArchiveFlowTitle">
+	                                        <div class="qwen-caption-flow-section__header">
+	                                            <strong id="qwenCaptionArchiveFlowTitle">Caption archive</strong>
+	                                            <span class="training-help">Caption-only jobs and caption exports.</span>
+	                                        </div>
+	                                        <label for="qwenCaptionBatchCount">Apply captions to next N images</label>
+	                                        <div class="qwen-caption-row">
+	                                            <input type="number" id="qwenCaptionBatchCount" min="1" value="5" />
+	                                            <button type="button" id="qwenCaptionBatchRun" class="training-button secondary">Caption next N</button>
+	                                        </div>
+	                                        <div class="qwen-caption-settings__checks qwen-caption-settings__checks--inline">
+	                                            <label><input type="checkbox" id="qwenCaptionBatchIncludeCurrent" checked /> Include current image</label>
+	                                            <label><input type="checkbox" id="qwenCaptionBatchOverwrite" /> Overwrite existing captions</label>
+	                                            <label><input type="checkbox" id="qwenCaptionBatchFollowActive" checked /> Follow backend image<span class="help-icon" title="During backend caption and training-dataset jobs, switch the image viewer to the image currently being processed. Turn off to inspect another image while the job runs.">?</span></label>
+	                                        </div>
+	                                        <div class="qwen-caption-row qwen-caption-actions-row">
+	                                            <button type="button" id="qwenCaptionBatchRunAll" class="training-button secondary">Caption all images</button>
+	                                            <button type="button" id="qwenCaptionBatchCancel" class="training-button secondary">Cancel batch</button>
+	                                            <button type="button" id="qwenCaptionDownloadJsonl" class="training-button secondary">Download captions JSONL</button>
+	                                            <button type="button" id="qwenCaptionDownloadGroupedJson" class="training-button secondary">Download grouped JSON</button>
+	                                            <button type="button" id="qwenCaptionDownloadVlmJsonl" class="training-button secondary">Download VLM JSONL</button>
+	                                        </div>
+	                                        <div class="training-help">All-image caption and training-dataset jobs start with the selected image, continue through the loaded list, then wrap to earlier images. With Follow backend image enabled, the viewer advances to each backend case as it runs.</div>
+	                                    </section>
+	                                    <section class="qwen-caption-instruction-panel" aria-labelledby="qwenCaptionInstructionTitle">
+	                                        <div class="qwen-caption-flow-section__header">
+	                                            <strong id="qwenCaptionInstructionTitle">Training dataset</strong>
+	                                            <span class="training-help">Caption0 plus generated Q&amp;A rows for instruction training.</span>
+	                                        </div>
+	                                        <ol class="qwen-caption-step-list" aria-label="Training dataset flow">
+	                                            <li>Preview prompts</li>
+	                                            <li>Create dataset</li>
+	                                            <li>Review readiness</li>
+	                                            <li>Download bundle</li>
+	                                        </ol>
+	                                        <div class="qwen-caption-instruction-status" aria-live="polite">
+	                                            <span id="qwenCaptionInstructionDatasetStatus" class="qwen-caption-status-chip is-warn">Dataset needed</span>
+	                                            <span id="qwenCaptionInstructionModelStatus" class="qwen-caption-status-chip is-pending">Model status pending</span>
+	                                            <span id="qwenCaptionInstructionJobStatus" class="qwen-caption-status-chip is-pass">Job idle</span>
+	                                            <span id="qwenCaptionInstructionReadinessStatus" class="qwen-caption-status-chip is-pending">Readiness not checked</span>
+	                                            <span id="qwenCaptionInstructionActionReason" class="qwen-caption-status-reason">Select a caption dataset before creating or exporting training data.</span>
+	                                        </div>
+	                                        <div class="qwen-caption-settings__grid qwen-caption-settings__grid--compact">
+	                                            <div class="qwen-caption-settings__field">
+	                                                <label for="qwenCaptionRunKind">Run kind<span class="help-icon" title="Production writes durable rows. Test runs use the same pipeline and can also count as complete when the checkbox below is enabled.">?</span></label>
+	                                                <select id="qwenCaptionRunKind">
+	                                                    <option value="production" selected>Production</option>
+	                                                    <option value="test">Test run</option>
+	                                                </select>
+	                                            </div>
+	                                            <div class="qwen-caption-settings__field">
+	                                                <label for="qwenCaptionWritePolicy">Write policy<span class="help-icon" title="Controls how generated caption and QA rows are persisted. Replace archives generated rows before saving new ones; manual rows are preserved.">?</span></label>
+	                                                <select id="qwenCaptionWritePolicy">
+	                                                    <option value="fill_missing" selected>Fill missing only</option>
+	                                                    <option value="replace_generated">Replace generated rows</option>
+	                                                    <option value="append_variants">Append variants</option>
+	                                                    <option value="qa_only_extend">QA only: extend</option>
+	                                                    <option value="qa_only_replace">QA only: replace</option>
+	                                                </select>
+	                                            </div>
+	                                            <div class="qwen-caption-settings__field">
+	                                                <label for="qwenCaptionCompletionMode">Completion target<span class="help-icon" title="Per-image totals aims for the configured final number of active caption and QA rows per image. Incremental always adds this run's new output.">?</span></label>
+	                                                <select id="qwenCaptionCompletionMode">
+	                                                    <option value="per_image_totals" selected>Per-image totals</option>
+	                                                    <option value="incremental">Incremental add</option>
+	                                                </select>
+	                                            </div>
+	                                            <div class="qwen-caption-settings__field">
+	                                                <label for="qwenCaptionRunMaxImages">Max images<span class="help-icon" title="Optional cap for this training-dataset run. Use 0 for all loaded images. This is useful for local or remote test runs.">?</span></label>
+	                                                <input type="number" id="qwenCaptionRunMaxImages" min="0" max="1000000" step="1" value="0" />
+	                                            </div>
+	                                            <div class="qwen-caption-settings__field qwen-caption-settings__field--wide">
+	                                                <label>Current coverage</label>
+	                                                <div id="qwenCaptionCoverageStatus" class="qwen-caption-coverage-status">Coverage not checked.</div>
+	                                            </div>
+	                                        </div>
+	                                        <div class="qwen-caption-settings__grid qwen-caption-settings__grid--compact">
+	                                            <div class="qwen-caption-settings__field">
+	                                                <label for="qwenCaptionTargetBaseCaptions">Target captions/image<span class="help-icon" title="Final active base caption count per image in per-image-total mode.">?</span></label>
+	                                                <input type="number" id="qwenCaptionTargetBaseCaptions" min="0" max="20" step="1" value="1" />
+	                                            </div>
+	                                            <div class="qwen-caption-settings__field">
+	                                                <label for="qwenCaptionTargetGeneratedQa">Target Q&amp;A/image<span class="help-icon" title="Final active generated-QA count per image in per-image-total mode. Defaults to the requested generated QA rows.">?</span></label>
+	                                                <input type="number" id="qwenCaptionTargetGeneratedQa" min="0" max="100" step="1" value="8" />
+	                                            </div>
+	                                            <div class="qwen-caption-settings__field">
+	                                                <label for="qwenCaptionIncrementBaseCaptions">Add captions/image<span class="help-icon" title="Base captions to add per image when using incremental mode.">?</span></label>
+	                                                <input type="number" id="qwenCaptionIncrementBaseCaptions" min="0" max="20" step="1" value="0" />
+	                                            </div>
+	                                            <div class="qwen-caption-settings__field">
+	                                                <label for="qwenCaptionIncrementGeneratedQa">Add Q&amp;A/image<span class="help-icon" title="Generated-QA rows to add per image when using incremental mode. Defaults to the requested generated QA rows.">?</span></label>
+	                                                <input type="number" id="qwenCaptionIncrementGeneratedQa" min="0" max="100" step="1" value="8" />
+	                                            </div>
+	                                        </div>
+	                                        <div class="qwen-caption-settings__checks">
+	                                            <label><input type="checkbox" id="qwenCaptionTestOutputsCount" checked /> Test-run rows count as complete<span class="help-icon" title="When enabled, a test run writes durable caption and QA rows just like production. Disable to use a non-persisting diagnostic run.">?</span></label>
+	                                        </div>
+	                                        <div class="qwen-caption-settings__grid qwen-caption-settings__grid--compact">
+	                                            <div class="qwen-caption-settings__field">
+	                                                <label for="qwenCaptionSubcaptionsPerImage">Generated Q&amp;A rows per image<span class="help-icon" title="Additional VLM-created image-specific question/answer rows per image for instruction training. Range 0-20. Use 0 to keep only caption0 rows.">?</span></label>
+	                                                <input type="number" id="qwenCaptionSubcaptionsPerImage" min="0" max="20" step="1" value="8" />
+	                                            </div>
+	                                            <div class="qwen-caption-settings__field">
+	                                                <label for="qwenCaptionQaTopupAttempts">Q&amp;A top-up attempts<span class="help-icon" title="Maximum extra visual prompts used to fill rejected or missing generated QA rows before the image is marked underfilled. Range 0-12.">?</span></label>
+	                                                <input type="number" id="qwenCaptionQaTopupAttempts" min="0" max="12" step="1" value="6" />
+	                                            </div>
+	                                            <div class="qwen-caption-settings__field">
+	                                                <label for="qwenCaptionQaMix">Generated Q&amp;A mix<span class="help-icon" title="Controls the type mix requested from the generated-QA pass. Deterministic metadata QA is controlled separately.">?</span></label>
+	                                                <select id="qwenCaptionQaMix">
+	                                                    <option value="balanced" selected>Balanced</option>
+	                                                    <option value="scene">Scene-level</option>
+	                                                    <option value="object">Object-focused</option>
+	                                                    <option value="caption">Caption variants</option>
+	                                                </select>
+	                                            </div>
+	                                            <div class="qwen-caption-settings__field">
+	                                                <label for="qwenCaptionAnswerFormat">Generated answer format<span class="help-icon" title="Natural text is safest for generated QA. JSON asks the generator to wrap general answers as parseable JSON.">?</span></label>
+	                                                <select id="qwenCaptionAnswerFormat">
+	                                                    <option value="natural" selected>Natural text</option>
+	                                                    <option value="json">JSON answer</option>
+	                                                </select>
+	                                            </div>
+	                                        </div>
+	                                        <div class="qwen-caption-settings__field qwen-caption-settings__field--wide">
+	                                            <label for="qwenCaptionImposedQuestions">Imposed questions<span class="help-icon" title="Optional required questions for generated QA. Use one question per line or a JSON array. Questions that are not findable can be answered directly unless speculative QA language is restricted.">?</span></label>
+	                                            <textarea id="qwenCaptionImposedQuestions" rows="4" spellcheck="false" placeholder="What objects are present?&#10;How are they arranged?"></textarea>
+	                                            <div class="training-help">Optional. These questions are added to the generated-Q&amp;A prompt before model-created questions.</div>
+	                                        </div>
+	                                        <div class="qwen-caption-settings__checks">
+	                                            <label><input type="checkbox" id="qwenCaptionIncludeCaption0Training" checked /> Include caption0<span class="help-icon" title="Include the broad caption row in the instruction-training JSONL.">?</span></label>
+	                                            <label><input type="checkbox" id="qwenCaptionIncludeGeneratedQaTraining" checked /> Include generated Q&amp;A<span class="help-icon" title="Include VLM-created question/answer rows that passed structural validation.">?</span></label>
+	                                            <label><input type="checkbox" id="qwenCaptionIncludeDeterministicMetadataQa" /> Include deterministic metadata Q&amp;A<span class="help-icon" title="Add code-generated QA rows from real source labels. This is off by default so source metadata and generated language stay clearly separated.">?</span></label>
+	                                            <label><input type="checkbox" id="qwenCaptionIncludeSourceAnnotationsContext" checked /> Give generator read-only label context<span class="help-icon" title="Pass source annotation counts as read-only grounding context for generated QA. The VLM cannot write these source annotations.">?</span></label>
+	                                            <label><input type="checkbox" id="qwenCaptionStrictGrounding" checked /> Strict Q&amp;A grounding<span class="help-icon" title="Ask the generator to answer only from image evidence, caption0, or read-only source context.">?</span></label>
+	                                            <label><input type="checkbox" id="qwenCaptionRestrictSpeculativeQaLanguage" /> Restrict speculative Q&amp;A language<span class="help-icon" title="Default off. When enabled, generated QA rejects speculative wording and unavailable answers such as unknown, not visible, or cannot determine.">?</span></label>
+	                                            <label><input type="checkbox" id="qwenCaptionRequireReadyInstructionExport" checked /> Only export training data when ready<span class="help-icon" title="Block trainer JSONL and bundle download unless the readiness report is ready. Turn off only for deliberate review-pending diagnostics.">?</span></label>
+	                                        </div>
+	                                        <div class="qwen-caption-row qwen-caption-actions-row qwen-caption-instruction-actions">
+	                                            <button type="button" id="qwenCaptionInstructionReadinessRun" class="training-button secondary">Check caption readiness</button>
+	                                            <button type="button" id="qwenCaptionPreviewInstructionProcess" class="training-button secondary">Preview dataset prompts</button>
+	                                            <button type="button" id="qwenCaptionBuildInstructionDataset" class="training-button">Create training dataset</button>
+	                                            <button type="button" id="qwenCaptionDownloadInstructionBundle" class="training-button qwen-caption-primary-export">Download training bundle</button>
+	                                        </div>
+	                                        <div class="qwen-caption-settings__field qwen-caption-settings__field--wide">
+	                                            <label for="qwenCaptionGeneratedQaOutput">Latest generated Q&amp;A output<span class="help-icon" title="Read-only JSON view of the most recent generated QA rows reported by the backend job.">?</span></label>
+	                                            <div id="qwenCaptionGeneratedQaAccumulator" class="qwen-caption-generated-qa-accumulator" aria-live="polite"></div>
+	                                            <textarea id="qwenCaptionGeneratedQaOutput" rows="8" spellcheck="false" readonly placeholder="Generated QA JSON appears here during training-dataset runs."></textarea>
+	                                        </div>
+	                                        <details id="qwenCaptionInstructionAdvanced" class="qwen-caption-instruction-advanced">
+	                                            <summary>Advanced exports and review</summary>
+	                                            <div class="qwen-caption-row qwen-caption-actions-row qwen-caption-instruction-actions">
+	                                                <button type="button" id="qwenCaptionDownloadInstructionJsonl" class="training-button secondary">Download trainer JSONL</button>
+	                                                <button type="button" id="qwenCaptionDownloadInstructionArchive" class="training-button secondary">Download construction archive</button>
+	                                                <button type="button" id="qwenCaptionDownloadInstructionReview" class="training-button secondary">Download review file</button>
+	                                                <button type="button" id="qwenCaptionImportInstructionReview" class="training-button secondary">Import review decisions</button>
+	                                                <input type="file" id="qwenCaptionImportInstructionReviewFile" accept=".jsonl,.json,application/json,application/jsonl" hidden />
+	                                                <button type="button" id="qwenCaptionDownloadInstructionReport" class="training-button secondary">Download readiness report</button>
+	                                            </div>
+	                                        </details>
+	                                        <div class="training-help">The training bundle is the handoff: copied images, effective labels, trainer JSONL, construction archive, review file, readiness report, and checksums. Generated Q&amp;A never becomes source annotations. Trainer JSONL and bundle downloads require a ready report by default; advanced exports are for review and diagnostics.</div>
+	                                    </section>
+	                                </div>
                                 </div>
                             </details>
                             <details class="tool-panel" id="qwenEdrDetails">

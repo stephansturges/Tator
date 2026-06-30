@@ -473,6 +473,7 @@ def _ready_instruction_export_payload():
         "include_deterministic_metadata_qa": False,
         "qa_mix": "balanced",
         "answer_format": "natural",
+        "instruction_qa_restrict_speculative_language": False,
     }
     instruction_settings_fingerprint = "instruction-settings-fingerprint"
     export_validation = {"ok": True, "error_count": 0, "errors": [], "row_count": 1}
@@ -586,6 +587,7 @@ def test_caption_instruction_strict_export_gate_requires_ready_proofs() -> None:
         "include_deterministic_metadata_qa": False,
         "qa_mix": "balanced",
         "answer_format": "natural",
+        "instruction_qa_restrict_speculative_language": False,
     }
     instruction_settings_fingerprint = "instruction-settings-fingerprint"
     export_validation = {"ok": True, "error_count": 0, "errors": [], "row_count": 1}
@@ -3605,6 +3607,7 @@ def test_caption_alternate_routes_append_update_export_and_delete(
         "include_deterministic_metadata_qa": False,
         "qa_mix": "balanced",
         "answer_format": "natural",
+        "instruction_qa_restrict_speculative_language": False,
     }
     assert instruction_archive["training_row_count"] == 1
     assert instruction_archive["rejection_reason_counts"] == {}

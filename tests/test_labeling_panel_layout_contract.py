@@ -292,6 +292,10 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     assert "qwenCaptionDownloadVlmJsonl" in html
     assert "qwenCaptionBatchFollowActive" in html
     assert "Follow backend image" in html
+    assert "qwenCaptionImposedQuestions" in html
+    assert "Imposed questions" in html
+    assert "qwenCaptionGeneratedQaOutput" in html
+    assert "Latest generated Q&amp;A output" in html
     assert "qwenCaptionSubcaptionsPerImage" in html
     assert 'id="qwenCaptionSubcaptionsPerImage" min="0" max="20" step="1" value="8"' in html
     assert "qwenCaptionQaMix" in html
@@ -303,6 +307,8 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     assert "qwenCaptionIncludeDeterministicMetadataQa" in html
     assert "qwenCaptionIncludeSourceAnnotationsContext" in html
     assert "qwenCaptionStrictGrounding" in html
+    assert "qwenCaptionRestrictSpeculativeQaLanguage" in html
+    assert "Restrict speculative Q&amp;A language" in html
     assert "qwenCaptionRequireReadyInstructionExport" in html
     assert 'id="qwenCaptionRequireReadyInstructionExport" checked' in html
     assert "qwenCaptionBuildInstructionDataset" in html
@@ -313,20 +319,35 @@ def test_qwen_caption_all_advertises_resumable_backend_job():
     assert "qwenCaptionImportInstructionReview" in html
     assert "qwenCaptionImportInstructionReviewFile" in html
     assert "qwenCaptionDownloadInstructionReport" in html
-    assert "Create VLM training dataset" in html
+    assert "qwenCaptionInstructionAdvanced" in html
+    assert "qwenCaptionInstructionDatasetStatus" in html
+    assert "qwenCaptionInstructionModelStatus" in html
+    assert "qwenCaptionInstructionJobStatus" in html
+    assert "qwenCaptionInstructionReadinessStatus" in html
+    assert "qwenCaptionInstructionActionReason" in html
+    assert "Caption archive" in html
+    assert "Training dataset" in html
+    assert "Preview prompts" in html
+    assert "Create training dataset" in html
     assert "Download training bundle" in html
-    assert "Import reviewed JSONL" in html
-    assert "Generated QA never becomes source annotations" in html
-    assert "review JSONL can be exported for audit then imported" in html
-    assert "deterministic metadata QA is included only when explicitly enabled" in html
-    assert "The training bundle is the self-contained handoff" in html
-    assert "copied image bytes, effective labels, trainer JSONL, archive JSONL, review JSONL, report JSON, and a checksum manifest" in html
-    assert "Trainer JSONL and bundle downloads require a ready instruction report by default" in html
+    assert "Advanced exports and review" in html
+    assert "Download trainer JSONL" in html
+    assert "Download construction archive" in html
+    assert "Download review file" in html
+    assert "Import review decisions" in html
+    assert "Download readiness report" in html
+    assert "Generated Q&amp;A never becomes source annotations" in html
+    assert "The training bundle is the handoff" in html
+    assert "copied images, effective labels, trainer JSONL, construction archive, review file, readiness report, and checksums" in html
+    assert "Trainer JSONL and bundle downloads require a ready report by default" in html
+    assert "advanced exports are for review and diagnostics" in html
     assert "qwenCaptionExportHealth" in html
     assert "qwenCaptionReadinessRun" in html
+    assert "qwenCaptionInstructionReadinessRun" in html
     assert "qwenCaptionReadinessStatus" in html
     assert "qwenCaptionReadinessResults" in html
     assert "Check caption readiness" in html
+    assert html.count("Check caption readiness") >= 2
     assert "Download grouped JSON" in html
     assert "Download VLM JSONL" in html
     assert "Flat JSONL is the audit record stream" in html
@@ -537,6 +558,8 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "Caption readiness:" in js
     assert "Unlimited per-image captions" in js
     assert "captionReadinessRun.addEventListener" in js
+    assert "captionInstructionReadinessRun.addEventListener" in js
+    assert '["captionInstructionReadinessRun", "Training dataset readiness control"]' in js
     assert "if (updated?.is_primary)" in js
     assert "captionAutoSaveState.lastSaved.set(imageName, updated.caption || caption)" in js
     init_start = js.index("function initQwenPanel")
@@ -550,6 +573,8 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "function qwenCaptionArchiveMutationActive" in js
     assert "function updateCaptionRunConfigurationControls" in js
     assert "function updateCaptionInstructionDatasetOptionControls" in js
+    assert "function updateCaptionInstructionUxStatus" in js
+    assert "function setCaptionInstructionStatusChip" in js
     assert "function updateCaptionArchiveActionControls" in js
     assert "const busy = qwenCaptionArchiveMutationActive();" in update_caption_helper
     assert "const captionExportDisabled = busy;" in update_caption_helper
@@ -570,6 +595,8 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "updateCaptionInstructionDatasetOptionControls();" in update_caption_helper
     assert "updateCaptionGlossaryControls();" in update_caption_helper
     assert "updateCaptionArchiveActionControls();" in update_caption_helper
+    assert "updateCaptionInstructionUxStatus({ locked, busy, hasCaptionDataset });" in update_caption_helper
+    assert 'typeof updateCaptionInstructionUxStatus === "function"' in update_caption_helper
     run_config_helper = _extract_js_function(js, "updateCaptionRunConfigurationControls")
     assert "captionRunConfigurationElements().forEach" in run_config_helper
     assert "el.disabled = busy;" in run_config_helper
@@ -600,6 +627,7 @@ def test_qwen_caption_export_preserves_saved_alternates_and_primary_rows():
     assert "qwenElements.captionIncludeDeterministicMetadataQa" in instruction_option_helper
     assert "qwenElements.captionIncludeSourceAnnotationsContext" in instruction_option_helper
     assert "qwenElements.captionStrictGrounding" in instruction_option_helper
+    assert "qwenElements.captionRestrictSpeculativeQaLanguage" in instruction_option_helper
     render_alternates_helper = _extract_js_function(js, "renderCaptionAlternatesForCurrentImage")
     assert "updateCaptionArchiveActionControls();" in render_alternates_helper
     assert "qwenElements.captionSaveAlternate.disabled = busy || !imageName || !caption" in js
@@ -704,6 +732,7 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             "  captionIncludeDeterministicMetadataQa: button(),",
             "  captionIncludeSourceAnnotationsContext: button(),",
             "  captionStrictGrounding: button(),",
+            "  captionRestrictSpeculativeQaLanguage: button(),",
             "  captionOutput: { value: 'caption text' },",
             "  captionSaveAlternate: button(),",
             "  captionUpdateSelected: button(),",
@@ -767,6 +796,7 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             "assert.strictEqual(qwenElements.captionIncludeDeterministicMetadataQa.disabled, true);",
             "assert.strictEqual(qwenElements.captionIncludeSourceAnnotationsContext.disabled, true);",
             "assert.strictEqual(qwenElements.captionStrictGrounding.disabled, true);",
+            "assert.strictEqual(qwenElements.captionRestrictSpeculativeQaLanguage.disabled, true);",
             "qwenCaptionBatchBackendJobId = '';",
             "assert.strictEqual(qwenCaptionArchiveMutationActive(), false);",
             "assert.strictEqual(captionInstructionArtifactBusyMessage('exporting instruction rows'), '');",
@@ -812,6 +842,7 @@ def test_qwen_caption_instruction_artifacts_block_while_backend_job_id_is_active
             "assert.strictEqual(qwenElements.captionIncludeDeterministicMetadataQa.disabled, false);",
             "assert.strictEqual(qwenElements.captionIncludeSourceAnnotationsContext.disabled, false);",
             "assert.strictEqual(qwenElements.captionStrictGrounding.disabled, false);",
+            "assert.strictEqual(qwenElements.captionRestrictSpeculativeQaLanguage.disabled, false);",
         ]
     )
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
@@ -1415,6 +1446,7 @@ def test_qwen_caption_instruction_export_query_uses_backend_ready_gate_only_when
             "  include_caption0_in_training: true,",
             "  include_generated_qa_in_training: false,",
             "  include_deterministic_metadata_qa: true,",
+            "  instruction_qa_restrict_speculative_language: true,",
             "  qa_mix: 'object',",
             "  answer_format: 'json',",
             "};",
@@ -1422,11 +1454,14 @@ def test_qwen_caption_instruction_export_query_uses_backend_ready_gate_only_when
             "assert.strictEqual(strictParams.get('include_caption0_in_training'), 'true');",
             "assert.strictEqual(strictParams.get('include_generated_qa_in_training'), 'false');",
             "assert.strictEqual(strictParams.get('include_deterministic_metadata_qa'), 'true');",
+            "assert.strictEqual(strictParams.get('instruction_qa_restrict_speculative_language'), 'true');",
             "assert.strictEqual(strictParams.get('qa_mix'), 'object');",
             "assert.strictEqual(strictParams.get('answer_format'), 'json');",
             "assert.strictEqual(strictParams.get('require_ready_instruction_export'), 'true');",
             "const diagnosticParams = new URLSearchParams(captionInstructionExportQuery(settings));",
             "assert.strictEqual(diagnosticParams.has('require_ready_instruction_export'), false);",
+            "const explicitDiagnosticParams = new URLSearchParams(captionInstructionExportQuery(settings, { requireReadyInstructionExport: false }));",
+            "assert.strictEqual(explicitDiagnosticParams.get('require_ready_instruction_export'), 'false');",
         ]
     )
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
@@ -1491,7 +1526,7 @@ def test_qwen_caption_instruction_bundle_formats_backend_failures():
             "const duplicateZipMember = formatCaptionInstructionBundleApiError('caption_instruction_bundle_manifest_invalid:manifest_zip_duplicate_member');",
             "assert(duplicateZipMember.includes('ZIP contains duplicate member names'));",
             "const noRows = formatCaptionInstructionBundleApiError('caption_instruction_bundle_no_archive_rows');",
-            "assert(noRows.includes('Create a VLM training dataset first'));",
+            "assert(noRows.includes('Create a training dataset first'));",
             "assert.strictEqual(formatCaptionInstructionBundleApiError('plain backend error'), 'plain backend error');",
             "assert.strictEqual(formatCaptionInstructionBundleApiError(''), 'Training bundle export failed.');",
         ]
@@ -1639,6 +1674,7 @@ def test_qwen_caption_instruction_export_actions_preserve_malformed_payload_erro
             "  include_caption0_in_training: true,",
             "  include_generated_qa_in_training: true,",
             "  include_deterministic_metadata_qa: false,",
+            "  instruction_qa_restrict_speculative_language: false,",
             "  qa_mix: 'balanced',",
             "  answer_format: 'natural',",
             "};",
@@ -1892,10 +1928,12 @@ def test_qwen_caption_instruction_launch_settings_block_empty_training_family():
             "  include_caption0_in_training: true,",
             "  include_generated_qa_in_training: true,",
             "  include_deterministic_metadata_qa: false,",
+            "  instruction_qa_restrict_speculative_language: true,",
             "  subcaptions_per_image: 99,",
             "});",
             "assert.strictEqual(tooMany.ok, true);",
             "assert(tooMany.warnings.some((warning) => warning.includes('adjusted from 99 to 20')));",
+            "assert(tooMany.warnings.some((warning) => warning.includes('Restrict speculative Q&A language is on')));",
             "const negative = validateCaptionInstructionLaunchSettings({",
             "  instruction_dataset: true,",
             "  include_caption0_in_training: true,",
@@ -1911,10 +1949,12 @@ def test_qwen_caption_instruction_launch_settings_block_empty_training_family():
             "  include_caption0_in_training: false,",
             "  include_generated_qa_in_training: false,",
             "  include_deterministic_metadata_qa: true,",
+            "  instruction_qa_restrict_speculative_language: true,",
             "  subcaptions_per_image: 3,",
             "});",
             "assert(summary.includes('generated QA candidates per image for archive/review only'));",
             "assert(summary.includes('deterministic metadata QA rows'));",
+            "assert(summary.includes('strict speculative-language filter'));",
             "const existingOnly = describeCaptionInstructionLaunchSettings({",
             "  instruction_dataset: true,",
             "  include_caption0_in_training: false,",
@@ -1970,6 +2010,7 @@ def test_qwen_caption_instruction_artifact_consistency_blocks_mismatched_exports
             "  include_caption0_in_training: true,",
             "  include_generated_qa_in_training: true,",
             "  include_deterministic_metadata_qa: false,",
+            "  instruction_qa_restrict_speculative_language: false,",
             "  qa_mix: 'balanced',",
             "  answer_format: 'natural',",
             "};",
@@ -2304,6 +2345,23 @@ def test_qwen_caption_instruction_readiness_summary_formats_blockers_for_operato
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
 
 
+def test_qwen_caption_instruction_readiness_chip_does_not_treat_zero_fail_as_blocked():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            "const qwenElements = { captionReadinessStatus: { textContent: '' } };",
+            _extract_js_function(js, "captionInstructionReadinessChip"),
+            "function chip(text) { qwenElements.captionReadinessStatus.textContent = text; return captionInstructionReadinessChip(); }",
+            "assert.deepStrictEqual(chip('Readiness not checked.'), { text: 'Readiness not checked', status: 'pending' });",
+            "assert.deepStrictEqual(chip('Caption readiness: 52 pass, 0 warnings, 0 fail.'), { text: 'Readiness passed', status: 'pass' });",
+            "assert.deepStrictEqual(chip('Caption readiness: 51 pass, 1 warning, 0 fail.'), { text: 'Readiness needs review', status: 'warn' });",
+            "assert.deepStrictEqual(chip('Caption readiness: 49 pass, 0 warnings, 2 fail.'), { text: 'Readiness blocked', status: 'fail' });",
+        ]
+    )
+    subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
+
+
 def test_qwen_single_caption_uses_isolated_backend_job_when_dataset_backed():
     js = _js()
 
@@ -2354,13 +2412,13 @@ def test_qwen_next_n_caption_prefers_resumable_backend_job():
     assert "batch captioning uses isolated backend jobs so Metal crashes cannot take down" in batch
     assert "validateCaptionInstructionLaunchSettings(getCaptionInstructionDatasetSettings(true))" in batch
     assert "guardQwenCaptionArchiveIdle(" in batch
-    assert "starting a VLM training dataset job" in batch
+    assert "starting a training dataset job" in batch
     assert "starting another caption batch" in batch
     assert "Instruction dataset not started" in batch
     assert "try {" in batch
     assert "runQwenCaptionBackendBatch(imageNames, { ...options, backend: true })" in batch
     assert "formatBackendFetchError(error" in batch
-    assert "VLM training dataset" in batch
+    assert "training dataset" in batch
     assert "failed to start" in batch
     assert "setQwenCaptionBackendJobStatus(message)" in batch
     assert "renderQwenCaptionBackendJobProgress(currentJob" in js
@@ -2387,8 +2445,13 @@ def test_qwen_all_image_caption_and_instruction_runs_start_with_selected_image()
 
     assert "getCaptionImageList({ startAtCurrent: true })" in run_all_listener
     assert "Caption all ${imageNames.length} images starting with ${firstImage}" in run_all_listener
+    assert 'ensureAutomationAvailable("training dataset creation")' in instruction_listener
+    assert "Qwen backend is unavailable" in instruction_listener
+    assert "Select or register a caption dataset before creating a training dataset." in instruction_listener
     assert "getCaptionImageList({ startAtCurrent: true })" in instruction_listener
-    assert "Create a VLM training dataset for ${imageNames.length} images starting with ${firstImage}" in instruction_listener
+    assert "const runImageCount = settings.max_images" in instruction_listener
+    assert "Create a training dataset for ${runImageCount} image${runImageCount === 1 ? \"\" : \"s\"} starting with ${firstImage}" in instruction_listener
+    assert instruction_listener.index("Select or register a caption dataset before creating a training dataset.") < instruction_listener.index("confirm(")
     assert "All-image caption and training-dataset jobs start with the selected image" in html
     assert "viewer advances to each backend case" in html
 
@@ -2447,7 +2510,7 @@ def test_qwen_caption_launches_block_while_archive_is_mutating():
             "assert(backendStatuses.some((message) => message.includes('starting another caption batch')));",
             "await runQwenCaptionBatch(['frame.jpg'], { backend: true, instructionDataset: true });",
             "assert.strictEqual(backendLaunches, 0);",
-            "assert(backendStatuses.some((message) => message.includes('starting a VLM training dataset job')));",
+            "assert(backendStatuses.some((message) => message.includes('starting a training dataset job')));",
             "assert(updateCalls >= 3);",
         ]
     )
@@ -2504,11 +2567,10 @@ def test_qwen_caption_cancel_handles_detached_backend_jobs():
                 "\n    function formatQwenMemory",
             ),
             "assert.strictEqual(qwenCaptionArchiveMutationActive(), true);",
-            "assert.deepStrictEqual(qwenCaptionKnownBackendJobIds(), ['qcap_child', 'qcap_source']);",
+            "assert.deepStrictEqual(qwenCaptionKnownBackendJobIds(), ['qcap_child']);",
             "await requestQwenCaptionCancel({ force: false });",
             "assert.deepStrictEqual(fetchCalls.map((call) => call.url), [",
             "  'http://api.test/qwen/caption/jobs/qcap_child/cancel',",
-            "  'http://api.test/qwen/caption/jobs/qcap_source/cancel',",
             "]);",
             "assert(fetchCalls.every((call) => call.method === 'POST'));",
             "assert.strictEqual(qwenCaptionBatchCancel, false);",
@@ -2516,6 +2578,99 @@ def test_qwen_caption_cancel_handles_detached_backend_jobs():
             "assert.strictEqual(qwenCaptionBatchBackendJobId, null);",
             "assert.deepStrictEqual(qwenCaptionBackendActiveJobs, []);",
             "assert.strictEqual(refreshCalls, 1);",
+            "assert(updateCalls >= 2);",
+        ]
+    )
+    subprocess.run(
+        [
+            "node",
+            "-e",
+            f"(async () => {{\n{script}\n}})().catch((error) => {{ console.error(error); process.exit(1); }});",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+    )
+
+
+def test_qwen_caption_interrupted_backend_jobs_do_not_block_dataset_controls():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            "let qwenCaptionActive = false;",
+            "let qwenCaptionBatchActive = false;",
+            "let qwenCaptionBatchBackendJobId = null;",
+            "let qwenCaptionDatasetRefreshInFlight = false;",
+            "let qwenCaptionBackendActiveJobs = [",
+            "  { job_id: 'qcap_interrupted', status: 'interrupted' },",
+            "];",
+            "const qwenElements = {",
+            "  captionDatasetSelect: { disabled: true },",
+            "  captionDatasetRefresh: { disabled: true },",
+            "};",
+            "function isAnnotationDatasetModeActive() { return false; }",
+            _extract_js_function(js, "isQwenCaptionBackendJobActive"),
+            _extract_js_function(js, "qwenCaptionArchiveMutationActive"),
+            _extract_js_function(js, "syncQwenCaptionDatasetControls"),
+            "assert.strictEqual(isQwenCaptionBackendJobActive(qwenCaptionBackendActiveJobs[0]), false);",
+            "assert.strictEqual(qwenCaptionArchiveMutationActive(), false);",
+            "syncQwenCaptionDatasetControls();",
+            "assert.strictEqual(qwenElements.captionDatasetSelect.disabled, false);",
+            "assert.strictEqual(qwenElements.captionDatasetRefresh.disabled, false);",
+        ]
+    )
+    subprocess.run(
+        [
+            "node",
+            "-e",
+            f"(async () => {{\n{script}\n}})().catch((error) => {{ console.error(error); process.exit(1); }});",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+    )
+
+
+def test_qwen_caption_cancel_backend_jobs_clears_local_backend_job_lock():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            "const API_ROOT = 'http://api.test';",
+            "let qwenCaptionActive = false;",
+            "let qwenCaptionBatchActive = true;",
+            "let qwenCaptionBatchBackendJobId = 'qcap_child';",
+            "let qwenCaptionCancelRequested = true;",
+            "let qwenCaptionBatchCancel = false;",
+            "let qwenCaptionBackendActiveJobs = [];",
+            "const activeJobs = [{ job_id: 'qcap_child', status: 'running' }];",
+            "const fetchCalls = [];",
+            "let refreshCalls = 0;",
+            "let updateCalls = 0;",
+            "global.window = { confirm: () => true };",
+            "global.fetch = async (url, options = {}) => {",
+            "  fetchCalls.push({ url: String(url), method: options.method || 'GET' });",
+            "  return { ok: true, text: async () => '', json: async () => [] };",
+            "};",
+            "async function fetchQwenCaptionBackendJobs() { return activeJobs; }",
+            "function summarizeQwenCaptionBackendJobs() { return { activeJobs, message: 'active' }; }",
+            "function updateQwenCaptionButton() { updateCalls += 1; }",
+            "function qwenCaptionBackendJobShortLabel(job) { return `${job.job_id} (${job.status})`; }",
+            "function setQwenCaptionBackendJobStatus() {}",
+            "function setSamStatus() {}",
+            "function parseApiError(detail, fallback) { return detail || fallback; }",
+            "async function refreshQwenCaptionBackendJobsStatus() { refreshCalls += 1; qwenCaptionBackendActiveJobs = []; return []; }",
+            _extract_js_function(js, "isQwenCaptionBackendJobActive"),
+            _extract_js_function(js, "qwenCaptionArchiveMutationActive"),
+            "async " + _extract_js_function(js, "cancelQwenCaptionBackendActiveJobs"),
+            "assert.strictEqual(qwenCaptionArchiveMutationActive(), true);",
+            "await cancelQwenCaptionBackendActiveJobs();",
+            "assert.deepStrictEqual(fetchCalls, [{ url: 'http://api.test/qwen/caption/jobs/qcap_child/cancel', method: 'POST' }]);",
+            "assert.strictEqual(qwenCaptionBatchActive, false);",
+            "assert.strictEqual(qwenCaptionBatchBackendJobId, null);",
+            "assert.strictEqual(qwenCaptionCancelRequested, false);",
+            "assert.strictEqual(qwenCaptionBatchCancel, false);",
+            "assert.strictEqual(refreshCalls, 1);",
+            "assert.strictEqual(qwenCaptionArchiveMutationActive(), false);",
             "assert(updateCalls >= 2);",
         ]
     )
@@ -2981,10 +3136,22 @@ def test_help_tooltips_are_keyboard_accessible_app_wide():
     assert 'el.removeAttribute("title");' in js
     assert "el.tabIndex = 0;" in js
     assert 'el.setAttribute("aria-label", `Help: ${tooltip}`);' in js
+    assert "function ensureUiTooltipElement()" in js
+    assert "function positionUiTooltip()" in js
+    assert "function initializeViewportHelpTooltips()" in js
+    assert 'tooltip.id = "uiViewportTooltip";' in js
+    assert 'document.addEventListener("pointerover"' in js
+    assert 'document.addEventListener("focusin"' in js
+    assert 'document.addEventListener("scroll", () => positionUiTooltip(), true);' in js
+    assert "anchor.setAttribute(\"aria-describedby\", tooltip.id);" in js
     assert ".help-icon[data-tooltip]:focus-visible" in css
-    assert ".help-icon[data-tooltip]:focus-visible::before" in css
-    assert ".help-icon[data-tooltip]:focus-visible::after" in css
-    assert "content: attr(data-tooltip);" in css
+    assert ".ui-tooltip" in css
+    assert "position: fixed;" in css
+    assert "max-width: min(360px, calc(100vw - 24px));" in css
+    assert ".ui-tooltip::before" in css
+    assert "var(--ui-tooltip-arrow-x, 50%)" in css
+    assert ".help-icon[data-tooltip]::after" not in css
+    assert "content: attr(data-tooltip);" not in css
 
 
 def test_runtime_control_tooltips_cover_core_workflows():
@@ -3405,6 +3572,9 @@ def test_qwen_caption_toast_shows_prompt_output_trace_blocks():
     css = _css()
 
     assert "function renderQwenCaptionLiveToastBody" in js
+    assert "function maybeToastQwenCaptionGeneratedQaPairs" in js
+    assert "qwenCaptionSeenGeneratedQaToasts.add(key)" in js
+    assert "maybeToastQwenCaptionGeneratedQaPairs(liveSnapshot)" in js
     assert "progress?.io_events" in js
     start = js.index("function renderQwenCaptionLiveToastBody")
     end = js.index("function hideQwenCaptionLiveToast", start)
@@ -3415,6 +3585,7 @@ def test_qwen_caption_toast_shows_prompt_output_trace_blocks():
     assert "let qwenCaptionLiveToastHovered = false;" in js
     assert 'el.addEventListener("mouseenter", () => {' in js
     assert "if (qwenCaptionLiveToastHovered)" in js
+    assert "width: min(710px, calc(100vw - 36px));" in css
     assert "max-height: min(88vh, 960px);" in css
     assert "max-height: min(76vh, 820px);" in css
     assert ".qwen-caption-live-toast__trace-text" in css
@@ -3427,6 +3598,7 @@ def test_qwen_caption_toast_shows_prompt_output_trace_blocks():
 
 
 def test_qwen_caption_workflow_can_preview_complete_prompt_flow():
+    html = _html()
     js = _js()
     css = _css()
 
@@ -3435,6 +3607,15 @@ def test_qwen_caption_workflow_can_preview_complete_prompt_flow():
     assert "/qwen/caption/preview_prompt" in js
     assert "invokeQwenCaptionPromptPreview" in js
     assert "buildQwenCaptionRequestFields(requestImageName)" in js
+    assert "Preview dataset prompts" in html
+    assert "qwenCaptionPreviewInstructionProcess" in html
+    assert html.index("qwenCaptionPreviewInstructionProcess") < html.index("qwenCaptionBuildInstructionDataset")
+    assert "handleQwenCaptionInstructionProcessPreview" in js
+    assert "/qwen/caption/jobs/preview_process" in js
+    assert "buildQwenCaptionDatasetJobRequestPayload" in js
+    assert "generated-QA prompt template" in js
+    assert "Pilot certification is a launch-only gate" in js
+    assert "will still certify the selected pilot artifact directory" in js
     assert "max prompt ~" in js
     assert "output ${effectiveMin === effectiveMax" in js
     assert ".qwen-caption-prompt-preview-toast" in css
@@ -3452,6 +3633,42 @@ def test_qwen_caption_max_boxes_explains_auto_representative_subset():
     assert "Max boxes is set to Auto" in js
     assert "representative spatial subset of boxes" in js
     assert "omitted boxes are not absent objects" in js
+
+
+def test_qwen_caption_remote_provider_controls_and_cost_estimator_are_wired():
+    html = _html()
+    js = _js()
+    css = _css()
+
+    assert 'id="qwenCaptionProvider"' in html
+    assert "OpenAI API" in html
+    assert 'id="qwenCaptionOpenAiModel"' in html
+    assert 'value="gpt-5.5"' in html
+    assert 'id="qwenCaptionOpenAiImageDetail"' in html
+    assert 'value="original"' in html
+    assert 'id="qwenCaptionOpenAiServiceTier"' in html
+    assert 'id="qwenCaptionOpenAiKeyPath"' in html
+    assert 'value="openAI_API_KEY_DoNotCommit"' in html
+    assert 'id="qwenCaptionOpenAiCostEstimate"' in html
+    assert "Run kind to Test run" in html
+    assert "Max images to the desired count" in html
+    assert "const DEFAULT_OPENAI_CAPTION_MODEL = \"gpt-5.5\"" in js
+    assert "const DEFAULT_OPENAI_CAPTION_DETAIL = \"original\"" in js
+    assert "OPENAI_CAPTION_PRICING_PER_MILLION" in js
+    assert "function getCaptionProviderSettings" in js
+    assert "function updateOpenAiCaptionCostEstimate" in js
+    assert "caption_provider: providerSettings.provider" in js
+    assert "openai_model: providerSettings.model" in js
+    assert "openai_image_detail: providerSettings.detail" in js
+    assert "openai_api_key_path: providerSettings.keyPath" in js
+    assert "openai_service_tier: providerSettings.serviceTier" in js
+    assert "Caption provider control" in js
+    assert "OpenAI cost estimate display" in js
+    assert "Remote provider calls use the same prompt stack and output-token budget" in js
+    assert "OpenAI captioning uses the persisted backend job path" in js
+    assert "OpenAI provider needs a model and backend-local key path or OPENAI_API_KEY" in js
+    assert ".qwen-caption-remote-cost" in css
+    assert ".qwen-caption-remote-cost.is-warn" in css
 
 
 def test_qwen_caption_windowed_full_image_compose_is_set_and_forget_aware():
@@ -3509,16 +3726,17 @@ def test_qwen_caption_ui_scenarios_document_set_and_forget_workflows():
     assert "Attach / recover selected dataset" in scenarios
     assert "Download grouped JSON" in scenarios
     assert "Download VLM JSONL" in scenarios
-    assert "Create VLM training dataset" in scenarios
-    assert "Generated QA per image" in scenarios
+    assert "Create training dataset" in scenarios
+    assert "Preview dataset prompts" in scenarios
+    assert "Generated Q&A rows per image" in scenarios
     assert "0-20" in scenarios
-    assert "Download instruction JSONL" in scenarios
-    assert "Download instruction archive" in scenarios
-    assert "Download review JSONL" in scenarios
-    assert "Download instruction report" in scenarios
+    assert "Download trainer JSONL" in scenarios
+    assert "Download construction archive" in scenarios
+    assert "Download review file" in scenarios
+    assert "Download readiness report" in scenarios
     assert "training-readiness block" in scenarios
     assert "`ready` / `needs_review` / `blocked`" in scenarios
-    assert "Require\nready report for trainer JSONL" in scenarios
+    assert "Only export training data when ready" in scenarios
     assert "review-pending diagnostics" in scenarios
     assert "blank review decision/note fields" in scenarios
     assert "duplicate-question/diversity metrics" in scenarios
@@ -3559,21 +3777,36 @@ def test_qwen_caption_backend_batch_uses_visible_failure_stop_gate():
     js = _js()
 
     single_start = js.index("async function runQwenCaptionSingleBackendJob")
-    single_end = js.index("async function runQwenCaptionBackendBatch", single_start)
+    builder_start = js.index("function buildQwenCaptionDatasetJobRequestPayload", single_start)
+    single_end = builder_start
     single_helper = js[single_start:single_end]
-    batch_start = single_end
+    builder_end = js.index("async function runQwenCaptionBackendBatch", builder_start)
+    batch_request_builder = js[builder_start:builder_end]
+    batch_start = builder_end
     batch_end = js.index("function setQwenAgentStatus", batch_start)
     batch_helper = js[batch_start:batch_end]
+    request_fields_start = js.index("function buildQwenCaptionRequestFields")
+    request_fields_end = js.index("function getCaptionInstructionDatasetSettings", request_fields_start)
+    request_fields_helper = js[request_fields_start:request_fields_end]
     finish_start = js.index("async function finishQwenCaptionBackendJob")
     finish_end = js.index("async function monitorQwenCaptionBackendJob", finish_start)
     finish_helper = js[finish_start:finish_end]
 
+    assert "const { requestFields } = buildQwenCaptionRequestFields(templateImageName);" in batch_request_builder
+    assert "caption_request: requestFields" in batch_request_builder
+    assert "instruction_qa_imposed_questions: imposedQuestions" in js
+    assert "parseCaptionImposedQuestionsText" in js
+    assert "captionGeneratedQaOutput" in js
+    assert "labelmap_glossary: labelmapGlossary || null" in request_fields_helper
     assert "max_failures: getCaptionBackendMaxFailures(setAndForget, instructionSettings)" in single_helper
-    assert "max_failures: getCaptionBackendMaxFailures(setAndForget, instructionSettings)" in batch_helper
+    assert "max_failures: getCaptionBackendMaxFailures(setAndForget, instructionSettings)" in batch_request_builder
     assert "runner_heartbeat_interval_seconds: DEFAULT_CAPTION_BACKEND_HEARTBEAT_SECONDS" in single_helper
-    assert "runner_heartbeat_interval_seconds: DEFAULT_CAPTION_BACKEND_HEARTBEAT_SECONDS" in batch_helper
+    assert "runner_heartbeat_interval_seconds: DEFAULT_CAPTION_BACKEND_HEARTBEAT_SECONDS" in batch_request_builder
     assert "Backend batch complete • ${finalFailed} failed" in finish_helper
     assert "Backend caption batch complete with ${finalFailed} failed image" in finish_helper
+    assert "instruction_artifacts" in finish_helper
+    assert "bundle saved" in finish_helper
+    assert "training bundle saved" in finish_helper
     assert "qwenCaptionSetAndForget" in html
     assert "Set-and-forget backend run" in html
     assert "qwenCaptionBatchFollowActive" in html
@@ -3585,6 +3818,9 @@ def test_qwen_caption_backend_batch_uses_visible_failure_stop_gate():
     assert "Auto: set-and-forget uses 3 attempts" in html
     assert "qwenCaptionArtifactLogMb" in html
     assert "Attempt log cap (MB)" in html
+    assert 'id="qwenCaptionArtifactLogMb" min="0" max="1024" step="0.25" value="0"' in html
+    assert "Default 0 keeps full raw logs" in html
+    assert "const DEFAULT_CAPTION_ARTIFACT_LOG_MB = 0" in js
     assert "qwenCaptionMaxRecoveryRate" in html
     assert "Max recovery rate" in html
     assert "qwenCaptionMaxFailures" in html
@@ -3634,6 +3870,13 @@ def test_qwen_caption_backend_batch_uses_visible_failure_stop_gate():
     assert "const setAndForget = qwenElements.captionSetAndForget?.checked !== false" in single_helper
     assert "const healthGates = getCaptionHealthGateSettings()" in single_helper
     assert "const pilotCertification = getCaptionPilotCertificationSettings(setAndForget)" in single_helper
+    assert "const providerSettings = getCaptionProviderSettings()" in single_helper
+    assert "caption_provider: providerSettings.provider" in single_helper
+    assert "openai_model: providerSettings.model" in single_helper
+    assert "openai_image_detail: providerSettings.detail" in single_helper
+    assert "openai_api_key_path: providerSettings.keyPath" in single_helper
+    assert "openai_service_tier: providerSettings.serviceTier" in single_helper
+    assert "allowMissingForPreview" not in single_helper
     assert "save_text_labels: qwenElements.captionSaveText?.checked !== false" in single_helper
     assert "set_and_forget: setAndForget" in single_helper
     assert "allow_model_download: !!qwenElements.captionAllowModelDownload?.checked" in single_helper
@@ -3642,14 +3885,22 @@ def test_qwen_caption_backend_batch_uses_visible_failure_stop_gate():
     assert "...pilotCertification" in single_helper
     assert "Isolated caption job auto-resumed as ${autoResumeJobId}" in single_helper
     assert "qwenCaptionBackendJobAutoResumeId(job)" in single_helper
-    assert "const setAndForget = qwenElements.captionSetAndForget?.checked !== false" in batch_helper
-    assert "const pilotCertification = getCaptionPilotCertificationSettings(setAndForget)" in batch_helper
-    assert "set_and_forget: setAndForget" in batch_helper
-    assert "allow_model_download: !!qwenElements.captionAllowModelDownload?.checked" in batch_helper
-    assert "runner_artifact_log_bytes: getCaptionRunnerArtifactLogBytes()" in batch_helper
-    assert "const healthGates = getCaptionHealthGateSettings()" in batch_helper
-    assert "...healthGates" in batch_helper
-    assert "...pilotCertification" in batch_helper
+    assert "const setAndForget = qwenElements.captionSetAndForget?.checked !== false" in batch_request_builder
+    assert "const providerSettings = getCaptionProviderSettings()" in batch_request_builder
+    assert "caption_provider: providerSettings.provider" in batch_request_builder
+    assert "openai_model: providerSettings.model" in batch_request_builder
+    assert "openai_image_detail: providerSettings.detail" in batch_request_builder
+    assert "openai_api_key_path: providerSettings.keyPath" in batch_request_builder
+    assert "openai_service_tier: providerSettings.serviceTier" in batch_request_builder
+    assert "allowMissingForPreview: !!options.previewOnly" in batch_request_builder
+    assert "set_and_forget: setAndForget" in batch_request_builder
+    assert "allow_model_download: !!qwenElements.captionAllowModelDownload?.checked" in batch_request_builder
+    assert "runner_artifact_log_bytes: getCaptionRunnerArtifactLogBytes()" in batch_request_builder
+    assert "const healthGates = getCaptionHealthGateSettings()" in batch_request_builder
+    assert "...healthGates" in batch_request_builder
+    assert "...pilotCertification" in batch_request_builder
+    assert "body: JSON.stringify(requestPayload)" in batch_helper
+    assert "if (!captionProviderReadyForBackend())" in batch_helper
     assert "set_and_forget_backend" in js
     assert "require_pilot_certification" in js
     assert "pilot_output_dir" in js
@@ -3804,6 +4055,19 @@ def test_qwen_caption_backend_live_progress_snapshot_normalizes_job_telemetry():
             "    step_label: 'Compose full-image caption',",
             "    step_plan: [{ id: 'prepare', label: 'Prepare image and prompts' }, { id: 'prompt_stack', label: 'Build prompt stack' }, { id: 'caption', label: 'Compose full-image caption' }],",
             "    token_preview: 'The scene contains a vehicle.',",
+            "    latest_generated_qa_pairs: [{ id: 'qa-1', question: 'What is shown?', answer: 'A vehicle.' }],",
+            "    latest_generated_qa_pair_count: 1,",
+            "    latest_generated_qa_target_count: 8,",
+            "    latest_generated_qa_accepted_count: 5,",
+            "    latest_generated_qa_rejected_pair_count: 3,",
+            "    latest_generated_qa_status: 'underfilled',",
+            "    latest_generated_qa_attempt_summary: [",
+            "      { profile: 'primary', label: 'Primary prompt', accepted_count: 2, rejected_count: 4 },",
+            "      { profile: 'caption_grounded_fallback', label: 'Caption-grounded fallback', accepted_count: 2, rejected_count: 1 },",
+            "      { profile: 'sparse_scene_fallback', label: 'Sparse-scene fallback', accepted_count: 1, rejected_count: 0 },",
+            "    ],",
+            "    latest_generated_qa_image_name: 'frame002.jpg',",
+            "    latest_generated_qa_case_id: 'case-2',",
             "    io_events: [{ event: 'output', kind: 'output', title: 'output', text: 'The scene contains a vehicle.' }],",
             "    caption_dataset_progress: { processed: 2, total_cases: 10, case_index: 3, case: 'image_000003', image_name: 'frame003.jpg', stem: 'frame003', failed: 1, saved_text_labels: 2 },",
             "  },",
@@ -3817,6 +4081,15 @@ def test_qwen_caption_backend_live_progress_snapshot_normalizes_job_telemetry():
             "assert.strictEqual(snapshot.caption_dataset_progress.stem, 'frame003');",
             "assert(snapshot.step_detail.includes('frame003.jpg'));",
             "assert.strictEqual(snapshot.io_events[0].kind, 'output');",
+            "assert.strictEqual(snapshot.latest_generated_qa_pairs[0].question, 'What is shown?');",
+            "assert.strictEqual(snapshot.latest_generated_qa_pair_count, 1);",
+            "assert.strictEqual(snapshot.latest_generated_qa_target_count, 8);",
+            "assert.strictEqual(snapshot.latest_generated_qa_accepted_count, 5);",
+            "assert.strictEqual(snapshot.latest_generated_qa_rejected_pair_count, 3);",
+            "assert.strictEqual(snapshot.latest_generated_qa_status, 'underfilled');",
+            "assert.strictEqual(snapshot.latest_generated_qa_attempt_summary[1].label, 'Caption-grounded fallback');",
+            "assert.strictEqual(snapshot.latest_generated_qa_image_name, 'frame002.jpg');",
+            "assert.strictEqual(snapshot.latest_generated_qa_case_id, 'case-2');",
             "snapshot = qwenCaptionBackendLiveProgressSnapshot({",
             "  job_id: 'job-2',",
             "  status: 'running',",
@@ -3835,6 +4108,41 @@ def test_qwen_caption_backend_live_progress_snapshot_normalizes_job_telemetry():
             "});",
             "assert.strictEqual(snapshot.phase, 'error');",
             "assert(snapshot.error.includes('Caption runner preflight failed: selected caption model is not local'));",
+        ]
+    )
+    subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
+
+
+def test_qwen_caption_generated_qa_accumulator_renders_compact_status():
+    js = _js()
+    script = "\n".join(
+        [
+            "const assert = require('assert');",
+            _extract_js_function(js, "qwenCaptionGeneratedQaAttemptLine"),
+            _extract_js_function(js, "updateQwenCaptionGeneratedQaAccumulator"),
+            "let qwenElements = { captionGeneratedQaAccumulator: { textContent: '', hidden: true } };",
+            "updateQwenCaptionGeneratedQaAccumulator({",
+            "  latest_generated_qa_image_name: 'frame132.jpg',",
+            "  latest_generated_qa_target_count: 8,",
+            "  latest_generated_qa_accepted_count: 5,",
+            "  latest_generated_qa_rejected_pair_count: 5,",
+            "  latest_generated_qa_status: 'underfilled',",
+            "  latest_generated_qa_attempt_summary: [",
+            "    { label: 'Primary prompt', accepted_count: 2, rejected_count: 4 },",
+            "    { label: 'Caption-grounded fallback', accepted_count: 2, rejected_count: 1 },",
+            "    { label: 'Sparse-scene fallback', accepted_count: 1, rejected_count: 0 },",
+            "  ],",
+            "  caption_dataset_progress: { case_index: 132, total_cases: 258, image_name: 'frame132.jpg' },",
+            "});",
+            "const text = qwenElements.captionGeneratedQaAccumulator.textContent;",
+            "assert(text.includes('Image 132/258: frame132.jpg'));",
+            "assert(text.includes('Caption0: complete'));",
+            "assert(text.includes('Generated Q&A: 5/8 accepted, 5 rejected'));",
+            "assert(text.includes('Primary prompt: 2 accepted, 4 rejected'));",
+            "assert(text.includes('Caption-grounded fallback: 2 accepted, 1 rejected'));",
+            "assert(text.includes('Sparse-scene fallback: 1 accepted'));",
+            "assert(text.includes('Continuing with 5/8'));",
+            "assert.strictEqual(qwenElements.captionGeneratedQaAccumulator.hidden, false);",
         ]
     )
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)

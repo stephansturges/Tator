@@ -51,11 +51,19 @@ CRITICAL_CONTROLS = (
     "qwenCaptionStrictGrounding",
     "qwenCaptionRequireReadyInstructionExport",
     "qwenCaptionBuildInstructionDataset",
+    "qwenCaptionPreviewInstructionProcess",
+    "qwenCaptionDownloadInstructionBundle",
     "qwenCaptionDownloadInstructionJsonl",
     "qwenCaptionDownloadInstructionArchive",
     "qwenCaptionDownloadInstructionReview",
     "qwenCaptionImportInstructionReview",
     "qwenCaptionDownloadInstructionReport",
+    "qwenCaptionInstructionAdvanced",
+    "qwenCaptionInstructionDatasetStatus",
+    "qwenCaptionInstructionModelStatus",
+    "qwenCaptionInstructionJobStatus",
+    "qwenCaptionInstructionReadinessStatus",
+    "qwenCaptionInstructionActionReason",
     "qwenCaptionExportHealth",
     "qwenCaptionReadinessRun",
     "qwenCaptionReadinessStatus",
@@ -181,6 +189,9 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
             """
         )
         page.wait_for_timeout(750)
+        advanced_default_open = page.locator("#qwenCaptionInstructionAdvanced").evaluate("(el) => !!el.open")
+        page.locator("#qwenCaptionInstructionAdvanced").evaluate("(el) => { el.open = true; }")
+        page.wait_for_timeout(100)
 
         controls: dict[str, dict[str, Any]] = {}
         for control_id in CRITICAL_CONTROLS:
@@ -202,16 +213,19 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         alternates_text = page.locator("#qwenCaptionAlternates").inner_text(timeout=args.timeout_ms)
         grouped_export_count = page.locator("text=Download grouped JSON").count()
         vlm_export_count = page.locator("text=Download VLM JSONL").count()
-        instruction_build_count = page.locator("text=Create VLM training dataset").count()
-        instruction_jsonl_count = page.locator("text=Download instruction JSONL").count()
-        instruction_archive_count = page.locator("text=Download instruction archive").count()
-        instruction_review_count = page.locator("text=Download review JSONL").count()
-        instruction_import_count = page.locator("text=Import reviewed JSONL").count()
-        instruction_report_count = page.locator("text=Download instruction report").count()
+        instruction_build_count = page.locator("text=Create training dataset").count()
+        instruction_preview_count = page.locator("#qwenCaptionPreviewInstructionProcess").count()
+        instruction_bundle_count = page.locator("text=Download training bundle").count()
+        instruction_jsonl_count = page.locator("text=Download trainer JSONL").count()
+        instruction_archive_count = page.locator("text=Download construction archive").count()
+        instruction_review_count = page.locator("text=Download review file").count()
+        instruction_import_count = page.locator("text=Import review decisions").count()
+        instruction_report_count = page.locator("text=Download readiness report").count()
+        instruction_status_text = page.locator(".qwen-caption-instruction-status").inner_text(timeout=args.timeout_ms)
         all_image_order_help_count = page.locator(
             "text=All-image caption and training-dataset jobs start with the selected image"
         ).count()
-        instruction_help = page.locator(".qwen-caption-instruction-panel .training-help").inner_text(timeout=args.timeout_ms)
+        instruction_help = page.locator(".qwen-caption-instruction-panel > .training-help").last.inner_text(timeout=args.timeout_ms)
         action_button_metrics = page.evaluate(
             """
             () => Array.from(document.querySelectorAll(
@@ -239,6 +253,15 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
             if metric.get("scrollWidth", 0) > metric.get("clientWidth", 0) + 1
             or metric.get("scrollHeight", 0) > metric.get("clientHeight", 0) + 1
         ]
+        action_button_ids = [str(metric.get("id") or "") for metric in action_button_metrics]
+        try:
+            instruction_preview_index = action_button_ids.index("qwenCaptionPreviewInstructionProcess")
+        except ValueError:
+            instruction_preview_index = -1
+        try:
+            instruction_build_index = action_button_ids.index("qwenCaptionBuildInstructionDataset")
+        except ValueError:
+            instruction_build_index = -1
         subcaptions_value = page.locator("#qwenCaptionSubcaptionsPerImage").input_value()
         subcaptions_min = page.locator("#qwenCaptionSubcaptionsPerImage").get_attribute("min") or ""
         subcaptions_max = page.locator("#qwenCaptionSubcaptionsPerImage").get_attribute("max") or ""
@@ -263,6 +286,7 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         )
         readiness_status = page.locator("#qwenCaptionReadinessStatus").inner_text(timeout=args.timeout_ms)
         readiness_result_count = page.locator("#qwenCaptionReadinessResults li").count()
+        instruction_status_after_readiness = page.locator(".qwen-caption-instruction-status").inner_text(timeout=args.timeout_ms)
 
         if screenshot_path:
             page.evaluate(
@@ -305,14 +329,22 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
             "grouped_export_button_count": grouped_export_count,
             "vlm_export_button_count": vlm_export_count,
             "instruction_build_button_count": instruction_build_count,
+            "instruction_preview_button_count": instruction_preview_count,
+            "instruction_bundle_button_count": instruction_bundle_count,
             "instruction_jsonl_button_count": instruction_jsonl_count,
             "instruction_archive_button_count": instruction_archive_count,
             "instruction_review_button_count": instruction_review_count,
             "instruction_import_button_count": instruction_import_count,
             "instruction_report_button_count": instruction_report_count,
+            "instruction_advanced_default_open": advanced_default_open,
+            "instruction_status_text": instruction_status_text,
+            "instruction_status_after_readiness": instruction_status_after_readiness,
             "all_image_order_help_count": all_image_order_help_count,
             "instruction_help": instruction_help,
             "action_button_metrics": action_button_metrics,
+            "action_button_ids": action_button_ids,
+            "instruction_preview_index": instruction_preview_index,
+            "instruction_build_index": instruction_build_index,
             "overflowing_action_buttons": overflowing_action_buttons,
             "subcaptions_value": subcaptions_value,
             "subcaptions_min": subcaptions_min,
@@ -350,6 +382,8 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         report,
         "instruction_dataset_controls_visible",
         instruction_build_count == 1
+        and instruction_preview_count == 1
+        and instruction_bundle_count == 1
         and instruction_jsonl_count == 1
         and instruction_archive_count == 1
         and instruction_review_count == 1
@@ -357,11 +391,29 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         and instruction_report_count == 1,
         "Instruction dataset action and export buttons are visible.",
         build_count=instruction_build_count,
+        preview_count=instruction_preview_count,
+        bundle_count=instruction_bundle_count,
         jsonl_count=instruction_jsonl_count,
         archive_count=instruction_archive_count,
         review_count=instruction_review_count,
         import_count=instruction_import_count,
         report_count=instruction_report_count,
+    )
+    add_check(
+        report,
+        "instruction_advanced_exports_collapsed_by_default",
+        advanced_default_open is False,
+        "Advanced instruction exports are collapsed by default.",
+        default_open=advanced_default_open,
+    )
+    add_check(
+        report,
+        "instruction_preview_before_dataset_create",
+        instruction_preview_index >= 0 and instruction_build_index >= 0 and instruction_preview_index < instruction_build_index,
+        "Preview dataset prompts appears before Create training dataset in the rendered action order.",
+        action_button_ids=action_button_ids,
+        preview_index=instruction_preview_index,
+        build_index=instruction_build_index,
     )
     add_check(
         report,
@@ -395,11 +447,29 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
     add_check(
         report,
         "instruction_dataset_help_explains_separation",
-        "Generated QA never becomes source annotations" in instruction_help
-        and "deterministic metadata QA is included only when explicitly enabled" in instruction_help
-        and "imported to apply accepted, rejected, or needs-revision decisions before training" in instruction_help,
-        "Instruction dataset help explains generated QA/source annotation separation and review import.",
+        "Generated Q&A never becomes source annotations" in instruction_help
+        and "The training bundle is the handoff" in instruction_help
+        and "advanced exports are for review and diagnostics" in instruction_help,
+        "Instruction dataset help explains generated QA/source annotation separation and the bundle-first export path.",
         help_text=instruction_help,
+    )
+    add_check(
+        report,
+        "instruction_status_strip_visible",
+        "Dataset" in instruction_status_text
+        and "Model" in instruction_status_text
+        and "Job" in instruction_status_text
+        and "Readiness" in instruction_status_text,
+        "Instruction dataset status strip summarizes dataset, model, job, readiness, and action reason.",
+        status_text=instruction_status_text,
+    )
+    add_check(
+        report,
+        "instruction_status_strip_updates_after_readiness",
+        "Readiness not checked" not in instruction_status_after_readiness
+        and "Readiness" in instruction_status_after_readiness,
+        "Instruction dataset status strip reflects the latest readiness check.",
+        status_text=instruction_status_after_readiness,
     )
     add_check(
         report,

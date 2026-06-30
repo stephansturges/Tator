@@ -16,7 +16,9 @@ failure modes from returning during future prompt edits.
   raw model outputs, and generated captions are visible in the complete prompt
   preview but must not be saved into portable recipes.
 - Raw label names are backend identifiers. Model-facing prompt prose must use
-  validated natural terms from the glossary or a safe naturalized fallback.
+  each glossary broad term as the canonical class name. If a class has no valid
+  glossary term, prompt prose must use a safe natural English fallback rather
+  than an internal labelmap spelling.
 - Malformed glossary fragments such as `[`, `]`, `{`, `}`, empty text, or
   punctuation-only strings must never become class names, counts, box labels, or
   allowed-class text.
@@ -44,6 +46,14 @@ failure modes from returning during future prompt edits.
   rewrite, draft refinement, and truncated-caption repair must use the
   text-only Qwen editor path. This keeps large postprocess prompts from
   resubmitting image tensors to MLX/Metal.
+- Provider selection must not fork the prompt stack. The OpenAI provider swaps
+  only the model-call primitive used by visual and text stages; prompt preview,
+  caption generation, windowing, glossary substitution, generated-QA creation,
+  QA top-ups, verifier/rewrite passes, cleanup guards, artifacts, and run
+  settings fingerprints remain on the same code path as local Qwen. Visual
+  OpenAI calls use the Responses API with `input_text` plus `input_image`;
+  generated-QA top-up prompts must continue to include the image, not only the
+  prior caption text.
 - If an MLX caption generation enters a repeated-output loop, the request must
   stop that attempt as a controlled caption loop, unload the Qwen runtime, and
   use the configured loop-recovery policy. It must never continue into another
@@ -64,44 +74,79 @@ keep the captioning product path usable without hiding model/runtime failures.
    failures follow the same recoverable ladder with
    `recoverable_generation_error` events; streaming decode failures must not
    fall through to blocking MLX generation inside caption mode.
-3. `Safe retry only` retries the same model once with safer decoding: non-
+3. If the looped visual output contains caption-like natural language rather
+   than pure punctuation or character noise, `Safe retry + fallback` first runs
+   a bounded text-only editor salvage pass over the raw loop output and a
+   compact copy of the original caption context. This pass is recorded as
+   `loop_salvage_start` and either `loop_salvage_succeeded`,
+   `loop_salvage_rejected`, or `loop_salvage_skipped`. It must remove planning,
+   draft labels, repeated fragments, and recovery commentary, and it must return
+   `NO_CAPTION` rather than inventing a caption when the loop output has no
+   usable visual content. The image tensor is not resent for salvage; this is an
+   editor pass over the already-generated visual-caption evidence.
+4. `Safe retry only` retries the same model once with safer decoding: non-
    Thinking models switch to deterministic generation; Thinking models keep low
    temperature sampling; both tighten repetition controls and use a bounded
    recovery token cap.
-4. `Safe retry + fallback` normally performs that safe retry and, if it still
+5. `Safe retry + fallback` normally performs that safe retry and, if it still
    loops, runs the same stage with the fallback model. The default
    `Auto stable fallback` selects the caption-safe Instruct/editor model for the
    active runtime. If no distinct fallback model is available, recovery continues
    instead of failing the attempt.
-5. One recovery path is intentionally earlier than same-model visual retry:
+6. One recovery path is intentionally earlier than same-model visual retry:
    when the full-image visual composition stage in windowed mode loops after the
    window observations have already succeeded, the backend first composes a
    text-only caption from those completed window observations, full-frame counts,
    and the user request. That avoids immediately resending the same large
    full-image tensor/prompt combination into MLX after it has just emitted a
    repeated-output loop.
-6. Non-windowed full-image visual composition also has an unattended recovery
+7. Non-windowed full-image visual composition also has an unattended recovery
    path. After the primary visual pass and safe visual retry loop, the backend
    composes a text-only caption from authoritative counts, class inventory,
    representative spatial layout, and the user request. This is marked in
    `recovery_events`.
-7. For caption-only jobs, if every model-based recovery path loops, fails, or is
+8. For caption-only jobs, if every model-based recovery path loops, fails, or is
    unavailable, `Safe retry + fallback` can still finish with a deterministic
    count/layout caption. This is a degraded set-and-forget fallback, not the
    normal captioning path, and it is recorded as
    `deterministic_recovery_succeeded`.
-8. The unattended parent runner has one final caption-only set-and-forget
+9. The unattended parent runner has one final caption-only set-and-forget
    fallback outside the child process. If all child attempts are exhausted and
    the case has authoritative object counts, the parent writes a deterministic
    count/layout caption row with `parent_deterministic_recovery=true`, a
    `deterministic_recovery_succeeded` event, and a normal `captions.jsonl`
    record. If no counts are available, the case remains a terminal failed case
    for manual review because the parent has no reliable visual content to
-   summarize. Generated-QA instruction dataset jobs do not use this fallback:
-   a count/layout caption cannot create the requested generated training rows,
-   so a case with no valid generated QA remains a terminal failed case.
-9. `Off` reports the controlled loop failure after unloading the runtime.
-10. When cooldown is enabled, an exact stage/model/prompt/decode combination that
+   summarize. Generated-QA-only instruction dataset jobs do not use this
+   fallback: a count/layout caption cannot create the requested generated
+   training rows, so a QA-only case with no valid generated QA remains a
+   terminal failed case. When caption0 or deterministic metadata rows are still
+   selected, generated-QA failure is recorded as an audit warning and the
+   successful caption row is preserved.
+10. Generated-QA instruction dataset jobs have their own narrower recovery ladder
+   before they can affect the whole image attempt. Caption0 is generated once and
+   then held fixed. The worker first asks the VLM for the requested generated QA
+   rows with the image attached. If the first prompt loops, returns invalid JSON,
+   or produces too few verifier-accepted rows, the worker does not regenerate the
+   caption or restart the case. It issues visual QA top-up prompts for only the
+   missing rows, still with the image attached. It cycles caption-grounded and
+   sparse-scene top-up prompts until the target is reached or the bounded
+   top-up attempt cap is exhausted. Accepted QA rows are accumulated across
+   profiles. Underfilled default caption0 plus generated-QA cases continue with
+   an audit warning; QA-only cases remain strict when zero valid generated QA
+   rows exist.
+11. Generated-QA rows are verified before they become trainable. Clean rows are
+    marked `machine_validated` by deterministic checks. Rows with raw label
+    leakage or malformed questions get one bounded text-only verifier/rewrite
+    pass. By default, grounded inference wording and unavailable-information
+    answers such as "unknown from the image" are allowed. When **Restrict
+    speculative Q&A language** is enabled, speculative wording and unavailable
+    answers are rejected or rewritten before training export. A successful
+    rewrite preserves the original text in metadata and marks the row
+    `machine_validated`; a failed rewrite is saved as a rejected audit candidate
+    and excluded from flattened training JSONL.
+12. `Off` reports the controlled loop failure after unloading the runtime.
+13. When cooldown is enabled, an exact stage/model/prompt/decode combination that
    already looped skips the risky primary attempt during the cooldown window and
    goes straight to the configured recovery path.
 
@@ -116,8 +161,8 @@ The UI exposes these controls in **Generation and guards**:
 Recovery must remain visible. API responses include `recovery_events`, saved
 caption records keep those events, and the caption toast/trace receives the
 recovery event text so the user can tell whether a final caption came from the
-original model, text-only window-evidence recovery, a safe retry, or a fallback
-model, prompt-context recovery, or deterministic count/layout recovery. Caption
+original model, loop-output salvage, text-only window-evidence recovery, a safe
+retry, a fallback model, prompt-context recovery, or deterministic count/layout recovery. Caption
 progress has a shorter stale timeout than general Qwen jobs so a blocked MLX
 caption generation releases the UI state in minutes rather than remaining active
 for the general backend timeout.
@@ -147,6 +192,21 @@ The complete prompt-flow preview remains the source of truth for a specific
 image. It combines recipe-controlled prompt layers with generated per-image
 evidence and shows conditional templates for cleanup, coverage/count guards,
 and English rewrite guards.
+
+## Remote Provider Notes
+
+OpenAI API runs use the same rendered prompts shown in the complete prompt-flow
+preview, but the provider adapter sends them to the Responses API rather than to
+the local MLX runtime. The default image detail is `original` so the remote path
+preserves full-resolution visual grounding by default. Lower-detail choices are
+available for cost or latency experiments, but they should be treated as a run
+setting change and reviewed in the prompt/process preview before large jobs.
+
+The UI cost estimator is deliberately conservative and approximate. It is meant
+to answer "what order of magnitude will this run cost?" before launching a local
+or remote test run. It is not a replacement for API-side token accounting, and
+Batch-price estimates do not mean the current direct run is submitted through
+the Batch API.
 
 ## Token Budgets And Trace Visibility
 
@@ -184,6 +244,12 @@ Caption token control uses an explicit Auto/override split:
   When it fires, the partial repeated text may be trimmed for logging/progress,
   but the caption call still raises a controlled loop error so a cleaned fragment
   such as a single punctuation mark is not accepted as a successful caption.
+  The controlled loop exception carries bounded diagnostics including
+  `generated_chars`, `raw_output_head`, `raw_output_tail`, `trimmed_output`, and
+  `degenerate_reason`. Instruction-QA generation copies that payload into each
+  failed QA attempt's `loop_diagnostic`, so a future empty-QA case can be
+  inspected for repeated punctuation, repeated JSON fragments, or merely similar
+  repeated questions.
 - A `Max boxes` value of `0` means Auto. Auto preserves authoritative class
   counts but caps very dense prompt box lists to a representative spatial subset
   selected for class coverage and image-region spread, so MLX full-image vision
@@ -630,13 +696,18 @@ refreshed alongside the parent heartbeat during long child attempts. The lock is
 released on normal completion, and the soak audit warns if a terminal run leaves
 it behind.
 
-Raw per-attempt diagnostic blobs are bounded by default for unattended runs.
+Raw per-attempt diagnostic blobs are intentionally uncapped by default during
+first-run hardening and early dataset creation runs.
 The runner keeps the structured artifacts that drive resume and audit
 (`manifest.json`, `results.jsonl`, `captions.jsonl`, `summary.json`,
-`heartbeat.json`, and each `result.json`) intact, but caps child stdout/stderr
-and copied `qwen_caption_io` trace files to `--max-artifact-log-bytes`
-(default 1 MiB per file). Truncated files include an explicit marker and keep
-the tail, which is usually where a crash or repeated-output failure appears.
+`heartbeat.json`, and each `result.json`) intact. Child stdout/stderr and
+copied `qwen_caption_io` trace files are kept in full when
+`--max-artifact-log-bytes` is `0`; setting a positive byte cap truncates those
+raw files with an explicit marker and keeps the tail, which is usually where a
+crash or repeated-output failure appears.
+Loop diagnostics stored inside `result.json` are bounded independently from raw
+trace-file caps so the runner still preserves the repeated output sample even
+when a sidecar Qwen IO trace misses the failed subpass.
 The worker mirrors the active Qwen `run_id` into `worker_progress.jsonl`, then
 copies the matching per-run trace files from `logs/qwen_caption_io/` into the
 attempt directory. This avoids the older failure mode where a late guard pass
@@ -657,8 +728,10 @@ artifacts have been copied. `QWEN_CAPTION_IO_RUN_LOG_MAX_FILES` defaults to
 corresponding retention cap. Soak audit and certification use the larger of
 preview-estimated and runtime-measured prompt tokens, because the runtime
 tokenizer measurement is the launch gate whenever it is available.
-Set the CLI flag or backend request field to `0` only for active debugging when
-full raw prompt traces are worth the disk cost. The caption UI exposes this as
+The CLI flag, backend request field, and caption UI default to `0`, meaning
+full raw prompt traces are preserved for debugging. Operators can set a
+positive cap when a long storage-limited run should bound per-attempt raw
+stdout/stderr and prompt-trace copies. The caption UI exposes this as
 **Attempt log cap (MB)** for dataset-backed backend jobs.
 Strict audit treats malformed append-only JSONL rows as evidence corruption.
 Invalid `results.jsonl` or present `captions.jsonl` lines are reported with
@@ -701,6 +774,16 @@ with failed images is reported as a completed job with nonzero failure counts in
 audits, a terminal failed case violates the zero-failure cap immediately; only a
 `failed_attempt` row that still has a scheduled next attempt is treated as a live
 pending retry.
+Generated-QA instruction runs fail closed only when generated QA is the required
+row family and no caption0 row is available to preserve. The default caption0
+plus generated-QA path keeps a successful caption0 row and records an audit
+warning when QA top-ups still produce zero accepted pairs. A deterministic parent
+count/layout recovery may keep caption-only runs moving, but it cannot satisfy a
+QA-only generated-QA training case because it does not exercise the
+image-grounded QA prompt, verifier, or top-up accumulator. When all child
+attempts are exhausted under QA-only generated-QA settings, the terminal row
+records `parent_deterministic_recovery_skipped.reason="generated_qa_required"`
+and is audited as a failed case rather than a recovered training row.
 If no dataset id is available, only a user who has deliberately disabled
 set-and-forget can run a direct current-image request for local interactive
 diagnostics; multi-image captioning remains backend-job only.
@@ -818,8 +901,9 @@ without exactly one `caption` key, or duplicate `image_path`/`question` pairs.
   instruction archive provenance, missing or unknown validation/review state,
   invalid JSON for JSON row types, generated QA rejected by archive validation,
   non-trainable review state, and duplicate `image_path`/`question` rows before
-  download. The instruction panel also exposes generated QA mix and generated
-  answer format so job launch and browser exports use the same row policy.
+  download. The instruction panel also exposes generated QA mix, generated
+  answer format, and the optional speculative-language restriction so job launch
+  and browser exports use the same row policy.
 For detailed/windowed jobs, set-and-forget also changes the Auto value of
 **Windowed full-image compose** to `text_only`. The crop observations still come
 from visual Qwen calls; only the later full-image composition avoids resending a

@@ -238,6 +238,11 @@ lightning_logs/
 PCS.txt
 crashlog.txt
 fuzz_long.log
+
+# Local API credentials and one-off benchmark scratch files
+openAI_API_KEY_DoNotCommit
+tmp_qwen_caption_benchmark_request.json
+.annotation_overlay/
 check_cuda.sh
 sam3integration.txt
 sam3/

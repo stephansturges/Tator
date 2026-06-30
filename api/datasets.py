@@ -462,6 +462,7 @@ def build_datasets_router(
     transient_annotation_session_start_fn: Callable[[str, dict], Any],
     transient_annotation_session_heartbeat_fn: Callable[[str, dict], Any],
     transient_annotation_session_stop_fn: Callable[[str, dict], Any],
+    caption_coverage_fn: Optional[Callable[..., Any]] = None,
     export_caption_instruction_bundle_fn: Optional[Callable[[str, dict, Any], Any]] = None,
 ) -> APIRouter:
     router = APIRouter()
@@ -619,6 +620,27 @@ def build_datasets_router(
     @router.post("/datasets/{dataset_id}/captions/instruction_review")
     def apply_caption_instruction_review(dataset_id: str, payload: Any = Body(...)):  # noqa: B008
         return apply_caption_instruction_review_fn(dataset_id, payload)
+
+    @router.get("/datasets/{dataset_id}/captions/coverage")
+    def get_caption_coverage(
+        dataset_id: str,
+        target_base_captions_per_image: int = Query(1),
+        target_generated_qa_per_image: int = Query(8),
+        image_names: str = Query(""),
+    ):
+        if caption_coverage_fn is None:
+            raise HTTPException(status_code=404, detail="caption_coverage_unavailable")
+        selected = [
+            item.strip()
+            for item in str(image_names or "").split(",")
+            if item.strip()
+        ]
+        return caption_coverage_fn(
+            dataset_id,
+            target_base_captions_per_image=target_base_captions_per_image,
+            target_generated_qa_per_image=target_generated_qa_per_image,
+            image_names=selected,
+        )
 
     @router.post("/datasets/{dataset_id}/captions/batch")
     def get_captions_batch(dataset_id: str, payload: dict = Body(...)):  # noqa: B008

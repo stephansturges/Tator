@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import argparse
 import base64
+import concurrent.futures
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -26,7 +28,9 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
+import urllib.error
+import urllib.request
 import uuid
 
 from PIL import Image
@@ -35,8 +39,23 @@ from PIL import Image
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+from utils.glossary import _normalize_labelmap_glossary, _parse_glossary_mapping
 DEFAULT_DATASET = REPO_ROOT / "uploads/datasets/data_ingestion_reference_current_label_images_dataset_9526"
 DEFAULT_MODEL = "mlx-community/Qwen3-VL-2B-Instruct-4bit"
+CAPTION_PROVIDER_LOCAL = "local_qwen"
+CAPTION_PROVIDER_OPENAI = "openai"
+CAPTION_PROVIDERS = (CAPTION_PROVIDER_LOCAL, CAPTION_PROVIDER_OPENAI)
+DEFAULT_OPENAI_MODEL = "gpt-5.5"
+DEFAULT_OPENAI_IMAGE_DETAIL = "original"
+OPENAI_IMAGE_DETAIL_CHOICES = ("original", "auto", "high", "low")
+DEFAULT_OPENAI_API_KEY_FILE = "openAI_API_KEY_DoNotCommit"
+DEFAULT_OPENAI_SERVICE_TIER = "standard"
+OPENAI_SERVICE_TIER_CHOICES = ("standard", "batch")
+DEFAULT_OPENAI_TIMEOUT_SECONDS = 120.0
+DEFAULT_OPENAI_MAX_RETRIES = 5
+DEFAULT_OPENAI_REASONING_EFFORT = "medium"
+OPENAI_REASONING_EFFORT_CHOICES = ("low", "medium", "high", "xhigh")
 DEFAULT_PROMPT = (
     "Write a detailed caption describing the scene, setting, visible objects, "
     "spatial relationships, and notable details. Prefer a high-angle or "
@@ -44,10 +63,25 @@ DEFAULT_PROMPT = (
 )
 LABEL_ALIASES = {
     "LightVehicle": "Light Vehicle",
-    "UPole": "U Pole",
     "Solarpanels": "Solar Panels",
     "Gastank": "Gas Tank",
 }
+QA_VERIFIER_STATUS = "machine_validated"
+QA_VERIFIER_MAX_NEW_TOKENS = 2048
+QA_RAW_LABEL_LEAK_PREFIX = "raw_label_term:"
+QA_STRICT_SPECULATION_PATTERN = re.compile(
+    (
+        r"\b("
+        r"likely|probably|maybe|possibly|presumably|potential|seems|appears|"
+        r"suggest|suggests|suggesting|hint|hints|hinting|"
+        r"indicate|indicates|indicating|infer|inferred|inference|"
+        r"imply|implies|implied|could|might|"
+        r"unclear|unknown|cannot determine|not enough information|"
+        r"not visible|not shown|cannot be seen"
+        r")\b"
+    ),
+    flags=re.IGNORECASE,
+)
 UNSUPPORTED_SPECIFIC_TERMS = {
     "Crane": ("crane", "cranes", "gantry crane", "gantry cranes"),
 }
@@ -60,6 +94,7 @@ RUNNER_CAPABILITY_CAPTION_IO_EVENT_SUMMARY = "caption_io_event_summary"
 RUNNER_CAPABILITY_WORKER_PROGRESS_HEARTBEAT = "worker_progress_heartbeat"
 RUNNER_CAPABILITY_ADAPTIVE_RETRY_PROFILE = "adaptive_retry_profile"
 RUNNER_CAPABILITY_INSTRUCTION_QA = "instruction_qa_generation"
+RUNNER_CAPABILITY_PARALLEL_CASES = "parallel_case_workers"
 RUNNER_CAPABILITIES = (
     RUNNER_CAPABILITY_GRACEFUL_RESTART,
     RUNNER_CAPABILITY_PARENT_DETERMINISTIC_RECOVERY,
@@ -67,18 +102,21 @@ RUNNER_CAPABILITIES = (
     RUNNER_CAPABILITY_WORKER_PROGRESS_HEARTBEAT,
     RUNNER_CAPABILITY_ADAPTIVE_RETRY_PROFILE,
     RUNNER_CAPABILITY_INSTRUCTION_QA,
+    RUNNER_CAPABILITY_PARALLEL_CASES,
 )
 WORKER_PROGRESS_JSON = "worker_progress.json"
 WORKER_PROGRESS_JSONL = "worker_progress.jsonl"
 QWEN_CAPTION_IO_SUMMARY_JSON = "qwen_caption_io_summary.json"
 RUNNER_LOCK_STALE_SECONDS = 21600.0
 RUNNER_LOCK_POLL_SECONDS = 5.0
-DEFAULT_ARTIFACT_LOG_BYTES = 1_048_576
+DEFAULT_ARTIFACT_LOG_BYTES = 0
 DEFAULT_COOLDOWN_BACKOFF_MULTIPLIER = 2.0
 DEFAULT_MAX_COOLDOWN_AFTER_CRASH = 60.0
 DEFAULT_RETRY_IMAGE_SIDE_SCALE = 0.75
 DEFAULT_MIN_RETRY_IMAGE_SIDE = 256
 DEFAULT_SUMMARY_ROW_LIMIT = 250
+DEFAULT_INSTRUCTION_QA_MAX_TOPUP_ATTEMPTS = 6
+MAX_INSTRUCTION_QA_TOPUP_ATTEMPTS = 12
 SUMMARY_OK_STATUSES = {"ok", "preview_only", "skipped_completed", "skipped_existing_caption"}
 RUN_SETTINGS_SCHEMA_VERSION = 1
 IMAGE_SPECIFIC_REQUEST_KEYS = (
@@ -90,6 +128,14 @@ IMAGE_SPECIFIC_REQUEST_KEYS = (
     "image_height",
 )
 RUN_SETTINGS_ARG_DEFAULTS: dict[str, Any] = {
+    "caption_provider": CAPTION_PROVIDER_LOCAL,
+    "openai_model": DEFAULT_OPENAI_MODEL,
+    "openai_image_detail": DEFAULT_OPENAI_IMAGE_DETAIL,
+    "openai_api_key_file": DEFAULT_OPENAI_API_KEY_FILE,
+    "openai_service_tier": DEFAULT_OPENAI_SERVICE_TIER,
+    "openai_timeout": DEFAULT_OPENAI_TIMEOUT_SECONDS,
+    "openai_max_retries": DEFAULT_OPENAI_MAX_RETRIES,
+    "openai_reasoning_effort": DEFAULT_OPENAI_REASONING_EFFORT,
     "model_id": DEFAULT_MODEL,
     "refinement_model_id": "same",
     "fallback_model_id": "auto",
@@ -113,11 +159,18 @@ RUN_SETTINGS_ARG_DEFAULTS: dict[str, Any] = {
     "use_sampling": False,
     "instruction_dataset": False,
     "subcaptions_per_image": 0,
+    "include_caption0_in_training": True,
+    "include_generated_qa_in_training": True,
+    "include_deterministic_metadata_qa": False,
+    "instruction_qa_imposed_questions": [],
     "instruction_max_new_tokens": None,
+    "instruction_qa_max_topup_attempts": DEFAULT_INSTRUCTION_QA_MAX_TOPUP_ATTEMPTS,
+    "instruction_qa_restrict_speculative_language": False,
     "include_source_annotations_in_generator_context": True,
     "strict_grounding": True,
     "qa_mix": "balanced",
     "answer_format": "natural",
+    "parallel_cases": 1,
 }
 
 
@@ -150,29 +203,61 @@ def quality_term_pattern(term: str) -> str:
     return r"\s+".join(re.escape(part) for part in re.sub(r"\s+", " ", term).split())
 
 
-def quality_label_present(text: str, label: str) -> bool:
+def _quality_glossary_label_terms(
+    label: str,
+    glossary_map: Mapping[str, Sequence[Any]] | None = None,
+) -> list[str]:
+    clean_label = str(label or "").strip()
+    terms: list[str] = []
+    seen: set[str] = set()
+
+    def add(raw: Any) -> None:
+        term = _display_term(raw)
+        key = _label_key(term)
+        if term and key and key not in seen:
+            seen.add(key)
+            terms.append(term)
+
+    for raw_term in (glossary_map or {}).get(clean_label, []) or []:
+        add(raw_term)
+    add(_natural_label(clean_label))
+    add(clean_label)
+    return terms
+
+
+def quality_label_present(
+    text: str,
+    label: str,
+    glossary_map: Mapping[str, Sequence[Any]] | None = None,
+) -> bool:
     lowered = str(text or "").lower()
     compact = lowered.replace(" ", "")
-    for variant in quality_label_variants(label):
-        if re.search(rf"\b{quality_term_pattern(variant)}\b", lowered, flags=re.IGNORECASE):
-            return True
-        if variant.replace(" ", "") in compact:
-            return True
+    for term in _quality_glossary_label_terms(label, glossary_map):
+        for variant in quality_label_variants(term):
+            if re.search(rf"\b{quality_term_pattern(variant)}\b", lowered, flags=re.IGNORECASE):
+                return True
+            if variant.replace(" ", "") in compact:
+                return True
     return False
 
 
-def quality_negative_mentions_label(sentence: str, label: str) -> bool:
+def quality_negative_mentions_label(
+    sentence: str,
+    label: str,
+    glossary_map: Mapping[str, Sequence[Any]] | None = None,
+) -> bool:
     lowered = str(sentence or "").lower()
-    for variant in quality_label_variants(label):
-        term_pattern = quality_term_pattern(variant)
-        negative_patterns = [
-            rf"\bno\b(?:\s+[\w'-]+){{0,8}}\s+{term_pattern}\b",
-            rf"\bwithout\b(?:\s+[\w'-]+){{0,8}}\s+{term_pattern}\b",
-            rf"\bnot\s+any\b(?:\s+[\w'-]+){{0,8}}\s+{term_pattern}\b",
-            rf"\b(?:absent|missing)\b(?:\s+[\w'-]+){{0,4}}\s+{term_pattern}\b",
-        ]
-        if any(re.search(pattern, lowered, flags=re.IGNORECASE) for pattern in negative_patterns):
-            return True
+    for term in _quality_glossary_label_terms(label, glossary_map):
+        for variant in quality_label_variants(term):
+            term_pattern = quality_term_pattern(variant)
+            negative_patterns = [
+                rf"\bno\b(?:\s+[\w'-]+){{0,8}}\s+{term_pattern}\b",
+                rf"\bwithout\b(?:\s+[\w'-]+){{0,8}}\s+{term_pattern}\b",
+                rf"\bnot\s+any\b(?:\s+[\w'-]+){{0,8}}\s+{term_pattern}\b",
+                rf"\b(?:absent|missing)\b(?:\s+[\w'-]+){{0,4}}\s+{term_pattern}\b",
+            ]
+            if any(re.search(pattern, lowered, flags=re.IGNORECASE) for pattern in negative_patterns):
+                return True
     return False
 SAMPLE_STRATEGY_STRESS_PLUS_RANDOM = "stress_plus_random"
 
@@ -204,6 +289,171 @@ def load_labelmap(dataset_root: Path) -> list[str]:
 def class_name(raw: str) -> str:
     raw = str(raw or "").strip()
     return LABEL_ALIASES.get(raw, raw)
+
+
+def _label_key(text: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(text or "").strip().lower())
+
+
+def _natural_label(raw: Any) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    aliased = LABEL_ALIASES.get(text)
+    if aliased:
+        return aliased
+    spaced = text.replace("_", " ")
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", spaced)
+    spaced = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", spaced)
+    return re.sub(r"\s+", " ", spaced).strip()
+
+
+def _display_term(raw: Any) -> str:
+    text = re.sub(r"\s+", " ", str(raw or "").strip())
+    text = text.strip(" \t\r\n\"'`.,;:")
+    if not text or any(ch in text for ch in "[]{}"):
+        return ""
+    if not re.search(r"[A-Za-z0-9]", text):
+        return ""
+    return text[:80]
+
+
+def _request_template_value(args: argparse.Namespace, key: str, default: Any = None) -> Any:
+    try:
+        template = load_request_template(getattr(args, "request_json", None))
+    except Exception:
+        return default
+    return template.get(key, default) if isinstance(template, Mapping) else default
+
+
+def _case_label_names(case: Mapping[str, Any]) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for raw_label, raw_count in _case_class_counts(case).items():
+        label = str(raw_label or "").strip()
+        if not label:
+            continue
+        try:
+            count = int(raw_count or 0)
+        except (TypeError, ValueError, OverflowError):
+            count = 0
+        if count <= 0:
+            continue
+        key = _label_key(label)
+        if key and key not in seen:
+            seen.add(key)
+            names.append(label)
+    return names
+
+
+def _case_raw_label_variants(label: str) -> list[str]:
+    label_text = str(label or "").strip()
+    variants = {label_text}
+    for raw_label, alias in LABEL_ALIASES.items():
+        if _label_key(alias) == _label_key(label_text):
+            variants.add(raw_label)
+            variants.add(_natural_label(raw_label))
+    return [term for term in (_display_term(item) for item in variants) if term]
+
+
+def _case_glossary_map(case: Mapping[str, Any], args: argparse.Namespace) -> dict[str, list[str]]:
+    raw_glossary = _request_template_value(args, "labelmap_glossary", None)
+    if not raw_glossary:
+        return {}
+    labels = _case_label_names(case)
+    parse_labels: list[str] = []
+    seen: set[str] = set()
+    for label in labels:
+        for term in [label, *_case_raw_label_variants(label)]:
+            key = _label_key(term)
+            if key and key not in seen:
+                seen.add(key)
+                parse_labels.append(term)
+    try:
+        parsed = _parse_glossary_mapping(_normalize_labelmap_glossary(raw_glossary), parse_labels)
+    except Exception:
+        return {}
+    alias_to_case_label: dict[str, str] = {}
+    for label in labels:
+        for term in [label, *_case_raw_label_variants(label)]:
+            key = _label_key(term)
+            if key:
+                alias_to_case_label[key] = label
+    out: dict[str, list[str]] = {}
+    for raw_label, raw_terms in parsed.items():
+        case_label = alias_to_case_label.get(_label_key(raw_label), str(raw_label or "").strip())
+        if not case_label:
+            continue
+        terms: list[str] = []
+        seen_terms: set[str] = set()
+        for raw_term in raw_terms or []:
+            term = _display_term(raw_term)
+            key = term.lower()
+            if term and key not in seen_terms:
+                seen_terms.add(key)
+                terms.append(term)
+        if terms:
+            out[case_label] = terms
+    return out
+
+
+def _case_preferred_label(label: str, glossary_map: Mapping[str, Sequence[Any]] | None = None) -> str:
+    clean_label = str(label or "").strip()
+    for term in (glossary_map or {}).get(clean_label, []) or []:
+        display = _display_term(term)
+        if display:
+            return display
+    return _natural_label(clean_label)
+
+
+def _case_canonical_class_counts(case: Mapping[str, Any], args: argparse.Namespace) -> dict[str, int]:
+    glossary_map = _case_glossary_map(case, args)
+    counts: dict[str, int] = {}
+    for raw_label, raw_count in _case_class_counts(case).items():
+        try:
+            count = int(raw_count or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if count <= 0:
+            continue
+        label = _case_preferred_label(str(raw_label or "").strip(), glossary_map)
+        if not label:
+            continue
+        counts[label] = counts.get(label, 0) + count
+    return counts
+
+
+def _case_glossary_context(case: Mapping[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    glossary_map = _case_glossary_map(case, args)
+    entries: list[dict[str, Any]] = []
+    for label in _case_label_names(case):
+        preferred = _case_preferred_label(label, glossary_map)
+        raw_terms = [
+            term
+            for term in _case_raw_label_variants(label)
+            if _label_key(term) != _label_key(preferred)
+        ]
+        entry: dict[str, Any] = {
+            "source_class": label,
+            "canonical_term": preferred,
+        }
+        if raw_terms:
+            entry["raw_terms_to_avoid"] = sorted(set(raw_terms), key=str.lower)
+        variants = [
+            _display_term(term)
+            for term in (glossary_map.get(label) or [])
+            if _display_term(term) and _label_key(term) != _label_key(preferred)
+        ]
+        if variants:
+            entry["glossary_variants"] = variants[:6]
+        entries.append(entry)
+    return {
+        "policy": (
+            "Use canonical_term for labeled classes. Never output raw_terms_to_avoid. "
+            "Use glossary_variants only when the image clearly supports the narrower variant."
+        ),
+        "classes": entries,
+    }
 
 
 def read_yolo_counts(label_path: Path, names: list[str]) -> Counter[str]:
@@ -1369,6 +1619,9 @@ def worker_progress_snapshot(snapshot: Mapping[str, Any], *, seq: int) -> dict[s
     compact_io_events = _worker_progress_compact_io_events(io_events)
     if compact_io_events:
         payload["io_events"] = compact_io_events
+    instruction_qa_accumulator = snapshot.get("instruction_qa_accumulator")
+    if isinstance(instruction_qa_accumulator, Mapping):
+        payload["instruction_qa_accumulator"] = dict(instruction_qa_accumulator)
     return payload
 
 
@@ -1533,11 +1786,42 @@ def row_has_recovery_events(row: Mapping[str, Any]) -> bool:
     return isinstance(events, list) and bool(events)
 
 
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def row_generated_qa_warning(row: Mapping[str, Any]) -> bool:
+    warning = row.get("generated_qa_warning") or row.get("instruction_qa_warning")
+    if isinstance(warning, Mapping):
+        return True
+    status = str(row.get("instruction_qa_status") or "").strip().lower()
+    if status in {"error", "underfilled", "empty", "instruction_qa_failed"}:
+        return True
+    target = _safe_int(row.get("generated_qa_target_pair_count"), 0)
+    accepted = _safe_int(row.get("generated_qa_pair_count"), 0)
+    return target > 0 and accepted < target
+
+
+def row_generated_qa_error(row: Mapping[str, Any]) -> bool:
+    status = str(row.get("instruction_qa_status") or "").strip().lower()
+    if status in {"error", "instruction_qa_failed"}:
+        return True
+    warning = row.get("generated_qa_warning") or row.get("instruction_qa_warning")
+    if isinstance(warning, Mapping):
+        warning_type = str(warning.get("type") or "").strip()
+        return warning_type == "InstructionQaGenerationWarning"
+    return False
+
+
 def write_summary(
     output_root: Path,
     rows: Sequence[Mapping[str, Any]],
     *,
     row_limit: int | None = None,
+    extra: Mapping[str, Any] | None = None,
 ) -> None:
     latest: dict[str, Mapping[str, Any]] = {}
     for row in rows:
@@ -1566,6 +1850,19 @@ def write_summary(
             if status not in SUMMARY_OK_STATUSES
         ),
         "quality_failed_cases": sum(1 for row in ordered if row.get("quality_failures")),
+        "generated_qa_warning_cases": sum(1 for row in ordered if row_generated_qa_warning(row)),
+        "generated_qa_error_cases": sum(1 for row in ordered if row_generated_qa_error(row)),
+        "generated_qa_underfilled_cases": sum(
+            1
+            for row in ordered
+            if str(row.get("instruction_qa_status") or "").strip().lower() == "underfilled"
+        ),
+        "generated_qa_zero_pair_cases": sum(
+            1
+            for row in ordered
+            if _safe_int(row.get("generated_qa_target_pair_count"), 0) > 0
+            and _safe_int(row.get("generated_qa_pair_count"), 0) <= 0
+        ),
         "totals": dict(totals),
         "row_count": len(ordered),
         "row_limit": effective_limit,
@@ -1574,6 +1871,8 @@ def write_summary(
         "rows_sample_policy": sample_policy if rows_truncated else "all",
         "rows": sampled_rows,
     }
+    if extra:
+        payload.update(dict(extra))
     atomic_write_json(output_root / "summary.json", payload)
 
 
@@ -1641,6 +1940,423 @@ def yolo_hints(label_path: Path, image_width: int, image_height: int, names: lis
 
 def image_base64(path: Path) -> str:
     return base64.b64encode(path.read_bytes()).decode("ascii")
+
+
+def _normalize_caption_provider(value: Any) -> str:
+    provider = str(value or CAPTION_PROVIDER_LOCAL).strip().lower().replace("-", "_")
+    if provider in {"qwen", "local", "localqwen", "local_qwen"}:
+        return CAPTION_PROVIDER_LOCAL
+    if provider in {"openai", "openai_api", "remote"}:
+        return CAPTION_PROVIDER_OPENAI
+    return CAPTION_PROVIDER_LOCAL
+
+
+def _normalize_openai_image_detail(value: Any) -> str:
+    detail = str(value or DEFAULT_OPENAI_IMAGE_DETAIL).strip().lower()
+    return detail if detail in OPENAI_IMAGE_DETAIL_CHOICES else DEFAULT_OPENAI_IMAGE_DETAIL
+
+
+def _resolve_openai_key_file(path_value: Any) -> Path | None:
+    raw = str(path_value or "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    return path
+
+
+def _extract_openai_response_text(data: Mapping[str, Any]) -> str:
+    output_text = data.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text
+    chunks: list[str] = []
+    for item in data.get("output") if isinstance(data.get("output"), list) else []:
+        if not isinstance(item, Mapping):
+            continue
+        for content in item.get("content") if isinstance(item.get("content"), list) else []:
+            if not isinstance(content, Mapping):
+                continue
+            text = content.get("text") or content.get("output_text")
+            if isinstance(text, str):
+                chunks.append(text)
+    return "\n".join(part for part in chunks if part).strip()
+
+
+def _openai_relevant_headers(headers: Any) -> dict[str, str]:
+    out: dict[str, str] = {}
+    try:
+        items = list(headers.items())
+    except Exception:
+        items = []
+    for raw_key, raw_value in items:
+        key = str(raw_key or "").strip().lower()
+        if not key:
+            continue
+        if (
+            key.startswith("x-ratelimit-")
+            or key in {"retry-after", "openai-processing-ms", "x-request-id"}
+        ):
+            out[key] = str(raw_value or "")
+    return out
+
+
+def _openai_error_payload(text: str) -> dict[str, Any]:
+    try:
+        data = json.loads(str(text or ""))
+    except Exception:
+        return {}
+    error = data.get("error") if isinstance(data, Mapping) else None
+    return dict(error) if isinstance(error, Mapping) else {}
+
+
+def _openai_error_is_retryable(*, status_code: int, error_payload: Mapping[str, Any]) -> bool:
+    code = str(error_payload.get("code") or "").strip().lower()
+    error_type = str(error_payload.get("type") or "").strip().lower()
+    if code in {"insufficient_quota", "billing_hard_limit_reached"}:
+        return False
+    if error_type in {"insufficient_quota"}:
+        return False
+    return status_code in {408, 409, 429, 500, 502, 503, 504}
+
+
+class OpenAICaptionApiAdapter:
+    """Provider adapter that preserves the local caption orchestration.
+
+    The runner still calls localinferenceapi.qwen_caption and generated-QA
+    helpers. Only the model-call primitives are swapped, so prompt preview,
+    caption guards, QA top-ups, artifacts, resume behavior, and exported rows
+    stay on the same code path as the local Qwen provider.
+    """
+
+    def __init__(self, local_api: Any, args: argparse.Namespace):
+        self.local_api = local_api
+        self.model = str(getattr(args, "openai_model", DEFAULT_OPENAI_MODEL) or DEFAULT_OPENAI_MODEL).strip()
+        if not self.model:
+            self.model = DEFAULT_OPENAI_MODEL
+        self.image_detail = _normalize_openai_image_detail(getattr(args, "openai_image_detail", DEFAULT_OPENAI_IMAGE_DETAIL))
+        reasoning_effort = str(
+            getattr(args, "openai_reasoning_effort", DEFAULT_OPENAI_REASONING_EFFORT)
+            or DEFAULT_OPENAI_REASONING_EFFORT
+        ).strip().lower()
+        self.reasoning_effort = (
+            reasoning_effort
+            if reasoning_effort in OPENAI_REASONING_EFFORT_CHOICES
+            else DEFAULT_OPENAI_REASONING_EFFORT
+        )
+        self.api_key_file = _resolve_openai_key_file(getattr(args, "openai_api_key_file", DEFAULT_OPENAI_API_KEY_FILE))
+        try:
+            timeout = float(getattr(args, "openai_timeout", DEFAULT_OPENAI_TIMEOUT_SECONDS) or DEFAULT_OPENAI_TIMEOUT_SECONDS)
+        except (TypeError, ValueError, OverflowError):
+            timeout = DEFAULT_OPENAI_TIMEOUT_SECONDS
+        self.timeout = max(5.0, min(timeout, 600.0))
+        try:
+            retries = int(getattr(args, "openai_max_retries", DEFAULT_OPENAI_MAX_RETRIES) or DEFAULT_OPENAI_MAX_RETRIES)
+        except (TypeError, ValueError, OverflowError):
+            retries = DEFAULT_OPENAI_MAX_RETRIES
+        self.max_retries = max(0, min(retries, 12))
+        self._progress_lock = threading.Lock()
+        self._progress: dict[str, Any] = {
+            "active": False,
+            "phase": "openai_caption_provider",
+            "step_label": "OpenAI provider idle",
+            "step_detail": f"model={self.model}, image_detail={self.image_detail}",
+            "model_id": self.model,
+            "progress": 0.0,
+            "io_events": [],
+        }
+
+    def _api_key(self) -> str:
+        env_key = str(os.environ.get("OPENAI_API_KEY") or "").strip()
+        if env_key:
+            return env_key
+        if self.api_key_file and self.api_key_file.exists():
+            key = self.api_key_file.read_text().strip()
+            if key:
+                return key
+        raise RuntimeError(
+            "openai_api_key_not_configured: set OPENAI_API_KEY or configure an existing OpenAI API key file"
+        )
+
+    def _set_progress(self, *, active: bool, step_label: str, step_detail: str = "", live_text: str = "", event: Mapping[str, Any] | None = None) -> None:
+        with self._progress_lock:
+            events = list(self._progress.get("io_events") or [])
+            if event:
+                events.append(dict(event))
+                events = events[-8:]
+            self._progress.update(
+                {
+                    "active": active,
+                    "phase": "openai_caption_provider",
+                    "step_label": step_label,
+                    "step_detail": step_detail,
+                    "model_id": self.model,
+                    "progress": 0.5 if active else 1.0,
+                    "live_text": live_text,
+                    "io_events": events,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+
+    def qwen_progress(self) -> dict[str, Any]:
+        with self._progress_lock:
+            snapshot = dict(self._progress)
+            snapshot["io_events"] = list(self._progress.get("io_events") or [])
+        snapshot["loaded"] = True
+        snapshot["memory"] = {}
+        snapshot["vram"] = {}
+        return snapshot
+
+    def qwen_caption_prompt_preview(self, payload: Any) -> Any:
+        return self.local_api.qwen_caption_prompt_preview(payload)
+
+    def qwen_caption(self, payload: Any) -> Any:
+        original_visual = self.local_api._run_qwen_inference
+        original_text = self.local_api._run_qwen_text_inference
+        self.local_api._run_qwen_inference = self._run_qwen_inference
+        self.local_api._run_qwen_text_inference = self._run_qwen_text_inference
+        try:
+            return self.local_api.qwen_caption(payload)
+        finally:
+            self.local_api._run_qwen_inference = original_visual
+            self.local_api._run_qwen_text_inference = original_text
+            self._set_progress(active=False, step_label="OpenAI caption call complete")
+
+    def _pil_image_data_url(self, pil_img: Image.Image) -> str:
+        buf = io.BytesIO()
+        image = pil_img.convert("RGB") if pil_img.mode not in {"RGB", "L"} else pil_img
+        image.save(buf, format="PNG")
+        return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode('ascii')}"
+
+    def _request_responses_api(
+        self,
+        *,
+        prompt: str,
+        system_prompt: str = "",
+        pil_img: Image.Image | None = None,
+        max_new_tokens: int | None = None,
+        call_kind: str,
+    ) -> str:
+        content: list[dict[str, Any]] = []
+        text_parts = []
+        if system_prompt:
+            text_parts.append(system_prompt)
+        text_parts.append(prompt)
+        content.append({"type": "input_text", "text": "\n\n".join(part for part in text_parts if part)})
+        if pil_img is not None:
+            content.append(
+                {
+                    "type": "input_image",
+                    "image_url": self._pil_image_data_url(pil_img),
+                    "detail": self.image_detail,
+                }
+            )
+        body: dict[str, Any] = {
+            "model": self.model,
+            "input": [{"role": "user", "content": content}],
+            "store": False,
+            "reasoning": {"effort": self.reasoning_effort},
+        }
+        if max_new_tokens is not None:
+            body["max_output_tokens"] = max(1, int(max_new_tokens))
+        payload = json.dumps(body).encode("utf-8")
+        self._set_progress(
+            active=True,
+            step_label="Waiting for OpenAI output",
+            step_detail=f"{call_kind}; model={self.model}; detail={self.image_detail}",
+            event={
+                "kind": "prompt",
+                "title": f"OpenAI {call_kind} request",
+                "text": f"model={self.model}\nreasoning_effort={self.reasoning_effort}\ndetail={self.image_detail}\nmax_output_tokens={body.get('max_output_tokens', 'auto')}\nprompt_chars={len(prompt)}",
+            },
+        )
+        response_body = ""
+        for request_attempt in range(1, self.max_retries + 2):
+            req = urllib.request.Request(
+                "https://api.openai.com/v1/responses",
+                data=payload,
+                headers={
+                    "Authorization": f"Bearer {self._api_key()}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    response_headers = _openai_relevant_headers(getattr(resp, "headers", None))
+                    response_body = resp.read().decode("utf-8", errors="replace")
+                if response_headers:
+                    self._set_progress(
+                        active=True,
+                        step_label="OpenAI response headers received",
+                        step_detail=f"{call_kind}; {json.dumps(response_headers, sort_keys=True)}",
+                    )
+                break
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")[:2000]
+                error_payload = _openai_error_payload(detail)
+                headers = _openai_relevant_headers(exc.headers)
+                retryable = _openai_error_is_retryable(
+                    status_code=int(exc.code),
+                    error_payload=error_payload,
+                )
+                should_retry = retryable and request_attempt <= self.max_retries
+                if not should_retry:
+                    diagnostic = {
+                        "status_code": int(exc.code),
+                        "error": error_payload,
+                        "headers": headers,
+                        "retryable": retryable,
+                    }
+                    raise RuntimeError(
+                        f"openai_responses_http_error:{exc.code}:{json.dumps(diagnostic, sort_keys=True)}:{detail}"
+                    ) from exc
+                retry_after = 0.0
+                try:
+                    retry_after = float(exc.headers.get("Retry-After") or 0.0)
+                except (TypeError, ValueError, OverflowError):
+                    retry_after = 0.0
+                delay = max(retry_after, min(60.0, 1.5 * (2 ** (request_attempt - 1)) + random.random()))
+                self._set_progress(
+                    active=True,
+                    step_label="Retrying OpenAI output",
+                    step_detail=(
+                        f"{call_kind}; HTTP {exc.code}; retry {request_attempt}/{self.max_retries}; "
+                        f"sleeping {delay:.1f}s; headers={json.dumps(headers, sort_keys=True)}"
+                    ),
+                )
+                time.sleep(delay)
+            except urllib.error.URLError as exc:
+                should_retry = request_attempt <= self.max_retries
+                if not should_retry:
+                    raise RuntimeError(f"openai_responses_request_error:{exc.reason}") from exc
+                delay = min(60.0, 1.5 * (2 ** (request_attempt - 1)) + random.random())
+                self._set_progress(
+                    active=True,
+                    step_label="Retrying OpenAI output",
+                    step_detail=f"{call_kind}; network error; retry {request_attempt}/{self.max_retries}; sleeping {delay:.1f}s",
+                )
+                time.sleep(delay)
+        data = json.loads(response_body)
+        text = _extract_openai_response_text(data)
+        if not text:
+            raise RuntimeError("openai_responses_empty_output")
+        self._set_progress(
+            active=False,
+            step_label="OpenAI output received",
+            live_text=text,
+            event={
+                "kind": "output",
+                "title": f"OpenAI {call_kind} output",
+                "text": text,
+            },
+        )
+        return text
+
+    def _run_qwen_inference(
+        self,
+        prompt: str,
+        pil_img: Image.Image,
+        max_new_tokens: int | None = None,
+        system_prompt_override: str | None = None,
+        model_id_override: str | None = None,
+        runtime_override: Any = None,
+        decode_override: Mapping[str, Any] | None = None,
+        chat_template_kwargs: Mapping[str, Any] | None = None,
+    ) -> tuple[str, int, int]:
+        del model_id_override, runtime_override, decode_override, chat_template_kwargs
+        call_id = uuid.uuid4().hex[:12]
+        if hasattr(self.local_api, "_qwen_caption_io_input"):
+            self.local_api._qwen_caption_io_input(
+                call_id=call_id,
+                source="openai_inference",
+                runtime_platform="openai_responses",
+                model_id=self.model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": prompt},
+                            {"type": "input_image", "image_url": "<base64 image omitted>", "detail": self.image_detail},
+                        ],
+                    }
+                ],
+                prompt_text=prompt,
+                system_prompt=str(system_prompt_override or ""),
+                user_prompt=prompt,
+                image_width=int(pil_img.width),
+                image_height=int(pil_img.height),
+                max_new_tokens=max_new_tokens,
+            )
+        output_text = self._request_responses_api(
+            prompt=prompt,
+            system_prompt=str(system_prompt_override or ""),
+            pil_img=pil_img,
+            max_new_tokens=max_new_tokens,
+            call_kind="visual",
+        )
+        if hasattr(self.local_api, "_qwen_caption_io_output"):
+            self.local_api._qwen_caption_io_output(
+                call_id=call_id,
+                source="openai_inference",
+                runtime_platform="openai_responses",
+                model_id=self.model,
+                output_text=output_text,
+                loop_detected=False,
+                degenerate_reason=None,
+            )
+        return output_text, int(pil_img.width), int(pil_img.height)
+
+    def _run_qwen_text_inference(
+        self,
+        prompt: str,
+        *,
+        max_new_tokens: int | None = None,
+        system_prompt_override: str | None = None,
+        model_id_override: str | None = None,
+        runtime_override: Any = None,
+        decode_override: Mapping[str, Any] | None = None,
+        chat_template_kwargs: Mapping[str, Any] | None = None,
+    ) -> tuple[str, int, int]:
+        del model_id_override, runtime_override, decode_override, chat_template_kwargs
+        call_id = uuid.uuid4().hex[:12]
+        if hasattr(self.local_api, "_qwen_caption_io_input"):
+            self.local_api._qwen_caption_io_input(
+                call_id=call_id,
+                source="openai_text_inference",
+                runtime_platform="openai_responses",
+                model_id=self.model,
+                messages=[{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
+                prompt_text=prompt,
+                system_prompt=str(system_prompt_override or ""),
+                user_prompt=prompt,
+                max_new_tokens=max_new_tokens,
+            )
+        output_text = self._request_responses_api(
+            prompt=prompt,
+            system_prompt=str(system_prompt_override or ""),
+            pil_img=None,
+            max_new_tokens=max_new_tokens,
+            call_kind="text",
+        )
+        if hasattr(self.local_api, "_qwen_caption_io_output"):
+            self.local_api._qwen_caption_io_output(
+                call_id=call_id,
+                source="openai_text_inference",
+                runtime_platform="openai_responses",
+                model_id=self.model,
+                output_text=output_text,
+                loop_detected=False,
+                degenerate_reason=None,
+            )
+        return output_text, 0, 0
+
+
+def caption_api_for_args(local_api: Any, args: argparse.Namespace) -> Any:
+    provider = _normalize_caption_provider(getattr(args, "caption_provider", CAPTION_PROVIDER_LOCAL))
+    if provider == CAPTION_PROVIDER_OPENAI:
+        return OpenAICaptionApiAdapter(local_api, args)
+    return local_api
 
 
 def load_request_template(request_json: Any) -> dict[str, Any]:
@@ -1748,12 +2464,16 @@ def case_payload(case: dict[str, Any], dataset_root: Path, args: argparse.Namesp
     )}}
 
 
-def summarize_caption(text: str, expected_counts: dict[str, int]) -> dict[str, Any]:
+def summarize_caption(
+    text: str,
+    expected_counts: dict[str, int],
+    glossary_map: Mapping[str, Sequence[Any]] | None = None,
+) -> dict[str, Any]:
     lowered = text.lower()
     missing_labels = [
         label
         for label in expected_counts
-        if not quality_label_present(lowered, label)
+        if not quality_label_present(lowered, label, glossary_map)
     ]
     missing_counts = [
         f"{count} {label}"
@@ -1781,7 +2501,7 @@ def summarize_caption(text: str, expected_counts: dict[str, int]) -> dict[str, A
         if count <= 0:
             continue
         for sentence in re.split(r"(?<=[.!?])\s+", text):
-            if quality_negative_mentions_label(sentence, label):
+            if quality_negative_mentions_label(sentence, label, glossary_map):
                 count_contradictions.append(sentence.strip())
                 break
     unsupported_specific_terms = []
@@ -1907,20 +2627,112 @@ def parent_deterministic_recovery_caption(case: Mapping[str, Any]) -> tuple[str,
     return caption, counts
 
 
+def parent_deterministic_recovery_eligibility(row: Mapping[str, Any]) -> tuple[bool, str]:
+    failure_kind = str(row.get("attempt_failure_kind") or "").strip()
+    status = str(row.get("status") or "").strip()
+    exception = row.get("exception") if isinstance(row.get("exception"), Mapping) else {}
+    exception_type = str(exception.get("type") or "").strip()
+    exception_message = str(exception.get("message") or "").strip().lower()
+    nonrecoverable_exception_types = {
+        "AttributeError",
+        "ImportError",
+        "KeyError",
+        "ModuleNotFoundError",
+        "SyntaxError",
+        "TypeError",
+        "ValidationError",
+        "ValueError",
+    }
+    if exception_type in nonrecoverable_exception_types:
+        return False, f"nonrecoverable_exception:{exception_type}"
+    if "validation error for qwencaptionrequest" in exception_message:
+        return False, "nonrecoverable_request_validation"
+    if failure_kind in {"signal_exit", "timeout"}:
+        return True, failure_kind
+    if failure_kind == "nonzero_exit" and exception_type in {"RuntimeError", "LoopDetectedError"}:
+        return True, f"{failure_kind}:{exception_type}"
+    qwen_io = row.get("qwen_caption_io") if isinstance(row.get("qwen_caption_io"), Mapping) else {}
+    try:
+        loop_events = int(qwen_io.get("loop_guard_events") or 0) + int(qwen_io.get("loop_trim_events") or 0)
+    except (TypeError, ValueError, OverflowError):
+        loop_events = 0
+    if loop_events > 0:
+        return True, "loop_detected"
+    if status in {"loop_detected", "stream_loop_detected"}:
+        return True, status
+    if failure_kind in {"worker_error"}:
+        return True, failure_kind
+    return False, f"ineligible_failure:{failure_kind or status or 'unknown'}"
+
+
+def _qa_json_candidate_texts(text: str) -> list[str]:
+    raw = str(text or "").strip()
+    if not raw:
+        return []
+    candidates = [raw]
+    seen = {raw}
+
+    def add_candidate(value: str) -> None:
+        value = str(value or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            candidates.append(value)
+
+    def repair_extra_quote_before_key(value: str) -> str:
+        # Qwen often emits otherwise-valid QA JSON with an extra quote before
+        # optional metadata keys, e.g. `,""row_type":...`. Salvage that without
+        # changing quoted question or answer content.
+        return re.sub(
+            r'(?<=[{,])\s*""(?=[A-Za-z_][A-Za-z0-9_]*"\s*:)',
+            '"',
+            value,
+        )
+
+    def repair_missing_key_close_quote(value: str) -> str:
+        # Larger thinking/abliterated models sometimes emit `"answer:"Yes`
+        # instead of `"answer":"Yes`. Repair object-key quotes only at member
+        # boundaries so quoted question/answer content is left alone.
+        return re.sub(
+            r'(?<=[{,])(\s*)"([A-Za-z_][A-Za-z0-9_]*)\s*:(?=\s*(?:"|\{|\[|-?\d|true\b|false\b|null\b))',
+            r'\1"\2":',
+            value,
+        )
+
+    def repair_trailing_commas(value: str) -> str:
+        return re.sub(r",\s*([}\]])", r"\1", value)
+
+    repairs = (
+        repair_extra_quote_before_key,
+        repair_missing_key_close_quote,
+        repair_trailing_commas,
+    )
+    index = 0
+    while index < len(candidates):
+        current = candidates[index]
+        for repair in repairs:
+            repaired = repair(current)
+            if repaired != current:
+                add_candidate(repaired)
+        index += 1
+    return candidates
+
+
 def _extract_json_payload(text: str) -> Any:
     raw = str(text or "").strip()
     if not raw:
         return None
-    try:
-        return json.loads(raw)
-    except Exception:
-        pass
-    fenced = re.search(r"```(?:json)?\s*(.*?)```", raw, flags=re.IGNORECASE | re.DOTALL)
-    if fenced:
+    for candidate in _qa_json_candidate_texts(raw):
         try:
-            return json.loads(fenced.group(1).strip())
+            return json.loads(candidate)
         except Exception:
             pass
+    fenced = re.search(r"```(?:json)?\s*(.*?)```", raw, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        for candidate in _qa_json_candidate_texts(fenced.group(1)):
+            try:
+                return json.loads(candidate)
+            except Exception:
+                pass
     starts = [idx for idx in (raw.find("{"), raw.find("[")) if idx >= 0]
     if not starts:
         return None
@@ -1928,10 +2740,44 @@ def _extract_json_payload(text: str) -> Any:
     end = max(raw.rfind("}"), raw.rfind("]"))
     if end <= start:
         return None
-    try:
-        return json.loads(raw[start : end + 1])
-    except Exception:
+    for candidate in _qa_json_candidate_texts(raw[start : end + 1]):
+        try:
+            return json.loads(candidate)
+        except Exception:
+            pass
+    return None
+
+
+def _extract_partial_qa_payload(text: str) -> dict[str, list[dict[str, Any]]] | None:
+    candidates = _qa_json_candidate_texts(text)
+    if not candidates:
         return None
+    raw = candidates[-1]
+    match = re.search(r'"qa_pairs"\s*:\s*\[', raw)
+    if match:
+        position = match.end()
+    else:
+        array_start = raw.find("[")
+        if array_start < 0:
+            return None
+        position = array_start + 1
+    decoder = json.JSONDecoder()
+    pairs: list[dict[str, Any]] = []
+    while position < len(raw):
+        while position < len(raw) and raw[position] in " \t\r\n,":
+            position += 1
+        if position >= len(raw) or raw[position] == "]":
+            break
+        if raw[position] != "{":
+            break
+        try:
+            item, end_position = decoder.raw_decode(raw, position)
+        except json.JSONDecodeError:
+            break
+        if isinstance(item, dict):
+            pairs.append(item)
+        position = end_position
+    return {"qa_pairs": pairs} if pairs else None
 
 
 def _normalize_generated_qa_pairs(
@@ -2018,18 +2864,8 @@ def _instruction_qa_max_new_tokens(args: argparse.Namespace, requested: int) -> 
     return max(512, min(4096, 256 + max(1, requested) * 192))
 
 
-def _case_source_annotation_context(case: Mapping[str, Any]) -> dict[str, Any]:
-    counts: dict[str, int] = {}
-    for raw_label, raw_count in _case_class_counts(case).items():
-        label = str(raw_label or "").strip()
-        if not label:
-            continue
-        try:
-            count = int(raw_count or 0)
-        except (TypeError, ValueError, OverflowError):
-            continue
-        if count > 0:
-            counts[label] = count
+def _case_source_annotation_context(case: Mapping[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    counts = _case_canonical_class_counts(case, args)
     return {
         "source": "dataset_label_counts",
         "label_count": _case_label_count(case),
@@ -2038,21 +2874,96 @@ def _case_source_annotation_context(case: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def generate_instruction_qa_pairs(
-    api: Any,
+def _normalize_instruction_qa_imposed_questions(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    values: list[Any]
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, list):
+            values = parsed
+        else:
+            values = text.splitlines()
+    elif isinstance(raw, Sequence) and not isinstance(raw, (bytes, bytearray)):
+        values = list(raw)
+    else:
+        values = [raw]
+    questions: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        question = re.sub(r"\s+", " ", str(value or "").strip())
+        question = question.strip(" \t\r\n\"'`,;")
+        if not question:
+            continue
+        if not question.endswith("?"):
+            question = f"{question}?"
+        key = question.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        questions.append(question[:500])
+        if len(questions) >= 20:
+            break
+    return questions
+
+
+def _instruction_qa_imposed_questions(args: argparse.Namespace) -> list[str]:
+    raw = getattr(args, "instruction_qa_imposed_questions", None)
+    if raw:
+        return _normalize_instruction_qa_imposed_questions(raw)
+    return _normalize_instruction_qa_imposed_questions(
+        _request_template_value(args, "instruction_qa_imposed_questions", None)
+    )
+
+
+def _instruction_qa_requested_count(args: argparse.Namespace) -> int:
+    try:
+        requested = int(getattr(args, "subcaptions_per_image", 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        requested = 0
+    imposed = _instruction_qa_imposed_questions(args)
+    return max(0, min(max(requested, len(imposed)), 20))
+
+
+def _generated_qa_required_for_worker_success(args: argparse.Namespace) -> bool:
+    if not bool(getattr(args, "instruction_dataset", False)):
+        return False
+    if _instruction_qa_requested_count(args) <= 0:
+        return False
+    include_generated = bool(getattr(args, "include_generated_qa_in_training", True))
+    include_caption0 = bool(getattr(args, "include_caption0_in_training", True))
+    return include_generated and not include_caption0
+
+
+def _generated_qa_blocks_parent_deterministic_recovery(args: argparse.Namespace) -> bool:
+    if not bool(getattr(args, "instruction_dataset", False)):
+        return False
+    if _instruction_qa_requested_count(args) <= 0:
+        return False
+    return bool(getattr(args, "include_generated_qa_in_training", True))
+
+
+def build_instruction_qa_prompt(
     case: Mapping[str, Any],
-    image_path: Path,
     caption: str,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
-    requested = max(0, min(int(getattr(args, "subcaptions_per_image", 0) or 0), 20))
-    if requested <= 0:
-        return {"requested": 0, "pairs": [], "rejections": [], "status": "skipped"}
+    imposed_questions = _instruction_qa_imposed_questions(args)
+    requested = _instruction_qa_requested_count(args)
+    glossary_context = _case_glossary_context(case, args)
     source_context = (
-        _case_source_annotation_context(case)
+        _case_source_annotation_context(case, args)
         if bool(getattr(args, "include_source_annotations_in_generator_context", True))
         else {"source": "disabled_by_request"}
     )
+    restrict_speculative_language = _instruction_qa_restrict_speculative_language(args)
+    speculation_text = _instruction_qa_speculation_policy_text(restrict_speculative_language)
     strict_text = (
         "Use strict grounding: each answer must be supported by the image, the completed caption, or the read-only source annotation context."
         if bool(getattr(args, "strict_grounding", True))
@@ -2081,16 +2992,36 @@ def generate_instruction_qa_pairs(
         if answer_format == "json"
         else "Answers must be concise natural-language facts, not JSON strings."
     )
+    imposed_text = ""
+    if imposed_questions:
+        imposed_answer_policy = (
+            "If a required question cannot be answered directly from the image, completed caption, glossary context, or read-only source annotations, omit it rather than inventing an answer or using unavailable-information language. "
+            if restrict_speculative_language
+            else "If a required question cannot be answered from the image, completed caption, glossary context, or read-only source annotations, answer that it is not visible or cannot be determined instead of inventing an answer. "
+        )
+        imposed_text = (
+            "Required user questions:\n"
+            f"{json.dumps(imposed_questions, ensure_ascii=False)}\n"
+            "Answer these questions first and keep each question text exactly as provided when the answer is grounded. "
+            f"{imposed_answer_policy}"
+            "After grounded required questions, add generated questions only if more rows are needed.\n"
+        )
     prompt = (
         f"Create up to {requested} diverse visual instruction question/answer pairs for this image.\n"
         f"Return only valid JSON with this shape: {answer_shape}.\n"
         "Questions must be image-specific and useful for training a vision-language model.\n"
+        f"{imposed_text}"
         f"{mix_text}\n"
         f"{format_text}\n"
         "Do not mention prompts, labels, bounding boxes, coordinates, source annotations, or that counts were provided.\n"
+        "When referring to labeled classes, use the canonical object terms from the glossary context. "
+        "If a class has no glossary entry, use the natural English class term from the context. "
+        "Never output raw labelmap names or odd internal spellings from the labelmap.\n"
         "Do not ask about an object that is absent or only implied by missing labels.\n"
+        f"{speculation_text}\n"
         f"{strict_text}\n\n"
         f"Completed broad caption:\n{caption}\n\n"
+        f"Glossary context:\n{json.dumps(glossary_context, ensure_ascii=False, sort_keys=True)}\n\n"
         f"Read-only source annotation context:\n{json.dumps(source_context, ensure_ascii=False, sort_keys=True)}"
     )
     system_prompt = (
@@ -2098,9 +3029,1056 @@ def generate_instruction_qa_pairs(
         "Use the image as truth and return only the requested JSON."
     )
     max_new_tokens = _instruction_qa_max_new_tokens(args, requested)
-    started = time.time()
+    return {
+        "requested": requested,
+        "source_context": source_context,
+        "glossary_context": glossary_context,
+        "imposed_questions": imposed_questions,
+        "qa_mix": qa_mix,
+        "answer_format": answer_format,
+        "restrict_speculative_language": restrict_speculative_language,
+        "system_prompt": system_prompt,
+        "prompt": prompt,
+        "max_new_tokens": max_new_tokens,
+    }
+
+
+def _instruction_qa_recovery_prompt(
+    *,
+    case: Mapping[str, Any],
+    caption: str,
+    requested: int,
+    answer_format: str,
+    source_context: Mapping[str, Any],
+    glossary_context: Mapping[str, Any],
+    imposed_questions: Sequence[str] | None = None,
+    restrict_speculative_language: bool = False,
+) -> str:
+    caption_text = re.sub(r"\s+", " ", str(caption or "").strip())
+    if len(caption_text) > 2400:
+        caption_text = caption_text[:2400].rsplit(" ", 1)[0].strip() + "..."
+    answer_shape = (
+        '{"qa_pairs":[{"question":"...","answer":{"answer":"..."},"row_type":"generated_qa","answer_format":"json"}]}'
+        if answer_format == "json"
+        else '{"qa_pairs":[{"question":"...","answer":"...","row_type":"generated_qa","answer_format":"natural"}]}'
+    )
+    format_text = (
+        "Each answer must be a JSON object encoded as a JSON value."
+        if answer_format == "json"
+        else "Each answer must be one concise natural-language sentence."
+    )
+    count_text = json.dumps(source_context.get("object_counts") if isinstance(source_context, Mapping) else {}, ensure_ascii=False, sort_keys=True)
+    imposed = _normalize_instruction_qa_imposed_questions(imposed_questions or [])
+    imposed_text = ""
+    if imposed:
+        imposed_answer_policy = (
+            "If a required answer is not directly findable in the image, caption, or source counts, omit that question; do not answer with unknown, not visible, or cannot determine.\n"
+            if restrict_speculative_language
+            else "If a required answer is not findable in the image, caption, or source counts, say that directly instead of inventing it.\n"
+        )
+        imposed_text = (
+            f"Required user questions: {json.dumps(imposed, ensure_ascii=False)}\n"
+            "Keep required question text exactly as provided. "
+            f"{imposed_answer_policy}"
+        )
+    uncertainty_policy = (
+        "Do not invent time, weather, purpose, activity, or hidden object function. Omit questions whose answer is not directly findable; do not use unavailable-information answers.\n"
+        if restrict_speculative_language
+        else "Do not invent time, weather, purpose, activity, or hidden object function; if such a detail is not findable, answer that it is not visible or cannot be determined.\n"
+    )
+    return (
+        "Visual QA recovery top-up. Return only valid JSON and no prose outside JSON.\n"
+        f"Return up to {requested} independent image-grounded question/answer pairs with this shape: {answer_shape}.\n"
+        "Every question must end with a question mark.\n"
+        f"{imposed_text}"
+        "Use only facts supported by the image, the caption, or the source counts below.\n"
+        "Use canonical object terms from the glossary context when referring to labeled classes.\n"
+        "Never output raw labelmap names or odd internal spellings from the labelmap.\n"
+        f"{uncertainty_policy}"
+        f"{_instruction_qa_speculation_policy_text(restrict_speculative_language)}\n"
+        "Do not mention prompts, labels, bounding boxes, coordinates, or source annotations.\n"
+        f"{format_text}\n\n"
+        f"Caption: {caption_text}\n"
+        f"Glossary context: {json.dumps(glossary_context, ensure_ascii=False, sort_keys=True)}\n"
+        f"Source counts: {count_text}\n"
+        f"Grounding context: {json.dumps(source_context, ensure_ascii=False, sort_keys=True)}"
+    )
+
+
+def _instruction_qa_fallback_max_new_tokens(primary_max_new_tokens: int, requested: int) -> int:
+    compact_budget = 192 + max(1, requested) * 160
+    return max(128, min(int(primary_max_new_tokens), max(512, compact_budget)))
+
+
+def _instruction_qa_max_topup_attempts(args: argparse.Namespace) -> int:
+    try:
+        value = int(getattr(args, "instruction_qa_max_topup_attempts", DEFAULT_INSTRUCTION_QA_MAX_TOPUP_ATTEMPTS))
+    except (TypeError, ValueError, OverflowError):
+        value = DEFAULT_INSTRUCTION_QA_MAX_TOPUP_ATTEMPTS
+    return max(0, min(value, MAX_INSTRUCTION_QA_TOPUP_ATTEMPTS))
+
+
+def _instruction_qa_restrict_speculative_language(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "instruction_qa_restrict_speculative_language", False))
+
+
+def _instruction_qa_speculation_policy_text(strict: bool) -> str:
+    if strict:
+        return (
+            "Restrict speculative language: do not use likely, probably, appears, suggests, indicates, could, might, unknown, not visible, or cannot determine. "
+            "Ask only questions with directly findable answers and omit unavailable-information questions rather than answering them."
+        )
+    return (
+        "Unavailable-information answers are allowed: if a useful question asks for a detail that is not findable, say that it is not visible or cannot be determined instead of inventing it. "
+        "Mild visual inference wording such as likely, appears, suggests, or indicates is allowed when it is grounded in visible evidence."
+    )
+
+
+def _instruction_qa_profile_specs(
+    *,
+    max_new_tokens: int,
+    requested: int,
+    max_topup_attempts: int,
+) -> list[dict[str, Any]]:
+    specs: list[dict[str, Any]] = [
+        {
+            "profile": "primary",
+            "max_new_tokens": max_new_tokens,
+            "decode_override": {
+                "do_sample": False,
+                "repetition_penalty": 1.08,
+                "repetition_context_size": 128,
+                "no_repeat_ngram_size": 8,
+            },
+            "detail": f"Creating up to {requested} generated QA rows",
+            "output_section": "Generated QA output",
+        },
+    ]
+    topup_templates = [
+        {
+            "profile": "caption_grounded_fallback",
+            "max_new_tokens": _instruction_qa_fallback_max_new_tokens(max_new_tokens, requested),
+            "decode_override": {
+                "do_sample": False,
+                "repetition_penalty": 1.18,
+                "repetition_context_size": 256,
+                "no_repeat_ngram_size": 8,
+            },
+            "detail": "Filling missing generated QA rows from caption-grounded visual context",
+            "output_section": "Generated QA caption-grounded fallback output",
+        },
+        {
+            "profile": "sparse_scene_fallback",
+            "max_new_tokens": _instruction_qa_fallback_max_new_tokens(max_new_tokens, requested),
+            "decode_override": {
+                "do_sample": False,
+                "repetition_penalty": 1.2,
+                "repetition_context_size": 256,
+                "no_repeat_ngram_size": 8,
+            },
+            "detail": "Filling missing generated QA rows with sparse-scene visual prompts",
+            "output_section": "Generated QA sparse-scene fallback output",
+        },
+    ]
+    for index in range(max(0, int(max_topup_attempts))):
+        spec = dict(topup_templates[index % len(topup_templates)])
+        spec["topup_attempt"] = index + 1
+        specs.append(spec)
+    return specs
+
+
+def _instruction_qa_profile_label(profile: str) -> str:
+    labels = {
+        "primary": "Primary prompt",
+        "caption_grounded_fallback": "Caption-grounded fallback",
+        "sparse_scene_fallback": "Sparse-scene fallback",
+        "qa_verifier_rewrite": "Verifier/rewrite",
+    }
+    return labels.get(str(profile or "").strip(), str(profile or "").replace("_", " ").strip().title() or "QA prompt")
+
+
+def _question_key(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip()).lower()
+
+
+def _instruction_qa_topup_context(
+    *,
+    accepted_pairs: Sequence[Mapping[str, Any]],
+    rejected_pairs: Sequence[Mapping[str, Any]],
+    max_items: int = 12,
+) -> dict[str, Any]:
+    accepted_questions = [
+        str(pair.get("question") or "").strip()
+        for pair in accepted_pairs
+        if str(pair.get("question") or "").strip()
+    ]
+    rejected_questions = [
+        str(pair.get("question") or "").strip()
+        for pair in rejected_pairs
+        if str(pair.get("question") or "").strip()
+    ]
+    return {
+        "accepted_questions": accepted_questions[-max_items:],
+        "rejected_questions": rejected_questions[-max_items:],
+    }
+
+
+def _instruction_qa_topup_prompt(
+    *,
+    profile: str,
+    case: Mapping[str, Any],
+    caption: str,
+    requested: int,
+    missing: int,
+    answer_format: str,
+    source_context: Mapping[str, Any],
+    glossary_context: Mapping[str, Any],
+    accepted_pairs: Sequence[Mapping[str, Any]],
+    rejected_pairs: Sequence[Mapping[str, Any]],
+    imposed_questions: Sequence[str] | None = None,
+    restrict_speculative_language: bool = False,
+) -> str:
+    caption_text = re.sub(r"\s+", " ", str(caption or "").strip())
+    if len(caption_text) > 2400:
+        caption_text = caption_text[:2400].rsplit(" ", 1)[0].strip() + "..."
+    answer_shape = (
+        '{"qa_pairs":[{"question":"...","answer":{"answer":"..."},"row_type":"generated_qa","answer_format":"json"}]}'
+        if answer_format == "json"
+        else '{"qa_pairs":[{"question":"...","answer":"...","row_type":"generated_qa","answer_format":"natural"}]}'
+    )
+    format_text = (
+        "Each answer must be a JSON object encoded as a JSON value."
+        if answer_format == "json"
+        else "Each answer must be one concise natural-language sentence."
+    )
+    imposed = _normalize_instruction_qa_imposed_questions(imposed_questions or [])
+    context = _instruction_qa_topup_context(
+        accepted_pairs=accepted_pairs,
+        rejected_pairs=rejected_pairs,
+    )
+    count_text = json.dumps(
+        source_context.get("object_counts") if isinstance(source_context, Mapping) else {},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    common = (
+        f"Return only valid JSON with this shape: {answer_shape}.\n"
+        f"Need {missing} additional accepted image-grounded QA row(s) out of the original target of {requested}.\n"
+        "Every question must end with a question mark.\n"
+        "Do not repeat any accepted question exactly. Avoid rejected questions unless you can make them clearly grounded and useful.\n"
+        "Use canonical object terms from the glossary context when referring to labeled classes. "
+        "If a class has no glossary entry, use the natural English class term from the context. "
+        "Never output raw labelmap names or odd internal spellings from the labelmap.\n"
+        "Do not mention prompts, labels, bounding boxes, coordinates, source annotations, or that counts were provided.\n"
+        f"{format_text}\n\n"
+        f"Completed broad caption: {caption_text}\n"
+        f"Glossary context: {json.dumps(glossary_context, ensure_ascii=False, sort_keys=True)}\n"
+        f"Source counts: {count_text}\n"
+        f"Accepted/rejected question history: {json.dumps(context, ensure_ascii=False, sort_keys=True)}\n"
+    )
+    if imposed:
+        imposed_answer_policy = (
+            "If its answer is not directly findable in the image, caption, or source counts, omit it; do not answer with unknown, not visible, or cannot determine.\n"
+            if restrict_speculative_language
+            else "If its answer is not findable in the image, caption, or source counts, keep the question and say that directly instead of inventing an answer.\n"
+        )
+        common += (
+            f"Required user questions: {json.dumps(imposed, ensure_ascii=False)}\n"
+            "If a required question is still unanswered and grounded, answer it first with the exact question text. "
+            f"{imposed_answer_policy}"
+        )
+    common += f"{_instruction_qa_speculation_policy_text(restrict_speculative_language)}\n"
+    if profile == "caption_grounded_fallback":
+        return (
+            "Caption-grounded visual QA top-up. You can see the image; use it as truth.\n"
+            "Prefer straightforward questions that are answerable from the visible scene and the completed caption.\n"
+            "Useful fallback questions may ask about the main setting, the main visible object groups, count facts from source counts, visible layout, colors, or spatial relationships.\n"
+            "Do not invent activity, intent, time, location, or hidden object function.\n"
+            f"{common}"
+        )
+    if profile == "sparse_scene_fallback":
+        sparse_policy = (
+            "In strict mode, use only directly answerable sparse-scene questions and omit unavailable-information questions.\n"
+            if restrict_speculative_language
+            else "If a useful question asks for a detail that is not findable, answer that it is not visible or cannot be determined instead of inventing it.\n"
+        )
+        return (
+            "Sparse-scene visual QA top-up. You can see the image; use it as truth.\n"
+            "It is acceptable to produce simple, similar-but-not-identical questions when the scene has little going on.\n"
+            "Favor grounded count, presence, arrangement, viewpoint, surface, color, and broad-scene questions. "
+            f"{sparse_policy}"
+            f"{common}"
+        )
+    return _instruction_qa_recovery_prompt(
+        case=case,
+        caption=caption,
+        requested=missing,
+        answer_format=answer_format,
+        source_context=source_context,
+        glossary_context=glossary_context,
+        imposed_questions=imposed,
+        restrict_speculative_language=restrict_speculative_language,
+    )
+
+
+def _instruction_qa_accumulator_payload(
+    *,
+    case: Mapping[str, Any],
+    requested: int,
+    accepted_pairs: Sequence[Mapping[str, Any]],
+    rejected_pairs: Sequence[Mapping[str, Any]],
+    attempt_summary: Sequence[Mapping[str, Any]],
+    status: str,
+) -> dict[str, Any]:
+    accepted_count = len(accepted_pairs)
+    clean_status = str(status or "").strip() or ("ok" if accepted_count >= requested else "underfilled")
+    final_status = clean_status not in {"generating", "pending"}
+    underfilled = bool(final_status and requested > 0 and accepted_count < requested)
+    return {
+        "case_id": case_key(case),
+        "image_name": str(case.get("image_name") or case.get("name") or case.get("stem") or "").strip(),
+        "caption0_status": "complete",
+        "target_pair_count": int(requested),
+        "accepted_pair_count": int(accepted_count),
+        "rejected_pair_count": int(len(rejected_pairs)),
+        "status": clean_status,
+        "underfilled": underfilled,
+        "continuing_with_pair_count": int(accepted_count) if underfilled else None,
+        "attempt_summary": [dict(item) for item in attempt_summary],
+        "pairs": [dict(pair) for pair in accepted_pairs[:20]],
+    }
+
+
+def _instruction_qa_progress_detail(
+    payload: Mapping[str, Any],
+    *,
+    active_profile: str | None = None,
+) -> str:
+    accepted = int(payload.get("accepted_pair_count") or 0)
+    target = int(payload.get("target_pair_count") or 0)
+    parts = [
+        "Caption0 complete",
+        f"Generated Q&A {accepted}/{target} accepted" if target > 0 else "Generated Q&A skipped",
+    ]
+    for item in payload.get("attempt_summary") or []:
+        if not isinstance(item, Mapping):
+            continue
+        label = str(item.get("label") or _instruction_qa_profile_label(str(item.get("profile") or ""))).strip()
+        accepted_count = int(item.get("accepted_count") or 0)
+        rejected_count = int(item.get("rejected_count") or 0)
+        suffix = f"{accepted_count} accepted"
+        if rejected_count:
+            suffix = f"{suffix}, {rejected_count} rejected"
+        parts.append(f"{label}: {suffix}")
+    if payload.get("underfilled"):
+        parts.append(f"Continuing with {accepted}/{target}")
+    elif active_profile:
+        parts.append(f"{_instruction_qa_profile_label(active_profile)} running")
+    return " • ".join(parts)
+
+
+def _phrase_present(text: str, phrase: str) -> bool:
+    phrase = str(phrase or "").strip()
+    if not phrase:
+        return False
+    pattern = r"(?<![A-Za-z0-9])" + re.escape(phrase) + r"(?![A-Za-z0-9])"
+    return bool(re.search(pattern, str(text or ""), flags=re.IGNORECASE))
+
+
+def _qa_raw_terms_to_avoid(case: Mapping[str, Any], args: argparse.Namespace) -> dict[str, list[str]]:
+    glossary_context = _case_glossary_context(case, args)
+    out: dict[str, list[str]] = {}
+    for entry in glossary_context.get("classes", []) if isinstance(glossary_context, Mapping) else []:
+        if not isinstance(entry, Mapping):
+            continue
+        canonical = str(entry.get("canonical_term") or "").strip()
+        raw_terms = [
+            str(term).strip()
+            for term in (entry.get("raw_terms_to_avoid") or [])
+            if str(term).strip()
+        ]
+        if canonical and raw_terms:
+            out[canonical] = raw_terms
+    return out
+
+
+def _qa_pair_rejection_reasons(
+    pair: Mapping[str, Any],
+    case: Mapping[str, Any],
+    args: argparse.Namespace,
+) -> list[str]:
+    reasons: list[str] = []
+    question = str(pair.get("question") or "").strip()
+    answer = str(pair.get("answer") or "").strip()
+    combined = f"{question}\n{answer}"
+    if not question.endswith("?"):
+        reasons.append("question_not_question")
+    if len(answer.split()) < 2:
+        reasons.append("answer_too_short")
+    for _canonical, raw_terms in _qa_raw_terms_to_avoid(case, args).items():
+        for raw_term in raw_terms:
+            if _phrase_present(combined, raw_term):
+                reasons.append(f"{QA_RAW_LABEL_LEAK_PREFIX}{raw_term}")
+    if _instruction_qa_restrict_speculative_language(args) and QA_STRICT_SPECULATION_PATTERN.search(combined):
+        reasons.append("speculative_or_unavailable_language")
+    return sorted(set(reasons))
+
+
+def _qa_machine_validated_pair(
+    pair: Mapping[str, Any],
+    *,
+    verifier_decision: str,
+    verifier_reasons: Sequence[str] | None = None,
+    question: str | None = None,
+    answer: str | None = None,
+) -> dict[str, Any]:
+    out = dict(pair)
+    original_question = str(pair.get("question") or "").strip()
+    original_answer = str(pair.get("answer") or "").strip()
+    if question is not None:
+        out["question"] = re.sub(r"\s+", " ", str(question or "").strip())
+    if answer is not None:
+        if isinstance(answer, (dict, list)):
+            out["answer"] = json.dumps(answer, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        else:
+            out["answer"] = re.sub(r"\s+", " ", str(answer or "").strip())
+    out["validation_status"] = QA_VERIFIER_STATUS
+    out["review_status"] = QA_VERIFIER_STATUS
+    out["answer_source"] = str(out.get("answer_source") or "vlm_generated").strip() or "vlm_generated"
+    out["validated_against"] = ["image", "language_annotations.caption0", "source_annotations", "qa_verifier"]
+    metadata = dict(out.get("metadata")) if isinstance(out.get("metadata"), Mapping) else {}
+    metadata["qa_verifier"] = {
+        "status": QA_VERIFIER_STATUS,
+        "decision": verifier_decision,
+        "reasons": list(verifier_reasons or []),
+    }
+    if verifier_decision == "rewrite":
+        metadata["original_question"] = original_question
+        metadata["original_answer"] = original_answer
+    out["metadata"] = metadata
+    validation = dict(out.get("validation")) if isinstance(out.get("validation"), Mapping) else {}
+    validation.update(
+        {
+            "status": QA_VERIFIER_STATUS,
+            "qa_verifier_passed": True,
+            "qa_verifier_decision": verifier_decision,
+        }
+    )
+    out["validation"] = validation
+    out.pop("rejection_reasons", None)
+    return out
+
+
+def _qa_rejected_pair(pair: Mapping[str, Any], reasons: Sequence[str]) -> dict[str, Any]:
+    out = dict(pair)
+    clean_reasons = sorted({str(reason).strip() for reason in reasons if str(reason).strip()})
+    out["validation_status"] = "rejected"
+    out["review_status"] = "rejected"
+    out["rejection_reasons"] = clean_reasons or ["qa_verifier_rejected"]
+    metadata = dict(out.get("metadata")) if isinstance(out.get("metadata"), Mapping) else {}
+    metadata["qa_verifier"] = {
+        "status": "rejected",
+        "decision": "reject",
+        "reasons": out["rejection_reasons"],
+    }
+    out["metadata"] = metadata
+    validation = dict(out.get("validation")) if isinstance(out.get("validation"), Mapping) else {}
+    validation.update(
+        {
+            "status": "rejected",
+            "qa_verifier_passed": False,
+            "qa_verifier_decision": "reject",
+            "rejection_reasons": out["rejection_reasons"],
+        }
+    )
+    out["validation"] = validation
+    return out
+
+
+def _instruction_qa_verifier_prompt(
+    *,
+    candidates: Sequence[Mapping[str, Any]],
+    case: Mapping[str, Any],
+    caption: str,
+    args: argparse.Namespace,
+    source_context: Mapping[str, Any],
+    glossary_context: Mapping[str, Any],
+) -> str:
+    caption_text = re.sub(r"\s+", " ", str(caption or "").strip())[:2400]
+    candidate_rows = []
+    for pair in candidates:
+        candidate_rows.append(
+            {
+                "qa_id": str(pair.get("qa_id") or pair.get("id") or "").strip(),
+                "question": str(pair.get("question") or "").strip(),
+                "answer": str(pair.get("answer") or "").strip(),
+                "deterministic_reasons": _qa_pair_rejection_reasons(pair, case, args),
+            }
+        )
+    if _instruction_qa_restrict_speculative_language(args):
+        speculation_rule = (
+            "Strict speculative language is enabled: reject pairs that use speculative or unavailable-information wording such as likely, probably, appears, suggests, could, might, unknown, not visible, or cannot determine."
+        )
+    else:
+        speculation_rule = (
+            "Answers that say a detail is not visible, unknown, or cannot be determined are acceptable when that is the grounded answer; do not reject them only for being unavailable-information answers. Mild inference wording is acceptable when grounded in visible evidence."
+        )
+    return (
+        "Verify and, when possible, rewrite generated image QA pairs for training.\n"
+        "Return only valid JSON with this shape: "
+        '{"qa_pairs":[{"qa_id":"...","decision":"accept|rewrite|reject","question":"...","answer":"...","rejection_reasons":[]}]}\n'
+        "Use rewrite when a pair is useful but contains raw label names or a malformed question.\n"
+        "Reject pairs that are duplicate, empty, contradictory, or cannot be fixed from the provided context.\n"
+        f"{speculation_rule}\n"
+        "Every accepted or rewritten question must end with a question mark.\n"
+        "Use canonical object terms from the glossary context for labeled classes. Never output raw labelmap names or odd internal spellings from the labelmap.\n"
+        "Do not mention prompts, labels, bounding boxes, coordinates, source annotations, or that counts were provided.\n\n"
+        f"Caption: {caption_text}\n"
+        f"Glossary context: {json.dumps(glossary_context, ensure_ascii=False, sort_keys=True)}\n"
+        f"Source context: {json.dumps(source_context, ensure_ascii=False, sort_keys=True)}\n"
+        f"Candidates: {json.dumps(candidate_rows, ensure_ascii=False, sort_keys=True)}"
+    )
+
+
+def _verifier_candidate_from_payload(payload: Any) -> dict[str, Mapping[str, Any]]:
+    raw_pairs = payload.get("qa_pairs") if isinstance(payload, Mapping) else payload
+    if not isinstance(raw_pairs, list):
+        return {}
+    out: dict[str, Mapping[str, Any]] = {}
+    for raw in raw_pairs:
+        if not isinstance(raw, Mapping):
+            continue
+        qa_id = str(raw.get("qa_id") or raw.get("id") or "").strip()
+        if qa_id:
+            out[qa_id] = raw
+    return out
+
+
+def _verify_generated_qa_pairs(
+    api: Any,
+    pairs: Sequence[Mapping[str, Any]],
+    *,
+    case: Mapping[str, Any],
+    caption: str,
+    args: argparse.Namespace,
+    source_context: Mapping[str, Any],
+    glossary_context: Mapping[str, Any],
+) -> dict[str, Any]:
+    verified: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    verifier_attempts: list[dict[str, Any]] = []
+    flagged: list[Mapping[str, Any]] = []
+    for pair in pairs:
+        reasons = _qa_pair_rejection_reasons(pair, case, args)
+        if reasons:
+            flagged.append(pair)
+        else:
+            verified.append(
+                _qa_machine_validated_pair(
+                    pair,
+                    verifier_decision="accept",
+                    verifier_reasons=[],
+                )
+            )
+    if not flagged:
+        return {
+            "pairs": verified,
+            "rejected_pairs": rejected,
+            "attempts": verifier_attempts,
+            "status": "ok",
+        }
+
+    if not hasattr(api, "_run_qwen_text_inference"):
+        for pair in flagged:
+            rejected.append(_qa_rejected_pair(pair, _qa_pair_rejection_reasons(pair, case, args)))
+        return {
+            "pairs": verified,
+            "rejected_pairs": rejected,
+            "attempts": [{"status": "skipped", "reason": "text_inference_unavailable"}],
+            "status": "ok" if verified else "empty",
+        }
+
+    prompt = _instruction_qa_verifier_prompt(
+        candidates=flagged,
+        case=case,
+        caption=caption,
+        args=args,
+        source_context=source_context,
+        glossary_context=glossary_context,
+    )
+    attempt_started = time.time()
+    attempt_record: dict[str, Any] = {
+        "profile": "qa_verifier_rewrite",
+        "candidate_count": len(flagged),
+        "max_new_tokens": QA_VERIFIER_MAX_NEW_TOKENS,
+    }
     try:
         if hasattr(api, "_qwen_progress_update"):
+            api._qwen_progress_update(
+                phase="generate",
+                phase_label="Verifying QA",
+                progress=0.95,
+                message="Verifying generated QA rows",
+                step_id="instruction_qa_verify",
+                step_label="Verify instruction QA",
+                step_detail=f"Rewriting or rejecting {len(flagged)} generated QA row(s)",
+                token_preview="",
+                live_output_reset=True,
+            )
+        raw, _width, _height = api._run_qwen_text_inference(
+            prompt,
+            max_new_tokens=QA_VERIFIER_MAX_NEW_TOKENS,
+            system_prompt_override="You are a strict visual QA verifier. Return only valid JSON.",
+            model_id_override=getattr(args, "model_id", None),
+            decode_override={
+                "do_sample": False,
+                "repetition_penalty": 1.18,
+                "repetition_context_size": 256,
+                "no_repeat_ngram_size": 8,
+            },
+            chat_template_kwargs={"enable_thinking": False},
+        )
+        parsed = _extract_json_payload(raw)
+        decisions = _verifier_candidate_from_payload(parsed)
+        attempt_record.update(
+            {
+                "status": "ok" if decisions else "empty",
+                "raw_output": raw,
+                "decision_count": len(decisions),
+                "elapsed_seconds": round(time.time() - attempt_started, 3),
+            }
+        )
+    except BaseException as exc:  # noqa: BLE001
+        decisions = {}
+        attempt_record.update(
+            {
+                "status": "error",
+                "type": type(exc).__name__,
+                "message": str(exc),
+                "elapsed_seconds": round(time.time() - attempt_started, 3),
+            }
+        )
+    verifier_attempts.append(attempt_record)
+
+    for pair in flagged:
+        qa_id = str(pair.get("qa_id") or pair.get("id") or "").strip()
+        decision = decisions.get(qa_id)
+        if not isinstance(decision, Mapping):
+            rejected.append(
+                _qa_rejected_pair(
+                    pair,
+                    [*_qa_pair_rejection_reasons(pair, case, args), "qa_verifier_missing_decision"],
+                )
+            )
+            continue
+        action = re.sub(r"[\s-]+", "_", str(decision.get("decision") or "").strip().lower())
+        if action not in {"accept", "rewrite", "reject"}:
+            action = "reject"
+        if action == "reject":
+            reasons = decision.get("rejection_reasons") if isinstance(decision.get("rejection_reasons"), list) else []
+            rejected.append(_qa_rejected_pair(pair, [str(reason) for reason in reasons] or ["qa_verifier_rejected"]))
+            continue
+        question = str(decision.get("question") or pair.get("question") or "").strip()
+        answer_value = decision.get("answer") if "answer" in decision else pair.get("answer")
+        candidate = _qa_machine_validated_pair(
+            pair,
+            verifier_decision=action,
+            verifier_reasons=_qa_pair_rejection_reasons(pair, case, args),
+            question=question,
+            answer=answer_value,
+        )
+        post_reasons = _qa_pair_rejection_reasons(candidate, case, args)
+        if post_reasons:
+            rejected.append(_qa_rejected_pair(candidate, [*post_reasons, "qa_verifier_postcheck_failed"]))
+        else:
+            verified.append(candidate)
+
+    return {
+        "pairs": verified,
+        "rejected_pairs": rejected,
+        "attempts": verifier_attempts,
+        "status": "ok" if verified else "empty",
+    }
+
+
+def generate_instruction_qa_pairs(
+    api: Any,
+    case: Mapping[str, Any],
+    image_path: Path,
+    caption: str,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    prompt_spec = build_instruction_qa_prompt(case, caption, args)
+    requested = int(prompt_spec.get("requested") or 0)
+    if requested <= 0:
+        return {"requested": 0, "pairs": [], "rejections": [], "status": "skipped"}
+    answer_format = str(prompt_spec.get("answer_format") or "natural")
+    system_prompt = str(prompt_spec.get("system_prompt") or "")
+    max_new_tokens = int(prompt_spec.get("max_new_tokens") or _instruction_qa_max_new_tokens(args, requested))
+    restrict_speculative_language = bool(prompt_spec.get("restrict_speculative_language"))
+    started = time.time()
+    attempts: list[dict[str, Any]] = []
+    attempt_summary: list[dict[str, Any]] = []
+    accepted_pairs: list[dict[str, Any]] = []
+    rejected_pairs: list[dict[str, Any]] = []
+    rejections: list[dict[str, Any]] = []
+    accepted_question_keys: set[str] = set()
+    recovered_by: str | None = None
+    source_context = (
+        prompt_spec.get("source_context")
+        if isinstance(prompt_spec.get("source_context"), Mapping)
+        else {}
+    )
+    glossary_context = (
+        prompt_spec.get("glossary_context")
+        if isinstance(prompt_spec.get("glossary_context"), Mapping)
+        else {}
+    )
+    imposed_questions = (
+        prompt_spec.get("imposed_questions")
+        if isinstance(prompt_spec.get("imposed_questions"), Sequence)
+        else []
+    )
+    max_topup_attempts = _instruction_qa_max_topup_attempts(args)
+    profile_specs = _instruction_qa_profile_specs(
+        max_new_tokens=max_new_tokens,
+        requested=requested,
+        max_topup_attempts=max_topup_attempts,
+    )
+    for attempt_index, attempt_spec in enumerate(profile_specs, start=1):
+        missing = max(0, requested - len(accepted_pairs))
+        if missing <= 0:
+            break
+        attempt_started = time.time()
+        profile = str(attempt_spec["profile"])
+        profile_label = _instruction_qa_profile_label(profile)
+        attempt_max_new_tokens = int(attempt_spec["max_new_tokens"])
+        if profile == "primary":
+            attempt_prompt = str(prompt_spec.get("prompt") or "")
+            attempt_requested = requested
+        else:
+            attempt_requested = missing
+            attempt_prompt = _instruction_qa_topup_prompt(
+                profile=profile,
+                case=case,
+                caption=caption,
+                requested=requested,
+                missing=missing,
+                answer_format=answer_format,
+                source_context=source_context,
+                glossary_context=glossary_context,
+                accepted_pairs=accepted_pairs,
+                rejected_pairs=rejected_pairs,
+                imposed_questions=imposed_questions,
+                restrict_speculative_language=restrict_speculative_language,
+            )
+        attempt_record: dict[str, Any] = {
+            "attempt": attempt_index,
+            "profile": profile,
+            "label": profile_label,
+            "call_kind": "visual",
+            "requested": attempt_requested,
+            "max_new_tokens": attempt_max_new_tokens,
+        }
+        if attempt_spec.get("topup_attempt"):
+            attempt_record["topup_attempt"] = int(attempt_spec["topup_attempt"])
+        summary_record: dict[str, Any] = {
+            "profile": profile,
+            "label": profile_label,
+            "call_kind": "visual",
+            "requested": attempt_requested,
+            "accepted_count": 0,
+            "rejected_count": 0,
+            "raw_pair_count": 0,
+            "status": "pending",
+            "total_accepted": len(accepted_pairs),
+        }
+        if attempt_spec.get("topup_attempt"):
+            summary_record["topup_attempt"] = int(attempt_spec["topup_attempt"])
+        try:
+            if hasattr(api, "_qwen_progress_update"):
+                accumulator = _instruction_qa_accumulator_payload(
+                    case=case,
+                    requested=requested,
+                    accepted_pairs=accepted_pairs,
+                    rejected_pairs=rejected_pairs,
+                    attempt_summary=attempt_summary,
+                    status="generating",
+                )
+                api._qwen_progress_update(
+                    phase="generate",
+                    phase_label="Generating QA",
+                    progress=0.9,
+                    message="Generating instruction QA rows",
+                    step_id="instruction_qa",
+                    step_label="Generate instruction QA",
+                    step_detail=_instruction_qa_progress_detail(accumulator, active_profile=profile),
+                    token_preview="",
+                    live_output_reset=True,
+                    instruction_qa_accumulator=accumulator,
+                )
+            if hasattr(api, "_qwen_progress_begin_output_section"):
+                api._qwen_progress_begin_output_section(str(attempt_spec["output_section"]))
+            with Image.open(image_path) as source_image:
+                pil_img = source_image.convert("RGB")
+            raw, _width, _height = api._run_qwen_inference(
+                attempt_prompt,
+                pil_img,
+                max_new_tokens=attempt_max_new_tokens,
+                system_prompt_override=system_prompt,
+                model_id_override=getattr(args, "model_id", None),
+                decode_override=attempt_spec["decode_override"],
+                chat_template_kwargs={"enable_thinking": False},
+            )
+            parsed = _extract_json_payload(raw)
+            parse_rejections: list[dict[str, Any]] = []
+            if parsed is None:
+                parsed = _extract_partial_qa_payload(raw)
+                if parsed is not None:
+                    parse_rejections.append({"reason": "qa_json_partial_payload_salvaged"})
+                else:
+                    parse_rejections.append({"reason": "qa_json_parse_failed"})
+            pairs, normalize_rejections = _normalize_generated_qa_pairs(
+                parsed,
+                requested=attempt_requested,
+                case=case,
+                answer_format=answer_format,
+            )
+            normalize_rejections = [*parse_rejections, *normalize_rejections]
+            status = "ok" if pairs else "empty"
+            attempt_record.update(
+                {
+                    "status": status,
+                    "pair_count": len(pairs),
+                    "rejections": normalize_rejections,
+                    "raw_output": raw,
+                    "elapsed_seconds": round(time.time() - attempt_started, 3),
+                }
+            )
+            attempts.append(attempt_record)
+            rejections.extend(normalize_rejections)
+            summary_record["raw_pair_count"] = len(pairs)
+            if pairs:
+                verifier_result = _verify_generated_qa_pairs(
+                    api,
+                    pairs,
+                    case=case,
+                    caption=caption,
+                    args=args,
+                    source_context=source_context,
+                    glossary_context=glossary_context,
+                )
+                verified_pairs = list(verifier_result.get("pairs") or [])
+                attempt_rejected_pairs = list(verifier_result.get("rejected_pairs") or [])
+                for rejected_pair in attempt_rejected_pairs:
+                    rejected_pairs.append(dict(rejected_pair))
+                    rejections.append(
+                        {
+                            "reason": "qa_verifier_rejected",
+                            "qa_id": str(rejected_pair.get("qa_id") or rejected_pair.get("id") or "").strip(),
+                            "question": str(rejected_pair.get("question") or "").strip(),
+                            "rejection_reasons": list(rejected_pair.get("rejection_reasons") or []),
+                        }
+                    )
+                attempts.extend(list(verifier_result.get("attempts") or []))
+                attempt_accepted = 0
+                for pair in verified_pairs:
+                    key = _question_key(pair.get("question"))
+                    if key in accepted_question_keys:
+                        duplicate = _qa_rejected_pair(pair, ["duplicate_question_across_qa_profiles"])
+                        rejected_pairs.append(duplicate)
+                        rejections.append(
+                            {
+                                "reason": "duplicate_question_across_qa_profiles",
+                                "qa_id": str(pair.get("qa_id") or pair.get("id") or "").strip(),
+                                "question": str(pair.get("question") or "").strip(),
+                            }
+                        )
+                        continue
+                    accepted_question_keys.add(key)
+                    accepted = dict(pair)
+                    accepted["qa_id"] = f"{case_key(case)}__generated_qa_{len(accepted_pairs) + 1:04d}"
+                    metadata = dict(accepted.get("metadata")) if isinstance(accepted.get("metadata"), Mapping) else {}
+                    metadata["qa_profile"] = profile
+                    metadata["qa_profile_label"] = profile_label
+                    accepted["metadata"] = metadata
+                    accepted_pairs.append(accepted)
+                    attempt_accepted += 1
+                    if profile != "primary" and recovered_by is None:
+                        recovered_by = profile
+                    if len(accepted_pairs) >= requested:
+                        break
+                summary_record["accepted_count"] = attempt_accepted
+                summary_record["rejected_count"] = (
+                    len(normalize_rejections)
+                    + len(attempt_rejected_pairs)
+                    + max(0, len(verified_pairs) - attempt_accepted)
+                )
+                summary_record["status"] = "ok" if attempt_accepted else "empty"
+                summary_record["total_accepted"] = len(accepted_pairs)
+            else:
+                summary_record["rejected_count"] = len(normalize_rejections)
+                summary_record["status"] = "empty"
+        except BaseException as exc:  # noqa: BLE001
+            loop_diagnostic: dict[str, Any] | None = None
+            diagnostic_fn = getattr(exc, "diagnostic_payload", None)
+            if callable(diagnostic_fn):
+                try:
+                    payload = diagnostic_fn(max_chars=6000)
+                except TypeError:
+                    payload = diagnostic_fn()
+                except Exception:
+                    payload = None
+                if isinstance(payload, Mapping):
+                    loop_diagnostic = dict(payload)
+            salvaged_pairs: list[dict[str, Any]] = []
+            salvage_normalize_rejections: list[dict[str, Any]] = []
+            salvage_rejected_pairs: list[dict[str, Any]] = []
+            salvage_accepted = 0
+            salvage_error: dict[str, Any] | None = None
+            if loop_diagnostic:
+                for diagnostic_key in ("trimmed_output", "raw_output_head", "raw_output_tail"):
+                    partial_payload = _extract_partial_qa_payload(
+                        str(loop_diagnostic.get(diagnostic_key) or "")
+                    )
+                    if partial_payload:
+                        salvaged_pairs, salvage_normalize_rejections = _normalize_generated_qa_pairs(
+                            partial_payload,
+                            requested=attempt_requested,
+                            case=case,
+                            answer_format=answer_format,
+                        )
+                        if salvaged_pairs:
+                            attempt_record["loop_salvage_source"] = diagnostic_key
+                            break
+                if salvaged_pairs:
+                    try:
+                        verifier_result = _verify_generated_qa_pairs(
+                            api,
+                            salvaged_pairs,
+                            case=case,
+                            caption=caption,
+                            args=args,
+                            source_context=source_context,
+                            glossary_context=glossary_context,
+                        )
+                        verified_pairs = list(verifier_result.get("pairs") or [])
+                        salvage_rejected_pairs = list(verifier_result.get("rejected_pairs") or [])
+                        for rejected_pair in salvage_rejected_pairs:
+                            rejected_pairs.append(dict(rejected_pair))
+                            rejections.append(
+                                {
+                                    "reason": "qa_verifier_rejected",
+                                    "qa_id": str(rejected_pair.get("qa_id") or rejected_pair.get("id") or "").strip(),
+                                    "question": str(rejected_pair.get("question") or "").strip(),
+                                    "rejection_reasons": list(rejected_pair.get("rejection_reasons") or []),
+                                    "salvaged_from_loop": True,
+                                }
+                            )
+                        attempts.extend(list(verifier_result.get("attempts") or []))
+                        for pair in verified_pairs:
+                            key = _question_key(pair.get("question"))
+                            if key in accepted_question_keys:
+                                duplicate = _qa_rejected_pair(pair, ["duplicate_question_across_qa_profiles"])
+                                rejected_pairs.append(duplicate)
+                                rejections.append(
+                                    {
+                                        "reason": "duplicate_question_across_qa_profiles",
+                                        "qa_id": str(pair.get("qa_id") or pair.get("id") or "").strip(),
+                                        "question": str(pair.get("question") or "").strip(),
+                                        "salvaged_from_loop": True,
+                                    }
+                                )
+                                continue
+                            accepted_question_keys.add(key)
+                            accepted = dict(pair)
+                            accepted["qa_id"] = f"{case_key(case)}__generated_qa_{len(accepted_pairs) + 1:04d}"
+                            metadata = (
+                                dict(accepted.get("metadata"))
+                                if isinstance(accepted.get("metadata"), Mapping)
+                                else {}
+                            )
+                            metadata["qa_profile"] = profile
+                            metadata["qa_profile_label"] = profile_label
+                            metadata["salvaged_from_loop"] = True
+                            accepted["metadata"] = metadata
+                            accepted_pairs.append(accepted)
+                            salvage_accepted += 1
+                            if profile != "primary" and recovered_by is None:
+                                recovered_by = profile
+                            if len(accepted_pairs) >= requested:
+                                break
+                    except Exception as salvage_exc:  # noqa: BLE001
+                        salvage_error = {
+                            "reason": "loop_salvage_failed",
+                            "type": type(salvage_exc).__name__,
+                            "message": str(salvage_exc),
+                        }
+            rejection: dict[str, Any] = {
+                "reason": "generator_exception",
+                "type": type(exc).__name__,
+                "message": str(exc),
+            }
+            if loop_diagnostic:
+                rejection["loop_diagnostic"] = loop_diagnostic
+            if salvaged_pairs:
+                rejection["salvaged_pair_count"] = len(salvaged_pairs)
+                rejection["salvaged_accepted_count"] = salvage_accepted
+            attempt_record.update(
+                {
+                    "status": "partial_loop_recovered" if salvage_accepted else "error",
+                    "pair_count": len(salvaged_pairs),
+                    "rejections": [
+                        rejection,
+                        *salvage_normalize_rejections,
+                        *([salvage_error] if salvage_error else []),
+                    ],
+                    "elapsed_seconds": round(time.time() - attempt_started, 3),
+                }
+            )
+            if loop_diagnostic:
+                attempt_record["loop_diagnostic"] = loop_diagnostic
+            if salvaged_pairs:
+                attempt_record["salvaged_pair_count"] = len(salvaged_pairs)
+                attempt_record["salvaged_accepted_count"] = salvage_accepted
+            attempts.append(attempt_record)
+            rejections.append(rejection)
+            rejections.extend(salvage_normalize_rejections)
+            if salvage_error:
+                rejections.append(salvage_error)
+            summary_record.update(
+                {
+                    "status": "partial_loop_recovered" if salvage_accepted else "error",
+                    "accepted_count": salvage_accepted,
+                    "rejected_count": (
+                        1
+                        + len(salvage_normalize_rejections)
+                        + len(salvage_rejected_pairs)
+                        + max(0, len(salvaged_pairs) - salvage_accepted - len(salvage_rejected_pairs))
+                    ),
+                    "raw_pair_count": len(salvaged_pairs),
+                    "total_accepted": len(accepted_pairs),
+                    "elapsed_seconds": round(time.time() - attempt_started, 3),
+                    "error_type": type(exc).__name__,
+                }
+            )
+            if salvaged_pairs:
+                summary_record["salvaged_pair_count"] = len(salvaged_pairs)
+                summary_record["salvaged_accepted_count"] = salvage_accepted
+        if "elapsed_seconds" not in summary_record:
+            summary_record["elapsed_seconds"] = round(time.time() - attempt_started, 3)
+        summary_record["total_accepted"] = len(accepted_pairs)
+        attempt_summary.append(summary_record)
+        if hasattr(api, "_qwen_progress_update"):
+            status = "ok" if len(accepted_pairs) >= requested else "generating"
+            accumulator = _instruction_qa_accumulator_payload(
+                case=case,
+                requested=requested,
+                accepted_pairs=accepted_pairs,
+                rejected_pairs=rejected_pairs,
+                attempt_summary=attempt_summary,
+                status=status,
+            )
             api._qwen_progress_update(
                 phase="generate",
                 phase_label="Generating QA",
@@ -2108,56 +4086,66 @@ def generate_instruction_qa_pairs(
                 message="Generating instruction QA rows",
                 step_id="instruction_qa",
                 step_label="Generate instruction QA",
-                step_detail=f"Creating up to {requested} generated QA rows",
-                token_preview="",
-                live_output_reset=True,
+                step_detail=_instruction_qa_progress_detail(accumulator),
+                instruction_qa_accumulator=accumulator,
             )
-        if hasattr(api, "_qwen_progress_begin_output_section"):
-            api._qwen_progress_begin_output_section("Generated QA output")
-        with Image.open(image_path) as source_image:
-            pil_img = source_image.convert("RGB")
-        raw, _width, _height = api._run_qwen_inference(
-            prompt,
-            pil_img,
-            max_new_tokens=max_new_tokens,
-            system_prompt_override=system_prompt,
-            model_id_override=getattr(args, "model_id", None),
-            decode_override={
-                "do_sample": False,
-                "repetition_penalty": 1.08,
-                "repetition_context_size": 128,
-                "no_repeat_ngram_size": 8,
-            },
-            chat_template_kwargs={"enable_thinking": False},
+    final_status = "ok" if len(accepted_pairs) >= requested else ("underfilled" if accepted_pairs else "empty")
+    if not accepted_pairs and any(str(attempt.get("status") or "") == "error" for attempt in attempts):
+        final_status = "error"
+    accumulator = _instruction_qa_accumulator_payload(
+        case=case,
+        requested=requested,
+        accepted_pairs=accepted_pairs,
+        rejected_pairs=rejected_pairs,
+        attempt_summary=attempt_summary,
+        status=final_status,
+    )
+    if hasattr(api, "_qwen_progress_update"):
+        api._qwen_progress_update(
+            phase="generate",
+            phase_label="Generating QA",
+            progress=0.92,
+            message="Generated instruction QA rows"
+            if accepted_pairs
+            else "No accepted generated instruction QA rows",
+            step_id="instruction_qa",
+            step_label="Generate instruction QA",
+            step_detail=_instruction_qa_progress_detail(accumulator),
+            instruction_qa_accumulator=accumulator,
         )
-        parsed = _extract_json_payload(raw)
-        pairs, rejections = _normalize_generated_qa_pairs(
-            parsed,
-            requested=requested,
-            case=case,
-            answer_format=answer_format,
-        )
-        status = "ok" if pairs else "empty"
-        return {
-            "status": status,
-            "requested": requested,
-            "pair_count": len(pairs),
-            "pairs": pairs,
-            "rejections": rejections,
-            "raw_output": raw,
-            "max_new_tokens": max_new_tokens,
-            "elapsed_seconds": round(time.time() - started, 3),
-        }
-    except BaseException as exc:  # noqa: BLE001
-        return {
-            "status": "error",
-            "requested": requested,
-            "pair_count": 0,
-            "pairs": [],
-            "rejections": [{"reason": "generator_exception", "type": type(exc).__name__, "message": str(exc)}],
-            "max_new_tokens": max_new_tokens,
-            "elapsed_seconds": round(time.time() - started, 3),
-        }
+    verifier_rejected = [
+        pair
+        for pair in rejected_pairs
+        if isinstance(pair.get("metadata"), Mapping)
+        and isinstance(pair.get("metadata", {}).get("qa_verifier"), Mapping)
+    ]
+    return {
+        "status": final_status,
+        "requested": requested,
+        "target_pair_count": requested,
+        "pair_count": len(accepted_pairs),
+        "accepted_pair_count": len(accepted_pairs),
+        "rejected_pair_count": len(rejected_pairs),
+        "pairs": accepted_pairs,
+        "rejected_pairs": rejected_pairs,
+        "rejections": rejections,
+        "max_new_tokens": max_new_tokens,
+        "max_topup_attempts": max_topup_attempts,
+        "restrict_speculative_language": restrict_speculative_language,
+        "elapsed_seconds": round(time.time() - started, 3),
+        "attempts": attempts,
+        "attempt_summary": attempt_summary,
+        "accumulator": accumulator,
+        "underfilled": bool(requested > 0 and len(accepted_pairs) < requested),
+        "continuing_with_pair_count": len(accepted_pairs)
+        if requested > 0 and len(accepted_pairs) < requested
+        else None,
+        "verifier": {
+            "validated_count": len(accepted_pairs),
+            "rejected_count": len(verifier_rejected),
+        },
+        "recovered_by": recovered_by,
+    }
 
 
 def run_worker(case_path: Path, output_dir: Path, dataset_root: Path, args: argparse.Namespace) -> int:
@@ -2189,9 +4177,10 @@ def run_worker(case_path: Path, output_dir: Path, dataset_root: Path, args: argp
     progress_thread: threading.Thread | None = None
     api_module: Any = None
     try:
-        import localinferenceapi as api
+        import localinferenceapi as local_api
         from models.schemas import QwenCaptionRequest
 
+        api = caption_api_for_args(local_api, args)
         api_module = api
         progress_thread = start_worker_progress_mirror(
             api=api,
@@ -2208,7 +4197,7 @@ def run_worker(case_path: Path, output_dir: Path, dataset_root: Path, args: argp
             response = api.qwen_caption(request)
             response_data = response.dict() if hasattr(response, "dict") else dict(response)
             caption_text = str(response_data.get("caption") or "").strip()
-            requested_subcaptions = int(getattr(args, "subcaptions_per_image", 0) or 0)
+            requested_subcaptions = _instruction_qa_requested_count(args)
             if bool(getattr(args, "instruction_dataset", False)) and requested_subcaptions > 0:
                 instruction_qa = generate_instruction_qa_pairs(
                     api,
@@ -2219,11 +4208,44 @@ def run_worker(case_path: Path, output_dir: Path, dataset_root: Path, args: argp
                 )
                 result["instruction_qa"] = instruction_qa
                 response_data["generated_qa_pairs"] = list(instruction_qa.get("pairs") or [])
+                response_data["generated_qa_rejected_pairs"] = list(
+                    instruction_qa.get("rejected_pairs") or []
+                )
                 response_data["generated_qa_pair_count"] = int(instruction_qa.get("pair_count") or 0)
+                response_data["generated_qa_rejected_pair_count"] = int(
+                    instruction_qa.get("rejected_pair_count") or 0
+                )
+                response_data["generated_qa_target_pair_count"] = int(
+                    instruction_qa.get("target_pair_count")
+                    or instruction_qa.get("requested")
+                    or requested_subcaptions
+                    or 0
+                )
+                response_data["generated_qa_attempt_summary"] = list(
+                    instruction_qa.get("attempt_summary") or []
+                )
+                if isinstance(instruction_qa.get("accumulator"), Mapping):
+                    response_data["generated_qa_accumulator"] = dict(instruction_qa["accumulator"])
+                if bool(instruction_qa.get("underfilled")) and int(instruction_qa.get("pair_count") or 0) > 0:
+                    warning = {
+                        "type": "InstructionQaUnderfilledWarning",
+                        "message": (
+                            "generated QA was requested, but fewer accepted QA pairs "
+                            f"were produced than requested; accepted={int(instruction_qa.get('pair_count') or 0)} "
+                            f"target={int(response_data.get('generated_qa_target_pair_count') or 0)}"
+                        ),
+                        "status": instruction_qa.get("status"),
+                        "accepted_pair_count": int(instruction_qa.get("pair_count") or 0),
+                        "target_pair_count": int(response_data.get("generated_qa_target_pair_count") or 0),
+                        "attempt_summary": list(instruction_qa.get("attempt_summary") or []),
+                    }
+                    result["instruction_qa_warning"] = warning
+                    response_data["generated_qa_warning"] = warning
             result["response"] = response_data
             result["caption_quality"] = summarize_caption(
                 caption_text,
                 {str(k): int(v) for k, v in response_data.get("used_counts", {}).items()},
+                _case_glossary_map(case, args),
             )
             if (
                 bool(getattr(args, "instruction_dataset", False))
@@ -2235,15 +4257,24 @@ def run_worker(case_path: Path, output_dir: Path, dataset_root: Path, args: argp
                     if isinstance(result.get("instruction_qa"), Mapping)
                     else "missing"
                 )
-                result["status"] = "instruction_qa_failed"
-                result["exception"] = {
-                    "type": "InstructionQaGenerationError",
+                warning = {
+                    "type": "InstructionQaGenerationWarning",
                     "message": (
                         "generated QA was requested, but no valid generated QA pairs "
                         f"were produced; status={instruction_status}"
                     ),
+                    "status": instruction_status,
+                    "qa_only_required": _generated_qa_required_for_worker_success(args),
                 }
-                return 1
+                if _generated_qa_required_for_worker_success(args):
+                    result["status"] = "instruction_qa_failed"
+                    result["exception"] = {
+                        "type": "InstructionQaGenerationError",
+                        "message": warning["message"],
+                    }
+                    return 1
+                result["instruction_qa_warning"] = warning
+                response_data["generated_qa_warning"] = warning
             result["status"] = "ok"
     except BaseException as exc:  # noqa: BLE001
         result["status"] = "exception"
@@ -2286,10 +4317,10 @@ def run_worker(case_path: Path, output_dir: Path, dataset_root: Path, args: argp
     return 0 if result["status"] in {"ok", "preview_only"} else 1
 
 
-def _run_parent_locked(args: argparse.Namespace, runner_lock: ArtifactRunnerLock) -> int:
-    dataset_root = args.dataset_root.resolve()
-    output_root = args.output_dir.resolve()
-    output_root.mkdir(parents=True, exist_ok=True)
+def _select_parent_cases(
+    args: argparse.Namespace,
+    dataset_root: Path,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if args.cases_json:
         loaded_cases = json.loads(Path(args.cases_json).read_text())
         if not isinstance(loaded_cases, list):
@@ -2327,8 +4358,353 @@ def _run_parent_locked(args: argparse.Namespace, runner_lock: ArtifactRunnerLock
         ]
     if args.limit:
         cases = cases[: args.limit]
+    return cases, sample_meta
+
+
+def _worker_attempt_command(
+    args: argparse.Namespace,
+    *,
+    dataset_root: Path,
+    attempt_case_path: Path,
+    attempt_dir: Path,
+    attempt_profile: Mapping[str, Any],
+) -> list[str]:
+    cmd = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--worker",
+        "--case-json",
+        str(attempt_case_path),
+        "--output-dir",
+        str(attempt_dir),
+        "--dataset-root",
+        str(dataset_root),
+        "--caption-provider",
+        str(getattr(args, "caption_provider", CAPTION_PROVIDER_LOCAL) or CAPTION_PROVIDER_LOCAL),
+        "--openai-model",
+        str(getattr(args, "openai_model", DEFAULT_OPENAI_MODEL) or DEFAULT_OPENAI_MODEL),
+        "--openai-image-detail",
+        str(getattr(args, "openai_image_detail", DEFAULT_OPENAI_IMAGE_DETAIL) or DEFAULT_OPENAI_IMAGE_DETAIL),
+        "--openai-reasoning-effort",
+        str(getattr(args, "openai_reasoning_effort", DEFAULT_OPENAI_REASONING_EFFORT) or DEFAULT_OPENAI_REASONING_EFFORT),
+        "--openai-api-key-file",
+        str(getattr(args, "openai_api_key_file", DEFAULT_OPENAI_API_KEY_FILE) or DEFAULT_OPENAI_API_KEY_FILE),
+        "--openai-service-tier",
+        str(getattr(args, "openai_service_tier", DEFAULT_OPENAI_SERVICE_TIER) or DEFAULT_OPENAI_SERVICE_TIER),
+        "--openai-timeout",
+        str(getattr(args, "openai_timeout", DEFAULT_OPENAI_TIMEOUT_SECONDS) or DEFAULT_OPENAI_TIMEOUT_SECONDS),
+        "--openai-max-retries",
+        str(getattr(args, "openai_max_retries", DEFAULT_OPENAI_MAX_RETRIES) or DEFAULT_OPENAI_MAX_RETRIES),
+        "--model-id",
+        args.model_id,
+        "--refinement-model-id",
+        args.refinement_model_id,
+        "--fallback-model-id",
+        args.fallback_model_id,
+        "--loop-recovery",
+        args.loop_recovery,
+        "--windowed-full-image-strategy",
+        str(getattr(args, "windowed_full_image_strategy", "visual") or "visual"),
+        "--max-boxes",
+        str(args.max_boxes),
+        "--final-sentences",
+        str(args.final_sentences),
+        "--window-size",
+        str(args.window_size),
+        "--window-overlap",
+        str(args.window_overlap),
+        "--mlx-max-image-side",
+        str(attempt_profile["mlx_max_image_side"]),
+        "--temperature",
+        str(args.temperature),
+        "--top-p",
+        str(args.top_p),
+        "--top-k",
+        str(args.top_k),
+        "--prompt",
+        args.prompt,
+    ]
+    if args.request_json:
+        cmd.extend(["--request-json", str(args.request_json)])
+    artifact_log_bytes = normalize_artifact_log_bytes(
+        getattr(args, "max_artifact_log_bytes", DEFAULT_ARTIFACT_LOG_BYTES)
+    )
+    cmd.extend(["--max-artifact-log-bytes", str(artifact_log_bytes)])
+    if getattr(args, "instruction_dataset", False):
+        cmd.append("--instruction-dataset")
+    if int(getattr(args, "subcaptions_per_image", 0) or 0) > 0:
+        cmd.extend(["--subcaptions-per-image", str(args.subcaptions_per_image)])
+    if not bool(getattr(args, "include_caption0_in_training", True)):
+        cmd.append("--no-include-caption0-in-training")
+    if not bool(getattr(args, "include_generated_qa_in_training", True)):
+        cmd.append("--no-include-generated-qa-in-training")
+    if bool(getattr(args, "include_deterministic_metadata_qa", False)):
+        cmd.append("--include-deterministic-metadata-qa")
+    for question in _instruction_qa_imposed_questions(args):
+        cmd.extend(["--instruction-qa-imposed-question", question])
+    if getattr(args, "instruction_max_new_tokens", None) is not None:
+        cmd.extend(["--instruction-max-new-tokens", str(args.instruction_max_new_tokens)])
+    cmd.extend(
+        [
+            "--instruction-qa-max-topup-attempts",
+            str(_instruction_qa_max_topup_attempts(args)),
+        ]
+    )
+    if _instruction_qa_restrict_speculative_language(args):
+        cmd.append("--restrict-speculative-qa-language")
+    cmd.extend(["--qa-mix", str(getattr(args, "qa_mix", "balanced") or "balanced")])
+    cmd.extend(["--answer-format", str(getattr(args, "answer_format", "natural") or "natural")])
+    if not bool(getattr(args, "include_source_annotations_in_generator_context", True)):
+        cmd.append("--no-source-annotations-in-generator-context")
+    if not bool(getattr(args, "strict_grounding", True)):
+        cmd.append("--relaxed-instruction-grounding")
+    if args.max_new_tokens is not None:
+        cmd.extend(["--max-new-tokens", str(args.max_new_tokens)])
+    if args.preview_only:
+        cmd.append("--preview-only")
+    if args.use_sampling:
+        cmd.append("--use-sampling")
+    return cmd
+
+
+def _execute_worker_attempt(
+    args: argparse.Namespace,
+    *,
+    dataset_root: Path,
+    case: Mapping[str, Any],
+    case_index: int,
+    key: str,
+    image_name: str,
+    attempt: int,
+    total_attempts: int,
+    attempt_profile: Mapping[str, Any],
+    attempt_case_path: Path,
+    attempt_dir: Path,
+    heartbeat_callback: Callable[[Mapping[str, Any]], None] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    cmd = _worker_attempt_command(
+        args,
+        dataset_root=dataset_root,
+        attempt_case_path=attempt_case_path,
+        attempt_dir=attempt_dir,
+        attempt_profile=attempt_profile,
+    )
+    artifact_log_bytes = normalize_artifact_log_bytes(
+        getattr(args, "max_artifact_log_bytes", DEFAULT_ARTIFACT_LOG_BYTES)
+    )
+    started = time.time()
+    heartbeat_interval = max(0.0, float(getattr(args, "heartbeat_interval", 30.0) or 0.0))
+    heartbeat_stop = threading.Event()
+    heartbeat_thread: threading.Thread | None = None
+    if heartbeat_callback is not None and heartbeat_interval > 0:
+        worker_progress_mtime = 0.0
+
+        def _beat() -> None:
+            nonlocal worker_progress_mtime
+            while not heartbeat_stop.wait(heartbeat_interval):
+                worker_progress_mtime, worker_progress = read_worker_progress(
+                    attempt_dir,
+                    last_mtime=worker_progress_mtime,
+                )
+                fields: dict[str, Any] = {
+                    "case_id": key,
+                    "case": case.get("name"),
+                    "image_name": image_name,
+                    "stem": case.get("stem"),
+                    "case_index": case_index,
+                    "attempt": attempt,
+                    "total_attempts": total_attempts,
+                    "attempt_started_epoch": started,
+                    "attempt_timeout_seconds": float(args.timeout),
+                    "artifact_dir": str(attempt_dir),
+                    "attempt_profile": dict(attempt_profile),
+                    "attempt_mlx_max_image_side": attempt_profile["mlx_max_image_side"],
+                }
+                if worker_progress:
+                    fields.update(
+                        {
+                            "worker_progress": worker_progress,
+                            "worker_progress_seq": worker_progress.get("seq"),
+                            "worker_phase": worker_progress.get("phase"),
+                            "worker_step_id": worker_progress.get("step_id"),
+                            "worker_step_label": worker_progress.get("step_label"),
+                            "worker_message": worker_progress.get("message"),
+                            "worker_generated_tokens": worker_progress.get("generated_tokens"),
+                            "worker_max_new_tokens": worker_progress.get("max_new_tokens"),
+                        }
+                    )
+                heartbeat_callback(fields)
+
+        heartbeat_thread = threading.Thread(
+            target=_beat,
+            name=f"qwen-caption-parallel-heartbeat-{case_index}-{attempt}",
+            daemon=True,
+        )
+        heartbeat_thread.start()
+    timeout = False
+    try:
+        completed = subprocess.run(
+            cmd,
+            cwd=str(REPO_ROOT),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=args.timeout,
+            check=False,
+        )
+        returncode: Any = completed.returncode
+        stdout = completed.stdout
+        stderr = completed.stderr
+    except subprocess.TimeoutExpired as exc:
+        timeout = True
+        returncode = "timeout"
+        stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or b"").decode("utf-8", errors="replace")
+        stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or b"").decode("utf-8", errors="replace")
+    finally:
+        heartbeat_stop.set()
+        if heartbeat_thread is not None:
+            heartbeat_thread.join(timeout=1.0)
+    stdout_meta = write_text_artifact(
+        attempt_dir / "stdout.txt",
+        stdout or "",
+        max_bytes=artifact_log_bytes,
+        source="child_stdout",
+    )
+    stderr_meta = write_text_artifact(
+        attempt_dir / "stderr.txt",
+        stderr or "",
+        max_bytes=artifact_log_bytes,
+        source="child_stderr",
+    )
+    result_path = attempt_dir / "result.json"
+    result = json.loads(result_path.read_text()) if result_path.exists() else {}
+    response_data = result.get("response") or {}
+    preview_data = result.get("preview") or {}
+    worker_progress = _read_json_dict(attempt_dir / WORKER_PROGRESS_JSON)
+    preview_meta = preview_data.get("meta") if isinstance(preview_data, dict) else {}
+    preview_prompt_budget = (
+        preview_meta.get("prompt_budget")
+        if isinstance(preview_meta, dict)
+        else None
+    )
+    quality_failures = caption_quality_failures(result.get("caption_quality"))
+    row_status = "timeout" if timeout else (result.get("status") or "missing_result")
+    failure_kind = attempt_failure_kind(
+        return_code=returncode,
+        row_status=str(row_status),
+        timeout=timeout,
+    )
+    signal_fields = return_signal_fields(returncode)
+    qwen_caption_io = read_qwen_caption_io_summary(attempt_dir)
+    row = {
+        "case_id": key,
+        "case": case["name"],
+        "image_name": image_name,
+        "stem": case["stem"],
+        "caption_mode": case["caption_mode"],
+        "label_count": case["label_count"],
+        "class_counts": case["class_counts"],
+        "attempt": attempt,
+        "attempt_profile": dict(attempt_profile),
+        "exit_code": returncode,
+        **signal_fields,
+        "elapsed_seconds": round(time.time() - started, 3),
+        "status": row_status,
+        "attempt_failure_kind": failure_kind,
+        "used_boxes": response_data.get("used_boxes", preview_data.get("used_boxes")),
+        "truncated": response_data.get("truncated", preview_data.get("truncated")),
+        "recovery_events": response_data.get("recovery_events", []),
+        "preview_full_text_chars": len(str(preview_data.get("full_text") or "")),
+        "preview_prompt_budget": preview_prompt_budget,
+        "caption_quality": result.get("caption_quality"),
+        "generated_qa_pair_count": int(
+            ((result.get("instruction_qa") or {}) if isinstance(result.get("instruction_qa"), Mapping) else {}).get("pair_count")
+            or len(response_data.get("generated_qa_pairs") or [])
+            or 0
+        ),
+        "generated_qa_target_pair_count": int(
+            response_data.get("generated_qa_target_pair_count")
+            or ((result.get("instruction_qa") or {}) if isinstance(result.get("instruction_qa"), Mapping) else {}).get("target_pair_count")
+            or ((result.get("instruction_qa") or {}) if isinstance(result.get("instruction_qa"), Mapping) else {}).get("requested")
+            or 0
+        ),
+        "generated_qa_rejected_pair_count": int(
+            response_data.get("generated_qa_rejected_pair_count")
+            or ((result.get("instruction_qa") or {}) if isinstance(result.get("instruction_qa"), Mapping) else {}).get("rejected_pair_count")
+            or len(response_data.get("generated_qa_rejected_pairs") or [])
+            or 0
+        ),
+        "instruction_qa_status": (
+            ((result.get("instruction_qa") or {}) if isinstance(result.get("instruction_qa"), Mapping) else {}).get("status")
+        ),
+        "generated_qa_warning": (
+            response_data.get("generated_qa_warning")
+            if isinstance(response_data.get("generated_qa_warning"), Mapping)
+            else result.get("instruction_qa_warning")
+            if isinstance(result.get("instruction_qa_warning"), Mapping)
+            else None
+        ),
+        "quality_failures": quality_failures,
+        "exception": result.get("exception"),
+        "qwen_caption_io": qwen_caption_io,
+        "worker_progress": worker_progress,
+        "artifact_dir": str(attempt_dir),
+        "artifact_limits": {
+            "max_artifact_log_bytes": artifact_log_bytes,
+            "stdout": stdout_meta,
+            "stderr": stderr_meta,
+            "worker": result.get("artifact_limits") or {},
+        },
+    }
+    succeeded = row_succeeded(
+        row,
+        ignore_quality_failures=args.continue_on_quality_failures,
+    )
+    if not succeeded and failure_kind == "none":
+        failure_kind = "quality_or_policy_failure"
+        row["attempt_failure_kind"] = failure_kind
+    row["final_status"] = "ok" if succeeded else "failed_attempt"
+    return row, result if isinstance(result, dict) else {}, response_data if isinstance(response_data, dict) else {}
+
+
+def _caption_record_from_response(
+    *,
+    key: str,
+    image_name: str,
+    case: Mapping[str, Any],
+    response_data: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    caption = str(response_data.get("caption") or "").strip()
+    if not caption:
+        return None
+    caption_record: dict[str, Any] = {
+        "case_id": key,
+        "image_name": image_name,
+        "image_path": case.get("image_path"),
+        "caption": caption,
+        "used_counts": response_data.get("used_counts") or {},
+        "recovery_events": response_data.get("recovery_events") or [],
+        "generated_qa_pairs": response_data.get("generated_qa_pairs") or [],
+        "generated_qa_pair_count": int(response_data.get("generated_qa_pair_count") or 0),
+        "generated_qa_target_pair_count": int(response_data.get("generated_qa_target_pair_count") or 0),
+        "generated_qa_rejected_pair_count": int(response_data.get("generated_qa_rejected_pair_count") or 0),
+        "generated_qa_attempt_summary": response_data.get("generated_qa_attempt_summary") or [],
+    }
+    if isinstance(response_data.get("generated_qa_accumulator"), Mapping):
+        caption_record["generated_qa_accumulator"] = response_data["generated_qa_accumulator"]
+    if isinstance(response_data.get("generated_qa_warning"), Mapping):
+        caption_record["generated_qa_warning"] = response_data["generated_qa_warning"]
+    return caption_record
+
+
+def _run_parent_locked(args: argparse.Namespace, runner_lock: ArtifactRunnerLock) -> int:
+    dataset_root = args.dataset_root.resolve()
+    output_root = args.output_dir.resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    cases, sample_meta = _select_parent_cases(args, dataset_root)
     results_jsonl = output_root / "results.jsonl"
     captions_jsonl = output_root / "captions.jsonl"
+    parent_started = time.time()
     run_settings = run_settings_payload(args)
     existing_manifest_path = output_root / "manifest.json"
     if args.resume and existing_manifest_path.exists():
@@ -2394,6 +4770,12 @@ def _run_parent_locked(args: argparse.Namespace, runner_lock: ArtifactRunnerLock
                 "processed": len({case_key(row) for row in summary if isinstance(row, Mapping)}),
                 "total_cases": len(cases),
                 "failed_cases": failed_cases,
+                "generated_qa_warning_cases": sum(
+                    1 for row in summary if isinstance(row, Mapping) and row_generated_qa_warning(row)
+                ),
+                "generated_qa_error_cases": sum(
+                    1 for row in summary if isinstance(row, Mapping) and row_generated_qa_error(row)
+                ),
                 **fields,
             }
             write_heartbeat(output_root, payload)
@@ -2508,6 +4890,22 @@ def _run_parent_locked(args: argparse.Namespace, runner_lock: ArtifactRunnerLock
                 str(attempt_dir),
                 "--dataset-root",
                 str(dataset_root),
+                "--caption-provider",
+                str(getattr(args, "caption_provider", CAPTION_PROVIDER_LOCAL) or CAPTION_PROVIDER_LOCAL),
+                "--openai-model",
+                str(getattr(args, "openai_model", DEFAULT_OPENAI_MODEL) or DEFAULT_OPENAI_MODEL),
+                "--openai-image-detail",
+                str(getattr(args, "openai_image_detail", DEFAULT_OPENAI_IMAGE_DETAIL) or DEFAULT_OPENAI_IMAGE_DETAIL),
+                "--openai-reasoning-effort",
+                str(getattr(args, "openai_reasoning_effort", DEFAULT_OPENAI_REASONING_EFFORT) or DEFAULT_OPENAI_REASONING_EFFORT),
+                "--openai-api-key-file",
+                str(getattr(args, "openai_api_key_file", DEFAULT_OPENAI_API_KEY_FILE) or DEFAULT_OPENAI_API_KEY_FILE),
+                "--openai-service-tier",
+                str(getattr(args, "openai_service_tier", DEFAULT_OPENAI_SERVICE_TIER) or DEFAULT_OPENAI_SERVICE_TIER),
+                "--openai-timeout",
+                str(getattr(args, "openai_timeout", DEFAULT_OPENAI_TIMEOUT_SECONDS) or DEFAULT_OPENAI_TIMEOUT_SECONDS),
+                "--openai-max-retries",
+                str(getattr(args, "openai_max_retries", DEFAULT_OPENAI_MAX_RETRIES) or DEFAULT_OPENAI_MAX_RETRIES),
                 "--model-id",
                 args.model_id,
                 "--refinement-model-id",
@@ -2547,8 +4945,24 @@ def _run_parent_locked(args: argparse.Namespace, runner_lock: ArtifactRunnerLock
                 cmd.append("--instruction-dataset")
             if int(getattr(args, "subcaptions_per_image", 0) or 0) > 0:
                 cmd.extend(["--subcaptions-per-image", str(args.subcaptions_per_image)])
+            if not bool(getattr(args, "include_caption0_in_training", True)):
+                cmd.append("--no-include-caption0-in-training")
+            if not bool(getattr(args, "include_generated_qa_in_training", True)):
+                cmd.append("--no-include-generated-qa-in-training")
+            if bool(getattr(args, "include_deterministic_metadata_qa", False)):
+                cmd.append("--include-deterministic-metadata-qa")
+            for question in _instruction_qa_imposed_questions(args):
+                cmd.extend(["--instruction-qa-imposed-question", question])
             if getattr(args, "instruction_max_new_tokens", None) is not None:
                 cmd.extend(["--instruction-max-new-tokens", str(args.instruction_max_new_tokens)])
+            cmd.extend(
+                [
+                    "--instruction-qa-max-topup-attempts",
+                    str(_instruction_qa_max_topup_attempts(args)),
+                ]
+            )
+            if _instruction_qa_restrict_speculative_language(args):
+                cmd.append("--restrict-speculative-qa-language")
             cmd.extend(["--qa-mix", str(getattr(args, "qa_mix", "balanced") or "balanced")])
             cmd.extend(["--answer-format", str(getattr(args, "answer_format", "natural") or "natural")])
             if not bool(getattr(args, "include_source_annotations_in_generator_context", True)):
@@ -2704,8 +5118,27 @@ def _run_parent_locked(args: argparse.Namespace, runner_lock: ArtifactRunnerLock
                     or len(response_data.get("generated_qa_pairs") or [])
                     or 0
                 ),
+                "generated_qa_target_pair_count": int(
+                    response_data.get("generated_qa_target_pair_count")
+                    or ((result.get("instruction_qa") or {}) if isinstance(result.get("instruction_qa"), Mapping) else {}).get("target_pair_count")
+                    or ((result.get("instruction_qa") or {}) if isinstance(result.get("instruction_qa"), Mapping) else {}).get("requested")
+                    or 0
+                ),
+                "generated_qa_rejected_pair_count": int(
+                    response_data.get("generated_qa_rejected_pair_count")
+                    or ((result.get("instruction_qa") or {}) if isinstance(result.get("instruction_qa"), Mapping) else {}).get("rejected_pair_count")
+                    or len(response_data.get("generated_qa_rejected_pairs") or [])
+                    or 0
+                ),
                 "instruction_qa_status": (
                     ((result.get("instruction_qa") or {}) if isinstance(result.get("instruction_qa"), Mapping) else {}).get("status")
+                ),
+                "generated_qa_warning": (
+                    response_data.get("generated_qa_warning")
+                    if isinstance(response_data.get("generated_qa_warning"), Mapping)
+                    else result.get("instruction_qa_warning")
+                    if isinstance(result.get("instruction_qa_warning"), Mapping)
+                    else None
                 ),
                 "quality_failures": quality_failures,
                 "exception": result.get("exception"),
@@ -2744,12 +5177,31 @@ def _run_parent_locked(args: argparse.Namespace, runner_lock: ArtifactRunnerLock
                     caption_record = {
                         "case_id": key,
                         "image_name": image_name,
-	                        "image_path": case.get("image_path"),
+                        "image_path": case.get("image_path"),
                         "caption": caption,
                         "used_counts": response_data.get("used_counts") or {},
                         "recovery_events": response_data.get("recovery_events") or [],
                         "generated_qa_pairs": response_data.get("generated_qa_pairs") or [],
+                        "generated_qa_pair_count": int(
+                            response_data.get("generated_qa_pair_count") or 0
+                        ),
+                        "generated_qa_target_pair_count": int(
+                            response_data.get("generated_qa_target_pair_count") or 0
+                        ),
+                        "generated_qa_rejected_pair_count": int(
+                            response_data.get("generated_qa_rejected_pair_count") or 0
+                        ),
+                        "generated_qa_attempt_summary": response_data.get(
+                            "generated_qa_attempt_summary"
+                        )
+                        or [],
                     }
+                    if isinstance(response_data.get("generated_qa_accumulator"), Mapping):
+                        caption_record["generated_qa_accumulator"] = response_data[
+                            "generated_qa_accumulator"
+                        ]
+                    if isinstance(response_data.get("generated_qa_warning"), Mapping):
+                        caption_record["generated_qa_warning"] = response_data["generated_qa_warning"]
                     append_jsonl(captions_jsonl, caption_record)
             append_jsonl(results_jsonl, row)
             print(json.dumps(row, sort_keys=True), flush=True)
@@ -2777,9 +5229,10 @@ def _run_parent_locked(args: argparse.Namespace, runner_lock: ArtifactRunnerLock
         if final_row is None:
             continue
         if final_row.get("final_status") != "ok":
-            allow_parent_deterministic_recovery = not (
-                bool(getattr(args, "instruction_dataset", False))
-                and int(getattr(args, "subcaptions_per_image", 0) or 0) > 0
+            generated_qa_is_required = _generated_qa_blocks_parent_deterministic_recovery(args)
+            recovery_eligible, recovery_eligibility_reason = parent_deterministic_recovery_eligibility(final_row)
+            allow_parent_deterministic_recovery = bool(
+                not generated_qa_is_required and recovery_eligible
             )
             deterministic_recovery = (
                 parent_deterministic_recovery_caption(case)
@@ -2790,12 +5243,21 @@ def _run_parent_locked(args: argparse.Namespace, runner_lock: ArtifactRunnerLock
                 final_row = dict(final_row)
                 final_row["final_status"] = "failed"
                 final_row["terminal_failure"] = True
-                if not allow_parent_deterministic_recovery:
+                if generated_qa_is_required:
                     final_row["parent_deterministic_recovery_skipped"] = {
                         "reason": "generated_qa_required",
                         "detail": (
                             "Parent deterministic count/layout recovery cannot satisfy "
                             "a generated-QA instruction dataset case."
+                        ),
+                    }
+                elif not recovery_eligible:
+                    final_row["parent_deterministic_recovery_skipped"] = {
+                        "reason": recovery_eligibility_reason,
+                        "detail": (
+                            "Parent deterministic count/layout recovery is only for "
+                            "model/runtime failures; request validation and code/config "
+                            "errors must remain visible."
                         ),
                     }
                 append_jsonl(results_jsonl, final_row)
@@ -2909,10 +5371,621 @@ def _run_parent_locked(args: argparse.Namespace, runner_lock: ArtifactRunnerLock
         "processed": len({case_key(row) for row in summary if isinstance(row, Mapping)}),
         "total_cases": len(cases),
         "failed_cases": failed_cases,
+        "generated_qa_warning_cases": sum(
+            1 for row in summary if isinstance(row, Mapping) and row_generated_qa_warning(row)
+        ),
+        "generated_qa_error_cases": sum(
+            1 for row in summary if isinstance(row, Mapping) and row_generated_qa_error(row)
+        ),
         "exit_code": exit_code,
     }
     if restart_ack is not None:
         final_heartbeat["restart_request"] = restart_ack
+    write_summary(
+        output_root,
+        summary,
+        row_limit=summary_row_limit,
+        extra={
+            "status": final_heartbeat["status"],
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "duration_seconds": round(time.time() - parent_started, 3),
+            "exit_code": exit_code,
+        },
+    )
+    write_heartbeat(output_root, final_heartbeat)
+    lock_fields = dict(final_heartbeat)
+    lock_fields.pop("phase", None)
+    runner_lock.refresh("finished", **lock_fields)
+    return exit_code
+
+
+def _run_parent_parallel_locked(args: argparse.Namespace, runner_lock: ArtifactRunnerLock) -> int:
+    dataset_root = args.dataset_root.resolve()
+    output_root = args.output_dir.resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    cases, sample_meta = _select_parent_cases(args, dataset_root)
+    parallel_cases = max(1, min(int(getattr(args, "parallel_cases", 1) or 1), len(cases)))
+    results_jsonl = output_root / "results.jsonl"
+    captions_jsonl = output_root / "captions.jsonl"
+    parent_started = time.time()
+    run_settings = run_settings_payload(args)
+    existing_manifest_path = output_root / "manifest.json"
+    if args.resume and existing_manifest_path.exists():
+        existing_manifest = _read_json_dict(existing_manifest_path)
+        settings_status, settings_detail = manifest_run_settings_status(existing_manifest, run_settings)
+        if settings_status == "mismatch":
+            raise SystemExit(f"resume_settings_mismatch:{settings_detail}")
+    if not args.resume:
+        for path in (results_jsonl, captions_jsonl):
+            if path.exists():
+                path.unlink()
+    try:
+        latest_rows = load_latest_rows(results_jsonl)
+    except ResultsJsonlError as exc:
+        raise SystemExit(f"resume_results_jsonl_invalid:{exc}") from exc
+    try:
+        validate_captions_jsonl(captions_jsonl)
+    except CaptionsJsonlError as exc:
+        raise SystemExit(f"resume_captions_jsonl_invalid:{exc}") from exc
+    manifest = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "dataset_root": str(dataset_root),
+        "model_id": args.model_id,
+        "runner_capabilities": list(RUNNER_CAPABILITIES),
+        "preview_only": args.preview_only,
+        "all_images": args.all_images,
+        "cases_json": str(args.cases_json or ""),
+        "request_json": str(args.request_json or ""),
+        "resume": args.resume,
+        "attempts": args.attempts,
+        "parallel_cases": parallel_cases,
+        "sample_size": args.sample_size,
+        "sample_seed": args.sample_seed,
+        "sample_selection": sample_meta,
+        "max_boxes": args.max_boxes,
+        "max_new_tokens": args.max_new_tokens,
+        "summary_row_limit": getattr(args, "summary_row_limit", DEFAULT_SUMMARY_ROW_LIMIT),
+        "retry_image_side_scale": getattr(args, "retry_image_side_scale", DEFAULT_RETRY_IMAGE_SIDE_SCALE),
+        "min_retry_image_side": getattr(args, "min_retry_image_side", DEFAULT_MIN_RETRY_IMAGE_SIDE),
+        "run_settings": run_settings,
+        "cases": cases,
+    }
+    atomic_write_json(output_root / "manifest.json", manifest)
+    summary: list[dict[str, Any]] = list(latest_rows.values()) if args.resume else []
+    summary_by_key: dict[str, dict[str, Any]] = {
+        key: row for key, row in latest_rows.items()
+    } if args.resume else {}
+    summary_row_limit = int(getattr(args, "summary_row_limit", DEFAULT_SUMMARY_ROW_LIMIT))
+    if args.resume:
+        write_summary(output_root, summary, row_limit=summary_row_limit)
+
+    heartbeat_seq = 0
+    exit_code = 0
+    restart_ack: dict[str, Any] | None = None
+    state_lock = threading.RLock()
+    heartbeat_lock = threading.Lock()
+    print_lock = threading.Lock()
+    active_cases: dict[str, dict[str, Any]] = {}
+    state = {"failed_cases": 0, "submitted_cases": 0}
+
+    def _summary_processed_count() -> int:
+        return len({case_key(row) for row in summary if isinstance(row, Mapping)})
+
+    def emit_heartbeat(phase: str, **fields: Any) -> dict[str, Any]:
+        nonlocal heartbeat_seq
+        with heartbeat_lock:
+            with state_lock:
+                active_snapshot = list(active_cases.values())
+                processed = _summary_processed_count()
+                failed_cases = int(state["failed_cases"])
+                submitted_cases = int(state["submitted_cases"])
+            heartbeat_seq += 1
+            payload = {
+                "seq": heartbeat_seq,
+                "status": "running",
+                "phase": phase,
+                "runner_capabilities": list(RUNNER_CAPABILITIES),
+                "parallel_cases": parallel_cases,
+                "submitted_cases": submitted_cases,
+                "in_flight_cases": len(active_snapshot),
+                "active_cases": active_snapshot[: min(20, parallel_cases)],
+                "processed": processed,
+                "total_cases": len(cases),
+                "failed_cases": failed_cases,
+                "generated_qa_warning_cases": sum(
+                    1 for row in summary if isinstance(row, Mapping) and row_generated_qa_warning(row)
+                ),
+                "generated_qa_error_cases": sum(
+                    1 for row in summary if isinstance(row, Mapping) and row_generated_qa_error(row)
+                ),
+                **fields,
+            }
+            write_heartbeat(output_root, payload)
+            lock_fields = dict(payload)
+            lock_fields.pop("phase", None)
+            runner_lock.refresh(phase, **lock_fields)
+            return payload
+
+    def _set_active(key: str, payload: Mapping[str, Any]) -> None:
+        with state_lock:
+            active_cases[key] = {
+                "case_id": key,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                **dict(payload),
+            }
+
+    def _clear_active(key: str) -> None:
+        with state_lock:
+            active_cases.pop(key, None)
+
+    def _append_result_row(row: Mapping[str, Any]) -> None:
+        with state_lock:
+            append_jsonl(results_jsonl, row)
+        with print_lock:
+            print(json.dumps(dict(row), sort_keys=True), flush=True)
+
+    def _append_caption_record(record: Mapping[str, Any]) -> None:
+        with state_lock:
+            append_jsonl(captions_jsonl, record)
+
+    def _record_final_row(row: Mapping[str, Any]) -> None:
+        with state_lock:
+            final_row = dict(row)
+            key = str(final_row.get("case_id") or "").strip()
+            if key:
+                summary_by_key[key] = final_row
+            summary.append(final_row)
+            write_summary(output_root, summary, row_limit=summary_row_limit)
+
+    def _process_case(index: int, case: dict[str, Any]) -> dict[str, Any] | None:
+        nonlocal exit_code
+        key = case_key(case)
+        image_name = Path(str(case.get("image_path") or case.get("name") or "")).name
+        _set_active(
+            key,
+            {
+                "case": case.get("name"),
+                "image_name": image_name,
+                "stem": case.get("stem"),
+                "case_index": index,
+                "phase": "case_start",
+            },
+        )
+        emit_heartbeat(
+            "case_start",
+            case_id=key,
+            case=case.get("name"),
+            image_name=image_name,
+            stem=case.get("stem"),
+            case_index=index,
+        )
+        try:
+            previous = latest_rows.get(key)
+            reprocess_recovery = bool(getattr(args, "resume_reprocess_recovery_events", False))
+            previous_has_recovery = bool(previous and row_has_recovery_events(previous))
+            if (
+                args.resume
+                and previous
+                and row_succeeded(previous, ignore_quality_failures=args.continue_on_quality_failures)
+                and not (reprocess_recovery and previous_has_recovery)
+            ):
+                if bool(getattr(args, "record_resume_skips", False)):
+                    skipped = dict(previous)
+                    skipped["resumed_skip"] = True
+                    skipped["final_status"] = "skipped_completed"
+                    _append_result_row(skipped)
+                    _record_final_row(skipped)
+                    emit_heartbeat(
+                        "case_skipped_completed",
+                        case_id=key,
+                        case=case.get("name"),
+                        image_name=image_name,
+                        stem=case.get("stem"),
+                        case_index=index,
+                        recorded=True,
+                    )
+                    return skipped
+                return None
+            if args.skip_existing_captions and caption_exists_for_case(dataset_root, case):
+                skipped = {
+                    "case_id": key,
+                    "case": case["name"],
+                    "image_name": image_name,
+                    "stem": case["stem"],
+                    "caption_mode": case["caption_mode"],
+                    "label_count": case["label_count"],
+                    "class_counts": case["class_counts"],
+                    "exit_code": 0,
+                    "status": "skipped_existing_caption",
+                    "final_status": "skipped_existing_caption",
+                    "quality_failures": [],
+                    "artifact_dir": None,
+                }
+                _append_result_row(skipped)
+                _record_final_row(skipped)
+                emit_heartbeat(
+                    "case_skipped_existing_caption",
+                    case_id=key,
+                    case=case.get("name"),
+                    image_name=image_name,
+                    stem=case.get("stem"),
+                    case_index=index,
+                )
+                return skipped
+            case_dir = output_root / case_dir_name(index, case)
+            case_dir.mkdir(parents=True, exist_ok=True)
+            case_payload_data = dict(case)
+            case_payload_data["case_id"] = key
+            (case_dir / "case.json").write_text(json.dumps(case_payload_data, indent=2, sort_keys=True))
+            final_row: dict[str, Any] | None = None
+            final_response_data: dict[str, Any] = {}
+            total_attempts = max(1, int(args.attempts))
+            previous_failure_kind: str | None = None
+            for attempt in range(1, total_attempts + 1):
+                attempt_profile = attempt_generation_profile(
+                    args,
+                    attempt=attempt,
+                    previous_failure_kind=previous_failure_kind,
+                )
+                attempt_dir = case_dir / f"attempt_{attempt:02d}"
+                attempt_dir.mkdir(parents=True, exist_ok=True)
+                attempt_case_path = attempt_dir / "case.json"
+                attempt_case_path.write_text(json.dumps(case_payload_data, indent=2, sort_keys=True))
+                started = time.time()
+                _set_active(
+                    key,
+                    {
+                        "case": case.get("name"),
+                        "image_name": image_name,
+                        "stem": case.get("stem"),
+                        "case_index": index,
+                        "phase": "attempt_running",
+                        "attempt": attempt,
+                        "total_attempts": total_attempts,
+                        "attempt_started_epoch": started,
+                        "artifact_dir": str(attempt_dir),
+                    },
+                )
+                emit_heartbeat(
+                    "attempt_running",
+                    case_id=key,
+                    case=case.get("name"),
+                    image_name=image_name,
+                    stem=case.get("stem"),
+                    case_index=index,
+                    attempt=attempt,
+                    total_attempts=total_attempts,
+                    attempt_started_epoch=started,
+                    attempt_timeout_seconds=float(args.timeout),
+                    artifact_dir=str(attempt_dir),
+                    attempt_profile=attempt_profile,
+                    attempt_mlx_max_image_side=attempt_profile["mlx_max_image_side"],
+                )
+
+                def _attempt_progress(fields: Mapping[str, Any]) -> None:
+                    _set_active(
+                        key,
+                        {
+                            "case": case.get("name"),
+                            "image_name": image_name,
+                            "stem": case.get("stem"),
+                            "case_index": index,
+                            "phase": "attempt_running",
+                            "attempt": attempt,
+                            "total_attempts": total_attempts,
+                            "artifact_dir": str(attempt_dir),
+                            "worker_step_label": fields.get("worker_step_label"),
+                            "worker_message": fields.get("worker_message"),
+                        },
+                    )
+                    emit_heartbeat("attempt_running", **dict(fields))
+
+                row, _result, response_data = _execute_worker_attempt(
+                    args,
+                    dataset_root=dataset_root,
+                    case=case,
+                    case_index=index,
+                    key=key,
+                    image_name=image_name,
+                    attempt=attempt,
+                    total_attempts=total_attempts,
+                    attempt_profile=attempt_profile,
+                    attempt_case_path=attempt_case_path,
+                    attempt_dir=attempt_dir,
+                    heartbeat_callback=_attempt_progress,
+                )
+                succeeded = row_succeeded(
+                    row,
+                    ignore_quality_failures=args.continue_on_quality_failures,
+                )
+                next_attempt_cooldown = 0.0
+                if not succeeded and attempt < total_attempts:
+                    next_attempt_cooldown = attempt_cooldown_seconds(
+                        args,
+                        failed_attempt=attempt,
+                        failure_kind=str(row.get("attempt_failure_kind") or "none"),
+                    )
+                    row["next_attempt_cooldown_seconds"] = next_attempt_cooldown
+                _append_result_row(row)
+                final_row = dict(row)
+                final_response_data = dict(response_data)
+                if succeeded:
+                    caption = str(response_data.get("caption") or "").strip()
+                    if caption:
+                        if args.save_dataset_text_labels:
+                            saved_path = save_caption_for_case(dataset_root, case, caption)
+                            final_row["saved_text_label"] = str(saved_path)
+                        caption_record = _caption_record_from_response(
+                            key=key,
+                            image_name=image_name,
+                            case=case,
+                            response_data=response_data,
+                        )
+                        if caption_record is not None:
+                            _append_caption_record(caption_record)
+                    break
+                previous_failure_kind = str(row.get("attempt_failure_kind") or "none")
+                if next_attempt_cooldown > 0:
+                    emit_heartbeat(
+                        "attempt_cooldown",
+                        case_id=key,
+                        case=case.get("name"),
+                        image_name=image_name,
+                        stem=case.get("stem"),
+                        case_index=index,
+                        attempt=attempt,
+                        next_attempt=attempt + 1,
+                        total_attempts=total_attempts,
+                        cooldown_seconds=next_attempt_cooldown,
+                        attempt_failure_kind=previous_failure_kind,
+                        return_signal=row.get("return_signal"),
+                        return_signal_name=row.get("return_signal_name"),
+                    )
+                    time.sleep(next_attempt_cooldown)
+            if final_row is None:
+                return None
+            if final_row.get("final_status") != "ok":
+                generated_qa_is_required = _generated_qa_blocks_parent_deterministic_recovery(args)
+                recovery_eligible, recovery_eligibility_reason = parent_deterministic_recovery_eligibility(final_row)
+                allow_parent_deterministic_recovery = bool(
+                    not generated_qa_is_required and recovery_eligible
+                )
+                deterministic_recovery = (
+                    parent_deterministic_recovery_caption(case)
+                    if allow_parent_deterministic_recovery
+                    else None
+                )
+                if deterministic_recovery is None:
+                    final_row = dict(final_row)
+                    final_row["final_status"] = "failed"
+                    final_row["terminal_failure"] = True
+                    if generated_qa_is_required:
+                        final_row["parent_deterministic_recovery_skipped"] = {
+                            "reason": "generated_qa_required",
+                            "detail": (
+                                "Parent deterministic count/layout recovery cannot satisfy "
+                                "a generated-QA instruction dataset case."
+                            ),
+                        }
+                    elif not recovery_eligible:
+                        final_row["parent_deterministic_recovery_skipped"] = {
+                            "reason": recovery_eligibility_reason,
+                            "detail": (
+                                "Parent deterministic count/layout recovery is only for "
+                                "model/runtime failures; request validation and code/config "
+                                "errors must remain visible."
+                            ),
+                        }
+                    _append_result_row(final_row)
+                    with state_lock:
+                        state["failed_cases"] = int(state["failed_cases"]) + 1
+                    if args.max_failures:
+                        exit_code = 1
+                else:
+                    caption, recovered_counts = deterministic_recovery
+                    recovery_event = {
+                        "action": "deterministic_recovery_succeeded",
+                        "attempt": "parent_deterministic_recovery",
+                        "call_kind": "deterministic",
+                        "stage_label": "Parent exhausted-attempt recovery",
+                        "message": (
+                            "Recovered case with deterministic count/layout fallback after "
+                            "child attempts were exhausted."
+                        ),
+                        "detail": (
+                            "The fallback used authoritative case counts so unattended "
+                            "runs can continue without manual image recovery."
+                        ),
+                    }
+                    quality = summarize_caption(caption, recovered_counts)
+                    quality_failures = caption_quality_failures(quality)
+                    recovered_row = dict(final_row)
+                    recovered_row.update(
+                        {
+                            "source_attempt_exit_code": final_row.get("exit_code"),
+                            "source_attempt_status": final_row.get("status"),
+                            "source_attempt_failure_kind": final_row.get("attempt_failure_kind"),
+                            "source_attempt_exception": final_row.get("exception"),
+                            "exit_code": 0,
+                            "return_signal": None,
+                            "return_signal_name": None,
+                            "status": "ok",
+                            "attempt_failure_kind": "parent_deterministic_recovery",
+                            "final_status": "ok",
+                            "terminal_failure": False,
+                            "parent_deterministic_recovery": True,
+                            "caption_quality": quality,
+                            "quality_failures": quality_failures,
+                            "recovery_events": list(final_row.get("recovery_events") or [])
+                            + [recovery_event],
+                        }
+                    )
+                    if not quality_failures or args.continue_on_quality_failures:
+                        if args.save_dataset_text_labels:
+                            saved_path = save_caption_for_case(dataset_root, case, caption)
+                            recovered_row["saved_text_label"] = str(saved_path)
+                        _append_result_row(recovered_row)
+                        _append_caption_record(
+                            {
+                                "case_id": key,
+                                "image_name": image_name,
+                                "image_path": case.get("image_path"),
+                                "caption": caption,
+                                "used_counts": recovered_counts,
+                                "recovery_events": recovered_row["recovery_events"],
+                            }
+                        )
+                        final_row = recovered_row
+                    else:
+                        final_row = dict(final_row)
+                        final_row["final_status"] = "failed"
+                        final_row["terminal_failure"] = True
+                        final_row["parent_deterministic_recovery_rejected"] = quality_failures
+                        _append_result_row(final_row)
+                        with state_lock:
+                            state["failed_cases"] = int(state["failed_cases"]) + 1
+                        if args.max_failures:
+                            exit_code = 1
+            _record_final_row(final_row)
+            emit_heartbeat(
+                "case_complete",
+                case_id=key,
+                case=case.get("name"),
+                image_name=image_name,
+                stem=case.get("stem"),
+                case_index=index,
+                final_status=final_row.get("final_status"),
+                generated_qa_pair_count=final_row.get("generated_qa_pair_count"),
+                generated_qa_target_pair_count=final_row.get("generated_qa_target_pair_count"),
+            )
+            return final_row
+        except BaseException as exc:  # noqa: BLE001
+            failed = {
+                "case_id": key,
+                "case": case.get("name"),
+                "image_name": image_name,
+                "stem": case.get("stem"),
+                "caption_mode": case.get("caption_mode"),
+                "label_count": case.get("label_count"),
+                "class_counts": case.get("class_counts"),
+                "exit_code": 1,
+                "status": "parent_exception",
+                "final_status": "failed",
+                "terminal_failure": True,
+                "exception": {"type": type(exc).__name__, "message": str(exc)},
+                "quality_failures": [],
+                "artifact_dir": None,
+            }
+            _append_result_row(failed)
+            _record_final_row(failed)
+            with state_lock:
+                state["failed_cases"] = int(state["failed_cases"]) + 1
+            if args.max_failures:
+                exit_code = 1
+            emit_heartbeat(
+                "case_parent_exception",
+                case_id=key,
+                case=case.get("name"),
+                image_name=image_name,
+                stem=case.get("stem"),
+                case_index=index,
+                exception=failed["exception"],
+            )
+            return failed
+        finally:
+            _clear_active(key)
+
+    emit_heartbeat("started")
+    pending_index = 0
+    stop_submitting = False
+    with concurrent.futures.ThreadPoolExecutor(max_workers=parallel_cases) as executor:
+        futures: dict[concurrent.futures.Future[dict[str, Any] | None], tuple[int, dict[str, Any]]] = {}
+
+        def _submit_available() -> None:
+            nonlocal pending_index, restart_ack, stop_submitting
+            while len(futures) < parallel_cases and pending_index < len(cases) and not stop_submitting:
+                with state_lock:
+                    processed = _summary_processed_count()
+                restart_ack = _consume_runner_restart_request(
+                    output_root,
+                    processed=processed,
+                    total_cases=len(cases),
+                )
+                if restart_ack is not None:
+                    stop_submitting = True
+                    break
+                if args.max_failures and int(state["failed_cases"]) >= int(args.max_failures):
+                    stop_submitting = True
+                    break
+                pending_index += 1
+                case = cases[pending_index - 1]
+                with state_lock:
+                    state["submitted_cases"] = int(state["submitted_cases"]) + 1
+                future = executor.submit(_process_case, pending_index, case)
+                futures[future] = (pending_index, case)
+
+        while pending_index < len(cases) or futures:
+            _submit_available()
+            if not futures:
+                break
+            done, _pending = concurrent.futures.wait(
+                futures,
+                timeout=1.0,
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+            if not done:
+                emit_heartbeat("parallel_running")
+                continue
+            for future in done:
+                futures.pop(future, None)
+                try:
+                    future.result()
+                except BaseException as exc:  # noqa: BLE001
+                    # _process_case catches case-specific exceptions; this guard
+                    # keeps an unexpected scheduler error visible without killing
+                    # already-running workers.
+                    emit_heartbeat(
+                        "parallel_worker_exception",
+                        exception={"type": type(exc).__name__, "message": str(exc)},
+                    )
+                    with state_lock:
+                        state["failed_cases"] = int(state["failed_cases"]) + 1
+                    if args.max_failures:
+                        exit_code = 1
+                if args.max_failures and int(state["failed_cases"]) >= int(args.max_failures):
+                    stop_submitting = True
+    final_heartbeat = {
+        "seq": heartbeat_seq + 1,
+        "status": "restart_requested" if restart_ack is not None else "completed" if exit_code == 0 else "failed",
+        "phase": "restart_requested" if restart_ack is not None else "finished",
+        "runner_capabilities": list(RUNNER_CAPABILITIES),
+        "parallel_cases": parallel_cases,
+        "submitted_cases": int(state["submitted_cases"]),
+        "processed": _summary_processed_count(),
+        "total_cases": len(cases),
+        "failed_cases": int(state["failed_cases"]),
+        "generated_qa_warning_cases": sum(
+            1 for row in summary if isinstance(row, Mapping) and row_generated_qa_warning(row)
+        ),
+        "generated_qa_error_cases": sum(
+            1 for row in summary if isinstance(row, Mapping) and row_generated_qa_error(row)
+        ),
+        "exit_code": exit_code,
+    }
+    if restart_ack is not None:
+        final_heartbeat["restart_request"] = restart_ack
+    write_summary(
+        output_root,
+        summary,
+        row_limit=summary_row_limit,
+        extra={
+            "status": final_heartbeat["status"],
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "duration_seconds": round(time.time() - parent_started, 3),
+            "exit_code": exit_code,
+            "parallel_cases": parallel_cases,
+        },
+    )
     write_heartbeat(output_root, final_heartbeat)
     lock_fields = dict(final_heartbeat)
     lock_fields.pop("phase", None)
@@ -2937,6 +6010,8 @@ def run_parent(args: argparse.Namespace) -> int:
     )
     runner_lock.acquire()
     try:
+        if int(getattr(args, "parallel_cases", 1) or 1) > 1:
+            return _run_parent_parallel_locked(args, runner_lock)
         return _run_parent_locked(args, runner_lock)
     finally:
         runner_lock.release()
@@ -2956,6 +6031,52 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Optional QwenCaptionRequest field template merged into every image payload.",
+    )
+    parser.add_argument(
+        "--caption-provider",
+        choices=CAPTION_PROVIDERS,
+        default=CAPTION_PROVIDER_LOCAL,
+        help="Model-call provider for caption and generated-QA stages.",
+    )
+    parser.add_argument(
+        "--openai-model",
+        default=DEFAULT_OPENAI_MODEL,
+        help="OpenAI Responses API model used when --caption-provider=openai.",
+    )
+    parser.add_argument(
+        "--openai-image-detail",
+        choices=OPENAI_IMAGE_DETAIL_CHOICES,
+        default=DEFAULT_OPENAI_IMAGE_DETAIL,
+        help="OpenAI image detail for visual caption and QA calls. Original keeps full-resolution image handling by default.",
+    )
+    parser.add_argument(
+        "--openai-reasoning-effort",
+        choices=OPENAI_REASONING_EFFORT_CHOICES,
+        default=DEFAULT_OPENAI_REASONING_EFFORT,
+        help="OpenAI reasoning effort for remote caption and generated-QA calls.",
+    )
+    parser.add_argument(
+        "--openai-api-key-file",
+        default=DEFAULT_OPENAI_API_KEY_FILE,
+        help="Optional backend-local API key file. OPENAI_API_KEY environment variable takes precedence.",
+    )
+    parser.add_argument(
+        "--openai-service-tier",
+        choices=OPENAI_SERVICE_TIER_CHOICES,
+        default=DEFAULT_OPENAI_SERVICE_TIER,
+        help="Remote pricing tier used for estimates and provenance. Direct runner calls use the Responses API; Batch is an estimate tier, not a direct synchronous service tier.",
+    )
+    parser.add_argument(
+        "--openai-timeout",
+        type=float,
+        default=DEFAULT_OPENAI_TIMEOUT_SECONDS,
+        help="Seconds to wait for each OpenAI Responses API call.",
+    )
+    parser.add_argument(
+        "--openai-max-retries",
+        type=int,
+        default=DEFAULT_OPENAI_MAX_RETRIES,
+        help="Retries per OpenAI Responses API call for 429, 5xx, and transient network failures.",
     )
     parser.add_argument(
         "--output-dir",
@@ -3082,10 +6203,53 @@ def build_parser() -> argparse.ArgumentParser:
         help="Number of image-grounded generated QA pairs to request per image, clamped to 0-20.",
     )
     parser.add_argument(
+        "--include-caption0-in-training",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Whether caption0 rows are selected for instruction training artifacts.",
+    )
+    parser.add_argument(
+        "--include-generated-qa-in-training",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Whether generated QA rows are selected for instruction training artifacts.",
+    )
+    parser.add_argument(
+        "--include-deterministic-metadata-qa",
+        action="store_true",
+        help="Whether deterministic metadata QA rows are selected for instruction training artifacts.",
+    )
+    parser.add_argument(
+        "--instruction-qa-imposed-question",
+        dest="instruction_qa_imposed_questions",
+        action="append",
+        default=None,
+        help="Required user-supplied question for generated QA. May be passed more than once.",
+    )
+    parser.add_argument(
         "--instruction-max-new-tokens",
         type=int,
         default=None,
         help="Optional token cap for the generated QA pass. Auto scales with requested QA count.",
+    )
+    parser.add_argument(
+        "--instruction-qa-max-topup-attempts",
+        type=int,
+        default=DEFAULT_INSTRUCTION_QA_MAX_TOPUP_ATTEMPTS,
+        help=(
+            "Maximum additional visual generated-QA top-up attempts after the primary prompt. "
+            f"Clamped to 0-{MAX_INSTRUCTION_QA_TOPUP_ATTEMPTS}."
+        ),
+    )
+    parser.add_argument(
+        "--restrict-speculative-qa-language",
+        dest="instruction_qa_restrict_speculative_language",
+        action="store_true",
+        default=False,
+        help=(
+            "Reject generated QA rows that use speculative or unavailable-information language. "
+            "Default allows grounded inference and unknown/not-visible answers."
+        ),
     )
     parser.add_argument(
         "--qa-mix",
@@ -3140,6 +6304,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--preview-only", action="store_true")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--case", action="append", default=[])
+    parser.add_argument(
+        "--parallel-cases",
+        type=int,
+        default=1,
+        help=(
+            "Maximum image workers to run concurrently under one output manifest. "
+            "Use >1 for remote API runs; local MLX defaults to one worker for GPU stability."
+        ),
+    )
     parser.add_argument("--timeout", type=float, default=900.0)
     parser.add_argument(
         "--heartbeat-interval",
@@ -3196,15 +6369,40 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     try:
+        args.caption_provider = _normalize_caption_provider(args.caption_provider)
+        args.openai_image_detail = _normalize_openai_image_detail(args.openai_image_detail)
+        args.openai_reasoning_effort = str(
+            getattr(args, "openai_reasoning_effort", DEFAULT_OPENAI_REASONING_EFFORT)
+            or DEFAULT_OPENAI_REASONING_EFFORT
+        ).strip().lower()
+        if args.openai_reasoning_effort not in OPENAI_REASONING_EFFORT_CHOICES:
+            args.openai_reasoning_effort = DEFAULT_OPENAI_REASONING_EFFORT
+        try:
+            args.openai_timeout = max(5.0, min(float(args.openai_timeout), 600.0))
+        except (TypeError, ValueError, OverflowError):
+            args.openai_timeout = DEFAULT_OPENAI_TIMEOUT_SECONDS
+        try:
+            args.openai_max_retries = max(0, min(int(args.openai_max_retries or 0), 12))
+        except (TypeError, ValueError, OverflowError):
+            args.openai_max_retries = DEFAULT_OPENAI_MAX_RETRIES
         args.subcaptions_per_image = max(0, min(int(args.subcaptions_per_image or 0), 20))
     except (TypeError, ValueError, OverflowError):
         args.subcaptions_per_image = 0
+    args.instruction_qa_imposed_questions = _normalize_instruction_qa_imposed_questions(
+        getattr(args, "instruction_qa_imposed_questions", None)
+    )
+    args.instruction_qa_max_topup_attempts = _instruction_qa_max_topup_attempts(args)
+    args.instruction_qa_restrict_speculative_language = _instruction_qa_restrict_speculative_language(args)
     args.qa_mix = str(getattr(args, "qa_mix", "balanced") or "balanced").strip().lower()
     if args.qa_mix not in {"balanced", "scene", "object", "caption"}:
         args.qa_mix = "balanced"
     args.answer_format = str(getattr(args, "answer_format", "natural") or "natural").strip().lower()
     if args.answer_format not in {"natural", "json"}:
         args.answer_format = "natural"
+    try:
+        args.parallel_cases = max(1, min(int(args.parallel_cases or 1), 256))
+    except (TypeError, ValueError, OverflowError):
+        args.parallel_cases = 1
     if args.worker:
         if not args.case_json:
             raise SystemExit("--worker requires --case-json")

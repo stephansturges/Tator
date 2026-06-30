@@ -211,8 +211,8 @@ def _default_agent_glossary_for_labelmap(labelmap: Sequence[str]) -> str:
     for label in labelmap:
         natural = _natural_label(label)
         if natural:
-            terms = [natural]
             label_key = _glossary_label_key(label)
+            terms = [natural]
             natural_key = _glossary_label_key(natural)
             if "tank" in label_key and "storage tank" not in {term.lower() for term in terms}:
                 terms.append("storage tank")

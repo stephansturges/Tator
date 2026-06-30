@@ -110,7 +110,7 @@ body {
     position: fixed;
     right: 18px;
     top: 76px;
-    width: min(860px, calc(100vw - 36px));
+    width: min(710px, calc(100vw - 36px));
     max-height: min(88vh, 960px);
     z-index: 90;
     display: flex;
@@ -1776,6 +1776,23 @@ body.annotation-focus-mode .class-scroll-indicator {
     background: #fff1f2;
 }
 
+.qwen-caption-remote-cost {
+    border: 1px solid #bfdbfe;
+    border-radius: 6px;
+    background: #eff6ff;
+    color: #1e3a8a;
+    padding: 7px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1.35;
+}
+
+.qwen-caption-remote-cost.is-warn {
+    border-color: #facc15;
+    background: #fefce8;
+    color: #713f12;
+}
+
 .qwen-caption-archive-status,
 .qwen-caption-export-health {
     border: 1px solid #cbd5e1;
@@ -1996,10 +2013,28 @@ body.annotation-focus-mode .class-scroll-indicator {
 }
 
 .qwen-caption-settings__field select,
-.qwen-caption-settings__field input {
+.qwen-caption-settings__field input,
+.qwen-caption-settings__field textarea {
     width: 100%;
     max-width: 100%;
     box-sizing: border-box;
+}
+
+.qwen-caption-settings__field textarea {
+    resize: vertical;
+}
+
+.qwen-caption-coverage-status {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 7px 9px;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    background: #f8fafc;
+    color: #334155;
+    font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: normal;
+    overflow-wrap: anywhere;
 }
 
 .qwen-caption-settings__checks {
@@ -2079,17 +2114,162 @@ body.annotation-focus-mode .class-scroll-indicator {
     color: #475569;
 }
 
+.qwen-caption-flow-section {
+    flex: 1 1 100%;
+    display: grid;
+    gap: 10px;
+    min-width: min(100%, 320px);
+    padding: 10px;
+    border: 1px solid rgba(148, 163, 184, 0.3);
+    border-radius: 8px;
+    background: rgba(248, 250, 252, 0.72);
+}
+
+.qwen-caption-flow-section__header {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.qwen-caption-flow-section__header strong {
+    color: #1f2937;
+    font-size: 13px;
+}
+
 .qwen-caption-instruction-panel {
     flex: 1 1 100%;
     display: grid;
     gap: 10px;
     min-width: min(100%, 320px);
-    padding: 10px 0 0;
-    border-top: 1px solid rgba(148, 163, 184, 0.35);
+    padding: 10px;
+    border: 1px solid rgba(59, 130, 246, 0.28);
+    border-radius: 8px;
+    background: rgba(239, 246, 255, 0.52);
+}
+
+.qwen-caption-step-list {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    color: #475569;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.qwen-caption-step-list li {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.qwen-caption-step-list li:not(:last-child)::after {
+    content: "/";
+    color: #94a3b8;
+    font-weight: 800;
+}
+
+.qwen-caption-instruction-status {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    align-items: center;
+    min-width: 0;
+}
+
+.qwen-caption-status-chip,
+.qwen-caption-status-reason {
+    display: inline-flex;
+    align-items: center;
+    min-height: 24px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    background: rgba(255, 255, 255, 0.76);
+    color: #334155;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.2;
+}
+
+.qwen-caption-status-chip.is-pass {
+    border-color: rgba(22, 163, 74, 0.34);
+    background: rgba(220, 252, 231, 0.8);
+    color: #166534;
+}
+
+.qwen-caption-status-chip.is-warn,
+.qwen-caption-status-chip.is-pending {
+    border-color: rgba(245, 158, 11, 0.34);
+    background: rgba(254, 243, 199, 0.82);
+    color: #92400e;
+}
+
+.qwen-caption-status-chip.is-fail {
+    border-color: rgba(220, 38, 38, 0.35);
+    background: rgba(254, 226, 226, 0.85);
+    color: #991b1b;
+}
+
+.qwen-caption-status-reason {
+    flex: 1 1 220px;
+    font-weight: 600;
+}
+
+.qwen-caption-settings__checks--inline {
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.qwen-caption-instruction-advanced {
+    display: grid;
+    gap: 8px;
+    padding: 8px;
+    border: 1px dashed rgba(100, 116, 139, 0.42);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.48);
+}
+
+.qwen-caption-instruction-advanced summary {
+    cursor: pointer;
+    font-weight: 800;
+    color: #334155;
+}
+
+.qwen-caption-instruction-advanced[open] summary {
+    margin-bottom: 8px;
+}
+
+.qwen-caption-primary-export {
+    background: #15803d;
+}
+
+.qwen-caption-primary-export:hover {
+    background: #166534;
 }
 
 .qwen-caption-settings__grid--compact {
     grid-template-columns: repeat(auto-fit, minmax(180px, 260px));
+}
+
+.qwen-caption-generated-qa-accumulator {
+    display: block;
+    margin: 4px 0 8px;
+    padding: 8px 10px;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    background: #f8fafc;
+    color: #1f2937;
+    font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: pre-wrap;
+}
+
+.qwen-caption-generated-qa-accumulator:empty,
+.qwen-caption-generated-qa-accumulator[hidden] {
+    display: none;
 }
 
 .qwen-agent-trace {
@@ -4797,32 +4977,11 @@ details.training-card > summary::marker {
     outline-offset: 2px;
 }
 
-.help-icon[data-tooltip]::before,
-.help-icon[data-tooltip]::after {
-    content: none;
-    opacity: 0;
-    visibility: hidden;
-    pointer-events: none;
-    transition: opacity 80ms ease, transform 80ms ease;
-    transition-delay: 60ms;
-}
-
-.help-icon[data-tooltip]::before {
-    position: absolute;
-    z-index: 1000;
-    left: 50%;
-    top: calc(100% + 2px);
-    transform: translateX(-50%) translateY(-2px);
-    border: 6px solid transparent;
-    border-bottom-color: #0f172a;
-}
-
-.help-icon[data-tooltip]::after {
-    position: absolute;
-    z-index: 1001;
-    left: 50%;
-    top: calc(100% + 8px);
-    transform: translateX(-50%) translateY(-4px);
+.ui-tooltip {
+    position: fixed;
+    z-index: 50000;
+    left: 0;
+    top: 0;
     background: #0f172a;
     color: #f8fafc;
     border-radius: 10px;
@@ -4830,27 +4989,39 @@ details.training-card > summary::marker {
     font-size: 12px;
     font-weight: 500;
     line-height: 1.3;
-    width: max-content;
     min-width: 140px;
-    max-width: 260px;
+    max-width: min(360px, calc(100vw - 24px));
     white-space: pre-line;
+    overflow-wrap: anywhere;
     box-shadow: 0 10px 22px rgba(15, 23, 42, 0.22);
-}
-
-.help-icon[data-tooltip]:hover::before,
-.help-icon[data-tooltip]:hover::after,
-.help-icon[data-tooltip]:focus-visible::before,
-.help-icon[data-tooltip]:focus-visible::after {
-    content: "";
+    pointer-events: none;
     opacity: 1;
-    visibility: visible;
-    transform: translateX(-50%) translateY(0);
-    transition-delay: 0ms;
 }
 
-.help-icon[data-tooltip]:hover::after,
-.help-icon[data-tooltip]:focus-visible::after {
-    content: attr(data-tooltip);
+.ui-tooltip[hidden] {
+    display: none !important;
+}
+
+.ui-tooltip.is-positioning {
+    visibility: hidden;
+}
+
+.ui-tooltip::before {
+    content: "";
+    position: absolute;
+    left: var(--ui-tooltip-arrow-x, 50%);
+    transform: translateX(-50%);
+    border: 6px solid transparent;
+}
+
+.ui-tooltip[data-placement="bottom"]::before {
+    bottom: 100%;
+    border-bottom-color: #0f172a;
+}
+
+.ui-tooltip[data-placement="top"]::before {
+    top: 100%;
+    border-top-color: #0f172a;
 }
 
 .training-form-section input:disabled,
@@ -6035,6 +6206,9 @@ html.theme-dark .qwen-advanced,
 html.theme-dark .qwen-subpanel,
 html.theme-dark .qwen-caption-prompt,
 html.theme-dark .qwen-caption-settings__section,
+html.theme-dark .qwen-caption-flow-section,
+html.theme-dark .qwen-caption-instruction-panel,
+html.theme-dark .qwen-caption-instruction-advanced,
 html.theme-dark .qwen-model-card,
 html.theme-dark .qwen-train-callouts,
 html.theme-dark .qwen-radio-group,
@@ -6048,7 +6222,51 @@ html.theme-dark .qwen-sample-canvas {
     color: #dce5df;
 }
 
-html.theme-dark .qwen-caption-settings__title {
+html.theme-dark .qwen-caption-settings__title,
+html.theme-dark .qwen-caption-flow-section__header strong,
+html.theme-dark .qwen-caption-instruction-advanced summary {
+    color: #dce5df;
+}
+
+html.theme-dark .qwen-caption-status-chip,
+html.theme-dark .qwen-caption-status-reason {
+    border-color: #46515a;
+    background: #202a31;
+    color: #e5eef5;
+}
+
+html.theme-dark .qwen-caption-status-chip.is-pass {
+    border-color: #227a4a;
+    background: #143923;
+    color: #bbf7d0;
+}
+
+html.theme-dark .qwen-caption-status-chip.is-warn,
+html.theme-dark .qwen-caption-status-chip.is-pending {
+    border-color: #8a650f;
+    background: #3b2e12;
+    color: #fde68a;
+}
+
+html.theme-dark .qwen-caption-status-chip.is-fail {
+    border-color: #8f2d2d;
+    background: #3a1717;
+    color: #fecaca;
+}
+
+html.theme-dark .qwen-caption-generated-qa-accumulator {
+    border-color: #46515a;
+    background: #111827;
+    color: #e5eef5;
+}
+
+html.theme-dark .qwen-caption-coverage-status {
+    border-color: #46515a;
+    background: #111827;
+    color: #dce5df;
+}
+
+html.theme-dark .qwen-caption-step-list {
     color: #dce5df;
 }
 
@@ -6322,6 +6540,18 @@ html.theme-dark .qwen-caption-readiness__item.is-fail {
     border-color: rgba(252, 165, 165, 0.5);
 }
 
+html.theme-dark .qwen-caption-remote-cost {
+    background: rgba(30, 64, 175, 0.28);
+    border-color: rgba(96, 165, 250, 0.45);
+    color: #bfdbfe;
+}
+
+html.theme-dark .qwen-caption-remote-cost.is-warn {
+    background: rgba(113, 63, 18, 0.28);
+    border-color: rgba(250, 204, 21, 0.5);
+    color: #fde68a;
+}
+
 html.theme-dark .qwen-caption-export-health.is-pass {
     background: rgba(22, 101, 52, 0.22);
     border-color: rgba(134, 239, 172, 0.45);
@@ -6551,6 +6781,20 @@ html.theme-dark .storage-meta {
 html.theme-dark .help-icon {
     border-color: #6b7780;
     color: #c4cec8;
+}
+
+html.theme-dark .ui-tooltip {
+    background: #0f172a;
+    color: #f8fafc;
+    box-shadow: 0 12px 26px rgba(0, 0, 0, 0.36);
+}
+
+html.theme-dark .ui-tooltip[data-placement="bottom"]::before {
+    border-bottom-color: #0f172a;
+}
+
+html.theme-dark .ui-tooltip[data-placement="top"]::before {
+    border-top-color: #0f172a;
 }
 
 html.theme-dark .metrics-table,
@@ -6994,6 +7238,9 @@ html.theme-pipboy .qwen-advanced,
 html.theme-pipboy .qwen-subpanel,
 html.theme-pipboy .qwen-caption-prompt,
 html.theme-pipboy .qwen-caption-settings__section,
+html.theme-pipboy .qwen-caption-flow-section,
+html.theme-pipboy .qwen-caption-instruction-panel,
+html.theme-pipboy .qwen-caption-instruction-advanced,
 html.theme-pipboy .qwen-model-card,
 html.theme-pipboy .qwen-train-callouts,
 html.theme-pipboy .qwen-radio-group,
@@ -7005,8 +7252,42 @@ html.theme-pipboy .qwen-sample-canvas {
     color: var(--pip-green);
 }
 
-html.theme-pipboy .qwen-caption-settings__title {
+html.theme-pipboy .qwen-caption-settings__title,
+html.theme-pipboy .qwen-caption-flow-section__header strong,
+html.theme-pipboy .qwen-caption-instruction-advanced summary {
     color: var(--pip-green-strong);
+}
+
+html.theme-pipboy .qwen-caption-status-chip,
+html.theme-pipboy .qwen-caption-status-reason {
+    border-color: color-mix(in srgb, var(--pip-green) 42%, transparent);
+    background: color-mix(in srgb, var(--pip-green) 12%, transparent);
+    color: var(--pip-green);
+}
+
+html.theme-pipboy .qwen-caption-status-chip.is-pass,
+html.theme-pipboy .qwen-caption-status-chip.is-warn,
+html.theme-pipboy .qwen-caption-status-chip.is-pending,
+html.theme-pipboy .qwen-caption-status-chip.is-fail {
+    border-color: color-mix(in srgb, var(--pip-green) 58%, transparent);
+    background: color-mix(in srgb, var(--pip-green) 18%, transparent);
+    color: var(--pip-green-strong);
+}
+
+html.theme-pipboy .qwen-caption-generated-qa-accumulator {
+    border-color: color-mix(in srgb, var(--pip-green) 42%, transparent);
+    background: color-mix(in srgb, var(--pip-green) 10%, transparent);
+    color: var(--pip-green);
+}
+
+html.theme-pipboy .qwen-caption-coverage-status {
+    border-color: color-mix(in srgb, var(--pip-green) 42%, transparent);
+    background: color-mix(in srgb, var(--pip-green) 10%, transparent);
+    color: var(--pip-green);
+}
+
+html.theme-pipboy .qwen-caption-step-list {
+    color: var(--pip-green);
 }
 
 html.theme-pipboy .shortcut-key {
@@ -7485,6 +7766,21 @@ html.theme-pipboy .metric-chart-legend,
 html.theme-pipboy .active-help,
 html.theme-pipboy .storage-meta {
     color: color-mix(in srgb, var(--pip-green) 76%, transparent);
+}
+
+html.theme-pipboy .ui-tooltip {
+    background: rgba(3, 18, 10, 0.98);
+    color: var(--pip-green-strong);
+    border: 1px solid color-mix(in srgb, var(--pip-green) 48%, transparent);
+    box-shadow: 0 0 18px color-mix(in srgb, var(--pip-green) 26%, transparent);
+}
+
+html.theme-pipboy .ui-tooltip[data-placement="bottom"]::before {
+    border-bottom-color: color-mix(in srgb, var(--pip-green) 48%, transparent);
+}
+
+html.theme-pipboy .ui-tooltip[data-placement="top"]::before {
+    border-top-color: color-mix(in srgb, var(--pip-green) 48%, transparent);
 }
 
 html.theme-pipboy .metrics-table,

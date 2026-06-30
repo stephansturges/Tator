@@ -167,24 +167,35 @@ def assert_min_contrast(page, selector: str, threshold: float = 4.5) -> dict:
 def open_tooltip_and_assert_readable(page, selector: str, min_chars: int = 8) -> dict:
     locator = page.locator(selector)
     locator.hover()
+    page.wait_for_function(
+        """() => {
+            const tooltip = document.querySelector("#uiViewportTooltip");
+            return tooltip && !tooltip.hidden && tooltip.textContent.trim().length > 0;
+        }""",
+        timeout=3000,
+    )
     report = page.eval_on_selector(
-        selector,
-        """(el) => {
-            const after = getComputedStyle(el, "::after");
-            const before = getComputedStyle(el, "::before");
-            const normalize = (content) => {
-                const raw = String(content || "").trim();
-                if (!raw || raw === "none") return "";
-                return raw.replace(/^['\\"]|['\\"]$/g, "");
-            };
+        "#uiViewportTooltip",
+        """(tooltip) => {
+            const style = getComputedStyle(tooltip);
+            const before = getComputedStyle(tooltip, "::before");
+            const rect = tooltip.getBoundingClientRect();
+            const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+            const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
             return {
-                content: normalize(after.content),
-                opacity: Number(after.opacity || "0"),
-                pointerEvents: after.pointerEvents,
-                fontSize: Number.parseFloat(after.fontSize || "0") || 0,
-                lineHeight: Number.parseFloat(after.lineHeight || "0") || 0,
-                maxWidth: Number.parseFloat(after.maxWidth || "0") || 0,
-                beforeOpacity: Number(before.opacity || "0"),
+                content: String(tooltip.textContent || "").trim(),
+                opacity: Number(style.opacity || "0"),
+                pointerEvents: style.pointerEvents,
+                fontSize: Number.parseFloat(style.fontSize || "0") || 0,
+                lineHeight: Number.parseFloat(style.lineHeight || "0") || 0,
+                maxWidth: Number.parseFloat(style.maxWidth || "0") || 0,
+                beforeContent: String(before.content || ""),
+                left: rect.left,
+                right: rect.right,
+                top: rect.top,
+                bottom: rect.bottom,
+                viewportWidth,
+                viewportHeight,
             };
         }""",
     )
@@ -193,7 +204,15 @@ def open_tooltip_and_assert_readable(page, selector: str, min_chars: int = 8) ->
         f"{selector} tooltip content too short ({len(report['content'])} chars)"
     )
     assert report["opacity"] >= 0.9, f"{selector} tooltip did not become visible"
-    assert report["beforeOpacity"] >= 0.9, f"{selector} tooltip arrow did not become visible"
+    assert report["beforeContent"] not in ("", "none"), f"{selector} tooltip arrow did not render"
     assert report["fontSize"] >= 11, f"{selector} tooltip font-size too small ({report['fontSize']}px)"
     assert report["maxWidth"] >= 140, f"{selector} tooltip max-width unexpectedly small ({report['maxWidth']}px)"
+    assert report["left"] >= 0, f"{selector} tooltip is clipped on the left ({report['left']})"
+    assert report["top"] >= 0, f"{selector} tooltip is clipped on the top ({report['top']})"
+    assert report["right"] <= report["viewportWidth"], (
+        f"{selector} tooltip is clipped on the right ({report['right']} > {report['viewportWidth']})"
+    )
+    assert report["bottom"] <= report["viewportHeight"], (
+        f"{selector} tooltip is clipped on the bottom ({report['bottom']} > {report['viewportHeight']})"
+    )
     return report

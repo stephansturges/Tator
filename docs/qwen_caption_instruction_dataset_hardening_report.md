@@ -176,10 +176,11 @@ row before training.
   regression test for that path. This prevents generated-QA jobs from failing
   with an undefined image-path variable after a successful caption pass.
 - If generated QA is requested and no valid generated QA pairs are produced, the
-  worker marks the case `instruction_qa_failed` instead of returning an `ok`
-  caption-only result. The parent runner also skips deterministic count/layout
-  recovery for generated-QA instruction jobs, because that fallback cannot
-  create the requested training rows.
+  default caption0 plus generated-QA path keeps the caption0 result and records
+  an audit warning. QA-only generated-QA runs still mark the case
+  `instruction_qa_failed`. The parent runner also skips deterministic
+  count/layout recovery for QA-only generated-QA jobs, because that fallback
+  cannot create the requested training rows.
 - Generated QA rows are parsed from JSON, structurally validated, deduplicated by
   question within the image, and persisted as instruction records.
 - Generated-QA provenance fields such as answer format, source fields,

@@ -34,6 +34,14 @@ def _parent_args(dataset: Path, output_dir: Path, **overrides):
         "resume": False,
         "record_resume_skips": False,
         "skip_existing_captions": False,
+        "caption_provider": bench.CAPTION_PROVIDER_LOCAL,
+        "openai_model": bench.DEFAULT_OPENAI_MODEL,
+        "openai_image_detail": bench.DEFAULT_OPENAI_IMAGE_DETAIL,
+        "openai_reasoning_effort": bench.DEFAULT_OPENAI_REASONING_EFFORT,
+        "openai_api_key_file": bench.DEFAULT_OPENAI_API_KEY_FILE,
+        "openai_service_tier": bench.DEFAULT_OPENAI_SERVICE_TIER,
+        "openai_timeout": bench.DEFAULT_OPENAI_TIMEOUT_SECONDS,
+        "openai_max_retries": bench.DEFAULT_OPENAI_MAX_RETRIES,
         "attempts": 1,
         "cooldown_after_crash": 0,
         "cooldown_after_success": 0,
@@ -52,6 +60,8 @@ def _parent_args(dataset: Path, output_dir: Path, **overrides):
         "instruction_dataset": False,
         "subcaptions_per_image": 0,
         "instruction_max_new_tokens": None,
+        "instruction_qa_max_topup_attempts": bench.DEFAULT_INSTRUCTION_QA_MAX_TOPUP_ATTEMPTS,
+        "instruction_qa_restrict_speculative_language": False,
         "include_source_annotations_in_generator_context": True,
         "strict_grounding": True,
         "qa_mix": "balanced",
@@ -74,6 +84,7 @@ def _parent_args(dataset: Path, output_dir: Path, **overrides):
         "prompt": "Describe.",
         "preview_only": False,
         "use_sampling": False,
+        "parallel_cases": 1,
     }
     data.update(overrides)
     return SimpleNamespace(**data)
@@ -218,6 +229,652 @@ def test_instruction_qa_token_budget_scales_and_respects_override() -> None:
         SimpleNamespace(instruction_max_new_tokens=999999),
         requested=8,
     ) == 8192
+
+
+def test_instruction_qa_json_extractor_repairs_extra_quote_before_metadata_keys() -> None:
+    raw = (
+        '{"qa_pairs":[{"question":"What color is the water?",'
+        '"answer":"The water is green.",""row_type":"generated_qa",'
+        '""answer_format":"natural"}]}'
+    )
+
+    payload = bench._extract_json_payload(raw)
+    partial_payload = bench._extract_partial_qa_payload(raw)
+
+    assert payload["qa_pairs"][0]["question"] == "What color is the water?"
+    assert payload["qa_pairs"][0]["row_type"] == "generated_qa"
+    assert partial_payload["qa_pairs"][0]["answer_format"] == "natural"
+
+
+def test_instruction_qa_json_extractor_repairs_missing_key_quote_before_answer_value() -> None:
+    raw = (
+        '```json\n'
+        '{"qa_pairs":['
+        '{"question":"Are there bicycles near the people?",'
+        '"answer:"Yes, two bicycles are present near the people.",'
+        '"row_type":"generated_qa","answer_format":"natural"},'
+        '{"question":"What surface covers the open area?",'
+        '"answer":"Light gray pavement covers the open area."}'
+        ']}\n'
+        '```'
+    )
+
+    payload = bench._extract_json_payload(raw)
+    partial_payload = bench._extract_partial_qa_payload(raw)
+
+    assert payload["qa_pairs"][0]["answer"] == "Yes, two bicycles are present near the people."
+    assert payload["qa_pairs"][1]["question"] == "What surface covers the open area?"
+    assert partial_payload["qa_pairs"][0]["answer_format"] == "natural"
+
+
+def test_instruction_qa_prompt_uses_canonical_glossary_terms_for_classes(tmp_path: Path) -> None:
+    request_json = tmp_path / "request.json"
+    request_json.write_text(json.dumps({"labelmap_glossary": {"UPole": ["utility pole", "power pole"]}}))
+    args = _parent_args(
+        tmp_path,
+        tmp_path / "out",
+        request_json=request_json,
+        instruction_dataset=True,
+        subcaptions_per_image=2,
+    )
+
+    prompt_spec = bench.build_instruction_qa_prompt(
+        {"case_id": "case-upole", "class_counts": {"UPole": 1}},
+        "A utility pole stands beside a road.",
+        args,
+    )
+
+    assert prompt_spec["source_context"]["object_counts"] == {"utility pole": 1}
+    assert '"canonical_term": "utility pole"' in prompt_spec["prompt"]
+    assert "Never output raw labelmap names or odd internal spellings from the labelmap" in prompt_spec["prompt"]
+
+
+def test_instruction_qa_prompt_includes_imposed_questions_when_count_is_zero(tmp_path: Path) -> None:
+    args = _parent_args(
+        tmp_path,
+        tmp_path / "out",
+        instruction_dataset=True,
+        subcaptions_per_image=0,
+        instruction_qa_imposed_questions=["What object is closest to the road"],
+    )
+
+    prompt_spec = bench.build_instruction_qa_prompt(
+        {"case_id": "case-building", "class_counts": {"Building": 1}},
+        "A building stands beside a road.",
+        args,
+    )
+
+    assert prompt_spec["requested"] == 1
+    assert prompt_spec["imposed_questions"] == ["What object is closest to the road?"]
+    assert "Required user questions" in prompt_spec["prompt"]
+    assert "What object is closest to the road?" in prompt_spec["prompt"]
+
+
+def test_instruction_qa_allows_mild_inference_and_unavailable_information_answers(tmp_path: Path) -> None:
+    reasons = bench._qa_pair_rejection_reasons(
+        {
+            "question": "What can be inferred about the activity on the land?",
+            "answer": "The marks suggest recent mowing or tilling activity.",
+        },
+        {"case_id": "case-field"},
+        _parent_args(tmp_path, tmp_path / "out"),
+    )
+
+    assert "speculative_or_ungrounded_language" not in reasons
+
+    unavailable_reasons = bench._qa_pair_rejection_reasons(
+        {
+            "question": "What is the vehicle doing?",
+            "answer": "The activity is unknown from the image.",
+        },
+        {"case_id": "case-field"},
+        _parent_args(tmp_path, tmp_path / "out"),
+    )
+
+    assert "speculative_or_ungrounded_language" not in unavailable_reasons
+    assert "speculative_or_unavailable_language" not in unavailable_reasons
+
+    prompt_spec = bench.build_instruction_qa_prompt(
+        {"case_id": "case-field", "class_counts": {}},
+        "A field is shown from above.",
+        _parent_args(tmp_path, tmp_path / "out", instruction_dataset=True, subcaptions_per_image=1),
+    )
+    assert prompt_spec["restrict_speculative_language"] is False
+    assert "Unavailable-information answers are allowed" in prompt_spec["prompt"]
+
+
+def test_instruction_qa_restrict_speculative_language_rejects_inference_and_unavailable_answers(
+    tmp_path: Path,
+) -> None:
+    strict_args = _parent_args(
+        tmp_path,
+        tmp_path / "out",
+        instruction_dataset=True,
+        subcaptions_per_image=1,
+        instruction_qa_restrict_speculative_language=True,
+    )
+    inferred_reasons = bench._qa_pair_rejection_reasons(
+        {
+            "question": "What can be inferred about the activity on the land?",
+            "answer": "The marks suggest recent mowing or tilling activity.",
+        },
+        {"case_id": "case-field"},
+        strict_args,
+    )
+    unavailable_reasons = bench._qa_pair_rejection_reasons(
+        {
+            "question": "What is the vehicle doing?",
+            "answer": "The activity is unknown from the image.",
+        },
+        {"case_id": "case-field"},
+        strict_args,
+    )
+
+    assert "speculative_or_unavailable_language" in inferred_reasons
+    assert "speculative_or_unavailable_language" in unavailable_reasons
+
+    prompt_spec = bench.build_instruction_qa_prompt(
+        {"case_id": "case-field", "class_counts": {}},
+        "A field is shown from above.",
+        strict_args,
+    )
+    assert prompt_spec["restrict_speculative_language"] is True
+    assert "Restrict speculative language" in prompt_spec["prompt"]
+
+
+def test_instruction_qa_verifier_rewrites_raw_label_leaks(tmp_path: Path) -> None:
+    image_path = tmp_path / "frame.jpg"
+    _write_image(image_path)
+    request_json = tmp_path / "request.json"
+    request_json.write_text(json.dumps({"labelmap_glossary": {"UPole": ["utility pole", "power pole"]}}))
+    calls: list[str] = []
+
+    class FakeApi:
+        def _run_qwen_inference(self, _prompt, pil_img, **_kwargs):
+            return (
+                json.dumps(
+                    {
+                        "qa_pairs": [
+                            {
+                                "question": "What is beside the UPole?",
+                                "answer": "A road is likely beside the UPole.",
+                            }
+                        ]
+                    }
+                ),
+                pil_img.size[0],
+                pil_img.size[1],
+            )
+
+        def _run_qwen_text_inference(self, prompt, **_kwargs):
+            calls.append(prompt)
+            return (
+                json.dumps(
+                    {
+                        "qa_pairs": [
+                            {
+                                "qa_id": "case-upole__generated_qa_0001",
+                                "decision": "rewrite",
+                                "question": "What is beside the utility pole?",
+                                "answer": "A road is beside the utility pole.",
+                                "rejection_reasons": [],
+                            }
+                        ]
+                    }
+                ),
+                0,
+                0,
+            )
+
+    result = bench.generate_instruction_qa_pairs(
+        FakeApi(),
+        {"case_id": "case-upole", "class_counts": {"UPole": 1}},
+        image_path,
+        "A utility pole stands beside a road.",
+        _parent_args(
+            tmp_path,
+            tmp_path / "out",
+            request_json=request_json,
+            instruction_dataset=True,
+            subcaptions_per_image=1,
+        ),
+    )
+
+    assert result["status"] == "ok"
+    assert result["pair_count"] == 1
+    assert result["rejected_pair_count"] == 0
+    assert calls and "raw label names" in calls[0]
+    pair = result["pairs"][0]
+    assert pair["validation_status"] == "machine_validated"
+    assert pair["review_status"] == "machine_validated"
+    assert pair["question"] == "What is beside the utility pole?"
+    assert pair["answer"] == "A road is beside the utility pole."
+    assert pair["metadata"]["original_question"] == "What is beside the UPole?"
+
+
+def test_instruction_qa_verifier_rejects_failed_rewrites(tmp_path: Path) -> None:
+    image_path = tmp_path / "frame.jpg"
+    _write_image(image_path)
+    request_json = tmp_path / "request.json"
+    request_json.write_text(json.dumps({"labelmap_glossary": {"UPole": ["utility pole", "power pole"]}}))
+
+    class FakeApi:
+        def _run_qwen_inference(self, _prompt, pil_img, **_kwargs):
+            return (
+                json.dumps(
+                    {
+                        "qa_pairs": [
+                            {
+                                "question": "What is beside the UPole?",
+                                "answer": "A road is likely beside the UPole.",
+                            }
+                        ]
+                    }
+                ),
+                pil_img.size[0],
+                pil_img.size[1],
+            )
+
+        def _run_qwen_text_inference(self, _prompt, **_kwargs):
+            return (
+                json.dumps(
+                    {
+                        "qa_pairs": [
+                            {
+                                "qa_id": "case-bad__generated_qa_0001",
+                                "decision": "rewrite",
+                                "question": "What is beside the UPole?",
+                                "answer": "A road is likely beside the UPole.",
+                                "rejection_reasons": [],
+                            }
+                        ]
+                    }
+                ),
+                0,
+                0,
+            )
+
+    result = bench.generate_instruction_qa_pairs(
+        FakeApi(),
+        {"case_id": "case-bad", "class_counts": {"UPole": 1}},
+        image_path,
+        "A utility pole stands beside a road.",
+        _parent_args(
+            tmp_path,
+            tmp_path / "out",
+            request_json=request_json,
+            instruction_dataset=True,
+            subcaptions_per_image=1,
+            instruction_qa_max_topup_attempts=0,
+        ),
+    )
+
+    assert result["status"] == "empty"
+    assert result["pair_count"] == 0
+    assert result["rejected_pair_count"] >= 1
+    assert all(pair["validation_status"] == "rejected" for pair in result["rejected_pairs"])
+    assert all(
+        "qa_verifier_postcheck_failed" in pair["rejection_reasons"]
+        for pair in result["rejected_pairs"]
+    )
+
+
+def test_instruction_qa_generation_recovers_loop_with_visual_topup_retry(tmp_path: Path) -> None:
+    image_path = tmp_path / "frame.jpg"
+    _write_image(image_path)
+    calls: list[dict[str, object]] = []
+    visual_calls = 0
+
+    class FakeApi:
+        def _run_qwen_inference(self, prompt, pil_img, **kwargs):
+            nonlocal visual_calls
+            visual_calls += 1
+            calls.append(
+                {
+                    "call_kind": "visual",
+                    "prompt": prompt,
+                    "size": tuple(pil_img.size),
+                    "decode_override": kwargs.get("decode_override"),
+                    "max_new_tokens": kwargs.get("max_new_tokens"),
+                }
+            )
+            if visual_calls == 1:
+                raise RuntimeError("qwen_caption_repetition_loop")
+            return (
+                json.dumps(
+                    {
+                        "qa_pairs": [
+                            {
+                                "question": "How many buildings are present?",
+                                "answer": "1 building is present.",
+                            },
+                            {
+                                "question": "What is the main visible object?",
+                                "answer": "The main visible object is a building.",
+                            },
+                        ]
+                    }
+                ),
+                0,
+                0,
+            )
+
+    result = bench.generate_instruction_qa_pairs(
+        FakeApi(),
+        {"case_id": "case-qa-loop", "class_counts": {"Building": 1}},
+        image_path,
+        "The image shows one building.",
+        _parent_args(
+            tmp_path,
+            tmp_path / "out",
+            instruction_dataset=True,
+            subcaptions_per_image=2,
+            instruction_max_new_tokens=512,
+        ),
+    )
+
+    assert result["status"] == "ok"
+    assert result["pair_count"] == 2
+    assert result["recovered_by"] == "caption_grounded_fallback"
+    assert [attempt["status"] for attempt in result["attempts"]] == ["error", "ok"]
+    assert [attempt["call_kind"] for attempt in result["attempts"]] == ["visual", "visual"]
+    assert [call["call_kind"] for call in calls] == ["visual", "visual"]
+    assert [call["size"] for call in calls] == [(32, 24), (32, 24)]
+    assert "Caption-grounded visual QA top-up" in str(calls[1]["prompt"])
+    assert calls[1]["decode_override"]["repetition_penalty"] == 1.18
+    assert result["attempt_summary"][1]["label"] == "Caption-grounded fallback"
+    assert result["accumulator"]["accepted_pair_count"] == 2
+
+
+def test_instruction_qa_generation_recovers_empty_json_with_visual_topup_retry(tmp_path: Path) -> None:
+    image_path = tmp_path / "frame.jpg"
+    _write_image(image_path)
+    calls = 0
+
+    class FakeApi:
+        def _run_qwen_inference(self, prompt, pil_img, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return (json.dumps({"qa_pairs": []}), pil_img.size[0], pil_img.size[1])
+            assert "visual QA top-up" in prompt
+            return (
+                json.dumps(
+                    {
+                        "qa_pairs": [
+                            {
+                                "question": "What object is described in the caption?",
+                                "answer": "A building is described in the caption.",
+                            }
+                        ]
+                    }
+                ),
+                0,
+                0,
+            )
+
+    result = bench.generate_instruction_qa_pairs(
+        FakeApi(),
+        {"case_id": "case-empty", "class_counts": {"Building": 1}},
+        image_path,
+        "The image shows one building.",
+        _parent_args(
+            tmp_path,
+            tmp_path / "out",
+            instruction_dataset=True,
+            subcaptions_per_image=1,
+            instruction_max_new_tokens=512,
+        ),
+    )
+
+    assert calls == 2
+    assert result["status"] == "ok"
+    assert result["pair_count"] == 1
+    assert [attempt["status"] for attempt in result["attempts"]] == ["empty", "ok"]
+    assert [attempt["call_kind"] for attempt in result["attempts"]] == ["visual", "visual"]
+    assert result["attempt_summary"][0]["accepted_count"] == 0
+    assert result["attempt_summary"][1]["accepted_count"] == 1
+
+
+def test_instruction_qa_generation_accumulates_visual_topups(tmp_path: Path) -> None:
+    image_path = tmp_path / "frame.jpg"
+    _write_image(image_path)
+    calls: list[dict[str, object]] = []
+    outputs = [
+        {
+            "qa_pairs": [
+                {
+                    "question": "What is the main object?",
+                    "answer": "A building is the main object.",
+                },
+                {"question": "", "answer": "This row is malformed."},
+            ]
+        },
+        {
+            "qa_pairs": [
+                {
+                    "question": "How many buildings are present?",
+                    "answer": "1 building is present.",
+                }
+            ]
+        },
+        {
+            "qa_pairs": [
+                {
+                    "question": "What viewpoint is used?",
+                    "answer": "The scene is viewed from above.",
+                }
+            ]
+        },
+    ]
+
+    class FakeApi:
+        def _run_qwen_inference(self, prompt, pil_img, **kwargs):
+            calls.append(
+                {
+                    "prompt": prompt,
+                    "size": tuple(pil_img.size),
+                    "decode_override": kwargs.get("decode_override"),
+                }
+            )
+            return (json.dumps(outputs.pop(0)), pil_img.size[0], pil_img.size[1])
+
+    result = bench.generate_instruction_qa_pairs(
+        FakeApi(),
+        {"case_id": "case-accumulate", "class_counts": {"Building": 1}},
+        image_path,
+        "The image shows one building.",
+        _parent_args(
+            tmp_path,
+            tmp_path / "out",
+            instruction_dataset=True,
+            subcaptions_per_image=3,
+            instruction_max_new_tokens=512,
+        ),
+    )
+
+    assert result["status"] == "ok"
+    assert result["pair_count"] == 3
+    assert result["rejected_pair_count"] == 0
+    assert result["rejections"][0]["reason"] == "missing_question_or_answer"
+    assert [call["size"] for call in calls] == [(32, 24), (32, 24), (32, 24)]
+    assert "Caption-grounded visual QA top-up" in str(calls[1]["prompt"])
+    assert "Sparse-scene visual QA top-up" in str(calls[2]["prompt"])
+    assert [item["label"] for item in result["attempt_summary"]] == [
+        "Primary prompt",
+        "Caption-grounded fallback",
+        "Sparse-scene fallback",
+    ]
+    assert [item["accepted_count"] for item in result["attempt_summary"]] == [1, 1, 1]
+    assert [pair["qa_id"] for pair in result["pairs"]] == [
+        "case-accumulate__generated_qa_0001",
+        "case-accumulate__generated_qa_0002",
+        "case-accumulate__generated_qa_0003",
+    ]
+    assert result["accumulator"]["accepted_pair_count"] == 3
+    assert result["accumulator"]["underfilled"] is False
+
+
+def test_instruction_qa_generation_salvages_topup_with_extra_quote_metadata_keys(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "frame.jpg"
+    _write_image(image_path)
+    outputs = [
+        json.dumps(
+            {
+                "qa_pairs": [
+                    {
+                        "question": "What is the main object?",
+                        "answer": "A building is present.",
+                    }
+                ]
+            }
+        ),
+        (
+            '{"qa_pairs":[{"question":"How many buildings are present?",'
+            '"answer":"1 building is present.",""row_type":"generated_qa"},'
+            '{"question":"What surrounds the building?",'
+            '"answer":"Open ground surrounds the building.",""answer_format":"natural"}]}'
+        ),
+    ]
+
+    class FakeApi:
+        def _run_qwen_inference(self, _prompt, pil_img, **_kwargs):
+            return (outputs.pop(0), pil_img.size[0], pil_img.size[1])
+
+    result = bench.generate_instruction_qa_pairs(
+        FakeApi(),
+        {"case_id": "case-repair-topup", "class_counts": {"Building": 1}},
+        image_path,
+        "The image shows one building.",
+        _parent_args(
+            tmp_path,
+            tmp_path / "out",
+            instruction_dataset=True,
+            subcaptions_per_image=3,
+            instruction_max_new_tokens=512,
+        ),
+    )
+
+    assert result["status"] == "ok"
+    assert result["pair_count"] == 3
+    assert result["underfilled"] is False
+    assert [item["accepted_count"] for item in result["attempt_summary"]] == [1, 2]
+
+
+def test_instruction_qa_generation_salvages_topup_with_missing_answer_key_quote(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "frame.jpg"
+    _write_image(image_path)
+    outputs = [
+        json.dumps(
+            {
+                "qa_pairs": [
+                    {
+                        "question": "What is the color of the water?",
+                        "answer": "The water is teal.",
+                    }
+                ]
+            }
+        ),
+        (
+            '```json\n'
+            '{"qa_pairs":['
+            '{"question":"Are there bicycles near the people?",'
+            '"answer:"Yes, two bicycles are near the people.",'
+            '"row_type":"generated_qa","answer_format":"natural"},'
+            '{"question":"Where is the red-roofed building?",'
+            '"answer:"The red-roofed building is in the lower-right area.",'
+            '"row_type":"generated_qa","answer_format":"natural"}'
+            ']}\n'
+            '```'
+        ),
+    ]
+
+    class FakeApi:
+        def _run_qwen_inference(self, _prompt, pil_img, **_kwargs):
+            return (outputs.pop(0), pil_img.size[0], pil_img.size[1])
+
+    result = bench.generate_instruction_qa_pairs(
+        FakeApi(),
+        {
+            "case_id": "case-missing-answer-key-quote",
+            "class_counts": {"Bike": 2, "Building": 2, "Person": 3},
+        },
+        image_path,
+        "The image shows teal water, two bicycles, three people, and two buildings.",
+        _parent_args(
+            tmp_path,
+            tmp_path / "out",
+            instruction_dataset=True,
+            subcaptions_per_image=3,
+            instruction_max_new_tokens=512,
+        ),
+    )
+
+    assert result["status"] == "ok"
+    assert result["pair_count"] == 3
+    assert result["underfilled"] is False
+    assert [item["accepted_count"] for item in result["attempt_summary"]] == [1, 2]
+    assert result["attempts"][1]["raw_output"].startswith("```json")
+    assert [pair["question"] for pair in result["pairs"]] == [
+        "What is the color of the water?",
+        "Are there bicycles near the people?",
+        "Where is the red-roofed building?",
+    ]
+
+
+def test_instruction_qa_generation_cycles_bounded_visual_topups_until_target(tmp_path: Path) -> None:
+    image_path = tmp_path / "frame.jpg"
+    _write_image(image_path)
+    calls: list[dict[str, object]] = []
+    outputs = [
+        {"qa_pairs": [{"question": "What is the main object?", "answer": "A building is present."}]},
+        {"qa_pairs": [{"question": "How many buildings are present?", "answer": "1 building is present."}]},
+        {"qa_pairs": [{"question": "What viewpoint is used?", "answer": "The scene is viewed from above."}]},
+        {"qa_pairs": [{"question": "What surrounds the building?", "answer": "Open ground surrounds the building."}]},
+    ]
+
+    class FakeApi:
+        def _run_qwen_inference(self, prompt, pil_img, **_kwargs):
+            calls.append({"prompt": prompt, "size": tuple(pil_img.size)})
+            return (json.dumps(outputs.pop(0)), pil_img.size[0], pil_img.size[1])
+
+    result = bench.generate_instruction_qa_pairs(
+        FakeApi(),
+        {"case_id": "case-repeat-topup", "class_counts": {"Building": 1}},
+        image_path,
+        "The image shows one building.",
+        _parent_args(
+            tmp_path,
+            tmp_path / "out",
+            instruction_dataset=True,
+            subcaptions_per_image=4,
+            instruction_max_new_tokens=512,
+            instruction_qa_max_topup_attempts=4,
+        ),
+    )
+
+    assert result["status"] == "ok"
+    assert result["pair_count"] == 4
+    assert len(calls) == 4
+    assert [call["size"] for call in calls] == [(32, 24)] * 4
+    assert [item["label"] for item in result["attempt_summary"]] == [
+        "Primary prompt",
+        "Caption-grounded fallback",
+        "Sparse-scene fallback",
+        "Caption-grounded fallback",
+    ]
+    assert [item.get("topup_attempt") for item in result["attempt_summary"]] == [
+        None,
+        1,
+        2,
+        3,
+    ]
+    assert result["max_topup_attempts"] == 4
+    assert result["accumulator"]["underfilled"] is False
 
 
 def test_worker_qwen_caption_io_artifacts_follow_worker_run_ids(
@@ -647,6 +1304,17 @@ def test_caption_quality_accepts_people_as_person_label() -> None:
     assert quality["missing_count_digits"] == []
 
 
+def test_caption_quality_accepts_glossary_canonical_label_mentions() -> None:
+    quality = bench.summarize_caption(
+        "The scene contains 1 utility pole beside the road.",
+        {"UPole": 1},
+        {"UPole": ["utility pole", "power pole"]},
+    )
+
+    assert quality["missing_label_mentions"] == []
+    assert quality["missing_count_digits"] == []
+
+
 def test_quality_label_variants_do_not_double_pluralize_plural_label() -> None:
     variants = bench.quality_label_variants("Solar Panels")
 
@@ -688,6 +1356,42 @@ def test_summary_file_is_atomic_and_counts_latest_status(tmp_path: Path) -> None
     assert summary["rows_truncated"] is False
     assert summary["rows_omitted"] == 0
     assert summary["totals"] == {"ok": 1, "skipped_existing_caption": 1}
+    assert summary["generated_qa_warning_cases"] == 0
+    assert summary["generated_qa_error_cases"] == 0
+
+
+def test_summary_counts_generated_qa_warnings_separately_from_caption_success(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        {
+            "case_id": "a",
+            "final_status": "ok",
+            "status": "ok",
+            "instruction_qa_status": "underfilled",
+            "generated_qa_pair_count": 3,
+            "generated_qa_target_pair_count": 8,
+        },
+        {
+            "case_id": "b",
+            "final_status": "ok",
+            "status": "ok",
+            "instruction_qa_status": "error",
+            "generated_qa_pair_count": 0,
+            "generated_qa_target_pair_count": 8,
+            "generated_qa_warning": {"type": "InstructionQaGenerationWarning"},
+        },
+    ]
+
+    bench.write_summary(tmp_path, rows)
+
+    summary = json.loads((tmp_path / "summary.json").read_text())
+    assert summary["failed_cases"] == 0
+    assert summary["totals"] == {"ok": 2}
+    assert summary["generated_qa_warning_cases"] == 2
+    assert summary["generated_qa_error_cases"] == 1
+    assert summary["generated_qa_underfilled_cases"] == 1
+    assert summary["generated_qa_zero_pair_cases"] == 1
 
 
 def test_summary_file_caps_row_snapshot_without_losing_totals(tmp_path: Path) -> None:
@@ -975,6 +1679,108 @@ def test_run_settings_payload_ignores_cases_json_path(tmp_path: Path) -> None:
     assert settings_a["fingerprint"] == settings_b["fingerprint"]
 
 
+def test_run_settings_payload_fingerprints_openai_provider_fields(tmp_path: Path) -> None:
+    local_settings = bench.run_settings_payload(
+        _parent_args(tmp_path / "dataset", tmp_path / "run", caption_provider="local_qwen")
+    )
+    openai_settings = bench.run_settings_payload(
+        _parent_args(
+            tmp_path / "dataset",
+            tmp_path / "run",
+            caption_provider="openai",
+            openai_model="gpt-5.5",
+            openai_image_detail="original",
+            openai_reasoning_effort="high",
+            openai_api_key_file="openAI_API_KEY_DoNotCommit",
+            openai_service_tier="standard",
+        )
+    )
+    low_detail_settings = bench.run_settings_payload(
+        _parent_args(
+            tmp_path / "dataset",
+            tmp_path / "run",
+            caption_provider="openai",
+            openai_model="gpt-5.5",
+            openai_image_detail="low",
+            openai_api_key_file="openAI_API_KEY_DoNotCommit",
+            openai_service_tier="standard",
+        )
+    )
+
+    assert openai_settings["caption_args"]["caption_provider"] == "openai"
+    assert openai_settings["caption_args"]["openai_image_detail"] == "original"
+    assert local_settings["fingerprint"] != openai_settings["fingerprint"]
+    assert openai_settings["fingerprint"] != low_detail_settings["fingerprint"]
+
+
+def test_openai_caption_adapter_sends_visual_responses_payload(monkeypatch) -> None:
+    captured = {}
+
+    class DummyResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self) -> bytes:
+            return json.dumps({"output_text": "A grounded caption."}).encode("utf-8")
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["timeout"] = timeout
+        captured["headers"] = dict(req.header_items())
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return DummyResponse()
+
+    io_inputs = []
+    io_outputs = []
+    local_api = SimpleNamespace(
+        _qwen_caption_io_input=lambda **kwargs: io_inputs.append(kwargs),
+        _qwen_caption_io_output=lambda **kwargs: io_outputs.append(kwargs),
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(bench.urllib.request, "urlopen", fake_urlopen)
+
+    adapter = bench.OpenAICaptionApiAdapter(
+        local_api,
+        SimpleNamespace(
+            openai_model="gpt-5.5",
+            openai_image_detail="original",
+            openai_api_key_file="",
+            openai_timeout=42,
+        ),
+    )
+    image = Image.new("RGB", (16, 8), color=(1, 2, 3))
+
+    text, width, height = adapter._run_qwen_inference(
+        "Describe the image.",
+        image,
+        max_new_tokens=123,
+        system_prompt_override="System instruction.",
+    )
+
+    assert text == "A grounded caption."
+    assert (width, height) == (16, 8)
+    assert captured["url"] == "https://api.openai.com/v1/responses"
+    assert captured["timeout"] == 42
+    assert captured["headers"]["Authorization"] == "Bearer sk-test"
+    body = captured["body"]
+    assert body["model"] == "gpt-5.5"
+    assert body["max_output_tokens"] == 123
+    assert body["store"] is False
+    content = body["input"][0]["content"]
+    text_content = [item for item in content if item["type"] == "input_text"][0]
+    image_content = [item for item in content if item["type"] == "input_image"][0]
+    assert "System instruction." in text_content["text"]
+    assert "Describe the image." in text_content["text"]
+    assert image_content["detail"] == "original"
+    assert image_content["image_url"].startswith("data:image/png;base64,")
+    assert io_inputs and io_inputs[0]["source"] == "openai_inference"
+    assert io_inputs[0]["messages"][0]["content"][1]["image_url"] == "<base64 image omitted>"
+    assert io_outputs and io_outputs[0]["output_text"] == "A grounded caption."
+
+
 def test_parent_resume_rejects_mismatched_run_settings_before_appending(monkeypatch, tmp_path: Path) -> None:
     dataset = tmp_path / "dataset"
     (dataset / "labelmap.txt").parent.mkdir(parents=True, exist_ok=True)
@@ -1016,6 +1822,128 @@ def test_parent_resume_rejects_mismatched_run_settings_before_appending(monkeypa
 
     assert len(child_calls) == 1
     assert (output_dir / "results.jsonl").read_text() == before_mismatch_results
+
+
+def test_parent_passes_openai_provider_fields_to_worker(monkeypatch, tmp_path: Path) -> None:
+    dataset = tmp_path / "dataset"
+    (dataset / "labelmap.txt").parent.mkdir(parents=True, exist_ok=True)
+    (dataset / "labelmap.txt").write_text("Building\n")
+    image_path = dataset / "images" / "frame.jpg"
+    _write_image(image_path)
+    output_dir = tmp_path / "run"
+    child_calls = []
+
+    def fake_run(cmd, **_kwargs):
+        child_calls.append(cmd)
+        attempt_dir = Path(cmd[cmd.index("--output-dir") + 1])
+        result = {
+            "status": "ok",
+            "response": {
+                "caption": "The scene contains a Building.",
+                "used_counts": {"Building": 1},
+                "used_boxes": 0,
+                "truncated": False,
+                "recovery_events": [],
+            },
+            "caption_quality": {},
+        }
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        (attempt_dir / "result.json").write_text(json.dumps(result))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(bench.subprocess, "run", fake_run)
+
+    assert bench.run_parent(
+        _parent_args(
+            dataset,
+            output_dir,
+            caption_provider="openai",
+            openai_model="gpt-5.5",
+            openai_image_detail="original",
+            openai_reasoning_effort="high",
+            openai_api_key_file="openAI_API_KEY_DoNotCommit",
+            openai_service_tier="standard",
+            openai_timeout=77,
+            openai_max_retries=4,
+        )
+    ) == 0
+
+    assert len(child_calls) == 1
+    cmd = child_calls[0]
+    assert cmd[cmd.index("--caption-provider") + 1] == "openai"
+    assert cmd[cmd.index("--openai-model") + 1] == "gpt-5.5"
+    assert cmd[cmd.index("--openai-image-detail") + 1] == "original"
+    assert cmd[cmd.index("--openai-reasoning-effort") + 1] == "high"
+    assert cmd[cmd.index("--openai-api-key-file") + 1] == "openAI_API_KEY_DoNotCommit"
+    assert cmd[cmd.index("--openai-service-tier") + 1] == "standard"
+    assert cmd[cmd.index("--openai-timeout") + 1] == "77"
+    assert cmd[cmd.index("--openai-max-retries") + 1] == "4"
+
+
+def test_parent_parallel_cases_runs_workers_under_one_manifest(monkeypatch, tmp_path: Path) -> None:
+    dataset = tmp_path / "dataset"
+    (dataset / "labelmap.txt").parent.mkdir(parents=True, exist_ok=True)
+    (dataset / "labelmap.txt").write_text("Building\n")
+    _write_image(dataset / "images" / "frame_a.jpg")
+    _write_image(dataset / "images" / "frame_b.jpg")
+    output_dir = tmp_path / "run"
+    child_calls = []
+
+    def fake_run(cmd, **_kwargs):
+        child_calls.append(cmd)
+        attempt_dir = Path(cmd[cmd.index("--output-dir") + 1])
+        result = {
+            "status": "ok",
+            "response": {
+                "caption": "The scene contains a Building.",
+                "used_counts": {"Building": 1},
+                "used_boxes": 0,
+                "truncated": False,
+                "recovery_events": [],
+                "generated_qa_pairs": [{"question": "What is present?", "answer": "A building is present."}],
+                "generated_qa_pair_count": 1,
+                "generated_qa_target_pair_count": 1,
+                "generated_qa_rejected_pair_count": 0,
+            },
+            "caption_quality": {},
+            "instruction_qa": {
+                "status": "ok",
+                "pair_count": 1,
+                "target_pair_count": 1,
+                "rejected_pair_count": 0,
+            },
+        }
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        (attempt_dir / "result.json").write_text(json.dumps(result))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(bench.subprocess, "run", fake_run)
+
+    assert bench.run_parent(
+        _parent_args(
+            dataset,
+            output_dir,
+            caption_provider="openai",
+            parallel_cases=2,
+            instruction_dataset=True,
+            subcaptions_per_image=1,
+            continue_on_quality_failures=True,
+            summary_row_limit=-1,
+        )
+    ) == 0
+
+    assert len(child_calls) == 2
+    manifest = json.loads((output_dir / "manifest.json").read_text())
+    assert manifest["parallel_cases"] == 2
+    assert manifest["run_settings"]["caption_args"]["parallel_cases"] == 2
+    rows = [json.loads(line) for line in (output_dir / "results.jsonl").read_text().splitlines()]
+    assert len([row for row in rows if row["final_status"] == "ok"]) == 2
+    captions = [json.loads(line) for line in (output_dir / "captions.jsonl").read_text().splitlines()]
+    assert len(captions) == 2
+    assert all(caption["generated_qa_pair_count"] == 1 for caption in captions)
+    heartbeat = json.loads((output_dir / "heartbeat.json").read_text())
+    assert heartbeat["parallel_cases"] == 2
+    assert heartbeat["processed"] == 2
 
 
 def test_parent_resume_rejects_invalid_results_jsonl_before_appending(monkeypatch, tmp_path: Path) -> None:
@@ -1455,7 +2383,153 @@ def test_parent_recovers_exhausted_attempts_with_deterministic_count_caption(
     assert heartbeat["failed_cases"] == 0
 
 
-def test_parent_does_not_recover_generated_qa_training_failure(
+def test_parent_does_not_recover_request_validation_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    dataset = tmp_path / "dataset"
+    (dataset / "labelmap.txt").parent.mkdir(parents=True, exist_ok=True)
+    (dataset / "labelmap.txt").write_text("Building\n")
+    _write_image(dataset / "images" / "frame.jpg")
+    label_dir = dataset / "labels"
+    label_dir.mkdir(parents=True, exist_ok=True)
+    (label_dir / "frame.txt").write_text("0 0.5 0.5 0.25 0.25\n")
+    output_dir = tmp_path / "run"
+
+    def fake_run(cmd, **_kwargs):
+        attempt_dir = Path(cmd[cmd.index("--output-dir") + 1])
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        result = {
+            "status": "exception",
+            "exception": {
+                "type": "ValidationError",
+                "message": "1 validation error for QwenCaptionRequest",
+            },
+            "caption_quality": {},
+        }
+        (attempt_dir / "result.json").write_text(json.dumps(result))
+        return SimpleNamespace(returncode=1, stdout="failure stdout", stderr="failure stderr")
+
+    monkeypatch.setattr(bench.subprocess, "run", fake_run)
+
+    assert bench.run_parent(_parent_args(dataset, output_dir, attempts=1, max_failures=1)) == 1
+
+    rows = [
+        json.loads(line)
+        for line in (output_dir / "results.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert [row["final_status"] for row in rows] == ["failed_attempt", "failed"]
+    terminal = rows[-1]
+    assert terminal["terminal_failure"] is True
+    assert terminal["parent_deterministic_recovery_skipped"]["reason"] == (
+        "nonrecoverable_exception:ValidationError"
+    )
+    assert "parent_deterministic_recovery" not in terminal
+
+
+def test_parent_does_not_recover_caption_quality_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    dataset = tmp_path / "dataset"
+    (dataset / "labelmap.txt").parent.mkdir(parents=True, exist_ok=True)
+    (dataset / "labelmap.txt").write_text("Building\n")
+    _write_image(dataset / "images" / "frame.jpg")
+    label_dir = dataset / "labels"
+    label_dir.mkdir(parents=True, exist_ok=True)
+    (label_dir / "frame.txt").write_text("0 0.5 0.5 0.25 0.25\n")
+    output_dir = tmp_path / "run"
+
+    def fake_run(cmd, **_kwargs):
+        attempt_dir = Path(cmd[cmd.index("--output-dir") + 1])
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        result = {
+            "status": "ok",
+            "response": {
+                "caption": "The image shows an empty paved area.",
+                "used_counts": {"Building": 1},
+            },
+            "caption_quality": {
+                "missing_label_mentions": ["Building"],
+                "missing_count_digits": ["1 Building"],
+            },
+        }
+        (attempt_dir / "result.json").write_text(json.dumps(result))
+        return SimpleNamespace(returncode=0, stdout="quality stdout", stderr="")
+
+    monkeypatch.setattr(bench.subprocess, "run", fake_run)
+
+    assert bench.run_parent(_parent_args(dataset, output_dir, attempts=1, max_failures=1)) == 1
+
+    rows = [
+        json.loads(line)
+        for line in (output_dir / "results.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert [row["final_status"] for row in rows] == ["failed_attempt", "failed"]
+    terminal = rows[-1]
+    assert terminal["terminal_failure"] is True
+    assert terminal["parent_deterministic_recovery_skipped"]["reason"] == (
+        "ineligible_failure:quality_or_policy_failure"
+    )
+    assert "parent_deterministic_recovery" not in terminal
+
+
+def test_parent_does_not_recover_generated_qa_training_failure_when_caption0_also_included(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    dataset = tmp_path / "dataset"
+    (dataset / "labelmap.txt").parent.mkdir(parents=True, exist_ok=True)
+    (dataset / "labelmap.txt").write_text("Building\n")
+    _write_image(dataset / "images" / "frame.jpg")
+    label_dir = dataset / "labels"
+    label_dir.mkdir(parents=True, exist_ok=True)
+    (label_dir / "frame.txt").write_text("0 0.5 0.5 0.25 0.25\n")
+    output_dir = tmp_path / "run"
+
+    def fake_run(cmd, **_kwargs):
+        attempt_dir = Path(cmd[cmd.index("--output-dir") + 1])
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        result = {
+            "status": "exception",
+            "exception": {"type": "RuntimeError", "message": "simulated model failure"},
+            "caption_quality": {},
+        }
+        (attempt_dir / "result.json").write_text(json.dumps(result))
+        return SimpleNamespace(returncode=1, stdout="failure stdout", stderr="failure stderr")
+
+    monkeypatch.setattr(bench.subprocess, "run", fake_run)
+
+    args = _parent_args(
+        dataset,
+        output_dir,
+        attempts=1,
+        instruction_dataset=True,
+        subcaptions_per_image=8,
+        include_caption0_in_training=True,
+        include_generated_qa_in_training=True,
+        include_deterministic_metadata_qa=False,
+        max_failures=1,
+    )
+    assert bench.run_parent(args) == 1
+
+    rows = [
+        json.loads(line)
+        for line in (output_dir / "results.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert [row["final_status"] for row in rows] == ["failed_attempt", "failed"]
+    terminal = rows[-1]
+    assert terminal["terminal_failure"] is True
+    assert terminal["parent_deterministic_recovery_skipped"]["reason"] == "generated_qa_required"
+    assert "parent_deterministic_recovery" not in terminal
+    summary = json.loads((output_dir / "summary.json").read_text())
+    assert summary["totals"] == {"failed": 1}
+
+
+def test_parent_does_not_recover_generated_qa_only_training_failure(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -1495,6 +2569,9 @@ def test_parent_does_not_recover_generated_qa_training_failure(
         attempts=1,
         instruction_dataset=True,
         subcaptions_per_image=8,
+        include_caption0_in_training=False,
+        include_generated_qa_in_training=True,
+        include_deterministic_metadata_qa=False,
         max_failures=1,
     )
     assert bench.run_parent(args) == 1
@@ -1596,13 +2673,16 @@ def test_worker_generates_instruction_qa_pairs_without_image_path_name_error(
     assert qa_images == [(32, 24)]
     assert result["instruction_qa"]["status"] == "ok"
     assert result["response"]["generated_qa_pair_count"] == 2
+    assert result["response"]["generated_qa_target_pair_count"] == 2
+    assert result["response"]["generated_qa_accumulator"]["accepted_pair_count"] == 2
+    assert result["response"]["generated_qa_attempt_summary"][0]["label"] == "Primary prompt"
     assert [pair["row_type"] for pair in result["response"]["generated_qa_pairs"]] == [
         "generated_qa",
         "generated_qa",
     ]
 
 
-def test_worker_fails_generated_qa_training_case_when_pairs_are_empty(
+def test_worker_preserves_caption0_when_generated_qa_pairs_are_empty(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -1655,6 +2735,72 @@ def test_worker_fails_generated_qa_training_case_when_pairs_are_empty(
         subcaptions_per_image=2,
         instruction_max_new_tokens=512,
     )
+    assert bench.run_worker(case_path, output_dir, dataset, args) == 0
+
+    result = json.loads((output_dir / "result.json").read_text())
+    assert result["status"] == "ok"
+    assert result["instruction_qa"]["status"] == "empty"
+    assert result["response"]["generated_qa_pair_count"] == 0
+    assert result["response"]["caption"] == "The image shows one building."
+    assert result["response"]["generated_qa_warning"]["type"] == "InstructionQaGenerationWarning"
+
+
+def test_worker_fails_generated_qa_only_training_case_when_pairs_are_empty(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    dataset = tmp_path / "dataset"
+    (dataset / "labelmap.txt").parent.mkdir(parents=True, exist_ok=True)
+    (dataset / "labelmap.txt").write_text("Building\n")
+    image_path = dataset / "images" / "frame.jpg"
+    _write_image(image_path)
+    label_dir = dataset / "labels"
+    label_dir.mkdir(parents=True, exist_ok=True)
+    label_path = label_dir / "frame.txt"
+    label_path.write_text("0 0.5 0.5 0.25 0.25\n")
+    case = {
+        "case_id": "image:frame:full",
+        "case": "frame",
+        "stem": "frame",
+        "name": "frame",
+        "image_name": "frame.jpg",
+        "image_path": str(image_path),
+        "label_path": str(label_path),
+        "caption_mode": "full",
+        "label_count": 1,
+        "class_counts": {"Building": 1},
+    }
+    case_path = tmp_path / "case.json"
+    case_path.write_text(json.dumps(case))
+    output_dir = tmp_path / "attempt"
+
+    fake_api = SimpleNamespace(
+        qwen_caption_prompt_preview=lambda _request: {"full_text": "preview"},
+        qwen_caption=lambda _request: {
+            "caption": "The image shows one building.",
+            "used_counts": {"Building": 1},
+            "used_boxes": 1,
+            "truncated": False,
+        },
+        qwen_progress=lambda: {},
+        _run_qwen_inference=lambda *_args, **_kwargs: (
+            json.dumps({"qa_pairs": []}),
+            32,
+            24,
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "localinferenceapi", fake_api)
+
+    args = _parent_args(
+        dataset,
+        output_dir,
+        instruction_dataset=True,
+        subcaptions_per_image=2,
+        instruction_max_new_tokens=512,
+        include_caption0_in_training=False,
+        include_generated_qa_in_training=True,
+        include_deterministic_metadata_qa=False,
+    )
     assert bench.run_worker(case_path, output_dir, dataset, args) == 1
 
     result = json.loads((output_dir / "result.json").read_text())
@@ -1662,6 +2808,110 @@ def test_worker_fails_generated_qa_training_case_when_pairs_are_empty(
     assert result["instruction_qa"]["status"] == "empty"
     assert result["response"]["generated_qa_pair_count"] == 0
     assert result["exception"]["type"] == "InstructionQaGenerationError"
+
+
+def test_instruction_qa_loop_exception_preserves_raw_output_diagnostic(tmp_path: Path) -> None:
+    image_path = tmp_path / "frame.jpg"
+    _write_image(image_path)
+
+    class LoopError(RuntimeError):
+        def __init__(self, raw_output: str):
+            super().__init__("qwen_caption_repetition_loop")
+            self.raw_output = raw_output
+
+        def diagnostic_payload(self, *, max_chars: int = 4000):
+            return {
+                "type": type(self).__name__,
+                "message": str(self),
+                "generated_chars": len(self.raw_output),
+                "raw_output_head": self.raw_output[:max_chars],
+                "raw_output_tail": self.raw_output[-max_chars:],
+                "raw_output_truncated": len(self.raw_output) > max_chars,
+            }
+
+    class FakeApi:
+        def _run_qwen_inference(self, *_args, **_kwargs):
+            raise LoopError("!" * 7000)
+
+    result = bench.generate_instruction_qa_pairs(
+        FakeApi(),
+        {"case_id": "case-loop", "class_counts": {"Container": 22}},
+        image_path,
+        "The scene shows 22 containers stacked in rows.",
+        _parent_args(
+            tmp_path,
+            tmp_path / "out",
+            instruction_dataset=True,
+            subcaptions_per_image=8,
+            instruction_qa_max_topup_attempts=2,
+        ),
+    )
+
+    assert result["status"] == "error"
+    assert result["pair_count"] == 0
+    assert len(result["attempts"]) == 3
+    primary_diagnostic = result["attempts"][0]["loop_diagnostic"]
+    assert primary_diagnostic["generated_chars"] == 7000
+    assert primary_diagnostic["raw_output_truncated"] is True
+    assert primary_diagnostic["raw_output_tail"] == "!" * 6000
+    assert [attempt["call_kind"] for attempt in result["attempts"]] == ["visual", "visual", "visual"]
+    assert all(attempt["loop_diagnostic"]["raw_output_tail"] == "!" * 6000 for attempt in result["attempts"])
+    assert result["attempt_summary"][-1]["label"] == "Sparse-scene fallback"
+
+
+def test_instruction_qa_salvages_complete_pairs_from_loop_output(tmp_path: Path) -> None:
+    image_path = tmp_path / "frame.jpg"
+    _write_image(image_path)
+    raw_output = (
+        '{"qa_pairs":['
+        '{"question":"How many buildings are visible?","answer":"Two buildings are visible."},'
+        '{"question":"What vehicle is on the road?","answer":"One truck is on the road."},'
+        '{"question":"This object is incomplete","answer":"'
+    )
+
+    class LoopError(RuntimeError):
+        def __init__(self, raw: str):
+            super().__init__("qwen_caption_repetition_loop")
+            self.raw_output = raw
+
+        def diagnostic_payload(self, *, max_chars: int = 4000):
+            return {
+                "type": type(self).__name__,
+                "message": str(self),
+                "generated_chars": len(self.raw_output),
+                "raw_output_head": self.raw_output[:max_chars],
+                "raw_output_tail": self.raw_output[-max_chars:],
+                "raw_output_truncated": False,
+                "trimmed_output": self.raw_output,
+                "trimmed_output_truncated": False,
+            }
+
+    class FakeApi:
+        def _run_qwen_inference(self, *_args, **_kwargs):
+            raise LoopError(raw_output)
+
+    result = bench.generate_instruction_qa_pairs(
+        FakeApi(),
+        {"case_id": "case-loop-salvage", "class_counts": {"Building": 2, "Truck": 1}},
+        image_path,
+        "The scene shows two buildings and one truck on a road.",
+        _parent_args(
+            tmp_path,
+            tmp_path / "out",
+            instruction_dataset=True,
+            subcaptions_per_image=2,
+        ),
+    )
+
+    assert result["status"] == "ok"
+    assert result["pair_count"] == 2
+    assert len(result["attempts"]) == 1
+    assert result["attempts"][0]["status"] == "partial_loop_recovered"
+    assert result["attempts"][0]["salvaged_pair_count"] == 2
+    assert result["attempts"][0]["salvaged_accepted_count"] == 2
+    assert result["attempt_summary"][0]["status"] == "partial_loop_recovered"
+    assert result["attempt_summary"][0]["salvaged_accepted_count"] == 2
+    assert all(pair["metadata"]["salvaged_from_loop"] is True for pair in result["pairs"])
 
 
 def test_parent_honors_restart_request_between_cases(monkeypatch, tmp_path: Path) -> None:
@@ -1771,10 +3021,16 @@ def test_parent_writes_heartbeat_during_attempt(monkeypatch, tmp_path: Path) -> 
             bench.time.sleep(0.01)
         lock_path = output_dir / bench.RUNNER_LOCK_NAME
         first_lock = json.loads(lock_path.read_text())
-        bench.time.sleep(0.06)
-        second_lock = json.loads(lock_path.read_text())
+        first_epoch = float(first_lock.get("heartbeat_epoch") or 0.0)
+        second_lock = first_lock
+        deadline = bench.time.time() + 1.0
+        while bench.time.time() < deadline:
+            second_lock = json.loads(lock_path.read_text())
+            if float(second_lock.get("heartbeat_epoch") or 0.0) > first_epoch:
+                break
+            bench.time.sleep(0.01)
         observed_lock_epochs.extend([
-            float(first_lock.get("heartbeat_epoch") or 0.0),
+            first_epoch,
             float(second_lock.get("heartbeat_epoch") or 0.0),
         ])
         result = {

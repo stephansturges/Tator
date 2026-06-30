@@ -167,26 +167,72 @@ before generation.
 
 ## 12. Create A VLM Instruction Dataset
 
-The user clicks **Create VLM training dataset** after choosing a caption dataset.
+The user can click **Preview dataset prompts** after choosing a caption dataset
+to inspect the first selected case's full caption prompt flow plus the
+generated-QA prompt template and generated-QA verifier/rewrite prompt template
+without running the model. The preview uses the same dataset-job payload builder
+as the real launch and includes a caption0 placeholder for the generated-QA
+prompt because runtime inserts the actual caption after the caption pass
+completes. Pilot certification is a launch-only gate, so preview still opens
+before a pilot artifact directory exists and warns that the real run remains
+blocked until the pilot directory is supplied; when a pilot directory is already
+selected, preview warns that launch will still certify it. After the preview
+looks sane, the user clicks
+**Create training dataset**.
+The **Check caption readiness** control is available both near the main caption
+controls and inside the Training dataset action row, so the operator can run the
+same readiness check immediately before previewing or launching the dataset
+job.
+Training-dataset launches use the same caption request-field builder as
+single-image captioning. The captured request therefore includes the same model,
+token, prompt-stack, windowing, label-hint, count/box, and glossary fields that
+the single-image caption path would send for the selected template image; later
+UI edits apply only to the next job because the backend job persists a request
+snapshot at launch.
 The run starts with the selected image, follows backend progress frame by frame,
 and creates caption0 rows plus, by default, 8 generated visual QA rows per
-image. **Generated QA per image** is clamped to 0-20, so `0` creates a
+image. **Generated Q&A rows per image** is clamped to 0-20, so `0` creates a
 caption0-only instruction export and high values cannot explode the prompt or
 artifact size; if a typed value or loaded recipe is outside that range, the
-launch confirmation warns that the value was adjusted. **Include caption0** and
-**Include generated QA** control the flattened instruction JSONL, while
-**Include deterministic metadata QA** is off by default and adds code-generated
+launch confirmation warns that the value was adjusted. **Q&A top-up attempts**
+is clamped to 0-12 and controls how many extra visual fallback prompts may run
+to replace rejected or missing generated-QA rows before the image is marked
+underfilled. **Include caption0** and **Include generated Q&A** control the
+flattened instruction JSONL, while
+**Include deterministic metadata Q&A** is off by default and adds code-generated
 rows from real source labels only when
 explicitly enabled. The UI refuses to launch an instruction run when all three
 trainable row families are disabled, and its confirmation text distinguishes
 trainer JSONL rows from generated QA candidates that are archive/review-only.
-**Generated QA mix** controls whether the generated-QA pass
+**Generated Q&A mix** controls whether the generated-QA pass
 leans balanced, scene-level, object-focused, or caption-variant oriented.
 **Generated answer format** controls whether generated answers are natural text
-or parseable JSON. **Give generator read-only label context** may pass source
+or parseable JSON. **Imposed questions** accepts one required question per line
+or a JSON array; imposed questions are answered first when possible, and answers
+that are not findable in the image can say so directly instead of being invented
+or silently dropped. **Give generator read-only label context** may pass source
 label counts into the generator as grounding context, but generated QA never
 becomes source annotations. **Strict QA grounding** asks the model to answer only
-from the image, caption0, or read-only source context.
+from the image, caption0, or read-only source context. **Restrict speculative
+Q&A language** is off by default; leave it off when the training set should
+learn grounded "unknown", "not visible", or mild inference answers, and enable it
+only when generated QA must contain directly findable facts with no speculation
+or unavailable-information answers.
+Generated-QA prompts always remain visual when they ask for new rows: the
+primary prompt and every top-up fallback prompt attach the image to the VLM
+call. Only the verifier/rewrite pass is text-only, because it rewrites or
+rejects already-generated candidate text rather than asking for new visual
+content.
+Generated QA also has a verifier/rewrite gate before export. Rows that already
+pass deterministic checks are marked `machine_validated`; rows with raw label
+names or malformed questions get one text-only rewrite attempt. If the optional
+speculative-language restriction is enabled, speculative or unavailable-answer
+wording is also rejected or rewritten. Rewritten rows keep their original
+question/answer in metadata, while failed rows remain in the audit archive as
+rejected candidates and are excluded from flattened trainer JSONL. Caption and
+generated-QA prompts must use glossary broad terms as canonical class names; if
+a class has no glossary entry, they use a natural English fallback rather than
+internal labelmap spellings.
 While a caption or instruction job is mutating the caption archive, the
 instruction row-family and generated-QA setup controls are disabled so the UI
 does not imply that mid-run edits will change the active backend job. They
@@ -195,8 +241,40 @@ cycle. Caption image, caption batch, caption-all, and training-dataset launch
 paths also repeat the same archive-idle check at action time, so stale buttons
 or scripted clicks do not start a second caption job while the first job is
 still mutating the archive.
+As each image succeeds, live backend progress may include the latest generated
+QA pairs. The UI shows those pairs as bounded status toasts once per
+job/image/question so the operator can see caption0 and generated QA quality
+without waiting for the final bundle. The same latest pairs are also mirrored
+into a read-only JSON textarea so the operator can inspect the full question,
+answer, validation status, and rejection reasons after the toast disappears.
+During the generated-QA subpass, the UI also shows a compact per-image
+accumulator with the current image index, caption0 status, accepted/target QA
+count, rejected count, and per-prompt-profile accepted/rejected totals for the
+primary prompt plus any caption-grounded or sparse-scene top-up attempts. This
+live status must make underfilled cases explicit, for example `Continuing with
+5/8`, instead of forcing the operator to infer it from logs.
 
-**Download instruction JSONL** exports normal `image_path` / `question` /
+Generated-QA failure is not a full-image failure for the default caption0 plus
+generated-QA path. If caption0 succeeds and generated QA loops, returns invalid
+JSON, or verifies to fewer accepted rows than requested, the backend keeps
+caption0, runs visual generated-QA top-up prompts with the image still attached,
+and then records an audit warning if the accepted total remains underfilled. A
+QA-only configuration remains strict and fails the case when no valid
+generated-QA row exists.
+
+The training-dataset panel is organized as **Preview prompts**, **Create
+dataset**, **Review readiness**, and **Download bundle**. The status strip shows
+whether a caption dataset is selected, whether the model backend is available,
+whether a caption/training job is active, the latest readiness state, and the
+reason actions are disabled. **Download training bundle** is the recommended
+handoff artifact because it includes copied image bytes, effective labels, the
+trainer JSONL, construction archive, review file, readiness report, and checksum
+manifest. Completed training-dataset backend jobs also materialize that same
+bundle plus `caption_instruction_report.json` into the job output directory
+under `instruction_artifacts/`, so a long run does not depend on the operator
+remembering to click a browser download before leaving the page.
+
+**Download trainer JSONL** exports normal `image_path` / `question` /
 `answer` rows. The trainer imports this flat shape directly and normalizes each
 row into an image/question/answer conversation. The UI validates missing image
 paths, blank questions, blank answers, required row metadata,
@@ -207,13 +285,13 @@ file. If the returned trainer-row payload is missing or not an array, the
 validator reports the malformed artifact and blocks export instead of throwing.
 It also validates the instruction report's training-readiness block:
 `blocked` readiness refuses the download, while `needs_review` readiness is
-blocked by default by **Require
-ready report for trainer JSONL**. Operators can disable that gate only for
+blocked by default by **Only export training data when ready**. Operators can disable that gate only for
 deliberate review-pending diagnostics. Scripted exports can use
 `require_ready_instruction_export=true` for the same server-side refusal; the
-UI sends that backend gate for trainer JSONL when **Require ready report for
-trainer JSONL** is checked. Archive, review, and report downloads deliberately
-do not send the ready gate because those diagnostic artifacts are needed to fix
+UI sends that backend gate for trainer JSONL and the bundle when **Only export
+training data when ready** is checked. Construction archive, review file, and
+readiness report downloads deliberately do not send the ready gate because those
+diagnostic artifacts are needed to fix
 a not-ready corpus. A selected row that a reviewer marks rejected or
 needs-revision moves readiness to `blocked` until the row is removed,
 regenerated, or accepted.
@@ -232,7 +310,8 @@ must update the caption export health row and the status toast with the same
 formatted message, without double-prefixing already formatted blocked messages.
 Busy responses from a live caption dataset job remain "blocked" operator
 messages rather than being relabeled as generic export/import failures.
-**Download instruction archive** exports one per-image construction archive
+The diagnostic downloads live under **Advanced exports and review** so the main
+path stays focused on preview, creation, readiness, and bundle export. **Download construction archive** exports one per-image construction archive
 record per JSONL line, keeping caption0, generated QA, optional deterministic
 metadata QA, source annotation provenance, and per-image export metadata separate
 from trainer rows. The archive download is blocked if row-level validation
@@ -249,11 +328,11 @@ available.
 Flat-layout image keys are canonicalized before export so a saved caption and a
 manifest row for the same nested image are not exported as duplicate instruction
 objects.
-**Download review JSONL** exports one candidate-level row for each caption0,
+**Download review file** exports one candidate-level row for each caption0,
 generated QA, and deterministic metadata QA item. Review rows preserve candidate
 answers, selected training answers, source summaries, rejection reasons,
 selected-for-training flags, and blank review decision/note fields so a human
-can audit the corpus before fine-tuning. **Import reviewed JSONL** reads that
+can audit the corpus before fine-tuning. **Import review decisions** reads that
 artifact after a reviewer fills accepted, rejected, or needs-revision decisions
 and applies only review metadata to matching saved caption and generated-QA
 records; rows from a different dataset are blocked before import. The backend
@@ -297,7 +376,7 @@ also blocked when the review-row count, selected review-row count, or
 manual-review row count disagrees with the instruction report. Missing or
 non-array review-row payloads are surfaced as validation failures with zero row
 count rather than crashing the export action.
-**Download instruction report** exports run-level counts, rejection reasons,
+**Download readiness report** exports run-level counts, rejection reasons,
 source-field provenance, split image counts, split row counts, QA count per
 image, selected flattened-row counts, duplicate-question/diversity metrics,
 structured-rewrite rates, answer-format distribution, source-class coverage,

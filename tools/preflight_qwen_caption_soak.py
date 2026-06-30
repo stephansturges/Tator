@@ -616,6 +616,20 @@ def _add_model_cache_check(
     args: argparse.Namespace,
     request_template: Mapping[str, Any] | None = None,
 ) -> None:
+    if str(getattr(args, "caption_provider", runner.CAPTION_PROVIDER_LOCAL) or "").strip().lower() == runner.CAPTION_PROVIDER_OPENAI:
+        report["model_cache"] = {
+            "remote_provider": "openai",
+            "models": [],
+            "unresolved": [],
+            "allow_model_download": False,
+        }
+        _add_check(
+            report,
+            "model_cache",
+            "ok",
+            "OpenAI caption provider selected; local Qwen model cache is not required",
+        )
+        return
     effective_args, effective_meta = _effective_caption_model_args(args, request_template)
     if bool(getattr(args, "preview_only", False)):
         report["model_cache"] = {

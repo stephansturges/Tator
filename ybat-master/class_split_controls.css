@@ -424,9 +424,17 @@ html.theme-pipboy .class-split-workspace {
 .class-split-resolved-summary span { color: var(--dqe-muted); font-size: 0.68rem; font-weight: 750; letter-spacing: 0.04em; text-transform: uppercase; }
 .class-split-resolved-summary strong { overflow-wrap: anywhere; color: var(--dqe-ink); font-size: 0.78rem; }
 .class-split-actions--guided { margin-top: 0.05rem; }
+.class-split-evidence-preview__body { display: grid; grid-template-columns: minmax(11rem, 0.65fr) minmax(15rem, 1.35fr); gap: 0.75rem; align-items: center; }
+.class-split-evidence-example { display: grid; grid-template-columns: 5rem minmax(0, 1fr); gap: 0.65rem; align-items: center; margin: 0; padding: 0.55rem; border: 1px solid var(--dqe-border); border-radius: 0.55rem; background: var(--dqe-surface-strong); }
+.class-split-evidence-example__crop { position: relative; width: 5rem; aspect-ratio: 4 / 3; overflow: hidden; border-radius: 0.4rem; background: linear-gradient(145deg, color-mix(in srgb, var(--dqe-muted) 28%, var(--dqe-surface)), var(--dqe-subtle)); }
+.class-split-evidence-example__object { position: absolute; inset: 22% 24% 18% 30%; border: 1px solid var(--dqe-ink); border-radius: 45% 45% 28% 28%; opacity: 0.8; }
+.class-split-evidence-example__focus { position: absolute; inset: 12% 14% 10% 18%; border-radius: 45%; background: radial-gradient(circle, color-mix(in srgb, var(--dqe-accent) 68%, transparent) 0 20%, color-mix(in srgb, var(--dqe-accent) 28%, transparent) 40%, transparent 70%); }
+.class-split-evidence-example figcaption, .class-split-evidence-preview__copy { display: grid; gap: 0.15rem; color: var(--dqe-ink); font-size: 0.78rem; line-height: 1.35; }
+.class-split-evidence-example figcaption span, .class-split-evidence-preview__copy p { margin: 0; color: var(--dqe-muted); }
 @media (max-width: 720px) {
     .class-split-preset-row, .class-split-choice-grid--scope, .class-split-weight-row { grid-template-columns: 1fr; }
     .class-split-step { grid-template-columns: 1.75rem minmax(0, 1fr); padding: 0.65rem; }
     .class-split-choice-grid, .class-split-tune__grid, .class-split-resolved-summary { grid-template-columns: 1fr; }
+    .class-split-evidence-preview__body { grid-template-columns: 1fr; }
     .class-split-weight-complement { padding-bottom: 0; }
 }

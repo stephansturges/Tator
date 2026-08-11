@@ -5437,6 +5437,10 @@ def test_class_split_explorer_panel_contract():
     assert "Spatial evidence refinement" in html
     assert "without asking a VLM to judge labels" in html
     assert "VLM evidence pass" not in html
+    assert html.count('id="classSplitRefinementPreview"') == 1
+    assert 'id="classSplitRefinementPreview" open' not in html
+    assert "It works with PCA or UMAP" in html
+    assert "this analysis pass does not make the final judgment" in html
     assert "never creates synthetic review items" in html
     assert 'id="classSplitRecipeExplanation"' in html
     assert 'id="classSplitPreprocessMode"' in html

@@ -1624,7 +1624,16 @@
                     <div class="class-split-step__body">
                       <div class="class-split-step__header"><h4 id="classSplitStepRefineTitle">Add spatial evidence</h4><p>Optional. Prepare token-level object evidence for later review without asking a VLM to judge labels.</p></div>
                       <div id="classSplitRefinementControl" class="class-split-refinement-control">
-                        <label class="class-split-toggle" for="classSplitRefineOutliers"><input type="checkbox" id="classSplitRefineOutliers" aria-describedby="classSplitRefinementHint classSplitSelectorExplanation" /><span><strong>Spatial evidence refinement</strong><small id="classSplitRefinementHint">Builds TokenCut overlays and spatial diagnostics for likely errors. Analysis itself remains deterministic.</small></span></label>
+                        <label class="class-split-toggle" for="classSplitRefineOutliers"><input type="checkbox" id="classSplitRefineOutliers" aria-describedby="classSplitRefinementHint classSplitSelectorExplanation" /><span><strong>Spatial evidence refinement</strong><small id="classSplitRefinementHint">Builds TokenCut overlays and spatial diagnostics for likely errors. It works with PCA or UMAP and does not ask a VLM to judge labels.</small></span></label>
+                        <details class="class-split-tune class-split-evidence-preview" id="classSplitRefinementPreview"><summary>Preview the prepared evidence</summary>
+                          <div class="class-split-evidence-preview__body">
+                            <figure class="class-split-evidence-example">
+                              <div class="class-split-evidence-example__crop" aria-hidden="true"><span class="class-split-evidence-example__object"></span><span class="class-split-evidence-example__focus"></span></div>
+                              <figcaption><strong>TokenCut focus overlay</strong><span>Highlights which object regions support the embedding evidence.</span></figcaption>
+                            </figure>
+                            <div class="class-split-evidence-preview__copy"><strong>What this pass prepares</strong><p>Per-object token saliency, spatial consistency, and class-relative evidence are attached to real review candidates. A later review system may use these artifacts alongside the crop and context image; this analysis pass does not make the final judgment.</p></div>
+                          </div>
+                        </details>
                         <details class="class-split-tune" id="classSplitSelectorExplanation"><summary>How candidates are prepared</summary><p>Embedding distance, class structure, scale, and spatial-token evidence prioritize real dataset objects. The review queue never invents synthetic candidates.</p></details>
                       </div>
                     </div>

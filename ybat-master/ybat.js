@@ -3850,7 +3850,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
     }
     const classSplitContextPreviewSourceLoads = new Map();
     let classSplitContextPreviewGeneration = 0;
-    const CLASS_SPLIT_GRAPH_HOVER_DEBOUNCE_MS = 90;
+    const CLASS_SPLIT_GRAPH_HOVER_DEBOUNCE_MS = 0;
     const classSplitGraphHoverState = {
         timer: null,
         token: 0,
@@ -50785,10 +50785,11 @@ async function cancelRfDetrTrainingJobRequest() {
                 ? "Local similarity groups (UMAP)"
                 : "Local similarity groups (UMAP unavailable)",
         };
-        const desired = normalizeClassSplitProjectionChoice(
+        const setupDesired = getClassSplitRequestedProjectionChoice();
+        const graphDesired = normalizeClassSplitProjectionChoice(
             classSplitElements.graphProjection?.value
-            || classSplitElements.projection?.value
-            || defaultClassSplitProjectionForScope()
+            || inferClassSplitResultSelectedProjection(classSplitState.result)
+            || setupDesired
         );
         const preprocessOptions = getClassSplitProjectionPreprocessModes();
         selects.forEach((select) => {
@@ -50798,7 +50799,16 @@ async function cancelRfDetrTrainingJobRequest() {
                     label: graphLabels[option.value] || option.label,
                 }))
                 : options;
-            fillSelectOptions(select, selectOptions, desired);
+            fillSelectOptions(
+                select,
+                selectOptions,
+                select === classSplitElements.graphProjection
+                    ? graphDesired
+                    : setupDesired
+            );
+            if (select === classSplitElements.graphProjection) {
+                refreshClassSplitGraphProjectionAvailability();
+            }
         });
         if (classSplitElements.projectionPreprocess) {
             const selectedPreprocess = normalizeClassSplitProjectionPreprocess(
@@ -50830,6 +50840,53 @@ async function cancelRfDetrTrainingJobRequest() {
             );
         }
         refreshClassSplitProjectionHint();
+    }
+
+    function refreshClassSplitGraphProjectionAvailability() {
+        const select = classSplitElements.graphProjection;
+        const status = classSplitElements.projectionAvailability;
+        if (!select) {
+            return;
+        }
+        const result = classSplitState.result;
+        const available = new Set();
+        if (result) {
+            const selected = inferClassSplitResultSelectedProjection(result);
+            if (selected) {
+                available.add(normalizeClassSplitProjectionChoice(selected));
+            }
+            (result?.projection_options?.coordinates_available || []).forEach((value) => {
+                available.add(normalizeClassSplitProjectionChoice(value));
+            });
+            Object.keys(classSplitState.projectionCoordinates || {}).forEach((value) => {
+                available.add(normalizeClassSplitProjectionChoice(value));
+            });
+            const current = normalizeClassSplitProjectionChoice(select.value);
+            if (!available.has(current)) {
+                const fallback = normalizeClassSplitProjectionChoice(
+                    selected || Array.from(available)[0]
+                );
+                if (available.has(fallback)) {
+                    select.value = fallback;
+                }
+            }
+        }
+        const availableLabels = [];
+        Array.from(select.options).forEach((option) => {
+            const baseLabel = String(option.textContent || "").replace(/ \(rerun required\)$/, "");
+            const isAvailable = !result
+                || available.has(normalizeClassSplitProjectionChoice(option.value));
+            option.disabled = !isAvailable;
+            option.textContent = isAvailable ? baseLabel : `${baseLabel} (rerun required)`;
+            if (result && isAvailable) {
+                availableLabels.push(baseLabel);
+            }
+        });
+        if (status) {
+            status.textContent = result
+                ? `Available now: ${availableLabels.join(", ") || "current layout"}. Other layouts require a rerun.`
+                : "The completed analysis will show which layouts are available without rerunning.";
+        }
     }
 
     function getClassSplitUmapProjectionMetrics() {
@@ -51131,16 +51188,35 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function setClassSplitProjectionChoice(choice, source = null) {
         const normalized = normalizeClassSplitProjectionChoice(choice);
-        [classSplitElements.projection, classSplitElements.graphProjection].forEach((select) => {
-            if (select && select !== source) {
-                select.value = normalized;
+        if (source === classSplitElements.graphProjection) {
+            classSplitElements.graphProjection.value = normalized;
+            return normalized;
+        }
+        if (source === classSplitElements.projection) {
+            classSplitElements.projection.value = normalized;
+            if (!classSplitState.result && classSplitElements.graphProjection) {
+                classSplitElements.graphProjection.value = normalized;
             }
-        });
+            return normalized;
+        }
+        [classSplitElements.projection, classSplitElements.graphProjection]
+            .filter(Boolean)
+            .forEach((select) => {
+                select.value = normalized;
+            });
         return normalized;
     }
 
+    function getClassSplitRequestedProjectionChoice() {
+        return normalizeClassSplitProjectionChoice(
+            classSplitElements.projection?.value
+            || classSplitState.lastRequest?.projection_mode
+            || defaultClassSplitProjectionForScope()
+        );
+    }
+
     function getClassSplitProjectionRequestParts() {
-        const choice = getClassSplitProjectionChoice();
+        const choice = getClassSplitRequestedProjectionChoice();
         if (choice === "umap") {
             return { projection: "umap", projectionMode: "global_pca" };
         }
@@ -51181,13 +51257,6 @@ async function cancelRfDetrTrainingJobRequest() {
         if (classSplitProjectionNeedsClassFilter(choice)) {
             return "Choose a class filter to use Within-filter PCA. Each class has its own local PCA axes, so all classes cannot be overlaid in that mode.";
         }
-        const settingDiffs = getClassSplitProjectionSettingDiffs(choice);
-        if (classSplitState.result && settingDiffs.length) {
-            const diffSummary = settingDiffs.length === 1
-                ? settingDiffs[0]
-                : `${settingDiffs.slice(0, -1).join(", ")} and ${settingDiffs[settingDiffs.length - 1]}`;
-            return `${classSplitProjectionChoiceLabel(choice)} coordinates are stale; changed ${diffSummary} since run. Run Data Quality Explorer to refresh.`;
-        }
         if (choice === "umap" && String(classSplitState.result?.summary?.projection || "") !== "umap") {
             return "UMAP coordinates are only available after rerunning Data Quality Explorer with UMAP selected.";
         }
@@ -51209,9 +51278,13 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function refreshClassSplitProjectionHint() {
-        const choice = getClassSplitProjectionChoice();
+        const choice = getClassSplitRequestedProjectionChoice();
         const scope = getClassSplitScope();
-        const unavailable = getClassSplitProjectionUnavailableMessage();
+        const unavailable = choice === "umap" && !classSplitUmapAvailable()
+            ? "UMAP is not installed in this backend. Install umap-learn or choose a PCA layout for the next run."
+            : choice === "within_filter_pca" && scope === "all_classes"
+                ? "Within-filter PCA requires a single-class scope. Choose Selected class or another layout for the next run."
+                : "";
         const guidance = {
             umap: classSplitUmapAvailable()
                 ? "UMAP preserves local neighborhoods and is the recommended selected-class view for spotting subclass islands. Axes and far-apart island distances are visual layout only."
@@ -51225,11 +51298,9 @@ async function cancelRfDetrTrainingJobRequest() {
             ? " For subclass work: run Selected class + UMAP, then verify islands by crop previews before relabeling."
             : " For likely-wrong-class review: use All classes + Class-balanced PCA, then filter likely wrong objects.";
         const title = unavailable || `${guidance}${suffix}`;
-        [classSplitElements.projection, classSplitElements.graphProjection].forEach((select) => {
-            if (select) {
-                select.title = title;
-            }
-        });
+        if (classSplitElements.projection) {
+            classSplitElements.projection.title = title;
+        }
         if (classSplitElements.projectionHint) {
             classSplitElements.projectionHint.textContent = title;
             classSplitElements.projectionHint.classList.toggle("is-warning", !!unavailable || (choice === "umap" && !classSplitUmapAvailable()));
@@ -51365,6 +51436,17 @@ async function cancelRfDetrTrainingJobRequest() {
         const progressState = job?.progress_state && typeof job.progress_state === "object"
             ? job.progress_state
             : {};
+        const message = String(job?.message || "").trim();
+        if (!progressState.phase_id && /snapshot[- ]?upload/i.test(message)) {
+            return {
+                phases: [{
+                    id: "snapshot_upload",
+                    label: "Uploading the dataset snapshot",
+                    status: "active",
+                }],
+                supplied: true,
+            };
+        }
         const supplied = progressState.phase_plan
             || progressState.phases
             || job?.phase_plan
@@ -51387,28 +51469,93 @@ async function cancelRfDetrTrainingJobRequest() {
         const projectionLabel = projection?.options?.[projection.selectedIndex]?.textContent?.trim() || "2D";
         const backbone = document.getElementById("classSplitBackbone");
         const backboneLabel = backbone?.options?.[backbone.selectedIndex]?.textContent?.trim() || "primary";
-        const labels = ["Prepare dataset", `Extract ${backboneLabel} features`];
+        const phases = [
+            { id: "preflight", label: "Preparing the analysis" },
+            { id: "models", label: `Loading ${backboneLabel}` },
+        ];
         if (mode !== "single_backbone") {
-            labels.push("Build SAM3 + SALAD descriptors");
+            phases.push({ id: "salad", label: "Learning spatial pooling" });
         }
+        phases.push({ id: "features", label: "Describing each object" });
         if (mode === "multi_backbone_fusion") {
-            labels.push("Fuse C-RADIO features");
+            phases.push({
+                id: "fusion",
+                label: "Combining complementary features",
+            });
         }
-        labels.push(document.getElementById("classSplitUseEl2n")?.checked
-            ? "Rank with class structure + EL2N"
-            : "Rank review candidates");
-        labels.push(`Build ${projectionLabel} map`);
+        phases.push({
+            id: "ranking",
+            label: document.getElementById("classSplitUseEl2n")?.checked
+                ? "Ranking with class structure + EL2N"
+                : "Ranking review candidates",
+        });
+        phases.push({
+            id: "projection",
+            label: `Building the ${projectionLabel} map`,
+        });
         if (document.getElementById("classSplitRefineOutliers")?.checked) {
-            labels.push("Prepare spatial evidence");
+            phases.push({
+                id: "refinement",
+                label: "Preparing spatial evidence",
+            });
         }
-        labels.push("Finalize review queue");
+        phases.push({
+            id: "finalization",
+            label: "Finalizing the review queue",
+        });
         return {
-            phases: labels.map((label, index) => ({ id: String(index), label, status: "" })),
+            phases: phases.map((phase) => ({ ...phase, status: "" })),
             supplied: false,
         };
     }
 
-    function renderClassSplitProgressPhases(job, progress, stageIndex, stageLabel) {
+    function classSplitProgressTipForPhase(phaseId) {
+        const tips = {
+            snapshot_upload: "The snapshot binds this run to the exact open annotations, so later edits cannot silently change a running analysis.",
+            preflight: "Preflight validates the dataset, resolved recipe, memory policy, and reusable artifacts before expensive model work starts.",
+            models: "Feature tools are loaded once and retained for the run; compatible cached descriptors can bypass repeated inference.",
+            salad: "SALAD learns a label-free spatial pooling vocabulary over object tokens, preserving local structure that a single global token can miss.",
+            features: "High-dimensional object descriptions retain distinctions that may be compressed or lost in the final two-dimensional map.",
+            fusion: "Each feature branch is normalized before weighting so a larger backbone cannot dominate merely because of its scale or dimension.",
+            ranking: "Class structure and EL2N reorder real objects for review; they never create candidates or change labels automatically.",
+            projection: "PCA or UMAP is a navigation view only. Candidate scoring continues to use the richer high-dimensional representation.",
+            refinement: "This pass prepares TokenCut and spatial evidence for later review; it does not ask a VLM to decide the label.",
+            finalization: "The final queue contains only real dataset objects, with tiny-object and overlap evidence kept separately visible.",
+            complete: "The saved result keeps its resolved recipe and provenance so the map and review queue can be interpreted later.",
+        };
+        return tips[String(phaseId || "").trim()]
+            || "Each stage reports the mechanism currently running, not an estimate inferred from the overall percentage.";
+    }
+
+    function formatClassSplitProgressCache(cache, message = "") {
+        if (cache && typeof cache === "object") {
+            if (cache.checkpoint?.hit || cache.status === "checkpoint_hit") {
+                return "Cache hit: reused the validated full embedding checkpoint";
+            }
+            const hits = Number(cache.hits);
+            const total = Number(cache.total);
+            if (
+                Number.isFinite(hits)
+                && hits > 0
+                && Number.isFinite(total)
+                && total > 0
+            ) {
+                return hits >= total
+                    ? `Cache hit: reused all ${total.toLocaleString()} descriptors`
+                    : `Partial cache hit: reused ${hits.toLocaleString()} of ${total.toLocaleString()} descriptors`;
+            }
+            if (cache.status === "miss" && Number.isFinite(total) && total > 0) {
+                return `Cache checked: computing ${total.toLocaleString()} descriptors`;
+            }
+        }
+        if (/validated saved embeddings/i.test(message)) {
+            return "Cache hit: reused the validated full embedding checkpoint";
+        }
+        const match = message.match(/([\d,]+) cache hits?/i);
+        return match ? `Cache hit: reused ${match[1]} descriptors` : "";
+    }
+
+    function renderClassSplitProgressPhases(job, progress, phaseId, phaseLabel) {
         const root = classSplitElements.progress;
         if (!root) {
             return;
@@ -51440,12 +51587,13 @@ async function cancelRfDetrTrainingJobRequest() {
             Math.max(0, phaseCount - 1),
             Math.floor(progress * phaseCount)
         );
-        const activeIndex = plan.supplied && Number.isFinite(stageIndex) && stageIndex > 0
-            ? Math.min(phaseCount - 1, Math.max(0, Math.round(stageIndex) - 1))
-            : progressIndex;
+        const explicitIndex = phaseId
+            ? plan.phases.findIndex((phase) => phase.id === phaseId)
+            : -1;
+        const activeIndex = explicitIndex >= 0 ? explicitIndex : progressIndex;
         const phaseTitle = document.getElementById("classSplitProgressPhase");
         if (phaseTitle) {
-            phaseTitle.textContent = stageLabel
+            phaseTitle.textContent = phaseLabel
                 || plan.phases[activeIndex]?.label
                 || (semanticState === "completed" ? "Analysis complete" : "Preparing analysis");
         }
@@ -51484,7 +51632,12 @@ async function cancelRfDetrTrainingJobRequest() {
             : {};
         const progress = Math.max(
             0,
-            Math.min(1, Number(progressState.progress ?? progressState.overall_progress ?? job?.progress) || 0)
+            Math.min(1, Number(
+                progressState.overall_fraction
+                ?? progressState.progress
+                ?? progressState.overall_progress
+                ?? job?.progress
+            ) || 0)
         );
         const progressPercent = Math.round(progress * 100);
         if (classSplitElements.progressFill) {
@@ -51518,17 +51671,39 @@ async function cancelRfDetrTrainingJobRequest() {
             if (Number(memory.worker_rss_bytes) > 0) {
                 runtimeParts.push(`worker ${formatBytes(Number(memory.worker_rss_bytes))}`);
             }
+            const snapshotUploading = !progressState.phase_id
+                && /snapshot[- ]?upload/i.test(message);
+            const phaseId = snapshotUploading
+                ? "snapshot_upload"
+                : String(progressState.phase_id || "").trim();
+            const phaseLabel = snapshotUploading
+                ? "Uploading the dataset snapshot"
+                : String(
+                    progressState.phase_label
+                    || job?.stage_label
+                    || job?.stage
+                    || ""
+                ).trim();
+            const phaseDetail = String(
+                progressState.phase_detail || message || logTail
+            ).trim();
             const stageIndex = Number(progressState.stage_index ?? job?.stage_index);
             const stageCount = Number(progressState.stage_count ?? job?.stage_count);
-            const stageProcessed = Number(progressState.stage_processed ?? progressState.processed ?? job?.stage_processed);
-            const stageTotal = Number(progressState.stage_total ?? progressState.total ?? job?.stage_total);
-            const stageLabel = String(progressState.stage_label || progressState.stage || job?.stage_label || job?.stage || "").trim();
+            const stageProcessed = Number(
+                progressState.completed_units
+                ?? progressState.stage_processed
+                ?? progressState.processed
+                ?? job?.stage_processed
+            );
+            const stageTotal = Number(
+                progressState.total_units
+                ?? progressState.stage_total
+                ?? progressState.total
+                ?? job?.stage_total
+            );
             const structuredParts = [];
             if (Number.isFinite(stageIndex) && stageIndex > 0 && Number.isFinite(stageCount) && stageCount > 0) {
                 structuredParts.push(`Stage ${Math.round(stageIndex)}/${Math.round(stageCount)}`);
-            }
-            if (stageLabel) {
-                structuredParts.push(stageLabel);
             }
             if (
                 Number.isFinite(stageProcessed)
@@ -51542,11 +51717,23 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             classSplitElements.progressText.textContent = [
                 pct,
-                structuredParts.length ? structuredParts.join(" · ") : (message || logTail),
-                structuredParts.length ? (message || logTail) : "",
+                structuredParts.length ? structuredParts.join(" · ") : "",
+                phaseDetail,
                 runtimeParts.join(" · "),
             ].filter(Boolean).join(" • ");
-            renderClassSplitProgressPhases(job, progress, stageIndex, stageLabel);
+            renderClassSplitProgressPhases(job, progress, phaseId, phaseLabel);
+            if (classSplitElements.progressCache) {
+                const cacheText = formatClassSplitProgressCache(
+                    progressState.cache,
+                    phaseDetail
+                );
+                classSplitElements.progressCache.textContent = cacheText;
+                classSplitElements.progressCache.hidden = !cacheText;
+            }
+            if (classSplitElements.progressTip) {
+                classSplitElements.progressTip.textContent =
+                    classSplitProgressTipForPhase(phaseId);
+            }
         }
     }
 
@@ -51565,7 +51752,7 @@ async function cancelRfDetrTrainingJobRequest() {
         const classSelected = !!String(classSplitElements.classSelect?.value || "").trim();
         const selectedClassCount = stats.counts.get(String(classSplitElements.classSelect?.value || "").trim()) || 0;
         const classSplitEncoderType = String(classSplitElements.encoderType?.value || "dinov3").trim().toLowerCase();
-        const projectionChoice = getClassSplitProjectionChoice();
+        const projectionChoice = getClassSplitRequestedProjectionChoice();
         const mutationBusy = classSplitMutationIsBusy();
         if (classSplitElements.datasetStatus) {
             if (!stats.imageCount) {
@@ -51654,7 +51841,6 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const graphInteractionLocked = classSplitState.active || mutationBusy;
         [
-            classSplitElements.colorMode,
             classSplitElements.graphProjection,
             classSplitElements.filterClass,
             classSplitElements.displayMode,
@@ -51666,17 +51852,6 @@ async function cancelRfDetrTrainingJobRequest() {
         ].filter(Boolean).forEach((control) => {
             control.disabled = graphInteractionLocked;
         });
-        ["classSplitMarkerSize", "classSplitMarkerOpacity"].forEach((controlId) => {
-            const control = document.getElementById(controlId);
-            if (control) {
-                control.disabled = graphInteractionLocked;
-            }
-        });
-        const labelDensityControl = document.getElementById("classSplitLabelDensity");
-        if (labelDensityControl) {
-            labelDensityControl.disabled = graphInteractionLocked
-                || String(classSplitElements.colorMode?.value || "class") !== "class";
-        }
         if (classSplitElements.graph) {
             classSplitElements.graph.toggleAttribute("inert", graphInteractionLocked);
             classSplitElements.graph.setAttribute(
@@ -52753,9 +52928,6 @@ async function cancelRfDetrTrainingJobRequest() {
             || classSplitState.capabilities?.default_pca_projection_mode
             || "class_balanced_pca"
         );
-        if (classSplitElements.colorMode) {
-            classSplitElements.colorMode.value = "class";
-        }
         if (classSplitElements.displayMode) {
             classSplitElements.displayMode.value = "all";
         }
@@ -54051,6 +54223,7 @@ async function cancelRfDetrTrainingJobRequest() {
         const points = (Array.isArray(result?.points) ? result.points : [])
             .filter((point) => (
                 point?.annotation_deleted !== true
+                && !String(point?.human_review_disposition || "").trim()
                 && !classSplitState.dismissedWrongIds.has(
                     String(point?.point_id || "")
                 )
@@ -54107,14 +54280,11 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!pointId) {
             return false;
         }
-        if (
+        return Boolean(
             pointId === classSplitState.selectedPointId
             || pointId === classSplitState.flashPointId
             || classSplitState.lassoPointIds?.has(pointId)
-        ) {
-            return true;
-        }
-        return classSplitPointIsRoughCandidate(point);
+        );
     }
 
     function sampleClassSplitGraphPoints(points) {
@@ -54128,6 +54298,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const forcedIds = new Set();
         const forcedObjects = new Set();
+        const priorityCandidates = [];
         const groups = new Map();
         source.forEach((point) => {
             const pointId = String(point?.point_id || "");
@@ -54139,15 +54310,64 @@ async function cancelRfDetrTrainingJobRequest() {
                 }
                 return;
             }
+            if (classSplitPointIsRoughCandidate(point)) {
+                priorityCandidates.push(point);
+                return;
+            }
             const className = String(point?.class_name || "").trim() || "unknown";
             if (!groups.has(className)) {
                 groups.set(className, []);
             }
             groups.get(className).push(point);
         });
-        const remainingSlots = Math.max(0, cap - forcedIds.size - forcedObjects.size);
+        if (forcedIds.size + forcedObjects.size > cap) {
+            const forcedPoints = source.filter((point) => {
+                const pointId = String(point?.point_id || "");
+                return (pointId && forcedIds.has(pointId)) || forcedObjects.has(point);
+            });
+            forcedPoints.sort((left, right) => {
+                const rank = (point) => {
+                    const pointId = String(point?.point_id || "");
+                    if (pointId === classSplitState.selectedPointId) return 3;
+                    if (pointId === classSplitState.flashPointId) return 2;
+                    return classSplitState.lassoPointIds?.has(pointId) ? 1 : 0;
+                };
+                return rank(right) - rank(left)
+                    || String(left?.point_id || "").localeCompare(String(right?.point_id || ""));
+            });
+            return {
+                points: forcedPoints.slice(0, cap),
+                capped: true,
+                requestedCount: source.length,
+                cap,
+            };
+        }
         const keepIds = new Set(forcedIds);
         const keepObjects = new Set(forcedObjects);
+        let remainingSlots = Math.max(0, cap - keepIds.size - keepObjects.size);
+        priorityCandidates
+            .sort((left, right) => {
+                const score = (point) => {
+                    const values = [
+                        point?.review_priority_score,
+                        point?.wrong_class_suspicion,
+                        point?.outlier_score,
+                    ].map(Number).filter(Number.isFinite);
+                    return values.length ? Math.max(...values) : 0;
+                };
+                return score(right) - score(left)
+                    || String(left?.point_id || "").localeCompare(String(right?.point_id || ""));
+            })
+            .slice(0, remainingSlots)
+            .forEach((point) => {
+                const pointId = String(point?.point_id || "");
+                if (pointId) {
+                    keepIds.add(pointId);
+                } else {
+                    keepObjects.add(point);
+                }
+            });
+        remainingSlots = Math.max(0, cap - keepIds.size - keepObjects.size);
         const groupEntries = Array.from(groups.entries()).filter(([, group]) => group.length > 0);
         const nonForcedCount = groupEntries.reduce((sum, [, group]) => sum + group.length, 0);
         if (remainingSlots > 0 && nonForcedCount > 0 && groupEntries.length > 0) {
@@ -54210,11 +54430,12 @@ async function cancelRfDetrTrainingJobRequest() {
                 }
             });
         }
-        return {
-            points: source.filter((point) => {
+        const sampledPoints = source.filter((point) => {
                 const pointId = String(point?.point_id || "");
                 return (pointId && keepIds.has(pointId)) || keepObjects.has(point);
-            }),
+            }).slice(0, cap);
+        return {
+            points: sampledPoints,
             capped: true,
             requestedCount: source.length,
             cap,
@@ -54222,7 +54443,13 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function classSplitPointMatchesActiveGraphView(point) {
-        if (!point) {
+        const pointId = String(point?.point_id || "");
+        if (
+            !point
+            || point.annotation_deleted === true
+            || String(point.human_review_disposition || "").trim()
+            || classSplitState.dismissedWrongIds.has(pointId)
+        ) {
             return false;
         }
         const filter = String(classSplitElements.filterClass?.value || "").trim();
@@ -54295,26 +54522,6 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function getClassSplitPointColor(point) {
-        const mode = String(classSplitElements.colorMode?.value || "class");
-        if (mode === "cluster") {
-            const clusterKey = classSplitPointClusterKey(point);
-            return clusterKey ? classSplitClusterColor(clusterKey) : (getClassSplitClassColorTokens(point.class_name || "").stroke || "#2563eb");
-        }
-        if (mode === "wrong") {
-            return classSplitScoreColor(point.wrong_class_suspicion, "#e0f2fe", "#ef4444");
-        }
-        if (mode === "outlier") {
-            return classSplitScoreColor(point.outlier_score, "#dcfce7", "#f97316");
-        }
-        if (mode === "area") {
-            const area = Math.max(0, (Number(point.width) || 0) * (Number(point.height) || 0));
-            const score = Math.min(1, Math.log10(area + 1) / 6);
-            return classSplitScoreColor(score, "#f1f5f9", "#7c3aed");
-        }
-        if (mode === "image_value") {
-            const score = Number(point.dataset_image_value_score);
-            return Number.isFinite(score) ? classSplitScoreColor(score, "#dcfce7", "#be123c") : "#94a3b8";
-        }
         return getClassSplitClassColorTokens(point.class_name || "").stroke || "#2563eb";
     }
 
@@ -54725,11 +54932,7 @@ async function cancelRfDetrTrainingJobRequest() {
     function moveClassSplitGraphHoverPreview(event) {
         const clientX = Number(event?.clientX);
         const clientY = Number(event?.clientY);
-        if (
-            classSplitGraphHoverState.pointId
-            && Number.isFinite(clientX)
-            && Number.isFinite(clientY)
-        ) {
+        if (Number.isFinite(clientX) && Number.isFinite(clientY)) {
             classSplitGraphHoverState.anchor = { clientX, clientY };
         }
         const preview = document.getElementById("classSplitGraphHoverPreview");
@@ -55784,16 +55987,9 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function buildClassSplitGraphTraces(points) {
-        const colorMode = String(classSplitElements.colorMode?.value || "class");
-        const pointTraces = colorMode === "class"
-            ? buildClassSplitClassTraces(points)
-            : [
-                buildClassSplitTrace(points, "Objects", false),
-                buildClassSplitTrace(points, "Likely wrong class", true),
-            ];
         return [
             ...buildClassSplitClusterHullTraces(points),
-            ...pointTraces,
+            ...buildClassSplitClassTraces(points),
         ].filter((trace) => trace && trace.x && trace.x.length > 0);
     }
 
@@ -56943,8 +57139,16 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         graphEl.__classSplitGraphHoverPreviewBound = true;
-        graphEl.addEventListener("mousemove", moveClassSplitGraphHoverPreview, { passive: true });
-        graphEl.addEventListener("mouseleave", hideClassSplitGraphHoverPreview);
+        graphEl.addEventListener(
+            "pointermove",
+            moveClassSplitGraphHoverPreview,
+            { passive: true, capture: true }
+        );
+        graphEl.addEventListener(
+            "pointerleave",
+            hideClassSplitGraphHoverPreview,
+            { capture: true }
+        );
     }
 
     function classSplitGraphHasLivePlot(graphEl = classSplitElements.graph) {
@@ -57139,12 +57343,6 @@ async function cancelRfDetrTrainingJobRequest() {
                 if (!classSplitGraphMutationContextIsCurrent(mutationContext)) {
                     return false;
                 }
-                await Promise.resolve(
-                    window.ClassSplitGraphView?.syncAfterExternalRestyle?.(graphEl)
-                );
-                if (!classSplitGraphMutationContextIsCurrent(mutationContext)) {
-                    return false;
-                }
                 if (typeof syncClassSplitGraphStatusAfterExternalRestyle === "function") {
                     syncClassSplitGraphStatusAfterExternalRestyle(graphEl);
                 }
@@ -57229,7 +57427,6 @@ async function cancelRfDetrTrainingJobRequest() {
         const projectionChoice = getClassSplitProjectionChoice();
         const displayMode = String(classSplitElements.displayMode?.value || "all");
         const filterClass = String(classSplitElements.filterClass?.value || "").trim();
-        const colorMode = String(classSplitElements.colorMode?.value || "class");
         return {
             allPoints,
             filteredPoints,
@@ -57241,21 +57438,8 @@ async function cancelRfDetrTrainingJobRequest() {
             projectionChoice,
             displayMode,
             filterClass,
-            colorMode,
             projectionUnavailable: getClassSplitProjectionUnavailableMessage(),
         };
-    }
-
-    function classSplitColorModeLabel(value) {
-        const labels = {
-            class: "class",
-            cluster: "cluster",
-            wrong: "wrong-class suspicion",
-            outlier: "outlier score",
-            area: "box area",
-            image_value: "image value",
-        };
-        return labels[String(value || "class")] || "class";
     }
 
     function updateClassSplitGraphStatus(view, message = "") {
@@ -57281,7 +57465,6 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         parts.push(`${view.classNames.length} class${view.classNames.length === 1 ? "" : "es"}`);
         parts.push(classSplitProjectionChoiceLabel(view.projectionChoice));
-        parts.push(`colored by ${classSplitColorModeLabel(view.colorMode)}`);
         if (view.filterClass) {
             parts.push(`filter: ${view.filterClass}`);
         }
@@ -57314,6 +57497,7 @@ async function cancelRfDetrTrainingJobRequest() {
             return Promise.resolve(false);
         }
         const renderToken = ++classSplitState.plotRenderToken;
+        refreshClassSplitGraphProjectionAvailability();
         const view = getClassSplitGraphViewModel();
         const points = view.points;
         refreshClassSplitProjectionHint();
@@ -57375,6 +57559,10 @@ async function cancelRfDetrTrainingJobRequest() {
         const theme = getClassSplitPlotTheme();
         const traces = buildClassSplitGraphTraces(points)
             .filter((trace) => trace.x.length > 0);
+        traces.forEach((trace) => {
+            trace.showlegend = false;
+            trace.hoverinfo = "none";
+        });
         const flashTrace = buildClassSplitFlashTrace();
         if (flashTrace) {
             traces.push(flashTrace);
@@ -57400,12 +57588,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 scaleratio: 1,
                 constrain: "domain",
             },
-            legend: {
-                orientation: "h",
-                y: 1.08,
-                x: 0,
-                bgcolor: "rgba(0,0,0,0)",
-            },
+            showlegend: false,
             dragmode: String(classSplitElements.dragMode?.value || "lasso"),
             uirevision: [
                 "class-split",
@@ -57431,16 +57614,6 @@ async function cancelRfDetrTrainingJobRequest() {
                 return false;
             }
             classSplitState.lastPlotViewKey = layout.uirevision;
-            try {
-                await Promise.resolve(
-                    window.ClassSplitGraphView?.captureAndApply?.(graphEl)
-                );
-            } catch (error) {
-                console.warn("Data Quality Explorer view-control update failed", error);
-            }
-            if (renderToken !== classSplitState.plotRenderToken) {
-                return false;
-            }
             updateClassSplitGraphStatus(view);
             if (typeof graphEl.removeAllListeners === "function") {
                 [
@@ -57462,8 +57635,9 @@ async function cancelRfDetrTrainingJobRequest() {
                 const pointId = String(event?.points?.[0]?.customdata || "");
                 const point = getClassSplitPointById(pointId);
                 const previewUrl = point ? getClassSplitThumbnailUrl(point) : "";
-                if (point && previewUrl && event?.event) {
-                    showClassSplitGraphHoverPreview(event.event, previewUrl, point);
+                const anchor = event?.event || classSplitGraphHoverState.anchor;
+                if (point && previewUrl && anchor) {
+                    showClassSplitGraphHoverPreview(anchor, previewUrl, point);
                 } else {
                     hideClassSplitGraphHoverPreview();
                 }
@@ -65185,7 +65359,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 saved
             );
             renderClassSplitReviewedList();
-            scheduleClassSplitBackgroundReviewRefresh({ renderPlot: true });
+            scheduleClassSplitBackgroundReviewRefresh();
             if (!quiet) {
                 enqueueTaskNotice("Current class confirmed · review choice saved.", {
                     key: toastKey,
@@ -66867,16 +67041,13 @@ async function cancelRfDetrTrainingJobRequest() {
             }
         });
         const pointIdList = Array.from(pointIds);
-        let removedFromPlot = false;
         pointIdList.forEach((resolvedPointId) => {
             classSplitState.dismissedWrongIds.add(resolvedPointId);
-            removedFromPlot = (
-                removeClassSplitPointFromActiveReviewGraph(
-                    resolvedPointId,
-                    { force: true }
-                ) || removedFromPlot
-            );
         });
+        removeClassSplitPointsFromActiveReviewGraph(
+            pointIdList,
+            { force: true, updateSelection: true, renderSelection: true }
+        );
         syncClassSplitWrongCandidateSummaryCount();
         renderClassSplitWrongList();
         persistDataQualityExplorerSession();
@@ -66893,7 +67064,7 @@ async function cancelRfDetrTrainingJobRequest() {
             message,
             "success"
         );
-        scheduleClassSplitBackgroundReviewRefresh({ renderPlot: removedFromPlot });
+        scheduleClassSplitBackgroundReviewRefresh();
     }
 
     function removeClassSplitDualBBoxLocally(target, exactResolution = null) {
@@ -68947,8 +69118,15 @@ async function cancelRfDetrTrainingJobRequest() {
         const override = Boolean(classSplitElements.qualityMemoryOverride?.checked);
         const busy = classSplitState.active || classSplitMutationIsBusy();
         const recommendedMb = Number(classSplitState.capabilities?.quality_execution?.recommended_budget_mb || 0);
+        if (classSplitElements.qualityMemoryOverrideField) {
+            classSplitElements.qualityMemoryOverrideField.hidden = policy !== "auto";
+        }
+        if (classSplitElements.qualityMemoryBudgetField) {
+            classSplitElements.qualityMemoryBudgetField.hidden =
+                policy === "full" || (policy === "auto" && !override);
+        }
         if (classSplitElements.qualityMemoryOverride) {
-            classSplitElements.qualityMemoryOverride.disabled = busy || policy !== "auto";
+            classSplitElements.qualityMemoryOverride.disabled = busy;
         }
         if (classSplitElements.qualityMemoryBudget) {
             classSplitElements.qualityMemoryBudget.disabled = busy || policy === "full" || (policy === "auto" && !override);
@@ -69023,7 +69201,9 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitElements.recipePreset = document.getElementById("classSplitRecipePreset");
         classSplitElements.qualityMemoryPolicy = document.getElementById("classSplitQualityMemoryPolicy");
         classSplitElements.qualityMemoryOverride = document.getElementById("classSplitQualityMemoryOverride");
+        classSplitElements.qualityMemoryOverrideField = document.getElementById("classSplitQualityMemoryOverrideField");
         classSplitElements.qualityMemoryBudget = document.getElementById("classSplitQualityMemoryBudget");
+        classSplitElements.qualityMemoryBudgetField = document.getElementById("classSplitQualityMemoryBudgetField");
         classSplitElements.qualityMemoryStatus = document.getElementById("classSplitQualityMemoryStatus");
         classSplitElements.qualityReviewFraction = document.getElementById("classSplitQualityReviewFraction");
         classSplitElements.qualityReviewFractionValue = document.getElementById("classSplitQualityReviewFractionValue");
@@ -69122,9 +69302,12 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitElements.progress = document.getElementById("classSplitProgress");
         classSplitElements.progressFill = document.getElementById("classSplitProgressFill");
         classSplitElements.progressText = document.getElementById("classSplitProgressText");
+        classSplitElements.progressCache = document.getElementById("classSplitProgressCache");
+        classSplitElements.progressTip = document.getElementById("classSplitProgressTip");
         classSplitElements.results = document.getElementById("classSplitResults");
-        classSplitElements.colorMode = document.getElementById("classSplitColorMode");
         classSplitElements.graphProjection = document.getElementById("classSplitGraphProjection");
+        classSplitElements.projectionAvailability = document.getElementById("classSplitProjectionAvailability");
+        classSplitElements.limitPlotPoints = document.getElementById("classSplitLimitPlotPoints");
         classSplitElements.filterClass = document.getElementById("classSplitFilterClass");
         classSplitElements.displayMode = document.getElementById("classSplitDisplayMode");
         classSplitElements.sizeFilter = document.getElementById("classSplitSizeFilter");
@@ -69331,19 +69514,27 @@ async function cancelRfDetrTrainingJobRequest() {
                 });
             });
         }
-        if (classSplitElements.colorMode) {
-            classSplitElements.colorMode.addEventListener("change", renderClassSplitPlot);
-        }
-        [classSplitElements.projection, classSplitElements.graphProjection].forEach((select) => {
-            if (!select) {
-                return;
-            }
-            select.addEventListener("change", () => {
-                setClassSplitProjectionChoice(select.value, select);
-                refreshClassSplitProjectionHint();
-                renderClassSplitReport();
-                renderClassSplitPlot();
-            });
+        classSplitElements.limitPlotPoints?.addEventListener(
+            "change",
+            renderClassSplitPlot
+        );
+        classSplitElements.projection?.addEventListener("change", () => {
+            setClassSplitProjectionChoice(
+                classSplitElements.projection.value,
+                classSplitElements.projection
+            );
+            refreshClassSplitControls();
+            refreshClassSplitProjectionHint();
+            persistDataQualityExplorerSession();
+        });
+        classSplitElements.graphProjection?.addEventListener("change", () => {
+            setClassSplitProjectionChoice(
+                classSplitElements.graphProjection.value,
+                classSplitElements.graphProjection
+            );
+            refreshClassSplitGraphProjectionAvailability();
+            renderClassSplitReport();
+            renderClassSplitPlot();
         });
         [
             classSplitElements.projectionNeighborK,
@@ -69358,8 +69549,6 @@ async function cancelRfDetrTrainingJobRequest() {
             control.addEventListener("change", () => {
                 persistDataQualityExplorerSession();
                 refreshClassSplitProjectionHint();
-                renderClassSplitReport();
-                renderClassSplitPlot();
             });
         });
         if (classSplitElements.filterClass) {
@@ -77983,7 +78172,12 @@ async function cancelRfDetrTrainingJobRequest() {
             ?? resolved.dimension;
         const dimension = Number.isFinite(Number(resolvedDimension)) ? Number(resolvedDimension) : current.dimension;
         const scope = byId("classSplitScopeAll")?.checked ? "All classes" : `One class${selectedText("classSplitClassSelect") ? `: ${selectedText("classSplitClassSelect")}` : ""}`;
-        target.innerHTML = `<div><span>Scope</span><strong>${escapeText(scope)}</strong></div><div><span>Map</span><strong>${escapeText(current.map)}</strong></div><div><span>Features</span><strong>${escapeText(modeLabel(mode))} · ${Number(dimension).toLocaleString()}D</strong></div><div><span>Review ranking</span><strong>${current.el2n ? "Class structure + EL2N" : "Class structure"}</strong></div><div><span>Spatial evidence</span><strong>${current.refine ? "Prepared" : "Off"}</strong></div><div><span>Memory</span><strong>${escapeText(current.memory)}</strong></div>`;
+        const featureDetail = mode === "multi_backbone_fusion"
+            ? `${current.compactWeight}% normalized DINOv3 + SAM3 shape + SALAD retrieval branch; ${current.cradioWeight}% normalized C-RADIO branch.`
+            : mode === "compact_fusion"
+                ? "Combines DINOv3 appearance, SAM3 shape, and SALAD spatial retrieval into one normalized descriptor."
+                : `Uses only ${current.backbone} with the selected pooling recipe.`;
+        target.innerHTML = `<div><span>Scope</span><strong>${escapeText(scope)}</strong><small>Controls which real annotations are embedded and compared.</small></div><div><span>Map</span><strong>${escapeText(current.map)}</strong><small>Lossy 2D navigation only; review ranking remains high-dimensional.</small></div><div><span>Features</span><strong>${escapeText(modeLabel(mode))} · ${Number(dimension).toLocaleString()}D</strong><small>${escapeText(featureDetail)}</small></div><div><span>Review ranking</span><strong>${current.el2n ? "Class structure + EL2N" : "Class structure"}</strong><small>${current.el2n ? "Adds model-surprise evidence to class-neighborhood and outlier signals." : "Uses class neighborhoods and outlier evidence without EL2N."}</small></div><div><span>Spatial evidence</span><strong>${current.refine ? "Prepared" : "Off"}</strong><small>${current.refine ? "Builds TokenCut and spatial diagnostics for later review; no VLM judgment occurs here." : "Skips the optional token-level evidence pass."}</small></div><div><span>Memory</span><strong>${escapeText(current.memory)}</strong><small>Changes execution strategy, not the requested review objects or human-control policy.</small></div>`;
     }
     function syncWeights() {
         const recipe = currentRecipe();

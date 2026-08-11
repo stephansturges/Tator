@@ -14,7 +14,6 @@
     <script src="filesaver.min.js?v=20260409a"></script>
     <script src="plotly-2.35.2.min.js?v=20260520a"></script>
     <script src="annotation_diversity.js?v=20260530a"></script>
-    <script src="class_split_graph_view.js?v=20260808a"></script>
     <script src="class_analysis_cache_admin.js?v=20260808a"></script>
     <script src="ybat.js?v=20260811c"></script>
 </head>
@@ -1613,8 +1612,8 @@
                                     <option value="full">Maximum fidelity / high RAM</option>
                                     <option value="budgeted">Memory-limited one-run analysis</option>
                                 </select></label>
-                        <label class="class-split-field" for="classSplitQualityMemoryBudget"><span>Maximum analysis memory</span><input type="number" id="classSplitQualityMemoryBudget" min="1" max="256" step="1" value="8" disabled /></label>
-                        <label class="class-split-toggle class-split-toggle--compact" for="classSplitQualityMemoryOverride"><input type="checkbox" id="classSplitQualityMemoryOverride" /><span><strong>Allow full-memory execution</strong><small>Use available RAM rather than a conservative cap.</small></span></label>
+                        <label class="class-split-toggle class-split-toggle--compact" id="classSplitQualityMemoryOverrideField" for="classSplitQualityMemoryOverride"><input type="checkbox" id="classSplitQualityMemoryOverride" /><span><strong>Set a custom Automatic-mode RAM target</strong><small>When off, Automatic derives a safe target from currently available backend memory.</small></span></label>
+                        <label class="class-split-field" id="classSplitQualityMemoryBudgetField" for="classSplitQualityMemoryBudget" hidden><span>Analysis memory target</span><input type="number" id="classSplitQualityMemoryBudget" min="1" max="256" step="1" value="8" disabled /><small>This is an analysis-workspace target; loaded models and input images use additional memory.</small></label>
                       </div>
                     </div>
                   </section>
@@ -1644,8 +1643,8 @@
                     <div class="class-split-step__body">
                       <div class="class-split-step__header"><h4 id="classSplitStepRunTitle">Review the recipe and run</h4><p>Confirm the resolved representation, ranking signals, map, and memory policy before analysis starts.</p></div>
                       <div class="class-split-choice-grid class-split-review-controls">
-                        <label class="class-split-field" for="classSplitQualityReviewFraction"><span>Review queue size</span><input type="range" id="classSplitQualityReviewFraction" min="1" max="25" step="1" value="5" /><output id="classSplitQualityReviewFractionValue" for="classSplitQualityReviewFraction"></output></label>
-                        <label class="class-split-field" for="classSplitLowDetailMinSide"><span>Tiny-object threshold</span><input type="number" id="classSplitLowDetailMinSide" min="1" max="1024" step="1" value="32" /></label>
+                        <label class="class-split-field" for="classSplitQualityReviewFraction"><span>Review queue size</span><input type="range" id="classSplitQualityReviewFraction" min="1" max="25" step="1" value="5" /><output id="classSplitQualityReviewFractionValue" for="classSplitQualityReviewFraction"></output><small>Surfaces this percentage of the highest-priority real objects first. It does not discard the rest of the analysis.</small></label>
+                        <label class="class-split-field" for="classSplitLowDetailMinSide"><span>Tiny-object threshold</span><input type="number" id="classSplitLowDetailMinSide" min="1" max="1024" step="1" value="32" /><small>Boxes whose shortest source-image side is below this pixel value are separated as tiny / low-detail evidence instead of dominating likely-label-error review.</small></label>
                       </div>
                       <div class="class-split-resolved-summary" id="classSplitResolvedSummary" aria-live="polite"></div>
                       <p class="class-split-guidance-status" id="classSplitEmbeddingGuidanceStatus"></p>
@@ -1661,71 +1660,22 @@
                     <div class="class-split-progress__bar" role="progressbar" aria-label="Data Quality Explorer progress" aria-describedby="classSplitProgressText" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="classSplitProgressFill"></div></div>
                     <div class="class-split-progress__steps" id="classSplitProgressSteps" role="list" aria-label="Analysis stages"></div>
                     <div id="classSplitProgressText" class="training-help" role="status" aria-live="polite"></div>
+                    <div class="class-split-progress__context">
+                        <span id="classSplitProgressCache" class="class-split-progress__cache" hidden></span>
+                        <span id="classSplitProgressTip" class="class-split-progress__tip"></span>
+                    </div>
                 </div>
                         <div class="class-split-results" id="classSplitResults" hidden>
                             <div class="class-split-toolbar">
-                                <label for="classSplitGraphProjection">Map layout</label>
-                                <select id="classSplitGraphProjection" class="class-split-toolbar__projection" title="Choose how objects are arranged on the lossy 2D map. This changes only the view, not full-dimensional candidate scoring or review ranking. Objects that look close in UMAP or PCA are not necessarily close in the source embedding.">
-                                    <option value="class_balanced_pca">Balanced class overview</option>
-                                    <option value="global_pca">Overall visual similarity</option>
-                                    <option value="between_class_pca">Emphasize class differences</option>
-                                    <option value="within_filter_pca">Detail within selected class</option>
-                                    <option value="umap" selected>Local similarity groups (UMAP)</option>
-                                </select>
-                                <label for="classSplitColorMode">Color points by</label>
-                                <select id="classSplitColorMode" title="Choose what the point colors represent. This does not filter objects or change their review order.">
-                                    <option value="class">Current class</option>
-                                    <option value="wrong">Likelihood the label is wrong</option>
-                                    <option value="outlier">How unusual the object looks</option>
-                                    <option value="area">Object size</option>
-                                    <option value="image_value">Image review value</option>
-                                </select>
-                                <label class="class-split-view-control" for="classSplitMarkerSize" title="Instant view-only marker scaling. It does not recompute embeddings or projection coordinates.">
-                                    <span>Marker size</span>
-                                    <input type="range" id="classSplitMarkerSize" min="50" max="250" step="10" value="100" />
-                                    <output id="classSplitMarkerSizeValue" for="classSplitMarkerSize">100%</output>
-                                </label>
-                                <label class="class-split-view-control" for="classSplitMarkerOpacity" title="Instant view-only opacity scaling. It does not recompute embeddings or projection coordinates.">
-                                    <span>Opacity</span>
-                                    <input type="range" id="classSplitMarkerOpacity" min="20" max="100" step="5" value="100" />
-                                    <output id="classSplitMarkerOpacityValue" for="classSplitMarkerOpacity">100%</output>
-                                </label>
-                                <label class="class-split-view-control" for="classSplitLabelDensity" title="Shows a deterministic sample of class labels when points are colored by Current class. This is view-only.">
-                                    <span>Class labels</span>
-                                    <input type="range" id="classSplitLabelDensity" min="0" max="100" step="5" value="0" />
-                                    <output id="classSplitLabelDensityValue" for="classSplitLabelDensity">0%</output>
-                                </label>
-                                <label for="classSplitFilterClass">Show class</label>
-                                <select id="classSplitFilterClass"></select>
-                                <label for="classSplitDisplayMode">Objects to show</label>
-                                <select id="classSplitDisplayMode" title="Choose which analyzed objects are visible on the map. Hidden points remain in the analysis and review queue.">
-                                    <option value="all">All analyzed objects</option>
-                                    <option value="wrong_only">Suggested review queue</option>
-                                    <option value="rough_only">All similarity-based flags</option>
-                                    <option value="overlap_only">Objects with overlapping boxes</option>
-                                    <option value="review_only">Anything marked for review</option>
-                                </select>
-                                <label for="classSplitSizeFilter">Object size</label>
-                                <select id="classSplitSizeFilter" title="Tiny / low-detail uses the configured absolute source-pixel threshold. Relative smallness is separate evidence. These controls only change the current view.">
-                                    <option value="all">All sizes</option>
-                                    <option value="low_detail_only">Tiny / low-detail only</option>
-                                    <option value="exclude_low_detail">Exclude tiny / low-detail</option>
-                                    <option value="relative_small">Relatively small only</option>
-                                </select>
-                                <label for="classSplitOverlapPairMode">Overlap pair filter</label>
-                                <select id="classSplitOverlapPairMode" title="Optionally focus the map on one selected pair of overlapping classes, or hide that pair.">
-                                    <option value="any">Any overlap pair</option>
-                                    <option value="include">Only selected pair</option>
-                                    <option value="exclude">Hide selected pair</option>
-                                </select>
-                                <select id="classSplitOverlapClassA" title="First class for close-overlap pair filtering."></select>
-                                <select id="classSplitOverlapClassB" title="Second class for close-overlap pair filtering."></select>
-                                <label for="classSplitDragMode">Drag action</label>
-                                <select id="classSplitDragMode" title="Choose what happens when you drag on the map: draw a freehand selection, draw a rectangular selection, or move the map.">
-                                    <option value="lasso" selected>Freehand select</option>
-                                    <option value="select">Rectangle select</option>
-                                    <option value="pan">Move map</option>
-                                </select>
+                                <div class="class-split-toolbar__group class-split-toolbar__group--primary">
+                                    <label class="class-split-toolbar__field" for="classSplitGraphProjection"><span>Map layout</span><select id="classSplitGraphProjection" class="class-split-toolbar__projection" title="Choose among layouts already calculated for this result. Changing this view never changes high-dimensional review ranking."><option value="class_balanced_pca">Balanced class overview</option><option value="global_pca">Overall visual similarity</option><option value="between_class_pca">Emphasize class differences</option><option value="within_filter_pca">Detail within selected class</option><option value="umap" selected>Local similarity groups (UMAP)</option></select><small id="classSplitProjectionAvailability">Available layouts are determined by this analysis run.</small></label>
+                                    <label class="class-split-toolbar__field" for="classSplitFilterClass"><span>Class</span><select id="classSplitFilterClass"></select></label>
+                                    <label class="class-split-toolbar__field" for="classSplitDisplayMode"><span>Objects</span><select id="classSplitDisplayMode" title="Choose which analyzed objects are visible. Hidden points remain in the analysis and review queue."><option value="all">All analyzed objects</option><option value="wrong_only">Suggested review queue</option><option value="rough_only">All similarity-based flags</option><option value="overlap_only">Objects with overlapping boxes</option><option value="review_only">Anything marked for review</option></select></label>
+                                    <label class="class-split-toolbar__field" for="classSplitSizeFilter"><span>Size</span><select id="classSplitSizeFilter" title="Tiny / low-detail uses the source-pixel threshold configured above. Relative smallness is separate evidence."><option value="all">All sizes</option><option value="low_detail_only">Tiny / low-detail only</option><option value="exclude_low_detail">Exclude tiny / low-detail</option><option value="relative_small">Relatively small only</option></select></label>
+                                    <label class="class-split-toolbar__field" for="classSplitDragMode"><span>Drag</span><select id="classSplitDragMode" title="Draw a freehand or rectangular multi-selection, or pan the map."><option value="lasso" selected>Freehand select</option><option value="select">Rectangle select</option><option value="pan">Move map</option></select></label>
+                                    <label class="class-split-toggle class-split-toolbar__cap" for="classSplitLimitPlotPoints"><input type="checkbox" id="classSplitLimitPlotPoints" checked /><span><strong>Limit map to 50,000 points</strong><small>Keeps important and selected objects while sampling the remainder deterministically.</small></span></label>
+                                </div>
+                                <fieldset class="class-split-toolbar__group class-split-toolbar__overlap"><legend>Overlap pair</legend><label class="class-split-toolbar__field" for="classSplitOverlapPairMode"><span>Show</span><select id="classSplitOverlapPairMode" title="Focus on one selected pair of overlapping classes, or hide that pair."><option value="any">Any overlap pair</option><option value="include">Only selected pair</option><option value="exclude">Hide selected pair</option></select></label><label class="class-split-toolbar__field" for="classSplitOverlapClassA"><span>First class</span><select id="classSplitOverlapClassA"></select></label><label class="class-split-toolbar__field" for="classSplitOverlapClassB"><span>Second class</span><select id="classSplitOverlapClassB"></select></label></fieldset>
                             </div>
                             <div id="classSplitGraphStatus" class="class-split-graph-status" aria-live="polite"></div>
                             <div id="classSplitGraph" class="class-split-graph"></div>

@@ -423,6 +423,7 @@ html.theme-pipboy .class-split-workspace {
 .class-split-resolved-summary > div { display: grid; gap: 0.08rem; min-width: 0; }
 .class-split-resolved-summary span { color: var(--dqe-muted); font-size: 0.68rem; font-weight: 750; letter-spacing: 0.04em; text-transform: uppercase; }
 .class-split-resolved-summary strong { overflow-wrap: anywhere; color: var(--dqe-ink); font-size: 0.78rem; }
+.class-split-resolved-summary small { color: var(--dqe-muted); font-size: 0.7rem; line-height: 1.35; }
 .class-split-actions--guided { margin-top: 0.05rem; }
 .class-split-progress { display: grid; gap: 0.65rem; margin-top: 0.8rem; padding: 0.8rem; border: 1px solid var(--dqe-border); border-radius: 0.75rem; background: var(--dqe-surface); color: var(--dqe-ink); }
 .class-split-progress__header { display: flex; justify-content: space-between; gap: 0.75rem; align-items: end; }
@@ -441,6 +442,19 @@ html.theme-pipboy .class-split-workspace {
 .class-split-progress[data-state="cancelled"] .class-split-progress__bar > div { background: var(--dqe-muted); }
 .class-split-progress #classSplitProgressText { margin: 0; color: var(--dqe-muted); font-size: 0.82rem; line-height: 1.45; overflow-wrap: anywhere; }
 .class-split-progress[data-state="failed"] #classSplitProgressText { color: var(--dqe-status-error); }
+.class-split-progress__context { display: flex; flex-wrap: wrap; gap: 0.45rem 0.8rem; align-items: center; }
+.class-split-progress__cache { padding: 0.25rem 0.5rem; border: 1px solid color-mix(in srgb, var(--dqe-accent) 45%, var(--dqe-border)); border-radius: 999px; background: color-mix(in srgb, var(--dqe-accent) 9%, var(--dqe-surface)); color: var(--dqe-ink); font-size: 0.72rem; font-weight: 750; }
+.class-split-progress__tip { color: var(--dqe-muted); font-size: 0.76rem; line-height: 1.4; }
+.class-split-results > .class-split-toolbar { display: grid; gap: 0.55rem; align-items: stretch; }
+.class-split-toolbar__group { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: end; min-width: 0; }
+.class-split-toolbar__group--primary { padding: 0.55rem; border: 1px solid var(--dqe-border); border-radius: 0.65rem; background: var(--dqe-surface); }
+.class-split-toolbar__field { display: grid; gap: 0.18rem; min-width: 8.5rem; color: var(--dqe-ink); }
+.class-split-toolbar__field > span, .class-split-toolbar__overlap legend { color: var(--dqe-muted); font-size: 0.68rem; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase; }
+.class-split-toolbar__field small { max-width: 22rem; color: var(--dqe-muted); font-size: 0.68rem; line-height: 1.3; }
+.class-split-toolbar__projection { min-width: 15rem; }
+.class-split-toolbar__cap { align-self: stretch; max-width: 18rem; padding: 0.45rem 0.55rem; }
+.class-split-toolbar__overlap { margin: 0; padding: 0.45rem 0.55rem 0.55rem; border: 1px solid var(--dqe-border); border-radius: 0.65rem; background: var(--dqe-subtle); }
+.class-split-toolbar__overlap legend { padding: 0 0.25rem; }
 .class-split-evidence-preview__body { display: grid; grid-template-columns: minmax(11rem, 0.65fr) minmax(15rem, 1.35fr); gap: 0.75rem; align-items: center; }
 .class-split-evidence-example { display: grid; grid-template-columns: 5rem minmax(0, 1fr); gap: 0.65rem; align-items: center; margin: 0; padding: 0.55rem; border: 1px solid var(--dqe-border); border-radius: 0.55rem; background: var(--dqe-surface-strong); }
 .class-split-evidence-example__crop { position: relative; width: 5rem; aspect-ratio: 4 / 3; overflow: hidden; border-radius: 0.4rem; background: linear-gradient(145deg, color-mix(in srgb, var(--dqe-muted) 28%, var(--dqe-surface)), var(--dqe-subtle)); }
@@ -454,4 +468,5 @@ html.theme-pipboy .class-split-workspace {
     .class-split-choice-grid, .class-split-tune__grid, .class-split-resolved-summary { grid-template-columns: 1fr; }
     .class-split-evidence-preview__body { grid-template-columns: 1fr; }
     .class-split-weight-complement { padding-bottom: 0; }
+    .class-split-toolbar__field, .class-split-toolbar__field select, .class-split-toolbar__cap { width: 100%; max-width: none; }
 }

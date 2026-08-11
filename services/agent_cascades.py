@@ -1,0 +1,739 @@
+"""Agent cascade persistence helpers."""
+
+from __future__ import annotations
+
+import io
+import json
+import os
+import shutil
+import stat
+import tempfile
+import time
+import uuid
+import zipfile
+from pathlib import Path, PureWindowsPath
+from typing import Any, BinaryIO, Callable, Dict, List, Optional
+
+from fastapi import HTTPException
+from starlette.status import (
+    HTTP_400_BAD_REQUEST,
+    HTTP_404_NOT_FOUND,
+    HTTP_500_INTERNAL_SERVER_ERROR,
+)
+from utils.status_compat import HTTP_413_CONTENT_TOO_LARGE
+
+
+def _path_within_root(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except Exception:
+        return False
+    return True
+
+
+def _path_has_symlink_component(path: Path) -> bool:
+    candidate = path if path.is_absolute() else path.absolute()
+    checks = [candidate]
+    checks.extend(candidate.parents)
+    for component in checks:
+        if component == component.parent:
+            continue
+        if component.is_symlink():
+            return True
+    return False
+
+
+def _zip_member_path_is_unsafe(name: str) -> bool:
+    member_name = str(name or "")
+    member_win = PureWindowsPath(member_name)
+    member_posix = Path(member_name)
+    return (
+        not member_name
+        or member_name.startswith("/")
+        or member_name.startswith("\\")
+        or member_win.is_absolute()
+        or bool(member_win.drive)
+        or member_posix.is_absolute()
+        or ".." in member_posix.parts
+    )
+
+
+def _zip_member_names_or_duplicate_error(zf: zipfile.ZipFile, *, detail: str) -> List[str]:
+    names = zf.namelist()
+    if len(names) != len(set(names)):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
+    return names
+
+
+def _agent_cascade_storage_root(
+    root: Path,
+    *,
+    create: bool = False,
+    detail: str = "agent_cascade_path_invalid",
+) -> Path:
+    if _path_has_symlink_component(root):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
+    if create:
+        root.mkdir(parents=True, exist_ok=True)
+        if _path_has_symlink_component(root):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
+    if root.exists() and not root.is_dir():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
+    if _path_has_symlink_component(root):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
+    return root.resolve(strict=False)
+
+
+def _agent_cascade_safe_id(cascade_id: str) -> str:
+    raw = str(cascade_id or "").strip()
+    if not raw or raw in {".", ".."}:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
+    if "/" in raw or "\\" in raw or Path(raw).is_absolute():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+    cleaned = "".join(ch if ch in allowed else "-" for ch in raw).strip("-_.")
+    if cleaned != raw:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
+    return raw
+
+
+def _prepare_output_file(path: Path) -> None:
+    if _path_has_symlink_component(path.parent):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if _path_has_symlink_component(path.parent):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
+    parent_resolved = path.parent.resolve(strict=True)
+    if path.is_symlink():
+        path.unlink(missing_ok=True)
+    elif path.exists() and path.is_dir():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
+    try:
+        path.resolve(strict=False).relative_to(parent_resolved)
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid") from exc
+
+
+def _prepare_atomic_output_file(path: Path) -> Path:
+    _prepare_output_file(path)
+    tmp_path = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    _prepare_output_file(tmp_path)
+    return tmp_path
+
+
+def _write_text_no_follow(path: Path, text: str) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+
+def _write_json_file(path: Path, payload: Dict[str, Any]) -> Path:
+    tmp_path = _prepare_atomic_output_file(path)
+    try:
+        _write_text_no_follow(tmp_path, json.dumps(payload, ensure_ascii=False, indent=2))
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
+    return path
+
+
+def _write_binary_file(path: Path, writer: Callable[[BinaryIO], None]) -> Path:
+    tmp_path = _prepare_atomic_output_file(path)
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(tmp_path, flags, 0o644)
+        with os.fdopen(fd, "wb") as fp:
+            writer(fp)
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
+    return path
+
+
+def _persist_agent_cascade_impl(
+    label: str,
+    payload: Dict[str, Any],
+    *,
+    cascades_root: Path,
+    path_is_within_root_fn,
+) -> Dict[str, Any]:
+    if not isinstance(payload, dict) or not payload:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_invalid_schema")
+    cascade_id = f"ac_{uuid.uuid4().hex[:8]}"
+    record = {
+        "id": cascade_id,
+        "label": (label or "").strip() or "agent_cascade",
+        "created_at": time.time(),
+        **payload,
+    }
+    root = _agent_cascade_storage_root(cascades_root, create=True)
+    path_raw = cascades_root / f"{cascade_id}.json"
+    path = path_raw.absolute()
+    if not _path_within_root(path, root):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
+    try:
+        _write_json_file(path_raw, record)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_cascade_save_failed:{exc}") from exc
+    record["_path"] = str(path_raw.resolve(strict=True))
+    zip_path_raw = cascades_root / f"{cascade_id}.zip"
+    zip_path = zip_path_raw.resolve(strict=False)
+    if zip_path.exists():
+        record["_zip"] = str(zip_path)
+    return record
+
+
+def _load_agent_cascade_impl(
+    cascade_id: str,
+    *,
+    cascades_root: Path,
+    path_is_within_root_fn,
+) -> Dict[str, Any]:
+    cascade_id = _agent_cascade_safe_id(cascade_id)
+    path_raw = cascades_root / f"{cascade_id}.json"
+    if path_raw.is_symlink():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="agent_cascade_not_found")
+    path = path_raw.resolve(strict=False)
+    root = _agent_cascade_storage_root(cascades_root)
+    if not path_is_within_root_fn(path, root) or not path.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="agent_cascade_not_found")
+    try:
+        with path.open("r", encoding="utf-8") as fp:
+            data = json.load(fp)
+        if not isinstance(data, dict):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_invalid_schema")
+        data["_path"] = str(path)
+        zip_path = (cascades_root / f"{cascade_id}.zip").resolve()
+        if zip_path.exists():
+            data["_zip"] = str(zip_path)
+        return data
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_cascade_load_failed:{exc}") from exc
+
+
+def _list_agent_cascades_impl(*, cascades_root: Path) -> List[Dict[str, Any]]:
+    cascades: List[Dict[str, Any]] = []
+    root = _agent_cascade_storage_root(cascades_root)
+    for path in root.glob("*.json"):
+        try:
+            if path.is_symlink():
+                continue
+            resolved_path = path.resolve()
+            if not _path_within_root(resolved_path, root) or not resolved_path.is_file():
+                continue
+            with path.open("r", encoding="utf-8") as fp:
+                data = json.load(fp)
+            if not isinstance(data, dict):
+                continue
+            data["_path"] = str(path)
+            zip_path = (cascades_root / f"{data.get('id','')}.zip").resolve()
+            if zip_path.exists():
+                data["_zip"] = str(zip_path)
+            cascades.append(data)
+        except Exception:
+            continue
+    cascades.sort(key=lambda r: r.get("created_at", 0), reverse=True)
+    return cascades
+
+
+def _delete_agent_cascade_impl(
+    cascade_id: str,
+    *,
+    cascades_root: Path,
+    path_is_within_root_fn,
+) -> None:
+    cascade_id = _agent_cascade_safe_id(cascade_id)
+    root = _agent_cascade_storage_root(cascades_root)
+    json_raw = root / f"{cascade_id}.json"
+    zip_raw = root / f"{cascade_id}.zip"
+    for raw_path in (json_raw, zip_raw):
+        if _path_has_symlink_component(raw_path.parent):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
+    json_path = json_raw.resolve()
+    if not path_is_within_root_fn(json_path, root):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
+    removed_any = False
+    for raw_path in (json_raw, zip_raw):
+        try:
+            resolved_path = raw_path.resolve()
+        except Exception:
+            resolved_path = raw_path
+        if not raw_path.is_symlink() and not path_is_within_root_fn(resolved_path, root):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
+        if raw_path.exists() or raw_path.is_symlink():
+            try:
+                raw_path.unlink()
+                removed_any = True
+            except Exception:
+                pass
+    if not removed_any:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="agent_cascade_not_found")
+
+
+def _ensure_cascade_zip_impl(
+    cascade: Dict[str, Any],
+    *,
+    cascades_root: Path,
+    recipes_root: Path,
+    classifiers_root: Path,
+    path_is_within_root_fn,
+    ensure_recipe_zip_fn,
+    load_recipe_fn,
+    resolve_classifier_fn,
+) -> Path:
+    cascade_id = cascade.get("id")
+    if not cascade_id:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_missing_id")
+    cascade_id_text = _agent_cascade_safe_id(str(cascade_id))
+    root = _agent_cascade_storage_root(cascades_root, create=True)
+    recipes_base = _agent_cascade_storage_root(recipes_root)
+    classifiers_base = _agent_cascade_storage_root(classifiers_root)
+    zip_raw = root / f"{cascade_id_text}.zip"
+    if zip_raw.is_symlink():
+        try:
+            zip_raw.unlink()
+        except Exception:
+            pass
+    zip_path = zip_raw.resolve(strict=False)
+    if not path_is_within_root_fn(zip_path, root):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
+    if zip_raw.exists():
+        try:
+            with zipfile.ZipFile(zip_raw, "r") as zf:
+                if zf.testzip() is None and "cascade.json" in set(zf.namelist()):
+                    return zip_raw
+        except Exception:
+            try:
+                zip_raw.unlink()
+            except Exception:
+                pass
+
+    steps = cascade.get("steps") or []
+    recipe_ids: List[str] = []
+    classifier_paths: List[str] = []
+    for step in steps if isinstance(steps, list) else []:
+        if not isinstance(step, dict):
+            continue
+        rid = step.get("recipe_id")
+        if isinstance(rid, str) and rid.strip():
+            recipe_ids.append(rid.strip())
+        extra_classifier = step.get("extra_clip_classifier_path")
+        if isinstance(extra_classifier, str) and extra_classifier.strip():
+            classifier_paths.append(extra_classifier.strip())
+    dedupe = cascade.get("dedupe") if isinstance(cascade.get("dedupe"), dict) else {}
+    if isinstance(dedupe, dict):
+        clip_head_recipe_id = dedupe.get("clip_head_recipe_id")
+        if isinstance(clip_head_recipe_id, str) and clip_head_recipe_id.strip():
+            recipe_ids.append(clip_head_recipe_id.strip())
+
+    def _safe_archive_relpath(raw: str) -> Optional[str]:
+        rel = str(raw or "").replace("\\", "/").strip().strip("/")
+        if not rel:
+            return None
+        rel_path = Path(rel)
+        if rel_path.is_absolute() or ".." in rel_path.parts:
+            return None
+        return rel
+
+    # Build zip bundle.
+    temp_zip_path = zip_raw.with_suffix(f"{zip_raw.suffix}.{uuid.uuid4().hex}.tmp")
+    _prepare_output_file(zip_raw)
+    _prepare_output_file(temp_zip_path)
+    try:
+        clean_cascade = json.loads(json.dumps(cascade))
+        for key in list(clean_cascade.keys()):
+            if isinstance(key, str) and key.startswith("_"):
+                clean_cascade.pop(key, None)
+        with zipfile.ZipFile(temp_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("cascade.json", json.dumps(clean_cascade, ensure_ascii=False, indent=2))
+
+            # Attach recipe zips.
+            for rid in sorted(set(recipe_ids)):
+                if not rid:
+                    continue
+                safe_recipe_name = _safe_archive_relpath(f"{rid}.zip")
+                if not safe_recipe_name:
+                    continue
+                try:
+                    recipe_obj = load_recipe_fn(rid)
+                except Exception:
+                    recipe_obj = {"id": rid}
+                recipe_zip = ensure_recipe_zip_fn(recipe_obj)
+                try:
+                    recipe_zip_resolved = recipe_zip.resolve()
+                except Exception:
+                    continue
+                if not path_is_within_root_fn(recipe_zip_resolved, recipes_base):
+                    continue
+                if recipe_zip.exists():
+                    try:
+                        zf.write(recipe_zip, arcname=f"recipes/{safe_recipe_name}")
+                    except Exception:
+                        continue
+
+            # Attach classifier artifacts referenced by steps.
+            for rel_path in sorted(set(classifier_paths)):
+                safe_classifier_rel = _safe_archive_relpath(rel_path)
+                if not safe_classifier_rel:
+                    continue
+                resolved = resolve_classifier_fn(rel_path)
+                if not resolved:
+                    continue
+                try:
+                    resolved_path = Path(resolved).resolve()
+                except Exception:
+                    continue
+                if not path_is_within_root_fn(resolved_path, classifiers_base):
+                    continue
+                if resolved_path.exists() and resolved_path.is_file():
+                    arcname = f"classifiers/{safe_classifier_rel}"
+                    try:
+                        zf.write(resolved_path, arcname=arcname)
+                    except Exception:
+                        pass
+                meta_archive_rel = _safe_archive_relpath(f"{os.path.splitext(safe_classifier_rel)[0]}.meta.pkl")
+                if not meta_archive_rel:
+                    continue
+                meta_candidates = [
+                    Path(os.path.splitext(str(resolved_path))[0] + ".meta.pkl"),
+                    resolved_path.with_suffix(resolved_path.suffix + ".meta.pkl"),
+                ]
+                seen_meta_paths: set[Path] = set()
+                for meta_path in meta_candidates:
+                    try:
+                        meta_path_resolved = meta_path.resolve(strict=True)
+                    except Exception:
+                        continue
+                    if meta_path_resolved in seen_meta_paths:
+                        continue
+                    seen_meta_paths.add(meta_path_resolved)
+                    if not (
+                        path_is_within_root_fn(meta_path_resolved, classifiers_base)
+                        and meta_path_resolved.is_file()
+                    ):
+                        continue
+                    try:
+                        zf.write(meta_path_resolved, arcname=f"classifiers/{meta_archive_rel}")
+                    except Exception:
+                        pass
+                    break
+        os.replace(temp_zip_path, zip_raw)
+    except Exception as exc:  # noqa: BLE001
+        try:
+            temp_zip_path.unlink()
+        except Exception:
+            pass
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_cascade_zip_failed:{exc}") from exc
+    return zip_raw
+
+
+def _import_agent_cascade_zip_obj_impl(
+    zf: zipfile.ZipFile,
+    *,
+    cascades_root: Path,
+    classifiers_root: Path,
+    max_json_bytes: int,
+    classifier_allowed_exts: List[str],
+    path_is_within_root_fn,
+    import_recipe_fn=None,
+    import_recipe_file_fn=None,
+    persist_cascade_fn,
+    max_entry_bytes: Optional[int] = None,
+    max_recipe_zip_bytes: Optional[int] = None,
+    max_total_uncompressed_bytes: Optional[int] = None,
+) -> Dict[str, Any]:
+    names = _zip_member_names_or_duplicate_error(zf, detail="agent_cascade_import_duplicate_files")
+    for name in names:
+        if _zip_member_path_is_unsafe(name):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
+    cascade_name = "cascade.json" if "cascade.json" in names else None
+    if not cascade_name:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_no_json")
+    info = zf.getinfo(cascade_name)
+    if max_entry_bytes and info.file_size > max_entry_bytes:
+        raise HTTPException(
+            status_code=HTTP_413_CONTENT_TOO_LARGE,
+            detail="agent_cascade_import_entry_too_large",
+        )
+    if info.file_size > max_json_bytes:
+        raise HTTPException(status_code=HTTP_413_CONTENT_TOO_LARGE, detail="agent_cascade_import_json_too_large")
+    cascade_path = Path(cascade_name)
+    if _zip_member_path_is_unsafe(cascade_name) or cascade_path.is_absolute() or ".." in cascade_path.parts:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
+    with zf.open(cascade_name) as jf:
+        cascade_data = json.load(jf)
+    if not isinstance(cascade_data, dict):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_invalid_schema")
+
+    recipe_zip_names: List[str] = []
+    classifier_file_names: List[str] = []
+    total_uncompressed = 0
+    for name in names:
+        if _zip_member_path_is_unsafe(name):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
+        arc_path = Path(name)
+        if arc_path.is_dir():
+            continue
+        if arc_path.is_absolute() or ".." in arc_path.parts:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
+        try:
+            member_info = zf.getinfo(name)
+        except KeyError:
+            continue
+        mode = (member_info.external_attr >> 16) & 0xFFFF
+        if stat.S_ISLNK(mode):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_symlink_unsupported")
+        if max_total_uncompressed_bytes and max_total_uncompressed_bytes > 0:
+            total_uncompressed += max(int(member_info.file_size or 0), 0)
+            if total_uncompressed > max_total_uncompressed_bytes:
+                raise HTTPException(
+                    status_code=HTTP_413_CONTENT_TOO_LARGE,
+                    detail="agent_cascade_import_uncompressed_too_large",
+                )
+        if max_entry_bytes and member_info.file_size > max_entry_bytes:
+            raise HTTPException(
+                status_code=HTTP_413_CONTENT_TOO_LARGE,
+                detail="agent_cascade_import_entry_too_large",
+            )
+        if len(arc_path.parts) >= 2 and arc_path.parts[0] == "recipes" and arc_path.suffix.lower() == ".zip":
+            if max_recipe_zip_bytes and member_info.file_size > max_recipe_zip_bytes:
+                raise HTTPException(
+                    status_code=HTTP_413_CONTENT_TOO_LARGE,
+                    detail="agent_cascade_import_recipe_too_large",
+                )
+            recipe_zip_names.append(name)
+        if len(arc_path.parts) >= 2 and arc_path.parts[0] == "classifiers":
+            if arc_path.name.endswith(".meta.pkl") or arc_path.suffix.lower() in classifier_allowed_exts:
+                classifier_file_names.append(name)
+
+    label = cascade_data.get("label") or "imported_cascade"
+    steps_raw = cascade_data.get("steps")
+    if not isinstance(steps_raw, list) or not steps_raw:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_invalid_schema")
+    dedupe_raw = cascade_data.get("dedupe") if isinstance(cascade_data.get("dedupe"), dict) else {}
+
+    validated_steps: List[tuple[Dict[str, Any], str]] = []
+    for raw in steps_raw:
+        if not isinstance(raw, dict):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_invalid_schema")
+        rid = raw.get("recipe_id")
+        if not rid and isinstance(raw.get("recipe"), dict):
+            rid = raw["recipe"].get("id")
+        if not isinstance(rid, str) or not rid.strip():
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_invalid_schema")
+        validated_steps.append((raw, rid.strip()))
+
+    classifier_map: Dict[str, str] = {}
+    classifier_import_root: Optional[Path] = None
+    recipe_import_tmp_root: Optional[Path] = None
+    try:
+        _agent_cascade_storage_root(
+            cascades_root,
+            detail="agent_cascade_import_invalid_path",
+        )
+        classifiers_base = _agent_cascade_storage_root(
+            classifiers_root,
+            create=bool(classifier_file_names),
+            detail="agent_cascade_import_invalid_path",
+        )
+        if classifier_file_names:
+            import_tag = f"cascade_{uuid.uuid4().hex[:8]}"
+            raw_classifier_import_root = classifiers_base / "imports" / import_tag
+            if _path_has_symlink_component(raw_classifier_import_root):
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
+            classifier_import_root = raw_classifier_import_root.resolve(strict=False)
+            if not path_is_within_root_fn(classifier_import_root, classifiers_base):
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
+            raw_classifier_import_root.mkdir(parents=True, exist_ok=True)
+            if _path_has_symlink_component(raw_classifier_import_root):
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
+            for name in classifier_file_names:
+                arc_path = Path(name)
+                rel_inside = Path(*arc_path.parts[1:])
+                raw_dest_path = classifier_import_root / rel_inside
+                if _path_has_symlink_component(raw_dest_path.parent):
+                    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
+                dest_path = raw_dest_path.resolve(strict=False)
+                if not path_is_within_root_fn(dest_path, classifiers_base):
+                    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
+                raw_dest_path.parent.mkdir(parents=True, exist_ok=True)
+                if _path_has_symlink_component(raw_dest_path.parent) or raw_dest_path.is_symlink():
+                    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
+                def _copy_classifier(dst: BinaryIO, *, archive_name: str = name) -> None:
+                    with zf.open(archive_name) as src:
+                        shutil.copyfileobj(src, dst, length=1024 * 1024)
+
+                try:
+                    _write_binary_file(dest_path, _copy_classifier)
+                except HTTPException:
+                    raise
+                except Exception:
+                    continue
+                if not arc_path.name.endswith(".meta.pkl") and arc_path.suffix.lower() in classifier_allowed_exts:
+                    orig_rel = str(rel_inside.as_posix())
+                    new_rel = str((Path("imports") / import_tag / rel_inside).as_posix())
+                    classifier_map[orig_rel] = new_rel
+
+        id_map: Dict[str, str] = {}
+        for name in recipe_zip_names:
+            src_id = None
+            try:
+                arc_path = Path(name)
+                src_id = arc_path.stem
+            except Exception:
+                src_id = None
+            if import_recipe_file_fn is not None:
+                if recipe_import_tmp_root is None:
+                    recipe_import_tmp_root = Path(tempfile.mkdtemp(prefix="agent_cascade_recipe_import_"))
+                recipe_zip_path = recipe_import_tmp_root / f"{uuid.uuid4().hex}.zip"
+                # Stream recipe archives to disk so cascade import does not materialize
+                # large nested zips in RAM before handing off to recipe importer.
+                with zf.open(name) as src, recipe_zip_path.open("wb") as dst:
+                    shutil.copyfileobj(src, dst, length=1024 * 1024)
+                old_id, persisted = import_recipe_file_fn(recipe_zip_path)
+                try:
+                    recipe_zip_path.unlink()
+                except Exception:
+                    pass
+            elif import_recipe_fn is not None:
+                old_id, persisted = import_recipe_fn(zf.read(name))
+            else:
+                raise HTTPException(
+                    status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="agent_cascade_import_recipe_handler_missing",
+                )
+            new_id = persisted.get("id")
+            if isinstance(new_id, str) and new_id:
+                if old_id:
+                    id_map[str(old_id)] = str(new_id)
+                if src_id:
+                    id_map[str(src_id)] = str(new_id)
+
+        steps_out: List[Dict[str, Any]] = []
+        for raw, rid in validated_steps:
+            mapped = id_map.get(rid)
+            if not mapped:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_missing_recipe")
+            extra_classifier_ref = None
+            if isinstance(raw.get("extra_clip_classifier_path"), str) and raw.get("extra_clip_classifier_path").strip():
+                extra_classifier_ref = str(raw.get("extra_clip_classifier_path")).strip()
+                if classifier_map:
+                    mapped_classifier = classifier_map.get(extra_classifier_ref)
+                    if not mapped_classifier:
+                        raise HTTPException(
+                            status_code=HTTP_400_BAD_REQUEST,
+                            detail="agent_cascade_import_missing_classifier",
+                        )
+                    extra_classifier_ref = mapped_classifier
+            steps_out.append(
+                {
+                    "enabled": bool(raw.get("enabled", True)),
+                    "recipe_id": mapped,
+                    "override_class_id": raw.get("override_class_id"),
+                    "override_class_name": raw.get("override_class_name"),
+                    "dedupe_group": raw.get("dedupe_group"),
+                    "participate_cross_class_dedupe": bool(raw.get("participate_cross_class_dedupe", True)),
+                    "clip_head_min_prob_override": raw.get("clip_head_min_prob_override"),
+                    "clip_head_margin_override": raw.get("clip_head_margin_override"),
+                    "extra_clip_classifier_path": extra_classifier_ref,
+                    "extra_clip_min_prob": raw.get("extra_clip_min_prob"),
+                    "extra_clip_margin": raw.get("extra_clip_margin"),
+                }
+            )
+        persisted = persist_cascade_fn(str(label), {"steps": steps_out, "dedupe": dedupe_raw})
+        classifier_import_root = None
+        return persisted
+    finally:
+        if recipe_import_tmp_root is not None:
+            shutil.rmtree(recipe_import_tmp_root, ignore_errors=True)
+        if classifier_import_root is not None:
+            shutil.rmtree(classifier_import_root, ignore_errors=True)
+
+
+def _import_agent_cascade_zip_bytes_impl(
+    zip_bytes: bytes,
+    *,
+    cascades_root: Path,
+    classifiers_root: Path,
+    max_json_bytes: int,
+    classifier_allowed_exts: List[str],
+    path_is_within_root_fn,
+    import_recipe_fn=None,
+    import_recipe_file_fn=None,
+    persist_cascade_fn,
+    max_entry_bytes: Optional[int] = None,
+    max_recipe_zip_bytes: Optional[int] = None,
+    max_total_uncompressed_bytes: Optional[int] = None,
+) -> Dict[str, Any]:
+    if not zip_bytes:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_zip_only")
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            return _import_agent_cascade_zip_obj_impl(
+                zf,
+                cascades_root=cascades_root,
+                classifiers_root=classifiers_root,
+                max_json_bytes=max_json_bytes,
+                classifier_allowed_exts=classifier_allowed_exts,
+                path_is_within_root_fn=path_is_within_root_fn,
+                import_recipe_fn=import_recipe_fn,
+                import_recipe_file_fn=import_recipe_file_fn,
+                persist_cascade_fn=persist_cascade_fn,
+                max_entry_bytes=max_entry_bytes,
+                max_recipe_zip_bytes=max_recipe_zip_bytes,
+                max_total_uncompressed_bytes=max_total_uncompressed_bytes,
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"agent_cascade_import_failed:{exc}") from exc
+
+
+def _import_agent_cascade_zip_file_impl(
+    zip_path: Path,
+    *,
+    cascades_root: Path,
+    classifiers_root: Path,
+    max_json_bytes: int,
+    classifier_allowed_exts: List[str],
+    path_is_within_root_fn,
+    import_recipe_fn=None,
+    import_recipe_file_fn=None,
+    persist_cascade_fn,
+    max_entry_bytes: Optional[int] = None,
+    max_recipe_zip_bytes: Optional[int] = None,
+    max_total_uncompressed_bytes: Optional[int] = None,
+) -> Dict[str, Any]:
+    if not zip_path.exists() or not zip_path.is_file():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_zip_only")
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            return _import_agent_cascade_zip_obj_impl(
+                zf,
+                cascades_root=cascades_root,
+                classifiers_root=classifiers_root,
+                max_json_bytes=max_json_bytes,
+                classifier_allowed_exts=classifier_allowed_exts,
+                path_is_within_root_fn=path_is_within_root_fn,
+                import_recipe_fn=import_recipe_fn,
+                import_recipe_file_fn=import_recipe_file_fn,
+                persist_cascade_fn=persist_cascade_fn,
+                max_entry_bytes=max_entry_bytes,
+                max_recipe_zip_bytes=max_recipe_zip_bytes,
+                max_total_uncompressed_bytes=max_total_uncompressed_bytes,
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"agent_cascade_import_failed:{exc}") from exc

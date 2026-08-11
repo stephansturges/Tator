@@ -1,0 +1,9 @@
+pre-commit
+black
+ruff
+isort
+mypy
+pytest
+types-PyYAML
+pip-audit
+playwright

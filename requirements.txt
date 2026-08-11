@@ -1,0 +1,77 @@
+# Core runtime (pinned with broad bounds)
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.24,<1.0
+numpy>=1.24,<3.0
+pillow>=10.0,<11.0
+albumentations>=1.4,<2.0
+joblib>=1.3,<2.0
+scikit-learn>=1.3,<2.0
+umap-learn>=0.5.5,<0.6
+scipy>=1.10,<2.0  # for reorder_labelmap.py (Hungarian assignment)
+pydantic>=2.7,<3.0
+python-multipart>=0.0.6,<1.0
+psutil>=5.9,<6.0
+packaging>=23.0,<25.0
+pyyaml>=6.0,<7.0
+json5>=0.9,<1.0
+omegaconf>=2.3,<3.0
+tiktoken>=0.6,<1.0
+ultralytics>=8.2,<9.0
+rfdetr>=1.8.1,<2.0
+xgboost>=2.0,<3.0
+
+# Torch (select the build matching your CUDA/CPU environment)
+# For Falcon automatic-labeling, prefer the tested setup in
+# `docs/environment_setup.md` via `tools/setup_venv_falcon_cu118.sh`.
+torch
+torchvision
+
+# CLIP and helpers
+ftfy
+regex
+tqdm
+git+https://github.com/openai/CLIP.git
+open_clip_torch>=3.3,<4.0
+
+# Segment Anything (SAM)
+git+https://github.com/facebookresearch/segment-anything.git
+
+# Segment Anything 3 (SAM3) — optional (see README for usage)
+# git+https://github.com/facebookresearch/sam3.git
+
+# SAM3 training dependencies
+hydra-core>=1.3,<1.4
+submitit>=1.5,<2.0
+fvcore>=0.1.5,<0.1.6
+iopath>=0.1.10,<0.1.11
+tensorboard>=2.14,<3.0
+
+# Qwen 3 visual-language (optional but enabled by default)
+transformers>=5.7,<6.0
+accelerate>=1.0,<2.0
+huggingface-hub>=1.5,<2.0
+qwen-vl-utils>=0.0.8
+safetensors>=0.4,<0.5
+pynndescent>=0.5.12,<0.6
+qwen-agent>=0.0.31,<1.0
+sentencepiece>=0.1.99,<0.2
+compressed-tensors>=0.12,<1.0
+gptqmodel>=4.0,<8.0
+optimum>=1.27,<3.0
+peft>=0.11,<1.0
+bitsandbytes>=0.43,<1.0
+trl>=0.10,<1.0
+lightning>=2.4,<3.0
+nltk>=3.8,<4.0
+decord>=0.6,<1.0
+
+# Optional extras for advanced training and tooling
+# opencv-python       # common image ops (required for tools/detect_missclassifications.py)
+# matplotlib          # plotting in notebooks/scripts
+# PyQt5               # required for tools/detect_missclassifications.py UI
+
+# Windowed detection helper
+sahi>=0.11,<0.12
+
+# Observability (optional)
+prometheus-client>=0.16,<1.0

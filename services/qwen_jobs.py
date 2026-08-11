@@ -1,0 +1,166 @@
+"""Qwen training job tracking + serialization."""
+
+from __future__ import annotations
+
+import json
+import logging
+import math
+import time
+from typing import Any, Dict, Optional, Sequence
+
+from services.job_payloads import clamp_progress, json_sanitize
+
+
+def _serialize_qwen_job_impl(job) -> Dict[str, Any]:
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "progress": job.progress,
+        "message": job.message,
+        "logs": json_sanitize(job.logs),
+        "config": json_sanitize(job.config),
+        "metrics": json_sanitize(job.metrics),
+        "result": json_sanitize(job.result),
+        "error": json_sanitize(job.error),
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+    }
+
+
+def _log_qwen_get_request_impl(endpoint: str, jobs: Sequence, logger: Optional[logging.Logger] = None) -> None:
+    logger = logger or logging.getLogger(__name__)
+    try:
+        if not jobs:
+            logger.info("[qwen-train] GET %s -> 0 jobs", endpoint)
+            return
+        for job in jobs:
+            config = job.config or {}
+            tracked_fields = {
+                "accelerator": config.get("accelerator"),
+                "devices": config.get("devices"),
+                "batch_size": config.get("batch_size"),
+                "accumulate_grad_batches": config.get("accumulate_grad_batches"),
+            }
+            logger.info(
+                "[qwen-train %s] GET %s -> status=%s message=%s config=%s",
+                job.job_id[:8],
+                endpoint,
+                job.status,
+                job.message,
+                json.dumps(tracked_fields, ensure_ascii=False),
+            )
+    except Exception:
+        pass
+
+
+def _qwen_job_log_impl(
+    job,
+    message: str,
+    *,
+    max_logs: int,
+    logger: Optional[logging.Logger] = None,
+) -> None:
+    entry = {"timestamp": time.time(), "message": message}
+    job.logs.append(entry)
+    if len(job.logs) > max_logs:
+        job.logs[:] = job.logs[-max_logs:]
+    job.updated_at = time.time()
+    if logger is None:
+        logger = logging.getLogger(__name__)
+    try:
+        logger.info("[qwen-train %s] %s", job.job_id[:8], message)
+    except Exception:
+        pass
+
+
+def _qwen_job_update_impl(
+    job,
+    *,
+    status: Optional[str] = None,
+    message: Optional[str] = None,
+    progress: Optional[float] = None,
+    error: Optional[str] = None,
+    result: Optional[Dict[str, Any]] = None,
+    log_message: bool = True,
+    max_logs: int,
+    logger: Optional[logging.Logger] = None,
+) -> None:
+    if status is not None:
+        job.status = status
+    if message is not None:
+        if message != job.message:
+            job.message = message
+            if log_message:
+                _qwen_job_log_impl(job, message, max_logs=max_logs, logger=logger)
+        else:
+            job.message = message
+    if progress is not None:
+        job.progress = clamp_progress(progress, fallback=job.progress)
+    if error is not None:
+        job.error = error
+    if result is not None:
+        job.result = result
+    job.updated_at = time.time()
+
+
+def _qwen_job_append_metric_impl(job, metric: Dict[str, Any], *, max_points: Optional[int]) -> None:
+    if not metric:
+        return
+    sanitized = {str(key): _coerce_metric_value_impl(val) for key, val in metric.items()}
+    job.metrics.append(sanitized)
+    if max_points and len(job.metrics) > max_points:
+        job.metrics[:] = job.metrics[-max_points:]
+    job.updated_at = time.time()
+
+
+def _coerce_metric_value_impl(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        try:
+            if not math.isfinite(float(value)):
+                return None
+        except Exception:
+            return None
+        return value
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _coerce_metric_value_impl(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_coerce_metric_value_impl(item) for item in value]
+    try:
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else None
+    except (TypeError, ValueError, OverflowError):
+        return str(value)
+
+
+def _summarize_qwen_metric_impl(metric: Dict[str, Any]) -> str:
+    phase = (metric.get("phase") or "").lower()
+    epoch = metric.get("epoch")
+    total_epochs = metric.get("total_epochs")
+    parts: list[str] = []
+    if isinstance(epoch, (int, float)):
+        if isinstance(total_epochs, (int, float)) and total_epochs:
+            parts.append(f"Epoch {int(epoch)}/{int(total_epochs)}")
+        else:
+            parts.append(f"Epoch {int(epoch)}")
+    if phase == "train":
+        batch = metric.get("batch")
+        batches_per_epoch = metric.get("batches_per_epoch")
+        if isinstance(batch, (int, float)) and isinstance(batches_per_epoch, (int, float)) and batches_per_epoch:
+            parts.append(f"Batch {int(batch)}/{int(batches_per_epoch)}")
+        train_loss = metric.get("train_loss")
+        if isinstance(train_loss, (int, float)):
+            parts.append(f"Loss {float(train_loss):.4f}")
+    elif phase == "val":
+        value = metric.get("value")
+        metric_name = metric.get("metric") or "validation"
+        if isinstance(value, (int, float)):
+            parts.append(f"{metric_name} {float(value):.4f}")
+    if not parts:
+        return "Training in progress ..."
+    return " • ".join(parts)

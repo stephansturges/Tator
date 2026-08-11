@@ -1,0 +1,264 @@
+"""SAM3 similarity expansion helpers."""
+
+from __future__ import annotations
+
+import time
+from typing import Any, Callable, Dict, List, Optional
+
+from PIL import Image
+
+from services.prepass_provenance import _agent_attach_provenance
+from services.prepass_windows import _agent_exemplars_for_window, _agent_similarity_windows
+
+
+def _agent_run_similarity_global(
+    payload: Any,
+    *,
+    pil_img: Image.Image,
+    image_token: str,
+    exemplars_by_label: Dict[str, List[Dict[str, Any]]],
+    sam3_similarity_fn: Optional[Callable[..., Dict[str, Any]]] = None,
+    similarity_payloads_fn: Optional[Callable[..., List[Dict[str, Any]]]] = None,
+    ensure_sam3_text_runtime_fn: Optional[Callable[..., Any]] = None,
+    trace_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
+    trace_full_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
+    trace_readable: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
+    detections: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    score_thr = payload.prepass_similarity_score
+    mask_thr = payload.sam3_mask_threshold
+    sam3_processor = None
+    global_state = None
+
+    if similarity_payloads_fn is not None and ensure_sam3_text_runtime_fn is not None:
+        try:
+            _, sam3_processor, _ = ensure_sam3_text_runtime_fn()
+            global_state = sam3_processor.set_image(pil_img)
+        except Exception:
+            sam3_processor = None
+            global_state = None
+
+    def _log_step(event: str, payload_obj: Dict[str, Any]) -> None:
+        if trace_writer:
+            trace_writer({"type": event, **payload_obj, "ts": time.time()})
+        if trace_full_writer:
+            trace_full_writer({"type": event, **payload_obj, "ts": time.time()})
+
+    for label, exemplars in exemplars_by_label.items():
+        exemplar_boxes = []
+        exemplar_handles = []
+        for det in exemplars:
+            bbox = det.get("bbox_2d")
+            if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+                exemplar_boxes.append({"bbox_2d": list(bbox[:4]), "bbox_space": "full"})
+            handle = det.get("handle")
+            if handle:
+                exemplar_handles.append(str(handle))
+        if not exemplar_boxes:
+            continue
+        args = {
+            "image_token": image_token,
+            "label": label,
+            "exemplar_boxes": exemplar_boxes,
+            "score_thr": score_thr,
+            "mask_threshold": mask_thr,
+        }
+        _log_step("deep_prepass_tool_call", {"tool": "sam3_similarity", "args": args})
+        try:
+            if similarity_payloads_fn is not None and sam3_processor is not None:
+                dets = similarity_payloads_fn(
+                    full_img=pil_img,
+                    crop_img=pil_img,
+                    exemplar_boxes=exemplar_boxes,
+                    label=label,
+                    score_thr=score_thr,
+                    mask_threshold=mask_thr,
+                    max_results=None,
+                    window_xyxy=None,
+                    window_bbox_2d=None,
+                    processor_override=sam3_processor,
+                    state=global_state,
+                )
+                result = {"detections": dets}
+            elif sam3_similarity_fn is not None:
+                result = sam3_similarity_fn(
+                    image_token=image_token,
+                    exemplar_boxes=exemplar_boxes,
+                    label=label,
+                    score_thr=score_thr,
+                    mask_threshold=mask_thr,
+                    register=False,
+                )
+            else:
+                result = {"detections": []}
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc)
+            if isinstance(exc, TypeError):
+                warnings.append(f"deep_prepass_similarity_type_error:{label}:full:{msg}")
+                continue
+            if "has no len" not in msg and "not supported between instances" not in msg:
+                warnings.append(f"deep_prepass_similarity_failed:{label}:full:{exc}")
+            continue
+        _log_step("deep_prepass_tool_result", {"tool": "sam3_similarity", "result": result})
+        dets = list(result.get("detections") or [])
+        if trace_readable:
+            trace_readable(
+                f"deep_prepass sam3_similarity label={label} window=full detections={len(dets)}"
+            )
+        _agent_attach_provenance(
+            dets,
+            source="sam3_similarity",
+            source_primary="sam3_similarity",
+            source_exemplar_handles=exemplar_handles or None,
+        )
+        detections.extend(dets)
+    return {"detections": detections, "warnings": warnings}
+
+
+def _agent_run_similarity_expansion(
+    payload: Any,
+    *,
+    pil_img: Image.Image,
+    image_token: str,
+    exemplars_by_label: Dict[str, List[Dict[str, Any]]],
+    sam3_similarity_fn: Optional[Callable[..., Dict[str, Any]]] = None,
+    similarity_payloads_fn: Optional[Callable[..., List[Dict[str, Any]]]] = None,
+    ensure_sam3_text_runtime_fn: Optional[Callable[..., Any]] = None,
+    grid_overlap_ratio_default: float,
+    trace_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
+    trace_full_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
+    trace_readable: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
+    img_w, img_h = pil_img.size
+    detections: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    windows = _agent_similarity_windows(
+        payload, pil_img=pil_img, grid_overlap_ratio_default=grid_overlap_ratio_default
+    )
+    score_thr = payload.prepass_similarity_score
+    mask_thr = payload.sam3_mask_threshold
+    sam3_processor = None
+    contexts: List[Dict[str, Any]] = []
+
+    if similarity_payloads_fn is not None and ensure_sam3_text_runtime_fn is not None:
+        try:
+            _, sam3_processor, _ = ensure_sam3_text_runtime_fn()
+        except Exception:
+            sam3_processor = None
+
+    def _log_step(event: str, payload_obj: Dict[str, Any]) -> None:
+        if trace_writer:
+            trace_writer({"type": event, **payload_obj, "ts": time.time()})
+        if trace_full_writer:
+            trace_full_writer({"type": event, **payload_obj, "ts": time.time()})
+
+    for window in windows:
+        context: Dict[str, Any] = {
+            "window": window,
+            "crop_img": pil_img,
+            "state": None,
+        }
+        window_xyxy = window.get("bbox_xyxy_px") or []
+        if (
+            sam3_processor is not None
+            and isinstance(window_xyxy, (list, tuple))
+            and len(window_xyxy) >= 4
+        ):
+            x1, y1, x2, y2 = window_xyxy
+            crop_img = pil_img.crop((x1, y1, x2, y2))
+            context["crop_img"] = crop_img
+            try:
+                context["state"] = sam3_processor.set_image(crop_img)
+            except Exception:
+                context["state"] = None
+        contexts.append(context)
+
+    for label, exemplars in exemplars_by_label.items():
+        for context in contexts:
+            window = context["window"]
+            window_xyxy = window.get("bbox_xyxy_px") or []
+            window_bbox_2d = window.get("bbox_2d")
+            window_exemplars = _agent_exemplars_for_window(
+                exemplars, img_w=img_w, img_h=img_h, window_xyxy=window_xyxy
+            )
+            if not window_exemplars:
+                continue
+            exemplar_boxes = []
+            exemplar_handles = []
+            for det in window_exemplars:
+                bbox = det.get("bbox_2d")
+                if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+                    exemplar_boxes.append({"bbox_2d": list(bbox[:4]), "bbox_space": "full"})
+                handle = det.get("handle")
+                if handle:
+                    exemplar_handles.append(str(handle))
+            if not exemplar_boxes:
+                continue
+            args = {
+                "image_token": image_token,
+                "label": label,
+                "exemplar_boxes": exemplar_boxes,
+                "score_thr": score_thr,
+                "mask_threshold": mask_thr,
+                "window_bbox_2d": window_bbox_2d,
+            }
+            if window.get("grid_cell"):
+                args["grid_cell"] = window.get("grid_cell")
+            _log_step("deep_prepass_tool_call", {"tool": "sam3_similarity", "args": args})
+            try:
+                if similarity_payloads_fn is not None and sam3_processor is not None:
+                    dets = similarity_payloads_fn(
+                        full_img=pil_img,
+                        crop_img=context.get("crop_img") or pil_img,
+                        exemplar_boxes=exemplar_boxes,
+                        label=label,
+                        score_thr=score_thr,
+                        mask_threshold=mask_thr,
+                        max_results=None,
+                        window_xyxy=window_xyxy,
+                        window_bbox_2d=window_bbox_2d,
+                        processor_override=sam3_processor,
+                        state=context.get("state"),
+                    )
+                    result = {"detections": dets}
+                elif sam3_similarity_fn is not None:
+                    result = sam3_similarity_fn(
+                        image_token=image_token,
+                        exemplar_boxes=exemplar_boxes,
+                        label=label,
+                        score_thr=score_thr,
+                        mask_threshold=mask_thr,
+                        window_bbox_2d=window_bbox_2d,
+                        grid_cell=window.get("grid_cell"),
+                        register=False,
+                    )
+                else:
+                    result = {"detections": []}
+            except Exception as exc:  # noqa: BLE001
+                msg = str(exc)
+                if isinstance(exc, TypeError):
+                    warnings.append(
+                        f"deep_prepass_similarity_type_error:{label}:{window.get('name')}:{msg}"
+                    )
+                    continue
+                if "has no len" not in msg and "not supported between instances" not in msg:
+                    warnings.append(
+                        f"deep_prepass_similarity_failed:{label}:{window.get('name')}:{exc}"
+                    )
+                continue
+            _log_step("deep_prepass_tool_result", {"tool": "sam3_similarity", "result": result})
+            dets = list(result.get("detections") or [])
+            if trace_readable:
+                window_name = window.get("name") or window.get("grid_cell") or "window"
+                trace_readable(
+                    f"deep_prepass sam3_similarity label={label} window={window_name} detections={len(dets)}"
+                )
+            _agent_attach_provenance(
+                dets,
+                source="sam3_similarity",
+                source_primary="sam3_similarity",
+                source_exemplar_handles=exemplar_handles or None,
+            )
+            detections.extend(dets)
+    return {"detections": detections, "warnings": warnings}

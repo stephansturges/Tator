@@ -1,0 +1,2407 @@
+"""Detector runtime helpers for YOLO/RF-DETR inference and training metadata."""
+
+from __future__ import annotations
+
+import csv
+import json
+import os
+import re
+import shutil
+import tempfile
+import time
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
+from utils.io import _path_is_within_root_impl
+
+
+def _path_identity(path: Path) -> Path:
+    try:
+        return path.resolve(strict=False)
+    except RuntimeError:
+        return path.absolute()
+
+
+def _is_platform_root_symlink(path: Path) -> bool:
+    """Allow macOS tempfile paths that traverse /var -> /private/var."""
+    try:
+        resolved = path.resolve(strict=False)
+    except Exception:
+        return False
+    return (path == Path("/var") and resolved == Path("/private/var")) or (
+        path == Path("/tmp") and resolved == Path("/private/tmp")
+    )
+
+
+def _path_has_symlink_component(path: Path, *, include_leaf: bool = True) -> bool:
+    candidate = path if path.is_absolute() else path.absolute()
+    checks = [candidate] if include_leaf else []
+    checks.extend(candidate.parents)
+    for component in checks:
+        if component == component.parent:
+            continue
+        if _is_platform_root_symlink(component):
+            continue
+        if component.is_symlink():
+            return True
+    return False
+
+
+def _ensure_no_symlink_components(path: Path, *, include_leaf: bool = True) -> None:
+    if _path_has_symlink_component(path, include_leaf=include_leaf):
+        raise RuntimeError("detector_path_invalid")
+
+
+def _prepare_detector_dir(path: Path, *, replace_leaf_symlink: bool = False) -> Path:
+    _ensure_no_symlink_components(path.parent)
+    if path.is_symlink():
+        if not replace_leaf_symlink:
+            raise RuntimeError("detector_path_invalid")
+        path.unlink(missing_ok=True)
+    path.mkdir(parents=True, exist_ok=True)
+    _ensure_no_symlink_components(path)
+    if not path.is_dir():
+        raise RuntimeError("detector_path_invalid")
+    return path.resolve(strict=False)
+
+
+def _prepare_output_file(path: Path) -> None:
+    _ensure_no_symlink_components(path.parent)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_no_symlink_components(path.parent)
+    parent_resolved = path.parent.resolve(strict=True)
+    if path.is_symlink():
+        path.unlink(missing_ok=True)
+    elif path.exists() and path.is_dir():
+        raise RuntimeError("detector_path_invalid")
+    try:
+        path.resolve(strict=False).relative_to(parent_resolved)
+    except Exception as exc:
+        raise RuntimeError("detector_path_invalid") from exc
+
+
+def _prepare_atomic_output_file(path: Path) -> Path:
+    _prepare_output_file(path)
+    tmp_path = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    _prepare_output_file(tmp_path)
+    return tmp_path
+
+
+def _write_text_no_follow(path: Path, text: str) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+
+def _write_json_atomic(path: Path, payload: Dict[str, Any], *, sort_keys: bool = False) -> Path:
+    tmp_path = _prepare_atomic_output_file(path)
+    try:
+        _write_text_no_follow(tmp_path, json.dumps(payload, indent=2, sort_keys=sort_keys))
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
+    return path
+
+
+def _write_text_file(path: Path, text: str) -> Path:
+    tmp_path = _prepare_atomic_output_file(path)
+    try:
+        _write_text_no_follow(tmp_path, text)
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
+    return path
+
+
+def _active_regular_file(path_value: Any) -> Optional[Path]:
+    raw = str(path_value or "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    if path.is_symlink():
+        return None
+    try:
+        parent_root = path.parent.resolve(strict=True)
+        resolved = path.resolve(strict=True)
+    except Exception:
+        return None
+    if not resolved.is_file():
+        return None
+    if not _path_is_within_root_impl(resolved, parent_root):
+        return None
+    return path
+
+
+def _regular_file_within_root(path: Path, root: Path) -> bool:
+    if path.is_symlink():
+        return False
+    try:
+        resolved_root = root.resolve(strict=False)
+        resolved_path = path.resolve(strict=True)
+    except Exception:
+        return False
+    if not _path_is_within_root_impl(resolved_path, resolved_root):
+        return False
+    return resolved_path.is_file()
+
+
+def _active_payload_has_valid_files(
+    payload: Dict[str, Any],
+    *,
+    job_root: Optional[Path] = None,
+) -> bool:
+    best_path = _active_regular_file(payload.get("best_path"))
+    if best_path is None:
+        return False
+    run_root: Optional[Path] = None
+    if job_root is not None:
+        try:
+            if _path_has_symlink_component(job_root):
+                return False
+            job_root_resolved = job_root.resolve(strict=True)
+            best_resolved = best_path.resolve(strict=True)
+        except Exception:
+            return False
+        if not _path_is_within_root_impl(best_resolved, job_root_resolved):
+            return False
+        run_root = best_resolved.parent
+        if run_root == job_root_resolved or not _path_is_within_root_impl(
+            run_root, job_root_resolved
+        ):
+            return False
+    labelmap_path = str(payload.get("labelmap_path") or "").strip()
+    if labelmap_path:
+        labelmap_file = _active_regular_file(labelmap_path)
+        if labelmap_file is None:
+            return False
+        if run_root is not None:
+            try:
+                labelmap_resolved = labelmap_file.resolve(strict=True)
+            except Exception:
+                return False
+            if not _path_is_within_root_impl(labelmap_resolved, run_root):
+                return False
+    return True
+
+
+def _unlink_self_referential_symlink(path: Path) -> bool:
+    if not path.is_symlink():
+        return False
+    try:
+        target = Path(os.readlink(path))
+    except OSError:
+        return False
+    if not target.is_absolute():
+        target = path.parent / target
+    if _path_identity(target) != _path_identity(path):
+        return False
+    path.unlink(missing_ok=True)
+    return True
+
+
+def _copy2_if_different(src: Path, dest: Path) -> None:
+    src_resolved = src.resolve()
+    _prepare_output_file(dest)
+    if dest.exists() and src_resolved == _path_identity(dest):
+        return
+    tmp_path = _prepare_atomic_output_file(dest)
+    try:
+        shutil.copy2(src_resolved, tmp_path)
+        os.replace(tmp_path, dest)
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
+
+
+def _copy_tree_within_root(src: Path, dest: Path) -> None:
+    src_resolved = src.resolve(strict=True)
+    _prepare_detector_dir(dest, replace_leaf_symlink=True)
+    dest_root = dest.resolve(strict=False)
+    for item in sorted(src.rglob("*")):
+        try:
+            item_resolved = item.resolve(strict=True)
+        except Exception:
+            continue
+        if not _path_is_within_root_impl(item_resolved, src_resolved):
+            continue
+        if not item_resolved.is_file():
+            continue
+        rel = item.relative_to(src)
+        target = dest / rel
+        try:
+            target.parent.resolve(strict=False).relative_to(dest_root)
+        except Exception:
+            continue
+        _ensure_no_symlink_components(target.parent)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_no_symlink_components(target.parent)
+        _copy2_if_different(item_resolved, target)
+
+
+def _detector_job_root(job_root: Path, *, create: bool = False) -> Path:
+    if create:
+        return _prepare_detector_dir(job_root)
+    _ensure_no_symlink_components(job_root)
+    if job_root.exists() and not job_root.is_dir():
+        raise RuntimeError("detector_path_invalid")
+    return job_root.resolve(strict=False)
+
+
+def _delete_run_child(child: Path, dir_size_fn: Callable[[Path], int]) -> int:
+    if child.is_symlink():
+        child.unlink()
+        return 0
+    if child.is_dir():
+        size = dir_size_fn(child)
+        shutil.rmtree(child)
+        return size
+    size = child.stat().st_size
+    child.unlink()
+    return size
+
+
+def _set_yolo_infer_state_impl(
+    model: Any,
+    path: Optional[str],
+    labelmap: List[str],
+    task: Optional[str],
+    *,
+    state: Dict[str, Any],
+) -> None:
+    state["model"] = model
+    state["path"] = path
+    state["labelmap"] = labelmap
+    state["task"] = task
+
+
+def _set_rfdetr_infer_state_impl(
+    model: Any,
+    path: Optional[str],
+    labelmap: List[str],
+    task: Optional[str],
+    variant: Optional[str],
+    *,
+    state: Dict[str, Any],
+) -> None:
+    state["model"] = model
+    state["path"] = path
+    state["labelmap"] = labelmap
+    state["task"] = task
+    state["variant"] = variant
+
+
+def _ensure_yolo_inference_runtime_impl(
+    *,
+    load_active_fn: Callable[[], Dict[str, Any]],
+    load_labelmap_fn: Callable[[Any], List[str]],
+    patch_ultralytics_fn: Callable[[], None],
+    should_patch_ultralytics_fn: Optional[Callable[[Dict[str, Any]], bool]] = None,
+    yolo_lock: Any,
+    get_state_fn: Callable[[], Tuple[Any, Optional[str], List[str], Optional[str]]],
+    set_state_fn: Callable[[Any, Optional[str], List[str], Optional[str]], None],
+    import_yolo_fn: Callable[[], Any],
+    http_exception_cls: Any,
+) -> Tuple[Any, List[str], Optional[str]]:
+    active = load_active_fn()
+    if not isinstance(active, dict):
+        raise http_exception_cls(status_code=412, detail="yolo_active_missing")
+    best_path = active.get("best_path")
+    if not best_path:
+        raise http_exception_cls(status_code=412, detail="yolo_active_missing")
+    if _active_regular_file(best_path) is None:
+        raise http_exception_cls(status_code=412, detail="yolo_active_missing_weights")
+    run_id = active.get("run_id")
+    try:
+        run_dir = Path(best_path).parent
+        run_meta = run_dir / "run.json"
+        if run_id and run_meta.exists():
+            meta = json.loads(run_meta.read_text())
+            dataset_root = str((meta.get("config") or {}).get("dataset_root") or "")
+            if "tator_yolo_smoke" in dataset_root:
+                raise http_exception_cls(status_code=412, detail="yolo_active_smoke_run")
+    except Exception:
+        pass
+    labelmap_path = active.get("labelmap_path")
+    task = active.get("task")
+    with yolo_lock:
+        model, path, labelmap, cached_task = get_state_fn()
+        if model is not None and path == best_path:
+            return model, labelmap, cached_task
+        try:
+            YOLO = import_yolo_fn()
+        except Exception as exc:  # noqa: BLE001
+            raise http_exception_cls(status_code=503, detail=f"yolo_unavailable:{exc}") from exc
+        should_patch = True
+        if should_patch_ultralytics_fn is not None:
+            try:
+                should_patch = bool(should_patch_ultralytics_fn(active))
+            except Exception:
+                should_patch = False
+        if should_patch:
+            patch_ultralytics_fn()
+        model = YOLO(best_path)
+        labelmap = load_labelmap_fn(labelmap_path) if labelmap_path else []
+        resolved_task = task or getattr(model, "task", None)
+        set_state_fn(model, best_path, labelmap, resolved_task)
+        return model, labelmap, resolved_task
+
+
+def _ensure_rfdetr_inference_runtime_impl(
+    *,
+    load_active_fn: Callable[[], Dict[str, Any]],
+    load_labelmap_fn: Callable[[Any], List[str]],
+    variant_info_fn: Callable[[str, Optional[str]], Dict[str, Any]],
+    rfdetr_lock: Any,
+    get_state_fn: Callable[[], Tuple[Any, Optional[str], List[str], Optional[str], Optional[str]]],
+    set_state_fn: Callable[[Any, Optional[str], List[str], Optional[str], Optional[str]], None],
+    import_rfdetr_fn: Callable[[], Dict[str, Any]],
+    http_exception_cls: Any,
+    torch_available: Callable[[], bool],
+    resolve_device_fn: Callable[[], str],
+) -> Tuple[Any, List[str], Optional[str]]:
+    active = load_active_fn()
+    if not isinstance(active, dict):
+        raise http_exception_cls(status_code=412, detail="rfdetr_active_missing")
+    best_path = active.get("best_path")
+    if not best_path:
+        raise http_exception_cls(status_code=412, detail="rfdetr_active_missing")
+    if _active_regular_file(best_path) is None:
+        raise http_exception_cls(status_code=412, detail="rfdetr_active_missing_weights")
+    labelmap_path = active.get("labelmap_path")
+    task = active.get("task") or "detect"
+    variant = active.get("variant")
+    def _rfdetr_get_model_device(obj: Any) -> Optional[str]:
+        for attr in ("model", "module"):
+            try:
+                inner = getattr(obj, attr, None)
+            except Exception:
+                inner = None
+            if inner is None:
+                continue
+            try:
+                params = inner.parameters()
+            except Exception:
+                params = None
+            if params is not None:
+                try:
+                    return str(next(params).device)
+                except Exception:
+                    pass
+        try:
+            params = obj.parameters()
+        except Exception:
+            params = None
+        if params is not None:
+            try:
+                return str(next(params).device)
+            except Exception:
+                pass
+        return None
+
+    device_str = resolve_device_fn()
+    with rfdetr_lock:
+        model, path, labelmap, cached_task, cached_variant = get_state_fn()
+        if model is not None and path == best_path:
+            current_device = _rfdetr_get_model_device(model)
+            if current_device and current_device != device_str:
+                model = None
+            else:
+                return model, labelmap, cached_task
+        try:
+            import_map = import_rfdetr_fn()
+        except Exception as exc:  # noqa: BLE001
+            raise http_exception_cls(status_code=503, detail=f"rfdetr_unavailable:{exc}") from exc
+        variant_info = variant_info_fn(task, variant)
+        variant_id = variant_info.get("id")
+        model_cls = import_map.get(variant_id)
+        if not model_cls:
+            raise http_exception_cls(status_code=400, detail="rfdetr_variant_unknown")
+        if torch_available() and isinstance(device_str, str) and device_str.startswith("cuda"):
+            try:
+                import torch
+
+                torch.cuda.set_device(device_str)
+            except Exception:
+                pass
+        model_kwargs: Dict[str, Any] = {
+            "pretrain_weights": best_path,
+            "device": device_str,
+        }
+        if variant_id == "rfdetr-seg-preview" or task == "segment":
+            model_kwargs["segmentation_head"] = True
+        model = model_cls(**model_kwargs)
+        labelmap = load_labelmap_fn(labelmap_path) if labelmap_path else []
+        if labelmap:
+            try:
+                model.model.class_names = labelmap
+            except Exception:
+                pass
+        set_state_fn(model, best_path, labelmap, task, variant_id)
+    return model, labelmap, task
+
+
+def _load_yolo_active_impl(
+    yolo_active_path: Path,
+    yolo_job_root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    if yolo_active_path.is_symlink() or not yolo_active_path.exists():
+        return {}
+    try:
+        payload = json.loads(yolo_active_path.read_text())
+        if not isinstance(payload, dict):
+            return {}
+        if not _active_payload_has_valid_files(payload, job_root=yolo_job_root):
+            return {}
+        return payload
+    except Exception:
+        return {}
+
+
+def _save_yolo_active_impl(payload: Dict[str, Any], yolo_active_path: Path) -> Dict[str, Any]:
+    data = dict(payload or {})
+    data["updated_at"] = time.time()
+    if "created_at" not in data:
+        data["created_at"] = data["updated_at"]
+    _write_json_atomic(yolo_active_path, data, sort_keys=True)
+    return data
+
+
+def _load_rfdetr_active_impl(
+    rfdetr_active_path: Path,
+    rfdetr_job_root: Path,
+    save_active_fn: Callable[[Dict[str, Any]], Dict[str, Any]],
+) -> Dict[str, Any]:
+    def _load_from(path: Path) -> Dict[str, Any]:
+        if path.is_symlink() or not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text())
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+
+    active = _load_from(rfdetr_active_path)
+    if _active_payload_has_valid_files(active, job_root=rfdetr_job_root):
+        return active
+
+    fallback_path = rfdetr_job_root / "active.json"
+    fallback = _load_from(fallback_path)
+    if _active_payload_has_valid_files(fallback, job_root=rfdetr_job_root):
+        try:
+            save_active_fn(fallback)
+        except Exception:
+            pass
+        return fallback
+    return {}
+
+
+def _save_rfdetr_active_impl(payload: Dict[str, Any], rfdetr_active_path: Path) -> Dict[str, Any]:
+    data = dict(payload or {})
+    data["updated_at"] = time.time()
+    if "created_at" not in data:
+        data["created_at"] = data["updated_at"]
+    _write_json_atomic(rfdetr_active_path, data, sort_keys=True)
+    return data
+
+
+def _load_detector_default_impl(detector_default_path: Path) -> Dict[str, Any]:
+    if detector_default_path.is_symlink() or not detector_default_path.exists():
+        return {"mode": "rfdetr"}
+    try:
+        payload = json.loads(detector_default_path.read_text())
+        if isinstance(payload, dict):
+            mode = str(payload.get("mode") or "").strip().lower()
+            if mode in {"yolo", "rfdetr"}:
+                return payload
+    except Exception:
+        pass
+    return {"mode": "rfdetr"}
+
+
+def _save_detector_default_impl(
+    payload: Dict[str, Any],
+    detector_default_path: Path,
+    http_exception_cls: Any,
+) -> Dict[str, Any]:
+    data = dict(payload or {})
+    mode = str(data.get("mode") or "").strip().lower()
+    if mode not in {"yolo", "rfdetr"}:
+        raise http_exception_cls(status_code=400, detail="detector_mode_invalid")
+    data["mode"] = mode
+    data["updated_at"] = time.time()
+    if "created_at" not in data:
+        data["created_at"] = data["updated_at"]
+    _write_json_atomic(detector_default_path, data, sort_keys=True)
+    return data
+
+
+def _yolo_run_dir_impl(
+    run_id: str,
+    *,
+    create: bool,
+    job_root: Path,
+    sanitize_fn: Callable[[str], str],
+    http_exception_cls: Any,
+) -> Path:
+    raw_id = str(run_id or "").strip()
+    safe_id = sanitize_fn(raw_id)
+    if not create and (not raw_id or safe_id != raw_id):
+        raise http_exception_cls(status_code=400, detail="invalid_run_id")
+    try:
+        job_root_resolved = _detector_job_root(job_root, create=create)
+    except RuntimeError as exc:
+        raise http_exception_cls(status_code=400, detail="invalid_run_id") from exc
+    raw_candidate = job_root_resolved / safe_id
+    if raw_candidate.is_symlink():
+        raise http_exception_cls(status_code=400, detail="invalid_run_id")
+    candidate = raw_candidate.resolve(strict=False)
+    if not _path_is_within_root_impl(candidate, job_root_resolved):
+        raise http_exception_cls(status_code=400, detail="invalid_run_id")
+    if create:
+        raw_candidate.mkdir(parents=True, exist_ok=True)
+        if raw_candidate.is_symlink():
+            raise http_exception_cls(status_code=400, detail="invalid_run_id")
+        candidate = raw_candidate.resolve(strict=True)
+    return candidate
+
+
+def _safe_run_meta_file_impl(run_dir: Path, *, meta_name: str) -> Optional[Path]:
+    if run_dir.is_symlink():
+        return None
+    try:
+        run_root = run_dir.resolve()
+    except Exception:
+        return None
+    meta_path = run_dir / meta_name
+    if meta_path.is_symlink():
+        return None
+    try:
+        resolved = meta_path.resolve(strict=True)
+    except Exception:
+        return None
+    if not _path_is_within_root_impl(resolved, run_root):
+        return None
+    if not resolved.is_file():
+        return None
+    return resolved
+
+
+def _yolo_load_run_meta_impl(run_dir: Path, *, meta_name: str) -> Dict[str, Any]:
+    meta_path = _safe_run_meta_file_impl(run_dir, meta_name=meta_name)
+    if meta_path is None:
+        return {}
+    try:
+        return json.loads(meta_path.read_text())
+    except Exception:
+        return {}
+
+
+def _yolo_write_run_meta_impl(
+    run_dir: Path,
+    meta: Dict[str, Any],
+    *,
+    meta_name: str,
+    time_fn: Callable[[], float],
+) -> None:
+    _prepare_detector_dir(run_dir)
+    payload = dict(meta or {})
+    now = time_fn()
+    payload.setdefault("created_at", now)
+    payload["updated_at"] = now
+    _write_json_atomic(run_dir / meta_name, payload, sort_keys=True)
+
+
+def _yolo_prune_run_dir_impl(
+    run_dir: Path,
+    *,
+    keep_files: Optional[set[str]] = None,
+    keep_files_default: Sequence[str],
+    dir_size_fn: Callable[[Path], int],
+    meta_name: str,
+) -> Dict[str, Any]:
+    kept: List[str] = []
+    deleted: List[str] = []
+    freed = 0
+    if not run_dir.exists():
+        return {"kept": kept, "deleted": deleted, "freed_bytes": freed}
+    keep = set(keep_files or keep_files_default)
+    for child in run_dir.iterdir():
+        if child.is_file() and child.suffix == ".yaml":
+            keep.add(child.name)
+    weights_dir = run_dir / "weights"
+    if weights_dir.exists():
+        best_path = weights_dir / "best.pt"
+        target_best = run_dir / "best.pt"
+        if best_path.exists() and not target_best.exists():
+            try:
+                _copy2_if_different(best_path, target_best)
+            except Exception:
+                pass
+    for child in list(run_dir.iterdir()):
+        if child.name in keep:
+            kept.append(child.name)
+            continue
+        try:
+            freed += _delete_run_child(child, dir_size_fn)
+            deleted.append(child.name)
+        except Exception:
+            continue
+    return {"kept": kept, "deleted": deleted, "freed_bytes": freed}
+
+
+def _rfdetr_run_dir_impl(
+    run_id: str,
+    *,
+    create: bool,
+    job_root: Path,
+    sanitize_fn: Callable[[str], str],
+    http_exception_cls: Any,
+) -> Path:
+    raw_id = str(run_id or "").strip()
+    safe_id = sanitize_fn(raw_id)
+    if not create and (not raw_id or safe_id != raw_id):
+        raise http_exception_cls(status_code=400, detail="invalid_run_id")
+    try:
+        job_root_resolved = _detector_job_root(job_root, create=create)
+    except RuntimeError as exc:
+        raise http_exception_cls(status_code=400, detail="invalid_run_id") from exc
+    raw_candidate = job_root_resolved / safe_id
+    if raw_candidate.is_symlink():
+        raise http_exception_cls(status_code=400, detail="invalid_run_id")
+    candidate = raw_candidate.resolve(strict=False)
+    if not _path_is_within_root_impl(candidate, job_root_resolved):
+        raise http_exception_cls(status_code=400, detail="invalid_run_id")
+    if create:
+        raw_candidate.mkdir(parents=True, exist_ok=True)
+        if raw_candidate.is_symlink():
+            raise http_exception_cls(status_code=400, detail="invalid_run_id")
+        candidate = raw_candidate.resolve(strict=True)
+    return candidate
+
+
+def _rfdetr_load_run_meta_impl(run_dir: Path, *, meta_name: str) -> Dict[str, Any]:
+    meta_path = _safe_run_meta_file_impl(run_dir, meta_name=meta_name)
+    if meta_path is None:
+        return {}
+    try:
+        return json.loads(meta_path.read_text())
+    except Exception:
+        return {}
+
+
+def _rfdetr_write_run_meta_impl(
+    run_dir: Path,
+    meta: Dict[str, Any],
+    *,
+    meta_name: str,
+    time_fn: Callable[[], float],
+) -> None:
+    _prepare_detector_dir(run_dir)
+    payload = dict(meta or {})
+    now = time_fn()
+    payload.setdefault("created_at", now)
+    payload["updated_at"] = now
+    _write_json_atomic(run_dir / meta_name, payload, sort_keys=True)
+
+
+def _rfdetr_prune_run_dir_impl(
+    run_dir: Path,
+    *,
+    keep_files: Optional[set[str]],
+    keep_files_default: Sequence[str],
+    dir_size_fn: Callable[[Path], int],
+) -> Dict[str, Any]:
+    kept: List[str] = []
+    deleted: List[str] = []
+    freed = 0
+    if not run_dir.exists():
+        return {"kept": kept, "deleted": deleted, "freed_bytes": freed}
+    keep = set(keep_files or keep_files_default)
+    for child in list(run_dir.iterdir()):
+        if child.name in keep:
+            kept.append(child.name)
+            continue
+        try:
+            freed += _delete_run_child(child, dir_size_fn)
+            deleted.append(child.name)
+        except Exception:
+            continue
+    return {"kept": kept, "deleted": deleted, "freed_bytes": freed}
+
+
+def _torch_cuda_available(torch_module: Any) -> bool:
+    try:
+        return bool(torch_module and torch_module.cuda.is_available())
+    except Exception:
+        return False
+
+
+def _torch_mps_available(torch_module: Any) -> bool:
+    try:
+        mps_backend = getattr(torch_module.backends, "mps", None)
+        return bool(torch_module and mps_backend and mps_backend.is_available())
+    except Exception:
+        return False
+
+
+def _clean_yolo_cuda_devices_impl(devices: Optional[List[int]]) -> List[str]:
+    if not devices:
+        return []
+    cleaned: List[str] = []
+    seen: set[str] = set()
+    for device in devices:
+        raw = str(device).strip()
+        if not re.fullmatch(r"\d+", raw):
+            raise ValueError("yolo_invalid_devices")
+        value = str(int(raw))
+        if value in seen:
+            raise ValueError("yolo_duplicate_devices")
+        seen.add(value)
+        cleaned.append(value)
+    return cleaned
+
+
+def _normalize_yolo_accelerator_impl(accelerator: Optional[str]) -> str:
+    value = str(accelerator or "auto").strip().lower()
+    if value in {"", "default"}:
+        return "auto"
+    if value not in {"auto", "cuda", "mps", "cpu"}:
+        raise ValueError("yolo_accelerator_unknown")
+    return value
+
+
+def _yolo_resolve_device_impl(
+    devices: Optional[List[int]],
+    accelerator: Optional[str] = None,
+    *,
+    torch_module: Any = None,
+    allow_mps: bool = True,
+) -> Dict[str, Any]:
+    requested = _normalize_yolo_accelerator_impl(accelerator)
+    cuda_devices = _clean_yolo_cuda_devices_impl(devices)
+    cuda_available = _torch_cuda_available(torch_module)
+    mps_available = bool(allow_mps and _torch_mps_available(torch_module))
+    if cuda_devices:
+        if requested not in {"auto", "cuda"}:
+            raise ValueError("yolo_cuda_devices_conflict")
+        if torch_module is not None:
+            if not cuda_available:
+                raise ValueError("yolo_cuda_devices_unavailable")
+            try:
+                device_count = int(torch_module.cuda.device_count())
+            except Exception:
+                device_count = 0
+            if device_count <= 0:
+                raise ValueError("yolo_cuda_devices_unavailable")
+            invalid = [int(device) for device in cuda_devices if int(device) >= device_count]
+            if invalid:
+                raise ValueError(f"yolo_invalid_devices:available=0-{device_count - 1}")
+        return {
+            "requested_accelerator": requested,
+            "resolved_accelerator": "cuda",
+            "device_arg": ",".join(cuda_devices),
+            "device_label": f"CUDA devices {','.join(cuda_devices)}",
+            "devices": [int(device) for device in cuda_devices],
+        }
+
+    if requested == "cpu":
+        return {
+            "requested_accelerator": requested,
+            "resolved_accelerator": "cpu",
+            "device_arg": "cpu",
+            "device_label": "CPU",
+            "devices": [],
+        }
+    if requested == "mps":
+        if torch_module is not None and not mps_available:
+            raise ValueError("yolo_mps_unavailable")
+        return {
+            "requested_accelerator": requested,
+            "resolved_accelerator": "mps",
+            "device_arg": "mps",
+            "device_label": "Apple MPS",
+            "devices": ["mps"],
+        }
+    if requested == "cuda":
+        if torch_module is not None and not cuda_available:
+            raise ValueError("yolo_cuda_unavailable")
+        return {
+            "requested_accelerator": requested,
+            "resolved_accelerator": "cuda",
+            "device_arg": None,
+            "device_label": "CUDA default",
+            "devices": [],
+        }
+
+    if torch_module is None:
+        return {
+            "requested_accelerator": requested,
+            "resolved_accelerator": "auto",
+            "device_arg": None,
+            "device_label": "Ultralytics default",
+            "devices": [],
+        }
+    if cuda_available:
+        return {
+            "requested_accelerator": requested,
+            "resolved_accelerator": "cuda",
+            "device_arg": None,
+            "device_label": "CUDA default",
+            "devices": [],
+        }
+    if mps_available:
+        return {
+            "requested_accelerator": requested,
+            "resolved_accelerator": "mps",
+            "device_arg": "mps",
+            "device_label": "Apple MPS",
+            "devices": ["mps"],
+        }
+    return {
+        "requested_accelerator": requested,
+        "resolved_accelerator": "cpu",
+        "device_arg": "cpu",
+        "device_label": "CPU",
+        "devices": [],
+    }
+
+
+def _yolo_device_arg_impl(
+    devices: Optional[List[int]],
+    accelerator: Optional[str] = None,
+    *,
+    torch_module: Any = None,
+    allow_mps: bool = True,
+) -> Optional[str]:
+    return _yolo_resolve_device_impl(
+        devices,
+        accelerator,
+        torch_module=torch_module,
+        allow_mps=allow_mps,
+    ).get("device_arg")
+
+
+def _clean_rfdetr_cuda_devices_impl(devices: Optional[List[int]]) -> List[int]:
+    if not devices:
+        return []
+    cleaned: List[int] = []
+    seen: set[int] = set()
+    for device in devices:
+        raw = str(device).strip()
+        if not re.fullmatch(r"\d+", raw):
+            raise ValueError("rfdetr_invalid_devices")
+        value = int(raw)
+        if value in seen:
+            raise ValueError("rfdetr_duplicate_devices")
+        seen.add(value)
+        cleaned.append(value)
+    return cleaned
+
+
+def _rfdetr_resolve_device_impl(
+    devices: Optional[List[int]],
+    *,
+    torch_module: Any = None,
+) -> Dict[str, Any]:
+    cuda_devices = _clean_rfdetr_cuda_devices_impl(devices)
+    cuda_available = _torch_cuda_available(torch_module)
+
+    if cuda_devices:
+        if torch_module is not None:
+            if not cuda_available:
+                raise ValueError("rfdetr_cuda_devices_unavailable")
+            try:
+                device_count = int(torch_module.cuda.device_count())
+            except Exception:
+                device_count = 0
+            if device_count <= 0:
+                raise ValueError("rfdetr_cuda_devices_unavailable")
+            invalid = [device for device in cuda_devices if device >= device_count]
+            if invalid:
+                raise ValueError(f"rfdetr_invalid_devices:available=0-{device_count - 1}")
+        return {
+            "resolved_accelerator": "cuda",
+            "device_arg": "cuda",
+            "device_label": f"CUDA devices {','.join(str(device) for device in cuda_devices)}",
+            "devices": cuda_devices,
+            "cuda_visible_devices": ",".join(str(device) for device in cuda_devices),
+        }
+
+    if torch_module is None:
+        return {
+            "resolved_accelerator": "auto",
+            "device_arg": None,
+            "device_label": "RF-DETR default",
+            "devices": [],
+            "cuda_visible_devices": None,
+        }
+    if cuda_available:
+        try:
+            device_count = int(torch_module.cuda.device_count())
+        except Exception:
+            device_count = 0
+        cuda_devices = list(range(max(0, device_count)))
+        return {
+            "resolved_accelerator": "cuda",
+            "device_arg": "cuda",
+            "device_label": (
+                f"CUDA devices {','.join(str(device) for device in cuda_devices)}"
+                if cuda_devices
+                else "CUDA"
+            ),
+            "devices": cuda_devices,
+            "cuda_visible_devices": ",".join(str(device) for device in cuda_devices)
+            if cuda_devices
+            else None,
+        }
+    return {
+        "resolved_accelerator": "cpu",
+        "device_arg": "cpu",
+        "device_label": "CPU",
+        "devices": [],
+        "cuda_visible_devices": None,
+    }
+
+
+def _yolo_p2_scale_impl(model_id: str) -> Optional[str]:
+    match = re.match(r"^yolov8([nsmlx])-p2$", model_id)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _rfdetr_variant_info_impl(
+    task: str,
+    variant: Optional[str],
+    *,
+    variants: Sequence[Dict[str, Any]],
+    http_exception_cls: Any,
+) -> Dict[str, Any]:
+    task_norm = (task or "detect").lower().strip()
+    variant_norm = (variant or "").strip().lower()
+    if task_norm == "segment":
+        variant_norm = "rfdetr-seg-preview"
+    if not variant_norm:
+        variant_norm = "rfdetr-medium" if task_norm == "detect" else "rfdetr-seg-preview"
+    variant_map = {entry["id"]: entry for entry in variants}
+    info = variant_map.get(variant_norm)
+    if not info:
+        raise http_exception_cls(status_code=400, detail="rfdetr_variant_unknown")
+    if task_norm == "segment" and info.get("task") != "segment":
+        variant_norm = "rfdetr-seg-preview"
+        info = variant_map.get(variant_norm)
+    return info or {}
+
+
+def _rfdetr_best_checkpoint_impl(run_dir: Path) -> Optional[str]:
+    run_root = run_dir.resolve()
+    for name in ("checkpoint_best_total.pth", "checkpoint_best_ema.pth", "checkpoint_best_regular.pth"):
+        path = run_dir / name
+        if not path.exists():
+            continue
+        try:
+            if not _path_is_within_root_impl(path.resolve(), run_root):
+                continue
+        except Exception:
+            continue
+        if path.is_file():
+            return str(path)
+    return None
+
+
+def _rfdetr_parse_log_series_impl(log_path: Path) -> List[Dict[str, Any]]:
+    if not log_path.exists():
+        return []
+    series: List[Dict[str, Any]] = []
+    for line in log_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            series.append(json.loads(line))
+        except Exception:
+            continue
+    return series
+
+
+def _rfdetr_sanitize_metric_impl(metric: Dict[str, Any]) -> Dict[str, Any]:
+    def _coerce(obj: Any) -> Any:
+        if isinstance(obj, __import__("numpy").ndarray):
+            return obj.tolist()
+        if isinstance(obj, __import__("numpy").generic):
+            try:
+                return obj.item()
+            except Exception:
+                return float(obj)
+        if isinstance(obj, Path):
+            return str(obj)
+        if isinstance(obj, set):
+            return list(obj)
+        return obj
+
+    try:
+        return json.loads(json.dumps(metric, default=_coerce))
+    except Exception:
+        return {}
+
+
+def _rfdetr_normalize_aug_policy_impl(raw: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not raw or not isinstance(raw, dict):
+        return None
+
+    def _clamp(value: Any, default: float = 0.0, maximum: float = 1.0) -> float:
+        try:
+            num = float(value)
+        except Exception:
+            num = default
+        return max(0.0, min(maximum, num))
+
+    policy = {
+        "hsv_h": _clamp(raw.get("hsv_h"), 0.0, 0.5),
+        "hsv_s": _clamp(raw.get("hsv_s"), 0.0, 1.0),
+        "hsv_v": _clamp(raw.get("hsv_v"), 0.0, 1.0),
+        "blur_prob": _clamp(raw.get("blur_prob"), 0.0, 1.0),
+        "gray_prob": _clamp(raw.get("gray_prob"), 0.0, 1.0),
+    }
+    kernel = raw.get("blur_kernel")
+    try:
+        kernel = int(kernel)
+    except Exception:
+        kernel = 0
+    if kernel and kernel % 2 == 0:
+        kernel += 1
+    policy["blur_kernel"] = max(0, kernel)
+    if not any(
+        [
+            policy["hsv_h"],
+            policy["hsv_s"],
+            policy["hsv_v"],
+            policy["blur_prob"],
+            policy["gray_prob"],
+        ]
+    ):
+        return None
+    return policy
+
+
+def _rfdetr_install_augmentations_impl(
+    policy: Optional[Dict[str, Any]],
+) -> Optional[Tuple[Any, Any]]:
+    if not policy:
+        return None
+    try:
+        import random as _random
+        import torchvision.transforms as tvt
+        import rfdetr.datasets.coco as coco_mod
+    except Exception:
+        return None
+
+    class _ImageOnlyTransform:
+        def __init__(self, transform, p: float = 1.0) -> None:
+            self.transform = transform
+            self.p = float(p)
+
+        def __call__(self, img, target):
+            if self.p < 1.0 and _random.random() > self.p:
+                return img, target
+            return self.transform(img), target
+
+    aug_transforms = []
+    hsv_h = float(policy.get("hsv_h") or 0.0)
+    hsv_s = float(policy.get("hsv_s") or 0.0)
+    hsv_v = float(policy.get("hsv_v") or 0.0)
+    if hsv_h > 0 or hsv_s > 0 or hsv_v > 0:
+        color_jitter = tvt.ColorJitter(
+            brightness=hsv_v,
+            contrast=hsv_v,
+            saturation=hsv_s,
+            hue=min(0.5, hsv_h),
+        )
+        aug_transforms.append(_ImageOnlyTransform(color_jitter, p=1.0))
+    gray_prob = float(policy.get("gray_prob") or 0.0)
+    if gray_prob > 0:
+        aug_transforms.append(_ImageOnlyTransform(tvt.RandomGrayscale(p=1.0), p=gray_prob))
+    blur_prob = float(policy.get("blur_prob") or 0.0)
+    blur_kernel = int(policy.get("blur_kernel") or 0)
+    if blur_prob > 0 and blur_kernel >= 3:
+        blur_kernel = blur_kernel if blur_kernel % 2 == 1 else blur_kernel + 1
+        blur = tvt.GaussianBlur(kernel_size=blur_kernel, sigma=(0.1, 2.0))
+        aug_transforms.append(_ImageOnlyTransform(blur, p=blur_prob))
+    if not aug_transforms:
+        return None
+    original_make = coco_mod.make_coco_transforms
+    original_make_square = coco_mod.make_coco_transforms_square_div_64
+
+    def _wrap_make(make_func):
+        def _wrapped(*args, **kwargs):
+            base = make_func(*args, **kwargs)
+            try:
+                if hasattr(base, "transforms") and isinstance(base.transforms, list):
+                    insert_idx = max(0, len(base.transforms) - 1)
+                    base.transforms[insert_idx:insert_idx] = list(aug_transforms)
+            except Exception:
+                pass
+            return base
+        return _wrapped
+
+    coco_mod.make_coco_transforms = _wrap_make(original_make)
+    coco_mod.make_coco_transforms_square_div_64 = _wrap_make(original_make_square)
+    return (original_make, original_make_square)
+
+
+def _rfdetr_restore_augmentations_impl(
+    restore: Optional[Tuple[Any, Any]],
+) -> None:
+    if not restore:
+        return
+    try:
+        import rfdetr.datasets.coco as coco_mod
+    except Exception:
+        return
+    try:
+        coco_mod.make_coco_transforms = restore[0]
+        coco_mod.make_coco_transforms_square_div_64 = restore[1]
+    except Exception:
+        return
+
+
+def _rfdetr_latest_checkpoint_epoch_impl(run_dir: Path) -> Optional[int]:
+    try:
+        best = None
+        for path in run_dir.glob("checkpoint*.pth"):
+            name = path.name
+            if not name.startswith("checkpoint") or not name.endswith(".pth"):
+                continue
+            token = name[len("checkpoint") : -len(".pth")]
+            if not token.isdigit():
+                continue
+            value = int(token)
+            if best is None or value > best:
+                best = value
+        return best
+    except Exception:
+        return None
+
+
+def _rfdetr_monitor_training_impl(
+    job: Any,
+    run_dir: Path,
+    total_epochs: int,
+    stop_event: Any,
+    *,
+    job_append_metric_fn: Callable[[Any, Dict[str, Any]], None],
+    job_update_fn: Callable[[Any], None],
+    sanitize_metric_fn: Callable[[Dict[str, Any]], Dict[str, Any]],
+    latest_checkpoint_fn: Callable[[Path], Optional[int]],
+    wait_seconds: float = 15.0,
+) -> None:
+    log_path = run_dir / "log.txt"
+    last_pos = 0
+    pending = ""
+    last_epoch: Optional[int] = None
+    while not stop_event.is_set():
+        if job.cancel_event.is_set() or job.status not in {"running", "queued"}:
+            break
+        new_metrics: List[Dict[str, Any]] = []
+        if log_path.exists():
+            try:
+                with log_path.open("r", encoding="utf-8", errors="ignore") as handle:
+                    handle.seek(last_pos)
+                    chunk = handle.read()
+                    last_pos = handle.tell()
+            except Exception:
+                chunk = ""
+            if chunk:
+                chunk = pending + chunk
+                pending = ""
+                if not chunk.endswith("\n"):
+                    last_newline = chunk.rfind("\n")
+                    if last_newline == -1:
+                        pending = chunk
+                        chunk = ""
+                    else:
+                        pending = chunk[last_newline + 1 :]
+                        chunk = chunk[: last_newline + 1]
+                for line in chunk.splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        metric = json.loads(line)
+                    except Exception:
+                        continue
+                    metric = sanitize_metric_fn(metric)
+                    if metric:
+                        new_metrics.append(metric)
+        if new_metrics:
+            for metric in new_metrics:
+                job_append_metric_fn(job, metric)
+            latest = new_metrics[-1]
+            epoch = latest.get("epoch")
+            if isinstance(epoch, (int, float)):
+                try:
+                    epoch_idx = int(epoch)
+                except Exception:
+                    epoch_idx = None
+                if epoch_idx is not None and epoch_idx != last_epoch:
+                    last_epoch = epoch_idx
+                    if total_epochs > 0:
+                        progress = max(0.0, min(0.99, epoch_idx / total_epochs))
+                        job_update_fn(job, progress=progress, message=f"Epoch {epoch_idx}/{total_epochs}")
+        else:
+            checkpoint_epoch = latest_checkpoint_fn(run_dir)
+            if checkpoint_epoch is not None and checkpoint_epoch != last_epoch:
+                last_epoch = checkpoint_epoch
+                if total_epochs > 0:
+                    progress = max(0.0, min(0.99, checkpoint_epoch / total_epochs))
+                    job_update_fn(job, progress=progress, message=f"Epoch {checkpoint_epoch}/{total_epochs}")
+    stop_event.wait(wait_seconds)
+
+
+def _yolo_build_aug_args_impl(aug: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not aug:
+        return {}
+    payload = dict(aug)
+    mapping = {
+        "flip_lr": "fliplr",
+        "flip_ud": "flipud",
+        "hsv_h": "hsv_h",
+        "hsv_s": "hsv_s",
+        "hsv_v": "hsv_v",
+        "mosaic": "mosaic",
+        "mixup": "mixup",
+        "copy_paste": "copy_paste",
+        "scale": "scale",
+        "translate": "translate",
+        "degrees": "degrees",
+        "shear": "shear",
+        "perspective": "perspective",
+        "erasing": "erasing",
+    }
+    aug_args: Dict[str, Any] = {}
+    for key, dest in mapping.items():
+        if key in payload:
+            aug_args[dest] = payload[key]
+    return {k: v for k, v in aug_args.items() if v is not None}
+
+
+def _yolo_parse_results_csv_impl(results_path: Path) -> List[Dict[str, Any]]:
+    if not results_path.exists():
+        return []
+    rows: List[Dict[str, Any]] = []
+    try:
+        with results_path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for idx, raw in enumerate(reader):
+                if not raw:
+                    continue
+                parsed: Dict[str, Any] = {}
+                for key, value in raw.items():
+                    if key is None or value is None:
+                        continue
+                    name = str(key).strip()
+                    if not name:
+                        continue
+                    text = str(value).strip()
+                    if text == "":
+                        continue
+                    try:
+                        num = float(text)
+                    except ValueError:
+                        continue
+                    if name == "epoch":
+                        parsed["epoch"] = int(num) if float(num).is_integer() else num
+                    else:
+                        parsed[name] = num
+                if "epoch" not in parsed:
+                    parsed["epoch"] = idx + 1
+                if parsed:
+                    rows.append(parsed)
+    except Exception:  # noqa: BLE001
+        return []
+    return rows
+
+
+def _yolo_monitor_training_impl(
+    job: Any,
+    run_dir: Path,
+    total_epochs: int,
+    stop_event: Any,
+    *,
+    parse_results_fn: Callable[[Path], List[Dict[str, Any]]],
+    job_append_metric_fn: Callable[[Any, Dict[str, Any]], None],
+    job_update_fn: Callable[[Any], None],
+    wait_seconds: float = 12.0,
+) -> None:
+    results_path = run_dir / "train" / "results.csv"
+    last_len = 0
+    while not stop_event.is_set():
+        if job.cancel_event.is_set() or job.status not in {"running", "queued"}:
+            break
+        series = parse_results_fn(results_path)
+        if series and len(series) > last_len:
+            new_entries = series[last_len:]
+            for metric in new_entries:
+                job_append_metric_fn(job, metric)
+            last_len = len(series)
+            latest = series[-1]
+            epoch = latest.get("epoch")
+            if isinstance(epoch, (int, float)):
+                try:
+                    epoch_idx = int(epoch)
+                except Exception:
+                    epoch_idx = None
+                if epoch_idx is not None and total_epochs > 0:
+                    progress = max(0.0, min(0.99, epoch_idx / total_epochs))
+                    job_update_fn(job, progress=progress, message=f"Epoch {epoch_idx}/{total_epochs}")
+    stop_event.wait(wait_seconds)
+
+
+def _strip_checkpoint_optimizer_impl(
+    ckpt_path: Path,
+    *,
+    torch_module: Any,
+) -> Tuple[bool, int, int]:
+    """Remove optimizer/scheduler state from a torch checkpoint to shrink size."""
+    if ckpt_path.is_symlink():
+        return False, 0, 0
+    before = ckpt_path.stat().st_size if ckpt_path.exists() else 0
+    if not ckpt_path.exists() or before == 0:
+        return False, before, before
+    try:
+        payload = torch_module.load(ckpt_path, map_location="cpu")
+        removed = False
+        for key in ["optimizer", "optimizers", "lr_schedulers", "schedulers", "trainer"]:
+            if key in payload:
+                payload.pop(key, None)
+                removed = True
+        if not removed:
+            return False, before, before
+        tmp_path = ckpt_path.with_suffix(ckpt_path.suffix + ".tmp")
+        _prepare_output_file(tmp_path)
+        torch_module.save(payload, tmp_path)
+        tmp_size = tmp_path.stat().st_size
+        os.replace(tmp_path, ckpt_path)
+        return True, before, tmp_size
+    except Exception:
+        return False, before, before
+
+
+def _yolo_load_labelmap_impl(labelmap_path: Path | str | None) -> List[str]:
+    if not labelmap_path:
+        return []
+    path = Path(labelmap_path)
+    if _active_regular_file(path) is None:
+        return []
+    try:
+        return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except Exception:
+        return []
+
+
+def _yolo_load_run_labelmap_impl(
+    run_dir: Path,
+    *,
+    yolo_load_labelmap_fn: Callable[[Path], List[str]],
+    yaml_load_fn: Callable[[str], Any],
+) -> List[str]:
+    labelmap_path = run_dir / "labelmap.txt"
+    labels = yolo_load_labelmap_fn(labelmap_path)
+    if labels:
+        return labels
+    data_yaml = run_dir / "data.yaml"
+    if _regular_file_within_root(data_yaml, run_dir):
+        try:
+            payload = yaml_load_fn(data_yaml.read_text())
+            names = payload.get("names") if isinstance(payload, dict) else None
+            if isinstance(names, dict):
+                return [names[k] for k in sorted(names.keys())]
+            if isinstance(names, list):
+                return [str(x) for x in names]
+        except Exception:
+            pass
+    return []
+
+
+def _rfdetr_load_labelmap_impl(
+    dataset_root: Path,
+    coco_train_json: Optional[str],
+    *,
+    yolo_load_labelmap_fn: Callable[[Path], List[str]],
+    json_load_fn: Callable[[str], Any],
+) -> List[str]:
+    labelmap_path = dataset_root / "labelmap.txt"
+    if labelmap_path.exists():
+        return yolo_load_labelmap_fn(labelmap_path)
+    coco_path = Path(coco_train_json) if coco_train_json else None
+    if coco_path and coco_path.exists():
+        try:
+            data = json_load_fn(coco_path.read_text())
+            categories = data.get("categories", [])
+            categories = [c for c in categories if isinstance(c, dict) and "id" in c and "name" in c]
+            categories.sort(key=lambda c: int(c.get("id", 0)))
+            return [str(c["name"]) for c in categories]
+        except Exception:
+            return []
+    return []
+
+
+def _rfdetr_remap_coco_ids_impl(src_path: Path, dest_path: Path) -> None:
+    """Create a 0-based COCO category id mapping for RF-DETR."""
+    data = json.loads(src_path.read_text())
+    categories = data.get("categories", [])
+    annotations = data.get("annotations", [])
+    if not isinstance(categories, list) or not isinstance(annotations, list):
+        raise RuntimeError("rfdetr_coco_invalid")
+    ordered = [c for c in categories if isinstance(c, dict) and "id" in c and "name" in c]
+    ordered.sort(key=lambda c: int(c.get("id", 0)))
+    mapping = {int(cat["id"]): idx for idx, cat in enumerate(ordered)}
+    new_categories = []
+    for idx, cat in enumerate(ordered):
+        new_categories.append(
+            {
+                "id": idx,
+                "name": str(cat.get("name")),
+                "supercategory": cat.get("supercategory") or "object",
+            }
+        )
+    new_annotations = []
+    for ann in annotations:
+        if not isinstance(ann, dict):
+            continue
+        try:
+            cat_id = int(ann.get("category_id"))
+        except Exception:
+            continue
+        if cat_id not in mapping:
+            continue
+        ann = dict(ann)
+        ann["category_id"] = mapping[cat_id]
+        new_annotations.append(ann)
+    data["categories"] = new_categories
+    data["annotations"] = new_annotations
+    _write_json_atomic(dest_path, data)
+
+
+def _rfdetr_prepare_dataset_impl(
+    dataset_root: Path,
+    run_dir: Path,
+    coco_train: str,
+    coco_val: str,
+    *,
+    remap_ids_fn: Callable[[Path, Path], None],
+) -> Path:
+    """Prepare a RF-DETR-compatible dataset layout with 0-based category ids."""
+    dataset_dir = run_dir / "dataset"
+    _prepare_detector_dir(dataset_dir)
+    dataset_root_resolved = dataset_root.resolve(strict=True)
+    train_src = dataset_root / "train"
+    valid_src = dataset_root / "valid"
+    val_src = dataset_root / "val"
+    test_src = dataset_root / "test"
+
+    if not train_src.exists():
+        train_src = dataset_root
+    if not valid_src.exists():
+        valid_src = val_src if val_src.exists() else train_src
+    if not test_src.exists():
+        test_src = valid_src if valid_src.exists() else train_src
+
+    def _link_split(name: str, source: Path) -> None:
+        dest = dataset_dir / name
+        source_resolved = source.resolve(strict=True)
+        if not _path_is_within_root_impl(source_resolved, dataset_root_resolved):
+            raise RuntimeError("rfdetr_dataset_path_invalid")
+        if source_resolved == _path_identity(dest):
+            return
+        _unlink_self_referential_symlink(dest)
+        if dest.exists() or dest.is_symlink():
+            return
+        try:
+            dest.symlink_to(source_resolved, target_is_directory=True)
+        except Exception:
+            _copy_tree_within_root(source_resolved, dest)
+
+    _link_split("train", train_src)
+    _link_split("valid", valid_src)
+    _link_split("test", test_src)
+
+    train_dest = dataset_dir / "train" / "_annotations.coco.json"
+    val_dest = dataset_dir / "valid" / "_annotations.coco.json"
+    test_dest = dataset_dir / "test" / "_annotations.coco.json"
+    remap_ids_fn(Path(coco_train), train_dest)
+    remap_ids_fn(Path(coco_val), val_dest)
+    remap_ids_fn(Path(coco_val), test_dest)
+    return dataset_dir
+
+
+def _yolo_write_data_yaml_impl(
+    run_dir: Path,
+    dataset_root: Path,
+    layout: Optional[str],
+    labelmap_path: Optional[str],
+    *,
+    resolve_split_paths_fn: Callable[[Path, Optional[str]], Tuple[str, str]],
+    yolo_load_labelmap_fn: Callable[[Path], List[str]],
+    yaml_dump_fn: Callable[[Dict[str, Any]], str],
+    copy_file_fn: Callable[[Path, Path], None],
+) -> Path:
+    train_rel, val_rel = resolve_split_paths_fn(dataset_root, layout)
+    names = []
+    if labelmap_path:
+        names = yolo_load_labelmap_fn(Path(labelmap_path))
+    data = {
+        "path": str(dataset_root),
+        "train": train_rel,
+        "val": val_rel,
+        "names": names,
+    }
+    data_path = run_dir / "data.yaml"
+    _write_text_file(data_path, yaml_dump_fn(data))
+    if labelmap_path:
+        try:
+            copy_file_fn(Path(labelmap_path), run_dir / "labelmap.txt")
+        except Exception:
+            pass
+    return data_path
+
+
+def _yolo_resolve_model_source_impl(
+    variant: Optional[str],
+    task: str,
+    from_scratch: bool,
+    base_weights: Optional[str],
+    *,
+    p2_scale_fn: Callable[[str], Optional[str]],
+) -> Tuple[str, str]:
+    model_id = (variant or "yolov8n").strip()
+    if p2_scale_fn(model_id):
+        return "cfg", "yolov8-p2.yaml"
+    if base_weights:
+        return "custom", base_weights
+    if from_scratch:
+        suffix = "-seg" if task == "segment" and "seg" not in model_id else ""
+        return "cfg", f"{model_id}{suffix}.yaml"
+    if task == "segment" and "seg" not in model_id:
+        model_id = f"{model_id}-seg"
+    return "weights", f"{model_id}.pt"
+
+
+def _yolo_variant_base_yaml_impl(
+    variant: str,
+    task: str,
+    *,
+    run_dir: Optional[Path],
+    http_exception_cls: Any,
+    import_ultralytics_fn: Callable[[], Any],
+    yaml_load_fn: Callable[[str], Any],
+    yaml_dump_fn: Callable[[Any], str],
+    upload_root: Path,
+    p2_scale_fn: Callable[[str], Optional[str]],
+) -> Path:
+    try:
+        ultralytics = import_ultralytics_fn()
+    except Exception as exc:  # noqa: BLE001
+        raise http_exception_cls(status_code=503, detail=f"yolo_unavailable:{exc}") from exc
+    model_id = (variant or "yolov8n").strip()
+    p2_scale = p2_scale_fn(model_id)
+    base_cfg_dir = Path(ultralytics.__file__).resolve().parent / "cfg" / "models" / "v8"
+    if p2_scale:
+        base_cfg = base_cfg_dir / "yolov8-p2.yaml"
+        cfg_payload = yaml_load_fn(base_cfg.read_text())
+        cfg_payload["scale"] = p2_scale
+        target_dir = run_dir or Path(tempfile.mkdtemp(prefix="yolo_p2_cfg_", dir=str(upload_root)))
+        target = target_dir / f"yolov8{p2_scale}-p2.yaml"
+        _write_text_file(target, yaml_dump_fn(cfg_payload))
+        return target
+    suffix = "-seg" if task == "segment" and "seg" not in model_id else ""
+    base_cfg = base_cfg_dir / f"{model_id}{suffix}.yaml"
+    if not base_cfg.exists():
+        raise http_exception_cls(status_code=404, detail="yolo_variant_yaml_missing")
+    return base_cfg
+
+
+def _yolo_write_variant_yaml_impl(
+    run_dir: Path,
+    variant: str,
+    task: str,
+    nc: int,
+    *,
+    variant_base_yaml_fn: Callable[..., Path],
+    yaml_load_fn: Callable[[str], Any],
+    yaml_dump_fn: Callable[[Any], str],
+) -> Path:
+    base_cfg = variant_base_yaml_fn(variant, task, run_dir=run_dir)
+    cfg_payload = yaml_load_fn(base_cfg.read_text())
+    cfg_payload["nc"] = int(nc)
+    target = run_dir / f"{Path(base_cfg).stem}_nc{nc}.yaml"
+    _write_text_file(target, yaml_dump_fn(cfg_payload))
+    return target
+
+
+def _yolo_write_head_graft_yaml_impl(
+    run_dir: Path,
+    variant: str,
+    base_nc: int,
+    new_nc: int,
+    *,
+    variant_base_yaml_fn: Callable[..., Path],
+    yaml_load_fn: Callable[[str], Any],
+    yaml_dump_fn: Callable[[Any], str],
+    http_exception_cls: Any,
+) -> Path:
+    base_cfg = variant_base_yaml_fn(variant, "detect", run_dir=run_dir)
+    cfg_payload = yaml_load_fn(base_cfg.read_text())
+    head = cfg_payload.get("head") or []
+    detect_idx = None
+    for idx, entry in enumerate(head):
+        if len(entry) >= 3 and entry[2] == "Detect":
+            detect_idx = idx
+            break
+    if detect_idx is None:
+        raise http_exception_cls(status_code=400, detail="yolo_detect_layer_missing")
+    detect_entry = list(head[detect_idx])
+    detect_args = list(detect_entry[3]) if isinstance(detect_entry[3], list) else [detect_entry[3]]
+    if detect_args:
+        detect_args[0] = int(base_nc)
+    else:
+        detect_args = [int(base_nc)]
+    detect_entry[3] = detect_args
+    head[detect_idx] = detect_entry
+    new_detect_args = list(detect_args)
+    new_detect_args[0] = int(new_nc)
+    new_detect = [detect_entry[0], detect_entry[1], "Detect", new_detect_args]
+    head.append(new_detect)
+    head.append([[-2, -1], 1, "ConcatHead", [int(base_nc), int(new_nc)]])
+    cfg_payload["head"] = head
+    cfg_payload["nc"] = int(base_nc + new_nc)
+    target = run_dir / f"{Path(base_cfg).stem}_2xhead.yaml"
+    _write_text_file(target, yaml_dump_fn(cfg_payload))
+    return target
+
+
+def _yolo_find_detect_modules_impl(
+    model: Any,
+    *,
+    import_detect_cls_fn: Callable[[], Any],
+) -> List[Any]:
+    try:
+        detect_cls = import_detect_cls_fn()
+    except Exception:
+        return []
+    modules: List[Any] = []
+    for m in getattr(model, "model", []):
+        if isinstance(m, detect_cls):
+            modules.append(m)
+    return modules
+
+
+def _yolo_detect_layer_index_impl(
+    model: Any,
+    *,
+    find_detect_modules_fn: Callable[[Any], List[Any]],
+) -> int:
+    detects = find_detect_modules_fn(model)
+    if not detects:
+        return max(0, len(getattr(model, "model", [])) - 1)
+    for idx, m in enumerate(getattr(model, "model", [])):
+        if m is detects[0]:
+            return idx
+    return max(0, len(getattr(model, "model", [])) - 1)
+
+
+def _rfdetr_ddp_worker_impl(
+    rank: int,
+    world_size: int,
+    variant_id: str,
+    model_kwargs: Dict[str, Any],
+    train_kwargs: Dict[str, Any],
+    aug_policy: Optional[Dict[str, Any]],
+    dist_url: str,
+    *,
+    os_module: Any,
+    torch_module: Any,
+    import_rfdetr_fn: Callable[[], Dict[str, Any]],
+    normalize_aug_fn: Callable[[Optional[Dict[str, Any]]], Optional[Dict[str, Any]]],
+    install_aug_fn: Callable[[Optional[Dict[str, Any]]], Optional[Tuple[Any, Any]]],
+    restore_aug_fn: Callable[[Optional[Tuple[Any, Any]]], None],
+) -> None:
+    os_module.environ["RANK"] = str(rank)
+    os_module.environ["WORLD_SIZE"] = str(world_size)
+    os_module.environ["LOCAL_RANK"] = str(rank)
+    if dist_url.startswith("tcp://"):
+        try:
+            host_port = dist_url.replace("tcp://", "")
+            host, port = host_port.split(":", 1)
+            os_module.environ["MASTER_ADDR"] = host
+            os_module.environ["MASTER_PORT"] = port
+        except Exception:
+            pass
+    try:
+        model_cls_map = import_rfdetr_fn()
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"rfdetr_import_failed:{exc}") from exc
+    model_cls = model_cls_map.get(variant_id)
+    if not model_cls:
+        raise RuntimeError("rfdetr_variant_unknown")
+    model_kwargs = dict(model_kwargs)
+    model_kwargs["device"] = "cuda" if torch_module.cuda.is_available() else model_kwargs.get("device", "cpu")
+    train_kwargs = dict(train_kwargs)
+    train_kwargs["device"] = "cuda" if torch_module.cuda.is_available() else train_kwargs.get("device", "cpu")
+    train_kwargs["world_size"] = world_size
+    train_kwargs["dist_url"] = dist_url
+    rf_detr = model_cls(**model_kwargs)
+    restore = install_aug_fn(normalize_aug_fn(aug_policy))
+    try:
+        rf_detr.train(**train_kwargs)
+    finally:
+        restore_aug_fn(restore)
+
+
+def _collect_yolo_artifacts_impl(run_dir: Path, *, meta_name: str) -> Dict[str, bool]:
+    return {
+        "best_pt": _regular_file_within_root(run_dir / "best.pt", run_dir),
+        "metrics_json": _regular_file_within_root(run_dir / "metrics.json", run_dir),
+        "metrics_series": _regular_file_within_root(run_dir / "metrics_series.json", run_dir),
+        "results_csv": _regular_file_within_root(run_dir / "results.csv", run_dir),
+        "args_yaml": _regular_file_within_root(run_dir / "args.yaml", run_dir),
+        "labelmap": _regular_file_within_root(run_dir / "labelmap.txt", run_dir),
+        "run_meta": _regular_file_within_root(run_dir / meta_name, run_dir),
+    }
+
+
+def _collect_rfdetr_artifacts_impl(run_dir: Path, *, meta_name: str) -> Dict[str, bool]:
+    return {
+        "best_regular": _regular_file_within_root(
+            run_dir / "checkpoint_best_regular.pth", run_dir
+        ),
+        "best_ema": _regular_file_within_root(run_dir / "checkpoint_best_ema.pth", run_dir),
+        "best_total": _regular_file_within_root(run_dir / "checkpoint_best_total.pth", run_dir),
+        "best_optimized": _regular_file_within_root(
+            run_dir / "checkpoint_best_optimized.pt", run_dir
+        ),
+        "results_json": _regular_file_within_root(run_dir / "results.json", run_dir),
+        "metrics_series": _regular_file_within_root(run_dir / "metrics_series.json", run_dir),
+        "log_txt": _regular_file_within_root(run_dir / "log.txt", run_dir),
+        "labelmap": _regular_file_within_root(run_dir / "labelmap.txt", run_dir),
+        "run_meta": _regular_file_within_root(run_dir / meta_name, run_dir),
+    }
+
+
+def _yolo_extract_detections_impl(
+    results: Any,
+    labelmap: List[str],
+    offset_x: float,
+    offset_y: float,
+    full_w: int,
+    full_h: int,
+) -> List[Dict[str, Any]]:
+    detections: List[Dict[str, Any]] = []
+    if not results:
+        return detections
+    det_boxes = results[0].boxes if results else None
+    if det_boxes is None or det_boxes.xyxy is None:
+        return detections
+    xyxy = det_boxes.xyxy.cpu().numpy()
+    confs = det_boxes.conf.cpu().numpy() if det_boxes.conf is not None else None
+    classes = det_boxes.cls.cpu().numpy() if det_boxes.cls is not None else None
+    for idx, box in enumerate(xyxy):
+        x1, y1, x2, y2 = [float(v) for v in box[:4]]
+        abs_x = max(0.0, min(full_w, x1 + offset_x))
+        abs_y = max(0.0, min(full_h, y1 + offset_y))
+        abs_w = max(0.0, min(full_w - abs_x, (x2 - x1)))
+        abs_h = max(0.0, min(full_h - abs_y, (y2 - y1)))
+        class_id = int(classes[idx]) if classes is not None else -1
+        class_name = labelmap[class_id] if 0 <= class_id < len(labelmap) else None
+        score = float(confs[idx]) if confs is not None else None
+        detections.append(
+            {
+                "bbox": [abs_x, abs_y, abs_w, abs_h],
+                "class_id": class_id,
+                "class_name": class_name,
+                "score": score,
+            }
+        )
+    return detections
+
+
+def _rfdetr_extract_detections_impl(
+    results: Any,
+    labelmap: List[str],
+    offset_x: float,
+    offset_y: float,
+    full_w: int,
+    full_h: int,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    detections: List[Dict[str, Any]] = []
+    labelmap_shifted = False
+    if results is None:
+        return detections, labelmap_shifted
+    xyxy = getattr(results, "xyxy", None)
+    scores = getattr(results, "confidence", None)
+    class_ids = getattr(results, "class_id", None)
+    if xyxy is None or not len(xyxy):
+        return detections, labelmap_shifted
+    for idx, box in enumerate(xyxy):
+        x1, y1, x2, y2 = [float(v) for v in box[:4]]
+        abs_x = max(0.0, min(full_w, x1 + offset_x))
+        abs_y = max(0.0, min(full_h, y1 + offset_y))
+        abs_w = max(0.0, min(full_w - abs_x, (x2 - x1)))
+        abs_h = max(0.0, min(full_h - abs_y, (y2 - y1)))
+        class_id = int(class_ids[idx]) if class_ids is not None else -1
+        if labelmap and class_id >= len(labelmap) and 0 <= class_id - 1 < len(labelmap):
+            class_id -= 1
+            labelmap_shifted = True
+        class_name = labelmap[class_id] if 0 <= class_id < len(labelmap) else None
+        score = float(scores[idx]) if scores is not None else None
+        detections.append(
+            {
+                "bbox": [abs_x, abs_y, abs_w, abs_h],
+                "class_id": class_id,
+                "class_name": class_name,
+                "score": score,
+            }
+        )
+    return detections, labelmap_shifted
+
+
+def _resolve_detector_image_impl(
+    image_base64: Optional[str],
+    image_token: Optional[str],
+    *,
+    fetch_preloaded_fn: Callable[[str, str], Optional[Any]],
+    decode_image_fn: Callable[[Optional[str]], Tuple[Any, Any]],
+    store_preloaded_fn: Callable[[str, Any, str], None],
+    hash_fn: Callable[[bytes], str],
+) -> Tuple[Any, Any, str]:
+    if image_token:
+        for variant in ("sam1", "sam3"):
+            cached = fetch_preloaded_fn(image_token, variant)
+            if cached is not None:
+                pil_img = __import__("PIL").Image.fromarray(cached)
+                return pil_img, cached, image_token
+        if image_base64:
+            pil_img, np_img = decode_image_fn(image_base64)
+            token = hash_fn(np_img.tobytes())
+            store_preloaded_fn(token, np_img, "sam1")
+            return pil_img, np_img, token
+        raise RuntimeError("image_token_not_found")
+    pil_img, np_img = decode_image_fn(image_base64)
+    token = hash_fn(np_img.tobytes())
+    store_preloaded_fn(token, np_img, "sam1")
+    return pil_img, np_img, token
+
+
+def _flatten_metrics_impl(obj: Any, prefix: str = "", out: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if out is None:
+        out = {}
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            next_prefix = f"{prefix}/{key}" if prefix else str(key)
+            _flatten_metrics_impl(value, next_prefix, out)
+    else:
+        out[prefix] = obj
+    return out
+
+
+def _lookup_metric_impl(flat: Dict[str, Any], keys: List[str]) -> Optional[float]:
+    if not flat:
+        return None
+    lowered = {str(k).lower(): v for k, v in flat.items()}
+    for key in keys:
+        if key in flat:
+            value = flat[key]
+        else:
+            value = lowered.get(key.lower())
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except Exception:
+            continue
+    return None
+
+
+def _yolo_metrics_summary_impl(run_dir: Path, *, read_csv_last_row_fn: Callable[[Path], Optional[Dict[str, str]]]) -> Dict[str, float]:
+    summary: Dict[str, float] = {}
+    metrics_path = run_dir / "metrics.json"
+    if metrics_path.exists():
+        try:
+            data = json.loads(metrics_path.read_text())
+            flat = _flatten_metrics_impl(data)
+            summary["map50_95"] = _lookup_metric_impl(flat, ["metrics/mAP50-95(B)", "metrics/mAP50-95", "map50-95"])
+            summary["map50"] = _lookup_metric_impl(flat, ["metrics/mAP50(B)", "metrics/mAP50", "map50"])
+            summary["precision"] = _lookup_metric_impl(flat, ["metrics/precision(B)", "metrics/precision", "precision"])
+            summary["recall"] = _lookup_metric_impl(flat, ["metrics/recall(B)", "metrics/recall", "recall"])
+        except Exception:
+            pass
+    if any(value is not None for value in summary.values()):
+        return {k: v for k, v in summary.items() if v is not None}
+    csv_path = run_dir / "results.csv"
+    last_row = read_csv_last_row_fn(csv_path)
+    if not last_row:
+        return {}
+
+    def _csv_value(name_variants: List[str]) -> Optional[float]:
+        for key in name_variants:
+            if key in last_row:
+                try:
+                    return float(last_row[key])
+                except Exception:
+                    return None
+            for col, val in last_row.items():
+                if col.strip().lower() == key.strip().lower():
+                    try:
+                        return float(val)
+                    except Exception:
+                        return None
+        return None
+
+    return {
+        "map50_95": _csv_value(["metrics/mAP50-95(B)", "metrics/mAP50-95"]),
+        "map50": _csv_value(["metrics/mAP50(B)", "metrics/mAP50"]),
+        "precision": _csv_value(["metrics/precision(B)", "metrics/precision"]),
+        "recall": _csv_value(["metrics/recall(B)", "metrics/recall"]),
+    }
+
+
+def _rfdetr_metrics_summary_impl(run_dir: Path) -> Dict[str, float]:
+    metrics_path = run_dir / "results.json"
+    if not metrics_path.exists():
+        return {}
+    try:
+        data = json.loads(metrics_path.read_text())
+    except Exception:
+        return {}
+    flat = _flatten_metrics_impl(data)
+    return {
+        "map": _lookup_metric_impl(flat, ["coco/bbox_mAP", "bbox_mAP", "metrics/bbox_mAP", "map"]),
+        "map50": _lookup_metric_impl(flat, ["coco/bbox_mAP50", "bbox_mAP50", "metrics/bbox_mAP50", "map50"]),
+        "map75": _lookup_metric_impl(flat, ["coco/bbox_mAP75", "bbox_mAP75", "metrics/bbox_mAP75", "map75"]),
+    }
+
+
+def _clean_metric_summary_impl(summary: Dict[str, Optional[float]]) -> Dict[str, float]:
+    return {key: float(value) for key, value in summary.items() if value is not None}
+
+
+def _list_yolo_runs_impl(
+    *,
+    job_root: Path,
+    dataset_cache_root: Path,
+    active_payload: Dict[str, Any],
+    load_meta_fn: Callable[[Path], Dict[str, Any]],
+    collect_artifacts_fn: Callable[[Path], Dict[str, bool]],
+    meta_name: str,
+) -> List[Dict[str, Any]]:
+    runs: List[Dict[str, Any]] = []
+    active_id = active_payload.get("run_id") if isinstance(active_payload, dict) else None
+    try:
+        job_root_resolved = _detector_job_root(job_root)
+    except Exception:
+        return runs
+    dataset_cache_resolved = dataset_cache_root.resolve(strict=False)
+    for entry in job_root.iterdir():
+        if entry.is_symlink():
+            continue
+        try:
+            run_dir = entry.resolve()
+        except Exception:
+            continue
+        if not _path_is_within_root_impl(run_dir, job_root_resolved):
+            continue
+        if not run_dir.is_dir():
+            continue
+        if run_dir == dataset_cache_resolved:
+            continue
+        if _safe_run_meta_file_impl(run_dir, meta_name=meta_name) is None:
+            continue
+        meta = load_meta_fn(run_dir)
+        run_id = meta.get("job_id") or run_dir.name
+        config = meta.get("config") or {}
+        dataset = config.get("dataset") or {}
+        run_name = config.get("run_name") or dataset.get("label") or dataset.get("id") or run_id
+        created_at = meta.get("created_at")
+        if not created_at:
+            try:
+                created_at = run_dir.stat().st_mtime
+            except Exception:
+                created_at = None
+        artifacts = collect_artifacts_fn(run_dir)
+        status = meta.get("status")
+        message = meta.get("message")
+        if status not in {"succeeded", "failed", "cancelled"} and artifacts.get("best_pt"):
+            status = "succeeded"
+            if not message:
+                message = "Artifacts present"
+        runs.append(
+            {
+                "run_id": run_id,
+                "run_name": run_name,
+                "status": status,
+                "message": message,
+                "created_at": created_at,
+                "updated_at": meta.get("updated_at"),
+                "dataset_id": dataset.get("id") or dataset.get("dataset_id"),
+                "dataset_label": dataset.get("label"),
+                "artifacts": artifacts,
+                "is_active": bool(active_id and run_id == active_id),
+            }
+        )
+    runs.sort(key=lambda item: item.get("created_at") or 0, reverse=True)
+    return runs
+
+
+def _list_rfdetr_runs_impl(
+    *,
+    job_root: Path,
+    active_payload: Dict[str, Any],
+    load_meta_fn: Callable[[Path], Dict[str, Any]],
+    collect_artifacts_fn: Callable[[Path], Dict[str, bool]],
+    meta_name: str,
+) -> List[Dict[str, Any]]:
+    runs: List[Dict[str, Any]] = []
+    active_id = active_payload.get("run_id") if isinstance(active_payload, dict) else None
+    try:
+        job_root_resolved = _detector_job_root(job_root)
+    except Exception:
+        return runs
+    for entry in job_root.iterdir():
+        if entry.is_symlink():
+            continue
+        try:
+            run_dir = entry.resolve()
+        except Exception:
+            continue
+        if not _path_is_within_root_impl(run_dir, job_root_resolved):
+            continue
+        if not run_dir.is_dir():
+            continue
+        if _safe_run_meta_file_impl(run_dir, meta_name=meta_name) is None:
+            continue
+        meta = load_meta_fn(run_dir)
+        run_id = meta.get("job_id") or run_dir.name
+        config = meta.get("config") or {}
+        dataset = config.get("dataset") or {}
+        run_name = config.get("run_name") or dataset.get("label") or dataset.get("id") or run_id
+        created_at = meta.get("created_at")
+        if not created_at:
+            try:
+                created_at = run_dir.stat().st_mtime
+            except Exception:
+                created_at = None
+        artifacts = collect_artifacts_fn(run_dir)
+        status = meta.get("status")
+        message = meta.get("message")
+        if status not in {"succeeded", "failed", "cancelled"} and (
+            artifacts.get("best_total") or artifacts.get("best_regular") or artifacts.get("best_ema")
+        ):
+            status = "succeeded"
+            if not message:
+                message = "Artifacts present"
+        runs.append(
+            {
+                "run_id": run_id,
+                "run_name": run_name,
+                "status": status,
+                "message": message,
+                "created_at": created_at,
+                "updated_at": meta.get("updated_at"),
+                "dataset_id": dataset.get("id") or dataset.get("dataset_id"),
+                "dataset_label": dataset.get("label"),
+                "artifacts": artifacts,
+                "is_active": bool(active_id and run_id == active_id),
+            }
+        )
+    runs.sort(key=lambda item: item.get("created_at") or 0, reverse=True)
+    return runs
+
+
+def _agent_tool_run_detector_impl(
+    *,
+    image_base64: Optional[str],
+    image_token: Optional[str],
+    detector_id: Optional[str],
+    mode: Optional[str],
+    conf: Optional[float],
+    sahi: Optional[Dict[str, Any]],
+    window: Optional[Any],
+    window_bbox_2d: Optional[Sequence[float]],
+    grid_cell: Optional[str],
+    max_det: Optional[int],
+    iou: Optional[float],
+    merge_iou: Optional[float],
+    expected_labelmap: Optional[Sequence[str]],
+    register: Optional[bool],
+    resolve_image_fn: Callable[[Optional[str], Optional[str], Optional[str]], Tuple[Any, Any, str]],
+    normalize_window_fn: Callable[[Optional[Any], int, int], Optional[Tuple[float, float, float, float]]],
+    ensure_yolo_runtime_fn: Callable[[], Tuple[Any, List[str], str]],
+    ensure_rfdetr_runtime_fn: Callable[[], Tuple[Any, List[str], str]],
+    ensure_yolo_runtime_by_id_fn: Optional[Callable[[Optional[str]], Tuple[Any, List[str], str]]],
+    ensure_rfdetr_runtime_by_id_fn: Optional[Callable[[Optional[str]], Tuple[Any, List[str], str]]],
+    raise_labelmap_mismatch_fn: Callable[[Optional[Sequence[str]], Optional[Sequence[str]], str], None],
+    clamp_conf_fn: Callable[[float, List[str]], float],
+    clamp_iou_fn: Callable[[float, List[str]], float],
+    clamp_max_det_fn: Callable[[int, List[str]], int],
+    clamp_slice_params_fn: Callable[[int, float, float, int, int, List[str]], Tuple[int, float, float]],
+    slice_image_fn: Callable[[Any, int, float], Tuple[List[Any], List[Tuple[int, int]]]],
+    yolo_extract_fn: Callable[[Any, List[str], float, float, int, int], List[Dict[str, Any]]],
+    rfdetr_extract_fn: Callable[[Any, List[str], float, float, int, int], Tuple[List[Dict[str, Any]], bool]],
+    merge_nms_fn: Callable[[List[Dict[str, Any]], float, int], List[Dict[str, Any]]],
+    xywh_to_xyxy_fn: Callable[[Sequence[float]], Tuple[float, float, float, float]],
+    det_payload_fn: Callable[..., Dict[str, Any]],
+    register_detections_fn: Callable[..., Optional[Dict[str, Any]]],
+    cluster_summaries_fn: Callable[[Sequence[int], bool], Dict[str, Any]],
+    handles_from_cluster_ids_fn: Callable[[Sequence[int]], List[str]],
+    cluster_label_counts_fn: Callable[[Sequence[int]], Dict[str, int]],
+    agent_labelmap: Optional[Sequence[str]],
+    agent_grid: Any,
+    yolo_lock: Any,
+    rfdetr_lock: Any,
+    http_exception_cls: Any,
+    yolo_device_fn: Optional[Callable[[], Optional[str]]] = None,
+) -> Dict[str, Any]:
+    pil_img, _, _ = resolve_image_fn(image_base64, image_token, None)
+    img_w, img_h = pil_img.size
+    mode_norm = (mode or "yolo").strip().lower()
+    if mode_norm not in {"yolo", "rfdetr"}:
+        raise http_exception_cls(status_code=400, detail="agent_detector_mode_invalid")
+    window_xyxy = normalize_window_fn(window, img_w, img_h)
+    if window_xyxy is None and window_bbox_2d is not None:
+        window_xyxy = normalize_window_fn({"bbox_2d": window_bbox_2d}, img_w, img_h)
+    crop_img = pil_img
+    offset_x = 0.0
+    offset_y = 0.0
+    if window_xyxy:
+        x1, y1, x2, y2 = window_xyxy
+        crop_img = pil_img.crop((x1, y1, x2, y2))
+        offset_x, offset_y = x1, y1
+    detections: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    if mode_norm == "yolo":
+        if detector_id and ensure_yolo_runtime_by_id_fn is not None:
+            model, labelmap, _task = ensure_yolo_runtime_by_id_fn(detector_id)
+        else:
+            model, labelmap, _task = ensure_yolo_runtime_fn()
+        expected = list(expected_labelmap or (agent_labelmap or []))
+        raise_labelmap_mismatch_fn(expected=expected or None, actual=labelmap, context="yolo")
+        conf_val = clamp_conf_fn(float(conf) if conf is not None else 0.25, warnings)
+        iou_val = clamp_iou_fn(float(iou) if iou is not None else 0.45, warnings)
+        max_det_val = clamp_max_det_fn(int(max_det) if max_det is not None else 300, warnings)
+        yolo_device = yolo_device_fn() if yolo_device_fn is not None else None
+        yolo_predict_kwargs = {"device": yolo_device} if yolo_device else {}
+        raw: List[Dict[str, Any]] = []
+        if sahi and sahi.get("enabled"):
+            try:
+                slice_size = int(sahi.get("slice_size") or 640)
+                overlap = float(sahi.get("overlap") or 0.2)
+                merge_iou_val = float(merge_iou or sahi.get("merge_iou") or 0.5)
+                slice_size, overlap, merge_iou_val = clamp_slice_params_fn(
+                    slice_size, overlap, merge_iou_val, crop_img.width, crop_img.height, warnings
+                )
+                slices, starts = slice_image_fn(crop_img, slice_size, overlap)
+                # Keep SAHI resilient: if slicer metadata is short, process available pairs
+                # and fall back to full-frame inference when no merged detections remain.
+                for tile, start in zip(slices, starts, strict=False):
+                    tile_offset_x = float(start[0]) + offset_x
+                    tile_offset_y = float(start[1]) + offset_y
+                    with yolo_lock:
+                        results = model.predict(
+                            __import__("PIL").Image.fromarray(tile),
+                            conf=conf_val,
+                            iou=iou_val,
+                            max_det=max_det_val,
+                            verbose=False,
+                            **yolo_predict_kwargs,
+                        )
+                    raw.extend(yolo_extract_fn(results, labelmap, tile_offset_x, tile_offset_y, img_w, img_h))
+                raw = merge_nms_fn(raw, merge_iou_val, max_det_val)
+            except http_exception_cls as exc:
+                if "sahi_unavailable" in str(exc.detail):
+                    warnings.append(str(exc.detail))
+                else:
+                    warnings.append(f"sahi_failed:{exc.detail}")
+                raw = []
+        if not raw:
+            with yolo_lock:
+                results = model.predict(
+                    crop_img,
+                    conf=conf_val,
+                    iou=iou_val,
+                    max_det=max_det_val,
+                    verbose=False,
+                    **yolo_predict_kwargs,
+                )
+            raw = yolo_extract_fn(results, labelmap, offset_x, offset_y, img_w, img_h)
+        for det in raw:
+            x1, y1, x2, y2 = xywh_to_xyxy_fn(det.get("bbox") or [])
+            detections.append(
+                det_payload_fn(
+                    img_w,
+                    img_h,
+                    (x1, y1, x2, y2),
+                    label=det.get("class_name"),
+                    class_id=det.get("class_id"),
+                    score=det.get("score"),
+                    source="yolo",
+                    window=window_xyxy,
+                )
+            )
+    else:
+        if detector_id and ensure_rfdetr_runtime_by_id_fn is not None:
+            model, labelmap, _task = ensure_rfdetr_runtime_by_id_fn(detector_id)
+        else:
+            model, labelmap, _task = ensure_rfdetr_runtime_fn()
+        expected = list(expected_labelmap or (agent_labelmap or []))
+        raise_labelmap_mismatch_fn(expected=expected or None, actual=labelmap, context="rfdetr")
+        conf_val = clamp_conf_fn(float(conf) if conf is not None else 0.25, warnings)
+        max_det_val = clamp_max_det_fn(int(max_det) if max_det is not None else 300, warnings)
+        raw: List[Dict[str, Any]] = []
+
+        def _sync_rfdetr_device() -> Optional[str]:
+            try:
+                import torch
+            except Exception:
+                return None
+            device = None
+            try:
+                inner = getattr(model, "model", None)
+                if inner is not None and hasattr(inner, "parameters"):
+                    device = str(next(inner.parameters()).device)
+            except Exception:
+                device = None
+            if device is None:
+                try:
+                    if hasattr(model, "parameters"):
+                        device = str(next(model.parameters()).device)
+                except Exception:
+                    device = None
+            if device and device.startswith("cuda"):
+                try:
+                    torch.cuda.set_device(device)
+                except Exception:
+                    return device
+            return device
+
+        def _rfdetr_predict_safe(image: Any) -> Any:
+            try:
+                _sync_rfdetr_device()
+                return model.predict(image, threshold=conf_val)
+            except Exception as exc:  # noqa: BLE001
+                msg = str(exc)
+                if "Expected all tensors to be on the same device" in msg:
+                    try:
+                        if hasattr(model, "model") and hasattr(model.model, "to"):
+                            model.model.to("cpu")
+                        if hasattr(model, "to"):
+                            model.to("cpu")
+                        return model.predict(image, threshold=conf_val)
+                    except Exception:
+                        pass
+                raise
+
+        if sahi and sahi.get("enabled"):
+            try:
+                slice_size = int(sahi.get("slice_size") or 640)
+                overlap = float(sahi.get("overlap") or 0.2)
+                merge_iou_val = float(merge_iou or sahi.get("merge_iou") or 0.5)
+                slice_size, overlap, merge_iou_val = clamp_slice_params_fn(
+                    slice_size, overlap, merge_iou_val, crop_img.width, crop_img.height, warnings
+                )
+                slices, starts = slice_image_fn(crop_img, slice_size, overlap)
+                # Keep SAHI resilient: if slicer metadata is short, process available pairs
+                # and fall back to full-frame inference when no merged detections remain.
+                for tile, start in zip(slices, starts, strict=False):
+                    tile_offset_x = float(start[0]) + offset_x
+                    tile_offset_y = float(start[1]) + offset_y
+                    try:
+                        with rfdetr_lock:
+                            results = _rfdetr_predict_safe(__import__("PIL").Image.fromarray(tile))
+                    except Exception as exc:  # noqa: BLE001
+                        raise http_exception_cls(status_code=500, detail=f"rfdetr_predict_failed:{exc}") from exc
+                    extracted, shifted = rfdetr_extract_fn(
+                        results, labelmap, tile_offset_x, tile_offset_y, img_w, img_h
+                    )
+                    if shifted:
+                        if expected:
+                            raise http_exception_cls(
+                                status_code=412,
+                                detail="detector_labelmap_shifted:rfdetr",
+                            )
+                        warnings.append("rfdetr_labelmap_shifted")
+                    raw.extend(extracted)
+                raw = merge_nms_fn(raw, merge_iou_val, max_det_val)
+            except http_exception_cls as exc:
+                if "sahi_unavailable" in str(exc.detail):
+                    warnings.append(str(exc.detail))
+                else:
+                    warnings.append(f"sahi_failed:{exc.detail}")
+                raw = []
+        if not raw:
+            try:
+                with rfdetr_lock:
+                    results = _rfdetr_predict_safe(crop_img)
+            except Exception as exc:  # noqa: BLE001
+                raise http_exception_cls(status_code=500, detail=f"rfdetr_predict_failed:{exc}") from exc
+            raw, shifted = rfdetr_extract_fn(results, labelmap, offset_x, offset_y, img_w, img_h)
+            if shifted:
+                if expected:
+                    raise http_exception_cls(
+                        status_code=412,
+                        detail="detector_labelmap_shifted:rfdetr",
+                    )
+                warnings.append("rfdetr_labelmap_shifted")
+        raw.sort(key=lambda det: float(det.get("score") or 0.0), reverse=True)
+        for det in raw[:max_det_val]:
+            x1, y1, x2, y2 = xywh_to_xyxy_fn(det.get("bbox") or [])
+            detections.append(
+                det_payload_fn(
+                    img_w,
+                    img_h,
+                    (x1, y1, x2, y2),
+                    label=det.get("class_name"),
+                    class_id=det.get("class_id"),
+                    score=det.get("score"),
+                    source="rfdetr",
+                    window=window_xyxy,
+                )
+            )
+    register_summary: Optional[Dict[str, Any]] = None
+    if register:
+        register_summary = register_detections_fn(
+            detections,
+            img_w=img_w,
+            img_h=img_h,
+            grid=agent_grid,
+            labelmap=agent_labelmap or [],
+            background=None,
+            source_override=None,
+            owner_cell=grid_cell,
+        )
+    new_cluster_ids = register_summary.get("new_cluster_ids") if isinstance(register_summary, dict) else []
+    updated_cluster_ids = register_summary.get("updated_cluster_ids") if isinstance(register_summary, dict) else []
+    new_summary = cluster_summaries_fn(new_cluster_ids, include_ids=False)
+    new_handles = handles_from_cluster_ids_fn(new_cluster_ids or [])
+    updated_handles = handles_from_cluster_ids_fn(updated_cluster_ids or [])
+    agent_view = {
+        "mode": mode_norm,
+        "grid_cell": grid_cell,
+        "warnings": warnings or None,
+        "new_clusters": register_summary.get("new_clusters") if isinstance(register_summary, dict) else 0,
+        "new_handles": new_handles,
+        "updated_clusters": len(updated_cluster_ids or []),
+        "updated_handles": updated_handles,
+        "new_items": new_summary.get("items"),
+        "new_items_total": new_summary.get("total"),
+        "new_items_truncated": new_summary.get("truncated"),
+        "label_counts": cluster_label_counts_fn(new_cluster_ids or []),
+    }
+    return {
+        "detections": detections,
+        "warnings": warnings or None,
+        "register_summary": register_summary,
+        "__agent_view__": agent_view,
+    }

@@ -1,0 +1,594 @@
+#!/usr/bin/env python3
+"""CLI wrapper around :func:`tools.clip_training.train_clip_from_yolo`."""
+import argparse
+import sys
+from pathlib import Path
+from typing import Sequence
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from tools.clip_training import TrainingError, train_clip_from_yolo
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Train CLIP+LogReg from a YOLO dataset, preserving YOLO numeric class order.",
+    )
+    parser.add_argument(
+        "--images_path",
+        type=str,
+        required=True,
+        help="Folder with images (.jpg, .png, etc.).",
+    )
+    parser.add_argument(
+        "--labels_path",
+        type=str,
+        required=True,
+        help="Folder with YOLO .txt label files.",
+    )
+    parser.add_argument(
+        "--model_output",
+        type=str,
+        default="my_logreg_model.pkl",
+        help="Where to save the trained logistic regression model.",
+    )
+    parser.add_argument(
+        "--labelmap_output",
+        type=str,
+        default="my_label_list.pkl",
+        help="Where to save the trained classifier label list.",
+    )
+    parser.add_argument(
+        "--input_labelmap",
+        type=str,
+        default=None,
+        help="Existing label list (.pkl or .txt with one class per line).",
+    )
+    parser.add_argument("--test_size", type=float, default=0.2, help="Test fraction (by image group).")
+    parser.add_argument("--random_seed", type=int, default=42)
+    parser.add_argument("--max_iter", type=int, default=1000)
+    parser.add_argument(
+        "--clip_model",
+        type=str,
+        default="ViT-B/32",
+        help="CLIP backbone (e.g., ViT-B/32, ViT-L/14, ViT-L/14@336px)",
+    )
+    parser.add_argument(
+        "--encoder-type",
+        type=str,
+        default="clip",
+        choices=["clip", "dinov3", "cradio"],
+        help="Embedding encoder for auto-class training.",
+    )
+    parser.add_argument(
+        "--encoder-model",
+        type=str,
+        default=None,
+        help="Hugging Face model id for DINOv3 or C-RADIOv4 encoders.",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Force device: 'cuda' or 'cpu'.",
+    )
+    parser.add_argument("--batch_size", type=int, default=64, help="Batch size for CLIP encoding.")
+    parser.add_argument(
+        "--min_per_class",
+        type=int,
+        default=2,
+        help="Drop classes with fewer samples before splitting.",
+    )
+    parser.add_argument(
+        "--class_weight",
+        type=str,
+        default="balanced",
+        choices=["balanced", "none", "effective"],
+        help="Class weighting for Logistic Regression.",
+    )
+    parser.add_argument(
+        "--effective_beta",
+        type=float,
+        default=0.9999,
+        help="Effective-number beta (only used when class_weight=effective).",
+    )
+    parser.add_argument(
+        "--C",
+        type=float,
+        default=1.0,
+        help="Inverse of regularisation strength for Logistic Regression.",
+    )
+    parser.add_argument(
+        "--solver",
+        type=str,
+        default="saga",
+        choices=["saga", "sag", "lbfgs", "liblinear", "newton-cg"],
+        help="Logistic regression solver.",
+    )
+    parser.add_argument(
+        "--classifier_type",
+        type=str,
+        default="logreg",
+        choices=["logreg", "mlp"],
+        help="Classifier head type: logistic regression or a small MLP.",
+    )
+    parser.add_argument(
+        "--mlp_hidden_sizes",
+        type=str,
+        default="256",
+        help="Comma-separated hidden sizes for the MLP head (e.g., '512,256').",
+    )
+    parser.add_argument(
+        "--mlp_dropout",
+        type=float,
+        default=0.1,
+        help="Dropout rate for MLP hidden layers.",
+    )
+    parser.add_argument(
+        "--mlp_epochs",
+        type=int,
+        default=50,
+        help="Epochs for MLP head training.",
+    )
+    parser.add_argument(
+        "--mlp_lr",
+        type=float,
+        default=1e-3,
+        help="Learning rate for MLP head training.",
+    )
+    parser.add_argument(
+        "--mlp_weight_decay",
+        type=float,
+        default=1e-4,
+        help="Weight decay for MLP head training.",
+    )
+    parser.add_argument(
+        "--mlp_label_smoothing",
+        type=float,
+        default=0.05,
+        help="Label smoothing for soft targets (0 disables).",
+    )
+    parser.add_argument(
+        "--mlp_loss_type",
+        type=str,
+        default="ce",
+        choices=["ce", "focal"],
+        help="Loss type for MLP heads.",
+    )
+    parser.add_argument(
+        "--mlp_activation",
+        type=str,
+        default="relu",
+        choices=["relu", "gelu"],
+        help="Activation function for MLP hidden layers.",
+    )
+    parser.add_argument(
+        "--mlp_layer_norm",
+        type=str,
+        default="false",
+        help="Enable LayerNorm between MLP layers (true/false).",
+    )
+    parser.add_argument(
+        "--mlp_focal_gamma",
+        type=float,
+        default=2.0,
+        help="Focal loss gamma (only used when loss type is focal).",
+    )
+    parser.add_argument(
+        "--mlp_focal_alpha",
+        type=float,
+        default=-1.0,
+        help="Optional focal loss alpha (negative disables extra scaling).",
+    )
+    parser.add_argument(
+        "--mlp_sampler",
+        type=str,
+        default="balanced",
+        choices=["balanced", "none", "shuffle"],
+        help="Sampling strategy for MLP training batches.",
+    )
+    parser.add_argument(
+        "--mlp_mixup_alpha",
+        type=float,
+        default=0.1,
+        help="Mixup alpha for embedding mixup (0 disables).",
+    )
+    parser.add_argument(
+        "--mlp_normalize_embeddings",
+        type=str,
+        default="true",
+        help="L2-normalize embeddings before MLP training (true/false).",
+    )
+    parser.add_argument(
+        "--mlp_patience",
+        type=int,
+        default=6,
+        help="Early-stop patience for MLP validation loss.",
+    )
+    parser.add_argument(
+        "--mlp_hard_mining_epochs",
+        type=int,
+        default=5,
+        help="Extra MLP epochs for hard-example mining.",
+    )
+    parser.add_argument(
+        "--logit_adjustment_mode",
+        type=str,
+        default="none",
+        choices=["none", "train", "infer", "both"],
+        help="Apply logit adjustment during training and/or inference.",
+    )
+    parser.add_argument(
+        "--logit_adjustment_inference",
+        type=str,
+        default=None,
+        help="Optional override for inference-time logit adjustment (true/false).",
+    )
+    parser.add_argument(
+        "--arcface_enabled",
+        type=str,
+        default="false",
+        help="Enable ArcFace-style margin loss for MLP heads.",
+    )
+    parser.add_argument(
+        "--arcface_margin",
+        type=float,
+        default=0.2,
+        help="ArcFace angular margin (only used when arcface_enabled=true).",
+    )
+    parser.add_argument(
+        "--arcface_scale",
+        type=float,
+        default=30.0,
+        help="ArcFace scale factor (only used when arcface_enabled=true).",
+    )
+    parser.add_argument(
+        "--supcon_weight",
+        type=float,
+        default=0.0,
+        help="Weight for supervised contrastive loss (0 disables).",
+    )
+    parser.add_argument(
+        "--supcon_temperature",
+        type=float,
+        default=0.07,
+        help="Temperature for supervised contrastive loss.",
+    )
+    parser.add_argument(
+        "--supcon_projection_dim",
+        type=int,
+        default=128,
+        help="Projection dimension for supervised contrastive loss.",
+    )
+    parser.add_argument(
+        "--supcon_projection_hidden",
+        type=int,
+        default=0,
+        help="Hidden dimension for projection head (0 for single-layer).",
+    )
+    parser.add_argument(
+        "--embedding_center",
+        type=str,
+        default="false",
+        help="Center embeddings before training (true/false).",
+    )
+    parser.add_argument(
+        "--embedding_standardize",
+        type=str,
+        default="false",
+        help="Standardize embeddings before training (true/false).",
+    )
+    parser.add_argument(
+        "--preprocess-mode",
+        type=str,
+        default="canonical",
+        choices=["native", "canonical"],
+        help="Object crop normalization mode before encoder preprocessing.",
+    )
+    parser.add_argument(
+        "--canonical-size",
+        type=int,
+        default=336,
+        help="Square pixel size for canonical object crops.",
+    )
+    parser.add_argument(
+        "--embedding-crop-mode",
+        type=str,
+        default="padded_square",
+        choices=["tight", "padded", "padded_square"],
+        help="Object crop geometry before preprocessing.",
+    )
+    parser.add_argument(
+        "--embedding-crop-padding-ratio",
+        type=float,
+        default=0.08,
+        help="Padding ratio around each bbox when crop mode uses padding.",
+    )
+    parser.add_argument(
+        "--background-mode",
+        type=str,
+        default="full_crop",
+        choices=["full_crop", "mean_fill_outside_box", "blur_outside_box", "darken_outside_box"],
+        help="How to treat pixels outside the bbox inside padded crops.",
+    )
+    parser.add_argument(
+        "--embedding-view-mode",
+        type=str,
+        default="single",
+        choices=["single", "tight_standard", "standard_context", "tight_context"],
+        help="Single-view or multi-view embedding composition.",
+    )
+    parser.add_argument(
+        "--embedding-adjustment",
+        type=str,
+        default="remove_size_bias",
+        choices=["none", "remove_size_bias"],
+        help="Embedding post-processing transform saved into classifier metadata.",
+    )
+    parser.add_argument(
+        "--dinov3-pooling",
+        type=str,
+        default="pooler",
+        choices=["pooler", "cls", "patch_mean", "cls_patch_concat"],
+        help="DINOv3 embedding pooling mode.",
+    )
+    parser.add_argument(
+        "--cradio-pooling",
+        type=str,
+        default="summary",
+        choices=["summary", "spatial_mean", "summary_spatial_concat"],
+        help="C-RADIOv4 embedding pooling mode.",
+    )
+    parser.add_argument(
+        "--embedding-aggregation",
+        type=str,
+        default="pooled",
+        choices=["pooled"],
+        help="Token aggregation mode for crop-level auto-class training.",
+    )
+    parser.add_argument(
+        "--embedding-salad-head-id",
+        type=str,
+        default="",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--calibration_mode",
+        type=str,
+        default="none",
+        choices=["none", "temperature"],
+        help="Post-training calibration mode.",
+    )
+    parser.add_argument(
+        "--calibration_min_temp",
+        type=float,
+        default=0.5,
+        help="Minimum temperature for calibration sweep.",
+    )
+    parser.add_argument(
+        "--calibration_max_temp",
+        type=float,
+        default=5.0,
+        help="Maximum temperature for calibration sweep.",
+    )
+    parser.add_argument(
+        "--calibration_max_iters",
+        type=int,
+        default=50,
+        help="Max calibration iterations (grid points).",
+    )
+    parser.add_argument(
+        "--reuse-embeddings",
+        action="store_true",
+        help="Reuse cached CLIP embeddings for this dataset if available.",
+    )
+    parser.add_argument(
+        "--hard-example-mining",
+        action="store_true",
+        help="Run a short second pass focusing on misclassified / low-confidence samples.",
+    )
+    parser.add_argument(
+        "--hard-misclassified-weight",
+        type=float,
+        default=3.0,
+        help="Weight multiplier applied to misclassified samples during hard mining.",
+    )
+    parser.add_argument(
+        "--hard-low-conf-weight",
+        type=float,
+        default=2.0,
+        help="Weight multiplier applied to low-confidence samples during hard mining.",
+    )
+    parser.add_argument(
+        "--hard-low-conf-threshold",
+        type=float,
+        default=0.65,
+        help="Maximum predicted probability to consider a sample low-confidence (0 disables threshold).",
+    )
+    parser.add_argument(
+        "--hard-margin-threshold",
+        type=float,
+        default=0.15,
+        help="Minimum gap between top-1 and top-2 class probabilities before a sample is treated as ambiguous (0 disables margin check).",
+    )
+    parser.add_argument(
+        "--convergence-tol",
+        type=float,
+        default=1e-4,
+        help="Tolerance for detecting convergence; lower values force additional iterations.",
+    )
+    parser.add_argument(
+        "--bg-classes",
+        type=int,
+        default=2,
+        help="Number of hidden background classes to add (1–10).",
+    )
+    return parser.parse_args()
+
+
+def _print_matrix(matrix: Sequence[Sequence[int]], labels: Sequence[str]) -> None:
+    if not matrix:
+        print("Confusion matrix is empty.")
+        return
+    header = "\t".join(["true\\pred"] + [str(lbl) for lbl in labels])
+    print(header)
+    for label, row in zip(labels, matrix, strict=False):
+        cells = "\t".join(str(int(v)) for v in row)
+        print(f"{label}\t{cells}")
+
+
+def main() -> None:
+    args = parse_args()
+
+    normalize_embeddings = str(args.mlp_normalize_embeddings).strip().lower() in {"1", "true", "yes", "on"}
+
+    def emit(progress: float, message: str) -> None:
+        print(f"[{progress * 100:5.1f}%] {message}")
+        sys.stdout.flush()
+
+    try:
+        artifacts = train_clip_from_yolo(
+            images_path=args.images_path,
+            labels_path=args.labels_path,
+            model_output=args.model_output,
+            labelmap_output=args.labelmap_output,
+            clip_model=args.clip_model,
+            encoder_type=args.encoder_type,
+            encoder_model=args.encoder_model,
+            input_labelmap=args.input_labelmap,
+            test_size=args.test_size,
+            random_seed=args.random_seed,
+            max_iter=args.max_iter,
+            device=args.device,
+            batch_size=args.batch_size,
+            min_per_class=args.min_per_class,
+            class_weight=args.class_weight,
+            effective_beta=args.effective_beta,
+            C=args.C,
+            solver=args.solver,
+            classifier_type=args.classifier_type,
+            mlp_hidden_sizes=args.mlp_hidden_sizes,
+            mlp_dropout=args.mlp_dropout,
+            mlp_epochs=args.mlp_epochs,
+            mlp_lr=args.mlp_lr,
+            mlp_weight_decay=args.mlp_weight_decay,
+            mlp_label_smoothing=args.mlp_label_smoothing,
+            mlp_loss_type=args.mlp_loss_type,
+            mlp_activation=args.mlp_activation,
+            mlp_layer_norm=args.mlp_layer_norm,
+            mlp_focal_gamma=args.mlp_focal_gamma,
+            mlp_focal_alpha=args.mlp_focal_alpha,
+            mlp_sampler=args.mlp_sampler,
+            mlp_mixup_alpha=args.mlp_mixup_alpha,
+            mlp_normalize_embeddings=normalize_embeddings,
+            mlp_patience=args.mlp_patience,
+            mlp_hard_mining_epochs=args.mlp_hard_mining_epochs,
+            logit_adjustment_mode=args.logit_adjustment_mode,
+            logit_adjustment_inference=args.logit_adjustment_inference,
+            arcface_enabled=args.arcface_enabled,
+            arcface_margin=args.arcface_margin,
+            arcface_scale=args.arcface_scale,
+            supcon_weight=args.supcon_weight,
+            supcon_temperature=args.supcon_temperature,
+            supcon_projection_dim=args.supcon_projection_dim,
+            supcon_projection_hidden=args.supcon_projection_hidden,
+            embedding_center=args.embedding_center,
+            embedding_standardize=args.embedding_standardize,
+            preprocess_mode=args.preprocess_mode,
+            canonical_size=args.canonical_size,
+            embedding_crop_mode=args.embedding_crop_mode,
+            embedding_crop_padding_ratio=args.embedding_crop_padding_ratio,
+            background_mode=args.background_mode,
+            embedding_view_mode=args.embedding_view_mode,
+            embedding_adjustment=args.embedding_adjustment,
+            dinov3_pooling=args.dinov3_pooling,
+            cradio_pooling=args.cradio_pooling,
+            embedding_aggregation=args.embedding_aggregation,
+            embedding_salad_head_id=args.embedding_salad_head_id,
+            calibration_mode=args.calibration_mode,
+            calibration_max_iters=args.calibration_max_iters,
+            calibration_min_temp=args.calibration_min_temp,
+            calibration_max_temp=args.calibration_max_temp,
+            reuse_embeddings=args.reuse_embeddings,
+            hard_example_mining=args.hard_example_mining,
+            hard_mining_misclassified_weight=args.hard_misclassified_weight,
+            hard_mining_low_conf_weight=args.hard_low_conf_weight,
+            hard_mining_low_conf_threshold=args.hard_low_conf_threshold,
+            hard_mining_margin_threshold=args.hard_margin_threshold,
+            convergence_tol=args.convergence_tol,
+            bg_class_count=args.bg_classes,
+            progress_cb=emit,
+        )
+    except TrainingError as exc:
+        print(f"[ERROR] {exc}")
+        sys.exit(1)
+
+    print("\nTraining summary")
+    print("================")
+    print(f"Model path          : {artifacts.model_path}")
+    print(f"Labelmap path       : {artifacts.labelmap_path}")
+    print(f"Metadata path       : {artifacts.meta_path}")
+    print(f"Encoder             : {artifacts.encoder_type} / {artifacts.encoder_model}")
+    print(f"Device              : {artifacts.device}")
+    print(f"Train samples       : {artifacts.samples_train}")
+    print(f"Test samples        : {artifacts.samples_test}")
+    print(f"Classes trained     : {artifacts.classes_seen}")
+    if artifacts.classes_encountered != artifacts.classes_seen:
+        print(f"Classes encountered : {artifacts.classes_encountered}")
+    print(f"Class weight        : {artifacts.class_weight}")
+    print(f"Solver              : {artifacts.solver}")
+    print(f"Iterations run      : {artifacts.iterations_run}")
+    print(f"Converged           : {artifacts.converged}")
+    print(f"Hard example mining : {'yes' if artifacts.hard_example_mining else 'no'}")
+    print(f"Embedding recipe    : {artifacts.preprocess_mode}/{artifacts.embedding_crop_mode}/{artifacts.embedding_adjustment}")
+    print(f"Crop pad / size     : {artifacts.embedding_crop_padding_ratio} / {artifacts.canonical_size}")
+    print(f"Background / views  : {artifacts.background_mode} / {artifacts.embedding_view_mode}")
+    print(f"DINOv3 pooling      : {artifacts.dinov3_pooling}")
+    if artifacts.dinov3_backend:
+        print(f"DINOv3 backend      : {artifacts.dinov3_backend}")
+    print(f"Aggregation         : {artifacts.embedding_aggregation}")
+    print(f"Accuracy            : {artifacts.accuracy:.4f}")
+    if artifacts.classifier_type == "mlp":
+        hidden_sizes = artifacts.mlp_hidden_sizes
+        hidden_display = ",".join(str(x) for x in hidden_sizes) if isinstance(hidden_sizes, list) else str(hidden_sizes)
+        print(f"MLP hidden sizes    : {hidden_display}")
+        print(f"MLP dropout         : {artifacts.mlp_dropout}")
+        print(f"MLP epochs          : {artifacts.mlp_epochs}")
+        print(f"MLP lr              : {artifacts.mlp_lr}")
+        print(f"MLP weight decay    : {artifacts.mlp_weight_decay}")
+        print(f"MLP label smoothing : {artifacts.mlp_label_smoothing}")
+        print(f"MLP loss type       : {artifacts.mlp_loss_type}")
+        if artifacts.mlp_loss_type == "focal":
+            print(f"MLP focal gamma     : {artifacts.mlp_focal_gamma}")
+            print(f"MLP focal alpha     : {artifacts.mlp_focal_alpha}")
+        print(f"MLP sampler         : {artifacts.mlp_sampler}")
+        print(f"MLP mixup alpha     : {artifacts.mlp_mixup_alpha}")
+        print(f"MLP normalize emb   : {artifacts.mlp_normalize_embeddings}")
+
+    print("\nClassification report:")
+    print(artifacts.classification_report)
+
+    print("Confusion matrix:")
+    _print_matrix(artifacts.confusion_matrix, artifacts.label_order)
+
+    if artifacts.per_class_metrics:
+        print("\nPer-class metrics:")
+        header = f"{'class':<20}{'precision':>12}{'recall':>12}{'f1':>12}{'support':>10}"
+        print(header)
+        for entry in artifacts.per_class_metrics:
+            label = str(entry.get('label', ''))
+            precision = entry.get('precision')
+            recall = entry.get('recall')
+            f1 = entry.get('f1')
+            support = entry.get('support')
+            precision_str = f"{precision:.4f}" if precision is not None else "--"
+            recall_str = f"{recall:.4f}" if recall is not None else "--"
+            f1_str = f"{f1:.4f}" if f1 is not None else "--"
+            support_str = str(int(support)) if support is not None else "--"
+            print(f"{label:<20}{precision_str:>12}{recall_str:>12}{f1_str:>12}{support_str:>10}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,5 @@
+{
+  "light_vehicle": ["car", "sedan", "suv", "van", "pickup"],
+  "person": ["person", "pedestrian", "human"],
+  "building": ["building", "house", "warehouse"]
+}

@@ -1,0 +1,846 @@
+import json
+import os
+import time
+
+import pytest
+from fastapi import HTTPException
+from PIL import Image
+
+import localinferenceapi as api
+
+
+def _reset_qwen_progress() -> None:
+    api.qwen_cancel_event.clear()
+    with api.qwen_progress_lock:
+        api.qwen_progress_state.clear()
+        api.qwen_progress_state.update(
+            {
+                "run_id": None,
+                "active": False,
+                "kind": None,
+                "phase": "idle",
+                "phase_label": "Idle",
+                "progress": 0.0,
+                "message": "",
+                "model_id": None,
+                "platform": None,
+                "local": None,
+                "partial": None,
+                "needs_download": None,
+                "cache_path": None,
+                "loaded": False,
+                "input_tokens": None,
+                "generated_tokens": 0,
+                "max_new_tokens": None,
+                "token_preview": "",
+                "started_at": None,
+                "updated_at": None,
+                "completed_at": None,
+                "error": None,
+                "cancel_requested": False,
+                "cancel_force": False,
+                "step_id": None,
+                "step_index": None,
+                "step_total": None,
+                "step_label": None,
+                "step_detail": None,
+                "step_region": None,
+                "step_plan": [],
+                "live_output": "",
+                "io_events": [],
+                "log_lines": [],
+            }
+        )
+
+
+def test_qwen_infer_prompt_render_failure_marks_progress_error(monkeypatch):
+    _reset_qwen_progress()
+
+    def fake_resolve_image_payload(*args, **kwargs):
+        pil_img = Image.new("RGB", (8, 8), color=(128, 128, 128))
+        return pil_img, api.np.zeros((8, 8, 3), dtype=api.np.uint8), "token-1"
+
+    def fake_render_prompt(*args, **kwargs):
+        raise HTTPException(status_code=422, detail="prompt_config_broken")
+
+    monkeypatch.setattr(api, "resolve_image_payload", fake_resolve_image_payload)
+    monkeypatch.setattr(api, "_render_qwen_prompt_impl", fake_render_prompt)
+
+    payload = api.QwenInferenceRequest(
+        image_base64="stub",
+        item_list="car",
+        prompt_type="bbox",
+    )
+
+    try:
+        api.qwen_infer(payload)
+    except HTTPException as exc:
+        assert exc.detail == "prompt_config_broken"
+    else:
+        raise AssertionError("qwen_infer should have raised")
+
+    progress = api.qwen_progress()
+    assert progress["active"] is False
+    assert progress["phase"] == "error"
+    assert progress["error"] == "Qwen prompt rendering failed"
+
+
+def test_qwen_progress_token_updates_preview_and_count():
+    _reset_qwen_progress()
+    api._qwen_progress_start(
+        kind="caption",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="test",
+        max_new_tokens=10,
+    )
+
+    api._qwen_progress_token("A", generated_tokens=1, max_new_tokens=10)
+    api._qwen_progress_token(" caption", generated_tokens=2, max_new_tokens=10)
+
+    progress = api.qwen_progress()
+    assert progress["active"] is True
+    assert progress["phase"] == "generate"
+    assert progress["generated_tokens"] == 2
+    assert progress["token_preview"] == "A caption"
+    assert progress["live_output"] == "A caption"
+
+
+def test_qwen_progress_and_status_report_backend_crash_supervision(monkeypatch):
+    _reset_qwen_progress()
+    monkeypatch.setenv("TATOR_BACKEND_LAUNCHER", "tools/run_macos_backend.sh")
+    monkeypatch.setenv("TATOR_BACKEND_LAUNCHER_RESTARTS_CRASHES", "1")
+    monkeypatch.setenv("TATOR_BACKEND_LAUNCHER_RESTART_MAX", "0")
+    monkeypatch.setenv("TATOR_BACKEND_LAUNCHER_RESTART_DELAY", "1")
+    monkeypatch.setenv("TATOR_BACKEND_LAUNCHER_RESTART_MAX_DELAY", "30")
+
+    progress = api.qwen_progress()
+    status = api.qwen_status()
+
+    assert progress["supervision"]["restart_capable"] is True
+    assert progress["supervision"]["set_and_forget_ready"] is True
+    assert progress["supervision"]["launcher"] == "tools/run_macos_backend.sh"
+    assert progress["supervision"]["restart_max"] == "0"
+    assert progress["supervision"]["restart_policy"]["ready"] is True
+    assert progress["supervision"]["restart_policy"]["restart_max"] == 0
+    assert status["supervision"] == progress["supervision"]
+    assert status["progress"]["supervision"] == progress["supervision"]
+
+
+def test_qwen_progress_reports_underprovisioned_backend_restart_policy(monkeypatch):
+    _reset_qwen_progress()
+    monkeypatch.setenv("TATOR_BACKEND_LAUNCHER", "tools/run_macos_backend.sh")
+    monkeypatch.setenv("TATOR_BACKEND_LAUNCHER_RESTARTS_CRASHES", "1")
+    monkeypatch.setenv("TATOR_BACKEND_LAUNCHER_RESTART_MAX", "1")
+    monkeypatch.setenv("TATOR_BACKEND_LAUNCHER_RESTART_DELAY", "1")
+    monkeypatch.setenv("TATOR_BACKEND_LAUNCHER_RESTART_MAX_DELAY", "30")
+
+    supervision = api.qwen_progress()["supervision"]
+    checks = {check["name"]: check for check in supervision["restart_policy"]["checks"]}
+
+    assert supervision["restart_capable"] is True
+    assert supervision["set_and_forget_ready"] is False
+    assert supervision["restart_policy"]["ready"] is False
+    assert checks["restart_count_budget"]["status"] == "error"
+    assert checks["restart_count_budget"]["restart_max"] == 1
+    assert "not large-run ready" in supervision["message"]
+
+
+def test_qwen_progress_reports_missing_backend_crash_supervision(monkeypatch):
+    _reset_qwen_progress()
+    monkeypatch.delenv("TATOR_BACKEND_LAUNCHER", raising=False)
+    monkeypatch.delenv("TATOR_BACKEND_LAUNCHER_RESTARTS_CRASHES", raising=False)
+
+    supervision = api.qwen_progress()["supervision"]
+
+    assert supervision["restart_capable"] is False
+    assert supervision["set_and_forget_ready"] is False
+    assert supervision["launcher"] is None
+    assert "not advertising crash-restart supervision" in supervision["message"]
+
+
+def test_qwen_progress_step_plan_metadata_and_region():
+    _reset_qwen_progress()
+    api._qwen_progress_start(
+        kind="caption",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="test",
+        max_new_tokens=10,
+    )
+    plan = [
+        {"id": "prepare", "label": "Prepare"},
+        {"id": "load_model", "label": "Load model"},
+        {"id": "window_1", "label": "Caption window 1/1"},
+    ]
+    api._qwen_progress_update(
+        step_plan=plan,
+        step_id="window_1",
+        step_region={
+            "x": 10,
+            "y": 20,
+            "width": 100,
+            "height": 120,
+            "image_name": "sample.jpg",
+        },
+        message="Captioning window",
+    )
+
+    progress = api.qwen_progress()
+    assert progress["step_id"] == "window_1"
+    assert progress["step_index"] == 3
+    assert progress["step_total"] == 3
+    assert progress["step_label"] == "Caption window 1/1"
+    assert len(progress["step_plan"]) == 3
+    assert progress["step_region"]["x"] == 10.0
+    assert progress["step_region"]["image_name"] == "sample.jpg"
+
+
+def test_qwen_caption_step_plan_describes_windowed_two_stage_flow():
+    plan = api._build_qwen_caption_step_plan(
+        caption_mode="windowed",
+        total_windows=4,
+        two_stage=True,
+        is_thinking=True,
+        force_unload=True,
+        caption_model_id="caption-model",
+        refinement_model_id="refine-model",
+    )
+    ids = [entry["id"] for entry in plan]
+    assert ids[:2] == ["prepare", "load_model"]
+    assert "window_4" in ids
+    assert "draft_caption" in ids
+    assert "refine_draft" in ids
+    assert ids[-2:] == ["unload_model", "finalize"]
+
+
+def test_qwen_caption_cancel_marks_progress_and_new_run_clears_event():
+    _reset_qwen_progress()
+    first_run = api._qwen_progress_start(
+        kind="caption",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="test",
+        max_new_tokens=10,
+    )
+
+    result = api.cancel_qwen_caption(force=False)
+
+    assert result["cancelled"] is True
+    assert result["run_id"] == first_run
+    assert api.qwen_cancel_event.is_set()
+    progress = api.qwen_progress()
+    assert progress["active"] is True
+    assert progress["phase"] == "cancelling"
+    assert progress["cancel_requested"] is True
+    assert progress["cancel_force"] is False
+
+    second_run = api._qwen_progress_start(
+        kind="caption",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="next",
+        max_new_tokens=10,
+    )
+
+    assert second_run != first_run
+    assert not api.qwen_cancel_event.is_set()
+    assert api.qwen_progress()["cancel_requested"] is False
+
+
+def test_qwen_cancel_request_handles_active_prepass():
+    _reset_qwen_progress()
+    run_id = api._qwen_progress_start(
+        kind="prepass",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="test",
+        max_new_tokens=10,
+    )
+
+    result = api.cancel_qwen_request(force=False)
+
+    assert result["cancelled"] is True
+    assert result["kind"] == "prepass"
+    assert result["run_id"] == run_id
+    assert api.qwen_cancel_event.is_set()
+    progress = api.qwen_progress()
+    assert progress["active"] is True
+    assert progress["phase"] == "cancelling"
+    assert progress["cancel_requested"] is True
+
+
+def test_qwen_caption_cancel_does_not_cancel_active_prepass():
+    _reset_qwen_progress()
+    api._qwen_progress_start(
+        kind="prepass",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="test",
+        max_new_tokens=10,
+    )
+
+    result = api.cancel_qwen_caption(force=False)
+
+    assert result["cancelled"] is False
+    assert result["active"] is True
+    assert result["kind"] == "prepass"
+    assert not api.qwen_cancel_event.is_set()
+    assert api.qwen_progress()["phase"] == "prepare"
+
+
+def test_qwen_progress_expires_stale_active_request(monkeypatch):
+    _reset_qwen_progress()
+    monkeypatch.setattr(api, "QWEN_PROGRESS_STALE_SECONDS", 5.0)
+    api._qwen_progress_start(
+        kind="prepass",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="test",
+        max_new_tokens=10,
+    )
+    with api.qwen_progress_lock:
+        api.qwen_progress_state["updated_at"] = 100.0
+        api.qwen_progress_state["started_at"] = 100.0
+    monkeypatch.setattr(api.time, "time", lambda: 110.25)
+
+    progress = api.qwen_progress()
+
+    assert progress["active"] is False
+    assert progress["phase"] == "error"
+    assert progress["phase_label"] == "Stale"
+    assert progress["error"] == "stale_progress"
+    assert "became stale" in progress["message"]
+    assert api.qwen_cancel_event.is_set()
+
+
+def test_qwen_progress_uses_caption_specific_stale_timeout(monkeypatch):
+    _reset_qwen_progress()
+    monkeypatch.setattr(api, "QWEN_PROGRESS_STALE_SECONDS", 1800.0)
+    monkeypatch.setattr(api, "QWEN_CAPTION_PROGRESS_STALE_SECONDS", 5.0)
+    api._qwen_progress_start(
+        kind="caption",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="test",
+        max_new_tokens=10,
+    )
+    with api.qwen_progress_lock:
+        api.qwen_progress_state["updated_at"] = 100.0
+        api.qwen_progress_state["started_at"] = 100.0
+    monkeypatch.setattr(api.time, "time", lambda: 110.0)
+
+    progress = api.qwen_progress()
+
+    assert progress["active"] is False
+    assert progress["phase"] == "error"
+    assert progress["error"] == "stale_progress"
+
+
+def test_qwen_progress_keeps_fresh_active_request_active(monkeypatch):
+    _reset_qwen_progress()
+    monkeypatch.setattr(api, "QWEN_PROGRESS_STALE_SECONDS", 5.0)
+    api._qwen_progress_start(
+        kind="prepass",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="test",
+        max_new_tokens=10,
+    )
+    with api.qwen_progress_lock:
+        api.qwen_progress_state["updated_at"] = 100.0
+        api.qwen_progress_state["started_at"] = 100.0
+    monkeypatch.setattr(api.time, "time", lambda: 103.0)
+
+    progress = api.qwen_progress()
+
+    assert progress["active"] is True
+    assert progress["phase"] == "prepare"
+    assert progress["error"] is None
+    assert not api.qwen_cancel_event.is_set()
+
+
+def test_qwen_prepass_progress_uses_caption_token_budget(monkeypatch):
+    _reset_qwen_progress()
+    monkeypatch.setattr(
+        api,
+        "_run_prepass_annotation",
+        lambda payload: {"detections": [], "warnings": [], "image_token": payload.image_token},
+    )
+
+    api.qwen_prepass(
+        api.QwenPrepassRequest(
+            image_base64="stub",
+            prepass_caption=True,
+            prepass_caption_profile="deep",
+            prepass_caption_max_tokens=99999,
+        )
+    )
+
+    progress = api.qwen_progress()
+    assert progress["max_new_tokens"] == 2000
+    assert progress["phase"] == "complete"
+
+
+def test_qwen_prepass_progress_uses_caption_profile_default(monkeypatch):
+    _reset_qwen_progress()
+    monkeypatch.setattr(
+        api,
+        "_run_prepass_annotation",
+        lambda payload: {"detections": [], "warnings": [], "image_token": payload.image_token},
+    )
+
+    api.qwen_prepass(
+        api.QwenPrepassRequest(
+            image_base64="stub",
+            prepass_caption=True,
+            prepass_caption_profile="light",
+        )
+    )
+
+    assert api.qwen_progress()["max_new_tokens"] == 512
+
+
+def test_qwen_prepass_cancellation_marks_progress_cancelled(monkeypatch):
+    _reset_qwen_progress()
+
+    def fake_prepass(_payload):
+        raise api.QwenCancellationRequested("qwen_cancelled")
+
+    monkeypatch.setattr(api, "_run_prepass_annotation", fake_prepass)
+
+    with pytest.raises(HTTPException) as exc_info:
+        api.qwen_prepass(api.QwenPrepassRequest(image_base64="stub"))
+
+    assert exc_info.value.status_code == 499
+    assert exc_info.value.detail == "qwen_prepass_cancelled"
+    progress = api.qwen_progress()
+    assert progress["active"] is False
+    assert progress["phase"] == "cancelled"
+    assert progress["error"] == "cancelled"
+
+
+def test_qwen_caption_io_input_does_not_fail_on_bad_token_count(monkeypatch, tmp_path):
+    _reset_qwen_progress()
+    monkeypatch.setattr(api, "LOG_ROOT", tmp_path)
+    api._qwen_progress_start(
+        kind="caption",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="test",
+        max_new_tokens=10,
+    )
+
+    api._qwen_caption_io_input(
+        call_id="call-1",
+        source="test",
+        model_id="model",
+        max_new_tokens="not-an-int",
+    )
+
+    latest_jsonl = tmp_path / "qwen_caption_io_latest.jsonl"
+    records = [json.loads(line) for line in latest_jsonl.read_text(encoding="utf-8").splitlines()]
+    assert records[-1]["event"] == "input"
+    assert records[-1]["max_new_tokens"] is None
+
+
+def test_qwen_caption_io_events_are_exposed_in_progress(monkeypatch, tmp_path):
+    _reset_qwen_progress()
+    monkeypatch.setattr(api, "LOG_ROOT", tmp_path)
+    api._qwen_progress_start(
+        kind="caption",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="test",
+        max_new_tokens=10,
+    )
+
+    api._qwen_caption_io_input(
+        call_id="call-1",
+        source="test",
+        model_id="model",
+        prompt_text="prompt with hints",
+        rendered_prompt="rendered prompt",
+    )
+    api._qwen_caption_io_output(
+        call_id="call-1",
+        source="test",
+        model_id="model",
+        output_text="model output",
+        loop_detected=True,
+        degenerate_reason="punctuation_loop",
+    )
+
+    events = api.qwen_progress()["io_events"]
+    assert [event["kind"] for event in events[-2:]] == ["prompt", "output"]
+    assert "rendered prompt" in events[-2]["text"]
+    assert "model output" in events[-1]["text"]
+    assert "degenerate_reason: punctuation_loop" in events[-1]["text"]
+
+
+def test_qwen_caption_io_prompt_budget_records_requested_and_effective_caps(monkeypatch, tmp_path):
+    _reset_qwen_progress()
+    monkeypatch.setattr(api, "LOG_ROOT", tmp_path)
+    api._qwen_progress_start(
+        kind="caption",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_MLX,
+        message="test",
+        max_new_tokens=3000,
+    )
+
+    api._qwen_caption_io_prompt_budget(
+        call_id="call-1",
+        source="qwen_chat_mlx",
+        runtime_platform=api.QWEN_PLATFORM_MLX,
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        prompt_tokens=6400,
+        requested_max_new_tokens=3000,
+        effective_max_new_tokens=512,
+        explicit_max_new_tokens=False,
+    )
+
+    latest_jsonl = tmp_path / "qwen_caption_io_latest.jsonl"
+    records = [json.loads(line) for line in latest_jsonl.read_text(encoding="utf-8").splitlines()]
+    assert records[-1]["event"] == "prompt_budget"
+    assert records[-1]["requested_max_new_tokens"] == 3000
+    assert records[-1]["effective_max_new_tokens"] == 512
+    assert records[-1]["max_new_tokens"] == 512
+    assert records[-1]["explicit_max_new_tokens"] is False
+
+    event = api.qwen_progress()["io_events"][-1]
+    assert "requested_max_new_tokens: 3000" in event["text"]
+    assert "effective_max_new_tokens: 512" in event["text"]
+
+
+def test_qwen_caption_io_readable_failure_does_not_break_request(monkeypatch, tmp_path):
+    _reset_qwen_progress()
+    monkeypatch.setattr(api, "LOG_ROOT", tmp_path)
+    monkeypatch.setattr(
+        api,
+        "_qwen_caption_io_readable",
+        lambda _record: (_ for _ in ()).throw(RuntimeError("format failed")),
+    )
+    api._qwen_progress_start(
+        kind="caption",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="test",
+        max_new_tokens=10,
+    )
+
+    api._qwen_caption_io_record({"event": "input", "call_id": "call-2"})
+
+    latest_jsonl = tmp_path / "qwen_caption_io_latest.jsonl"
+    records = [json.loads(line) for line in latest_jsonl.read_text(encoding="utf-8").splitlines()]
+    assert records[-1]["event"] == "input"
+
+
+def test_qwen_caption_io_stops_after_caption_progress_finishes(monkeypatch, tmp_path):
+    _reset_qwen_progress()
+    monkeypatch.setattr(api, "LOG_ROOT", tmp_path)
+    api._qwen_progress_start(
+        kind="caption",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="test",
+        max_new_tokens=10,
+    )
+    latest_jsonl = tmp_path / "qwen_caption_io_latest.jsonl"
+    before = latest_jsonl.read_text(encoding="utf-8")
+
+    api._qwen_progress_finish("done", token_preview="caption")
+    api._qwen_caption_io_output(
+        call_id="stale-call",
+        source="test",
+        model_id="model",
+        output_text="stale",
+    )
+
+    assert latest_jsonl.read_text(encoding="utf-8") == before
+
+
+def test_qwen_caption_io_reset_replaces_symlinked_latest_logs(monkeypatch, tmp_path):
+    _reset_qwen_progress()
+    monkeypatch.setattr(api, "LOG_ROOT", tmp_path)
+    outside_jsonl = tmp_path / "outside_latest.jsonl"
+    outside_text = tmp_path / "outside_latest.log"
+    outside_jsonl.write_text("external jsonl\n", encoding="utf-8")
+    outside_text.write_text("external text\n", encoding="utf-8")
+    latest_jsonl = tmp_path / "qwen_caption_io_latest.jsonl"
+    latest_text = tmp_path / "qwen_caption_io_latest.log"
+    try:
+        latest_jsonl.symlink_to(outside_jsonl)
+        latest_text.symlink_to(outside_text)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    api._qwen_progress_start(
+        kind="caption",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="test",
+        max_new_tokens=10,
+    )
+
+    assert outside_jsonl.read_text(encoding="utf-8") == "external jsonl\n"
+    assert outside_text.read_text(encoding="utf-8") == "external text\n"
+    assert not latest_jsonl.is_symlink()
+    assert not latest_text.is_symlink()
+    assert json.loads(latest_jsonl.read_text(encoding="utf-8").splitlines()[-1])["event"] == "run_start"
+
+
+def test_qwen_caption_io_append_replaces_symlinked_run_log(monkeypatch, tmp_path):
+    _reset_qwen_progress()
+    monkeypatch.setattr(api, "LOG_ROOT", tmp_path)
+    run_id = api._qwen_progress_start(
+        kind="caption",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="test",
+        max_new_tokens=10,
+    )
+    run_jsonl = tmp_path / "qwen_caption_io" / f"{run_id}.jsonl"
+    outside_jsonl = tmp_path / "outside_run.jsonl"
+    outside_jsonl.write_text("external run\n", encoding="utf-8")
+    try:
+        run_jsonl.unlink()
+        run_jsonl.symlink_to(outside_jsonl)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    api._qwen_caption_io_record({"event": "input", "call_id": "call-linked"})
+
+    assert outside_jsonl.read_text(encoding="utf-8") == "external run\n"
+    assert not run_jsonl.is_symlink()
+    records = [json.loads(line) for line in run_jsonl.read_text(encoding="utf-8").splitlines()]
+    assert records[-1]["event"] == "input"
+
+
+def test_qwen_caption_io_prepare_rejects_nested_symlinked_parent_before_mkdir(tmp_path):
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    safe_path = api._qwen_caption_io_prepare_file(
+        linked_parent / "nested" / "logs" / "qwen_caption_io_latest.jsonl"
+    )
+
+    assert safe_path is None
+    assert list(outside.iterdir()) == []
+
+
+def test_qwen_caption_io_reset_rejects_nested_symlinked_run_parent_before_mkdir(
+    monkeypatch, tmp_path
+):
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "LOG_ROOT", linked_parent / "nested" / "logs")
+
+    api._qwen_caption_io_reset_latest("run-through-linked-parent")
+
+    assert list(outside.iterdir()) == []
+
+
+def test_qwen_caption_io_prunes_old_run_logs_by_file_count(monkeypatch, tmp_path):
+    _reset_qwen_progress()
+    monkeypatch.setattr(api, "LOG_ROOT", tmp_path)
+    monkeypatch.setattr(api, "QWEN_CAPTION_IO_RUN_LOG_MAX_FILES", 4)
+    monkeypatch.setattr(api, "QWEN_CAPTION_IO_RUN_LOG_MAX_BYTES", 0)
+    run_root = tmp_path / "qwen_caption_io"
+    run_root.mkdir(parents=True)
+    base = time.time() - 1000
+    for index in range(6):
+        path = run_root / f"old-{index}.jsonl"
+        path.write_text(f"{index}\n", encoding="utf-8")
+        mtime = base + index
+        os.utime(path, (mtime, mtime))
+
+    api._qwen_caption_io_reset_latest("current")
+
+    remaining = sorted(path.name for path in run_root.iterdir() if path.is_file())
+    assert remaining == ["old-2.jsonl", "old-3.jsonl", "old-4.jsonl", "old-5.jsonl"]
+
+
+def test_qwen_caption_io_prune_keeps_active_run_logs(monkeypatch, tmp_path):
+    _reset_qwen_progress()
+    monkeypatch.setattr(api, "LOG_ROOT", tmp_path)
+    monkeypatch.setattr(api, "QWEN_CAPTION_IO_RUN_LOG_MAX_FILES", 1)
+    monkeypatch.setattr(api, "QWEN_CAPTION_IO_RUN_LOG_MAX_BYTES", 1)
+    run_root = tmp_path / "qwen_caption_io"
+    run_root.mkdir(parents=True)
+    active_jsonl = run_root / "active.jsonl"
+    active_log = run_root / "active.log"
+    stale_jsonl = run_root / "stale.jsonl"
+    stale_log = run_root / "stale.log"
+    active_jsonl.write_text("active jsonl\n", encoding="utf-8")
+    active_log.write_text("active log\n", encoding="utf-8")
+    stale_jsonl.write_text("stale jsonl\n", encoding="utf-8")
+    stale_log.write_text("stale log\n", encoding="utf-8")
+    old_time = time.time() - 1000
+    new_time = time.time()
+    for path in (active_jsonl, active_log):
+        os.utime(path, (old_time, old_time))
+    for path in (stale_jsonl, stale_log):
+        os.utime(path, (new_time, new_time))
+
+    api._qwen_caption_io_prune_run_logs("active")
+
+    assert active_jsonl.exists()
+    assert active_log.exists()
+    assert not stale_jsonl.exists()
+    assert not stale_log.exists()
+
+
+def test_qwen_prepass_trace_reset_replaces_symlinked_latest_logs(tmp_path):
+    full_root = tmp_path / "prepass_full"
+    readable_root = tmp_path / "prepass_readable"
+    full_root.mkdir()
+    readable_root.mkdir()
+    outside_jsonl = tmp_path / "outside_latest.jsonl"
+    outside_log = tmp_path / "outside_latest.log"
+    outside_jsonl.write_text("external jsonl\n", encoding="utf-8")
+    outside_log.write_text("external log\n", encoding="utf-8")
+    latest_jsonl = full_root / "latest.jsonl"
+    latest_log = readable_root / "latest.log"
+    try:
+        latest_jsonl.symlink_to(outside_jsonl)
+        latest_log.symlink_to(outside_log)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    assert api._qwen_prepass_trace_prepare_path(latest_jsonl, full_root, reset=True) == str(
+        latest_jsonl
+    )
+    assert api._qwen_prepass_trace_prepare_path(latest_log, readable_root, reset=True) == str(
+        latest_log
+    )
+    api._qwen_prepass_trace_write_file(
+        latest_jsonl,
+        full_root,
+        "{\"event\":\"start\"}\n",
+        append=True,
+    )
+    api._qwen_prepass_trace_write_file(latest_log, readable_root, "started\n", append=True)
+
+    assert outside_jsonl.read_text(encoding="utf-8") == "external jsonl\n"
+    assert outside_log.read_text(encoding="utf-8") == "external log\n"
+    assert not latest_jsonl.is_symlink()
+    assert not latest_log.is_symlink()
+    assert latest_jsonl.read_text(encoding="utf-8") == "{\"event\":\"start\"}\n"
+    assert latest_log.read_text(encoding="utf-8") == "started\n"
+
+
+def test_qwen_prepass_trace_append_replaces_symlinked_run_log(tmp_path):
+    trace_root = tmp_path / "prepass_traces"
+    trace_root.mkdir()
+    trace_path = trace_root / "prepass_run.jsonl"
+    outside_path = tmp_path / "outside_run.jsonl"
+    outside_path.write_text("external run\n", encoding="utf-8")
+    try:
+        trace_path.symlink_to(outside_path)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    api._qwen_prepass_trace_write_file(
+        trace_path,
+        trace_root,
+        "{\"event\":\"run\"}\n",
+        append=True,
+    )
+
+    assert outside_path.read_text(encoding="utf-8") == "external run\n"
+    assert not trace_path.is_symlink()
+    assert trace_path.read_text(encoding="utf-8") == "{\"event\":\"run\"}\n"
+
+
+def test_qwen_prepass_trace_rejects_symlinked_root(tmp_path):
+    outside_root = tmp_path / "outside_root"
+    outside_root.mkdir()
+    trace_root = tmp_path / "prepass_traces"
+    try:
+        trace_root.symlink_to(outside_root, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    api._qwen_prepass_trace_write_file(
+        trace_root / "latest.jsonl",
+        trace_root,
+        "{\"event\":\"escaped\"}\n",
+        append=True,
+    )
+
+    assert not (outside_root / "latest.jsonl").exists()
+
+
+def test_qwen_prepass_trace_rejects_symlinked_parent_root(tmp_path):
+    outside_parent = tmp_path / "outside_parent"
+    outside_parent.mkdir()
+    trace_parent = tmp_path / "trace_parent"
+    try:
+        trace_parent.symlink_to(outside_parent, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    trace_root = trace_parent / "prepass_traces"
+
+    written = api._qwen_prepass_trace_write_file(
+        trace_root / "latest.jsonl",
+        trace_root,
+        "{\"event\":\"escaped\"}\n",
+        append=True,
+    )
+
+    assert written is False
+    assert list(outside_parent.iterdir()) == []
+
+
+def test_qwen_prepass_trace_rejects_nested_symlinked_parent_root(tmp_path):
+    outside_parent = tmp_path / "outside_parent"
+    outside_parent.mkdir()
+    trace_parent = tmp_path / "trace_parent"
+    try:
+        trace_parent.symlink_to(outside_parent, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    trace_root = trace_parent / "nested" / "prepass_traces"
+
+    written = api._qwen_prepass_trace_write_file(
+        trace_root / "latest.jsonl",
+        trace_root,
+        "{\"event\":\"escaped\"}\n",
+        append=True,
+    )
+
+    assert written is False
+    assert list(outside_parent.iterdir()) == []
+
+
+def test_qwen_prepass_trace_rejects_nested_symlinked_file_parent_before_mkdir(tmp_path):
+    trace_root = tmp_path / "prepass_traces"
+    trace_root.mkdir()
+    outside_parent = tmp_path / "outside_parent"
+    outside_parent.mkdir()
+    linked_parent = trace_root / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside_parent, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    written = api._qwen_prepass_trace_write_file(
+        linked_parent / "nested" / "latest.jsonl",
+        trace_root,
+        "{\"event\":\"escaped\"}\n",
+        append=True,
+    )
+
+    assert written is False
+    assert list(outside_parent.iterdir()) == []

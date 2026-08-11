@@ -1,0 +1,13 @@
+# MLX-VLM install target for the macOS backend.
+#
+# In the full .venv-macos environment, install this file with --no-deps after
+# requirements-macos-inference.txt. mlx-vlm 0.6.6 adds SAM3 geometry support
+# and preserves pre-converted MLX convolution layouts when loading checkpoints.
+# Keep this as a package layer, not a separate Python environment. The main
+# macOS backend now uses Transformers 5.x; install mlx-vlm with --no-deps so it
+# does not replace the SAHI/SAM3-compatible OpenCV/NumPy line.
+
+mlx>=0.31,<1.0
+mlx-lm==0.31.3
+mlx-audio>=0.4.3,<0.5
+mlx-vlm==0.6.6

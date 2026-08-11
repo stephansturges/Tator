@@ -46,6 +46,30 @@ class ClassAnalysisQualityTests(unittest.TestCase):
         self.assertEqual(resolve_quality_recipe("balanced").recipe_id, THOROUGH_QUALITY_RECIPE)
         self.assertTrue(resolve_quality_recipe("thorough_quality_v1").use_cradio)
 
+    def test_custom_recipe_honors_normalized_multibackbone_weights(self):
+        recipe = resolve_quality_recipe(
+            "custom",
+            {
+                "quality_use_cradio": True,
+                "quality_use_el2n": True,
+                "quality_compact_weight": 3.0,
+                "quality_cradio_weight": 1.0,
+                "quality_late_compact_weight": 6.0,
+                "quality_late_cradio_weight": 4.0,
+                "quality_late_weight": 7.0,
+                "quality_el2n_weight": 3.0,
+            },
+        )
+        self.assertEqual(recipe.recipe_id, "custom")
+        self.assertTrue(recipe.use_cradio)
+        self.assertTrue(recipe.use_el2n)
+        self.assertAlmostEqual(recipe.compact_weight, 0.5)
+        self.assertAlmostEqual(recipe.cradio_weight, 0.5)
+        self.assertAlmostEqual(recipe.late_compact_weight, 0.5)
+        self.assertAlmostEqual(recipe.late_cradio_weight, 0.5)
+        self.assertAlmostEqual(recipe.late_weight, 0.5)
+        self.assertAlmostEqual(recipe.el2n_weight, 0.5)
+
     def test_feature_merge_is_aligned_and_normalized(self):
         compact = np.asarray([[1.0, 0.0], [0.0, 2.0]], dtype=np.float32)
         cradio = np.asarray([[0.0, 1.0], [3.0, 0.0]], dtype=np.float32)

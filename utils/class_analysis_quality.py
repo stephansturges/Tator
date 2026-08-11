@@ -215,10 +215,93 @@ def _quality_progress(
         callback(float(progress), str(message))
 
 
-def resolve_quality_recipe(value: Any) -> QualityRecipe:
+def resolve_quality_recipe(
+    value: Any,
+    overrides: Mapping[str, Any] | None = None,
+) -> QualityRecipe:
     recipe_id = QUALITY_RECIPE_ALIASES.get(str(value or "").strip().lower())
-    if not recipe_id or recipe_id == CUSTOM_RECIPE:
-        recipe_id = PRECISE_COMPACT_RECIPE if recipe_id == CUSTOM_RECIPE else THOROUGH_QUALITY_RECIPE
+    if not recipe_id:
+        recipe_id = THOROUGH_QUALITY_RECIPE
+    if recipe_id == CUSTOM_RECIPE:
+        values = overrides or {}
+
+        def custom_bool(key: str, default: bool = False) -> bool:
+            raw = values.get(key, default)
+            if isinstance(raw, str):
+                return raw.strip().lower() in {"1", "true", "yes", "on"}
+            return bool(raw)
+
+        def normalized_pair(
+            first_key: str,
+            second_key: str,
+            first_default: float,
+            second_default: float,
+        ) -> tuple[float, float]:
+            try:
+                first = float(values.get(first_key, first_default))
+            except (TypeError, ValueError):
+                first = first_default
+            try:
+                second = float(values.get(second_key, second_default))
+            except (TypeError, ValueError):
+                second = second_default
+            first = max(0.0, min(1.0, first)) if math.isfinite(first) else first_default
+            second = max(0.0, min(1.0, second)) if math.isfinite(second) else second_default
+            total = first + second
+            if total <= 0.0:
+                first, second, total = first_default, second_default, first_default + second_default
+            return first / total, second / total
+
+        use_cradio = custom_bool("quality_use_cradio")
+        use_el2n = custom_bool("quality_use_el2n")
+        compact_weight, cradio_weight = normalized_pair(
+            "quality_compact_weight",
+            "quality_cradio_weight",
+            0.75 if use_cradio else 1.0,
+            0.25 if use_cradio else 0.0,
+        )
+        if not use_cradio:
+            compact_weight, cradio_weight = 1.0, 0.0
+        local_weight, logistic_weight = normalized_pair(
+            "quality_local_weight",
+            "quality_logistic_weight",
+            0.35,
+            0.65,
+        )
+        late_compact_weight, late_cradio_weight = normalized_pair(
+            "quality_late_compact_weight",
+            "quality_late_cradio_weight",
+            0.60 if use_cradio else 1.0,
+            0.40 if use_cradio else 0.0,
+        )
+        if not use_cradio:
+            late_compact_weight, late_cradio_weight = 1.0, 0.0
+        late_weight, el2n_weight = normalized_pair(
+            "quality_late_weight",
+            "quality_el2n_weight",
+            0.70 if use_el2n else 1.0,
+            0.30 if use_el2n else 0.0,
+        )
+        if not use_el2n:
+            late_weight, el2n_weight = 1.0, 0.0
+        return QualityRecipe(
+            recipe_id=CUSTOM_RECIPE,
+            label="Custom",
+            compact_weight=compact_weight,
+            cradio_weight=cradio_weight,
+            local_weight=local_weight,
+            logistic_weight=logistic_weight,
+            late_compact_weight=late_compact_weight,
+            late_cradio_weight=late_cradio_weight,
+            late_weight=late_weight,
+            el2n_weight=el2n_weight,
+            review_fraction=max(
+                0.01,
+                min(0.25, float(values.get("quality_review_fraction") or 0.05)),
+            ),
+            use_cradio=use_cradio,
+            use_el2n=use_el2n,
+        )
     return RECIPES[recipe_id]
 
 
@@ -939,6 +1022,7 @@ def score_quality_records(
     cradio_embeddings: np.ndarray | None = None,
     *,
     recipe_id: str = THOROUGH_QUALITY_RECIPE,
+    recipe_overrides: Mapping[str, Any] | None = None,
     seed: int = 17,
     logistic_fit_limit: int = 8192,
     rbf_fit_limit: int = 4096,
@@ -952,7 +1036,7 @@ def score_quality_records(
     cancel_callback: Callable[[], bool] | None = None,
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> tuple[np.ndarray, list[dict[str, Any]], list[str]]:
-    recipe = resolve_quality_recipe(recipe_id)
+    recipe = resolve_quality_recipe(recipe_id, recipe_overrides)
     compact_source = np.asarray(compact_embeddings)
     if compact_source.ndim != 2 or compact_source.shape[0] != len(records):
         raise ValueError("quality records and compact embeddings must align")

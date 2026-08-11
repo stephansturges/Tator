@@ -20945,15 +20945,15 @@ async function cancelRfDetrTrainingJobRequest() {
     function embeddingRecipePresetLabel(preset) {
         const key = String(preset || "").toLowerCase();
         const labels = {
-            thorough_quality_v1: "Thorough quality",
-            precise_compact_v1: "Precise compact",
-            fast_map_v1: "Fast map",
+            thorough_quality_v1: "Thorough multi-backbone",
+            precise_compact_v1: "Balanced compact fusion",
+            fast_map_v1: "Fast single-backbone",
             fast: "Fast coarse",
             balanced: "Balanced default",
             precise: "Precise best",
             fusion: "DINOv3 + SAM3 fusion",
             cradio: "C-RADIOv4 summary",
-            custom: "Custom advanced",
+            custom: "Custom recipe",
         };
         return labels[key] || labels.balanced;
     }
@@ -21027,7 +21027,7 @@ async function cancelRfDetrTrainingJobRequest() {
             if (preset === "thorough_quality_v1") {
                 purpose = "Maximum discrimination and queue quality when runtime and RAM are available.";
                 facts = [
-                    ["Compact descriptor", "2,944-D: DINOv3 tight/context 2,048-D + SAM3 mask 256-D + balanced SALAD 640-D."],
+                    ["Compact descriptor", "2,432-D: DINOv3 tight/context 1,536-D + SAM3 mask 256-D + balanced SALAD 640-D."],
                     ["Compact fusion", "67.5% DINOv3, 22.5% SAM3, and 10% SALAD cosine contribution. Percentages are similarity weights, not shares of dimensions."],
                     ["Second backbone", "C-RADIOv4 summary adds a separate 4,608-D branch. Quality features merge compact/C-RADIO at 75%/25%."],
                     ["Queue scoring", "Local-neighbor/logistic evidence blends at 35%/65%, then late evidence and EL2N blend at 70%/30%."],
@@ -21036,7 +21036,7 @@ async function cancelRfDetrTrainingJobRequest() {
             } else if (preset === "precise_compact_v1") {
                 purpose = "Strong compact separation without the C-RADIO and EL2N passes.";
                 facts = [
-                    ["Descriptor", "2,944-D: DINOv3 tight/context 2,048-D + SAM3 mask 256-D + balanced SALAD 640-D."],
+                    ["Descriptor", "2,432-D: DINOv3 tight/context 1,536-D + SAM3 mask 256-D + balanced SALAD 640-D."],
                     ["Fusion", "67.5% DINOv3, 22.5% SAM3, and 10% SALAD cosine contribution."],
                     ["Queue scoring", "Local-neighbor/logistic evidence blends at 35%/65%; C-RADIO and EL2N are disabled."],
                     ["Use when", "You want most of the object/mask/token discrimination with lower RAM and runtime."],
@@ -21073,7 +21073,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 `<dl class="class-split-recipe-facts">`,
                 ...facts.map(([term, description]) => `<div><dt>${escapeHtml(term)}</dt><dd>${escapeHtml(description)}</dd></div>`),
                 `</dl>`,
-                `<p class="class-split-recipe-projection-note">${escapeHtml(projectionNote)} Deep evidence is a separate opt-in VLM evidence pass and works with every recipe and map type.</p>`,
+                `<p class="class-split-recipe-projection-note">${escapeHtml(projectionNote)} Spatial evidence refinement is a separate deterministic preparation pass and works with every recipe and map type.</p>`,
             ].join("");
             return;
         }
@@ -51745,6 +51745,16 @@ async function cancelRfDetrTrainingJobRequest() {
         if (sampleCap > 0) {
             request.sample_cap = sampleCap;
         }
+        const guidedFeatureMode = document.getElementById("classSplitFeatureMode")?.value || "single_backbone";
+        const compactWeightPercent = Number(document.getElementById("classSplitCompactWeight")?.value || 100);
+        request.feature_mode = guidedFeatureMode;
+        request.quality_use_cradio = guidedFeatureMode === "multi_backbone_fusion";
+        request.quality_use_el2n = Boolean(document.getElementById("classSplitUseEl2n")?.checked);
+        request.quality_compact_weight = Math.max(0, Math.min(1, compactWeightPercent / 100));
+        request.quality_cradio_weight = guidedFeatureMode === "multi_backbone_fusion"
+            ? Math.max(0, Math.min(1, 1 - request.quality_compact_weight))
+            : 0;
+
         return request;
     }
 
@@ -51788,6 +51798,10 @@ async function cancelRfDetrTrainingJobRequest() {
             request.quality_full_warning_acknowledged = true;
             request.quality_preflight_digest = String(payload.preflight_digest || "");
         }
+        if (typeof payload !== "undefined" && typeof window.renderClassSplitResolvedRecipe === "function") {
+            window.renderClassSplitResolvedRecipe(payload.resolved_recipe || null, payload);
+        }
+
         return request;
     }
 
@@ -77772,4 +77786,109 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
+})();
+
+
+// Guided Data Quality Explorer setup. Backend preflight remains authoritative;
+// this layer only keeps visible choices and the concise preview synchronized.
+(() => {
+    const presetConfig = {
+        thorough: { mode: "multi_backbone_fusion", el2n: true, compactWeight: 75 },
+        precise: { mode: "compact_fusion", el2n: false, compactWeight: 100 },
+        fast: { mode: "single_backbone", el2n: false, compactWeight: 100 },
+    };
+    const byId = (id) => document.getElementById(id);
+    const escapeText = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
+    const selectedText = (id) => { const e = byId(id); return e?.options?.[e.selectedIndex]?.textContent?.trim() || ""; };
+
+    function primaryDimension() {
+        const model = String(byId("classSplitBackbone")?.value || "").toLowerCase();
+        if (model.includes("vitg")) return 1536;
+        if (model.includes("vith")) return 1280;
+        if (model.includes("vitl")) return 1024;
+        if (model.includes("vits")) return 384;
+        return 768;
+    }
+    function currentRecipe() {
+        const mode = byId("classSplitFeatureMode")?.value || "single_backbone";
+        const aggregation = byId("classSplitEmbeddingAggregation")?.value || "single";
+        const base = primaryDimension();
+        const dino = ["cls_patch_concat", "tight_context"].includes(aggregation) ? base * 2 : base;
+        const compact = dino + 128 + 768;
+        const compactWeight = Math.max(0, Math.min(100, Number(byId("classSplitCompactWeight")?.value || 100)));
+        return {
+            mode,
+            dimension: mode === "multi_backbone_fusion" ? compact + 4608 : mode === "compact_fusion" ? compact : dino,
+            compactWeight,
+            cradioWeight: mode === "multi_backbone_fusion" ? 100 - compactWeight : 0,
+            el2n: Boolean(byId("classSplitUseEl2n")?.checked),
+            backbone: selectedText("classSplitBackbone") || "DINOv3",
+            map: selectedText("classSplitProjection") || "UMAP",
+            memory: selectedText("classSplitQualityMemoryPolicy") || "Automatic",
+            refine: Boolean(byId("classSplitRefineOutliers")?.checked),
+        };
+    }
+    function modeLabel(mode) {
+        if (mode === "multi_backbone_fusion") return "Multi-backbone fusion";
+        if (mode === "compact_fusion") return "Compact fusion";
+        return "Single backbone";
+    }
+    function renderExplanation() {
+        const target = byId("classSplitRecipeExplanation");
+        if (!target) return;
+        const recipe = currentRecipe();
+        const branches = recipe.mode === "multi_backbone_fusion"
+            ? "DINOv3 object features + SAM3 shape + SALAD retrieval + C-RADIO complementary features"
+            : recipe.mode === "compact_fusion"
+                ? "DINOv3 object features + SAM3 shape + SALAD retrieval"
+                : `${recipe.backbone} object features`;
+        target.innerHTML = `<strong>${escapeText(modeLabel(recipe.mode))}</strong><span>${escapeText(branches)}</span><small>Expected current output: ${recipe.dimension.toLocaleString()} dimensions. Preflight confirms the exact resolved recipe before execution.</small>`;
+    }
+    function renderResolvedRecipe(resolvedRecipe = null) {
+        const target = byId("classSplitResolvedSummary");
+        if (!target) return;
+        const current = currentRecipe();
+        const resolved = resolvedRecipe || {};
+        const mode = resolved.feature_mode || resolved.mode || current.mode;
+        const dimension = resolved.output_dimension ?? resolved.feature_dimension ?? resolved.embedding_dimension ?? resolved.dimension ?? current.dimension;
+        const scope = byId("classSplitScopeAll")?.checked ? "All classes" : `One class${selectedText("classSplitClassSelect") ? `: ${selectedText("classSplitClassSelect")}` : ""}`;
+        target.innerHTML = `<div><span>Scope</span><strong>${escapeText(scope)}</strong></div><div><span>Map</span><strong>${escapeText(current.map)}</strong></div><div><span>Features</span><strong>${escapeText(modeLabel(mode))} · ${Number(dimension).toLocaleString()}D</strong></div><div><span>Review ranking</span><strong>${current.el2n ? "Class structure + EL2N" : "Class structure"}</strong></div><div><span>Spatial evidence</span><strong>${current.refine ? "Prepared" : "Off"}</strong></div><div><span>Memory</span><strong>${escapeText(current.memory)}</strong></div>`;
+    }
+    function syncWeights() {
+        const recipe = currentRecipe();
+        if (byId("classSplitCompactWeightValue")) byId("classSplitCompactWeightValue").textContent = `${recipe.compactWeight}%`;
+        if (byId("classSplitCradioWeightValue")) byId("classSplitCradioWeightValue").textContent = `${recipe.cradioWeight}%`;
+        if (byId("classSplitFusionBalance")) byId("classSplitFusionBalance").hidden = recipe.mode !== "multi_backbone_fusion";
+    }
+    function renderAll() { syncWeights(); renderExplanation(); renderResolvedRecipe(); }
+    function applyPreset() {
+        const preset = byId("classSplitRecipePreset")?.value;
+        const config = presetConfig[preset];
+        if (!config) {
+            if (preset === "custom") byId("classSplitFeatureTuning")?.setAttribute("open", "");
+            renderAll(); return;
+        }
+        if (byId("classSplitFeatureMode")) byId("classSplitFeatureMode").value = config.mode;
+        if (byId("classSplitUseEl2n")) byId("classSplitUseEl2n").checked = config.el2n;
+        if (byId("classSplitCompactWeight")) byId("classSplitCompactWeight").value = String(config.compactWeight);
+        renderAll();
+    }
+    function initialize() {
+        const setup = byId("classSplitGuidedSetup");
+        if (!setup || setup.dataset.guidedSetupReady === "true") return;
+        setup.dataset.guidedSetupReady = "true";
+        byId("classSplitRecipePreset")?.addEventListener("change", applyPreset);
+        setup.addEventListener("input", (event) => {
+            if (["classSplitFeatureMode", "classSplitUseEl2n", "classSplitCompactWeight"].includes(event.target?.id)) {
+                const preset = byId("classSplitRecipePreset");
+                if (preset && preset.value !== "custom") preset.value = "custom";
+            }
+            renderAll();
+        });
+        setup.addEventListener("change", renderAll);
+        applyPreset();
+    }
+    window.renderClassSplitResolvedRecipe = renderResolvedRecipe;
+    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", initialize, { once: true });
+    else initialize();
 })();

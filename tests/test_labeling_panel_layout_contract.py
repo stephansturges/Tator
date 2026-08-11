@@ -5391,70 +5391,58 @@ def test_class_split_explorer_panel_contract():
     assert 'class="class-split-workspace"' in html
     assert 'class="class-split-panel class-split-panel--workspace"' in html
     assert 'id="classSplitDetails"' not in html
-    assert 'id="classSplitScopeSelected"' in html
-    assert 'id="classSplitScopeAll"' in html
-    assert 'id="classSplitScopeSelected" value="selected_class" /> Selected class' in html
-    assert 'id="classSplitScopeAll" value="all_classes" checked /> All classes' in html
-    assert 'id="classSplitEncoderType"' in html
-    assert 'id="classSplitBackbone"' in html
-    assert '<option value="thorough_quality_v1" selected>Thorough quality (recommended)</option>' in html
-    assert '<option value="precise_compact_v1">Precise compact</option>' in html
-    assert '<option value="fast_map_v1">Fast map</option>' in html
+    guided_ids = (
+        "classSplitGuidedSetup",
+        "classSplitScopeSelected",
+        "classSplitScopeAll",
+        "classSplitClassSelect",
+        "classSplitProjection",
+        "classSplitFeatureMode",
+        "classSplitFeatureTuning",
+        "classSplitUseEl2n",
+        "classSplitCompactWeight",
+        "classSplitQualityMemoryPolicy",
+        "classSplitRefineOutliers",
+        "classSplitResolvedSummary",
+        "classSplitRunButton",
+    )
+    for element_id in guided_ids:
+        assert html.count(f'id="{element_id}"') == 1
+    step_titles = (
+        "Choose what to inspect",
+        "Choose the map",
+        "Choose the feature system",
+        "Choose the memory policy",
+        "Add spatial evidence",
+        "Review the recipe and run",
+    )
+    assert [html.index(title) for title in step_titles] == sorted(
+        html.index(title) for title in step_titles
+    )
+    assert '<option value="thorough_quality_v1" selected>Thorough multi-backbone (recommended)</option>' in html
+    assert '<option value="precise_compact_v1">Balanced compact fusion</option>' in html
+    assert '<option value="fast_map_v1">Fast single-backbone</option>' in html
     assert '<option value="local_salad">Local SALAD separation</option>' not in html
-    assert '>Map<span class="help-icon"' in html
-    assert 'class="class-split-field class-split-field--projection"' in html
-    assert html.index('id="classSplitProjection"') < html.index('id="classSplitRecipePreset"')
     assert '<option value="class_balanced_pca">Class-balanced PCA</option>' in html
     assert '<option value="global_pca">Global PCA</option>' in html
     assert '<option value="between_class_pca">Between-class PCA</option>' in html
     assert '<option value="within_filter_pca">Within-filter PCA</option>' in html
     assert '<option value="umap" selected>UMAP local neighborhoods</option>' in html
     assert 'id="classSplitProjectionHint"' in html
-    assert "Projection guide" in html
-    assert "UMAP</strong><span>Best default for visually checking likely wrong labels" in html
-    assert "Class-balanced PCA</strong><span>Fast linear all-class overview" in html
-    assert 'Scope<span class="help-icon"' in html
-    assert 'Class<span class="help-icon"' in html
-    assert 'Encoder<span class="help-icon"' in html
-    assert 'Backbone<span class="help-icon"' in html
-    assert "Thorough is the strongest default" in html
-    assert "C-RADIOv4" in html
-    assert 'class="embedding-benchmark-note" open' not in html
-    assert "Neighbor agreement is a clustering signal, not classifier accuracy" in html
-    assert "Useful when you want to audit whether another visual backbone separates your dataset better" in html
-    assert "On Mac, C-RADIOv4 uses local MLX" in html
-    assert 'UMAP neighbors<span class="help-icon"' in html
-    assert 'UMAP min distance<span class="help-icon"' in html
-    assert 'id="classSplitProjectionMinDist" min="0" max="0.99" step="0.01" value="0.08"' in html
-    assert 'id="classSplitProjectionNeighborK" min="0" max="5000" value="10"' in html
-    assert "The default 10 emphasizes the same local evidence used to surface likely wrong labels" in html
-    assert 'UMAP metric<span class="help-icon"' in html
+    assert "Map tuning" in html
     assert 'id="classSplitProjectionMetric"' in html
     assert '<option value="cosine" selected>cosine</option>' in html
     assert '<option value="euclidean">euclidean</option>' in html
-    assert 'UMAP spread<span class="help-icon"' in html
-    assert 'id="classSplitProjectionSpread" min="0.1" max="10" step="0.1" value="1"' in html
-    assert 'id="classSplitSampleCap" min="0" max="50000" placeholder="All objects"' in html
     assert 'id="classSplitRefineOutliers" checked' not in html
-    assert 'id="classSplitRefinementHint"' in html
-    assert "Deep evidence" in html
-    assert 'aria-describedby="classSplitRefinementHint classSplitSelectorExplanation"' in html
-    assert "Optional VLM evidence pass" in html
-    assert 'id="classSplitSelectorExplanation"' in html
-    assert "How review ranking works" in html
-    assert "visual similarity finds objects whose current label disagrees" in html
-    assert "no reviewed decisions are used to train this adjustment" in html
-    assert "Common-overlap evidence affects rank only" in html
-    assert 'Crop padding<span class="help-icon"' in html
-    assert '<option value="tight_context" selected>Tight + context</option>' in html
+    assert "Spatial evidence refinement" in html
+    assert "without asking a VLM to judge labels" in html
+    assert "VLM evidence pass" not in html
+    assert "never creates synthetic review items" in html
     assert 'id="classSplitRecipeExplanation"' in html
     assert 'id="classSplitPreprocessMode"' in html
     assert 'id="classSplitSizeBiasMode"' in html
-    assert "Canonical square resize" in html
-    assert "Remove size/aspect bias" in html
-    assert "It is not full whitening" in html
-    assert 'Scoring neighbors<span class="help-icon"' in html
-    assert 'value="5000"' not in html
+    assert 'id="classSplitAdvancedSetup"' not in html
+    assert 'id="classSplitEmbeddingGuide"' not in html
     assert 'id="classSplitGraph" class="class-split-graph"' in html
     assert 'id="classSplitDisplayMode"' in html
     assert 'id="classSplitGraphProjection"' in html
@@ -5488,7 +5476,6 @@ def test_class_split_explorer_panel_contract():
     assert 'id="classSplitClusterRun"' in html
     assert "UMAP island proposals search the selected class in a local UMAP map" in html
     assert 'id="classSplitCradioPooling"' in html
-    assert "benchmark carefully before promoting any C-RADIO pooling mode" in html
     assert 'id="classSplitReport" class="class-split-report"' in html
     assert 'id="classSplitBulkPanel" class="class-split-bulk-panel class-split-multi-selection"' in html
     assert 'id="classSplitGraphStatus" class="class-split-graph-status" aria-live="polite"' in html

@@ -1473,258 +1473,178 @@
                                 <div class="training-help">Embed labeled object crops, inspect clusters, and jump back to source images for review.</div>
                             </div>
                         </div>
-                        <div class="class-split-grid class-split-grid--primary">
-                            <div class="class-split-field">
-                                <label>Scope<span class="help-icon" title="Use All classes for mislabel review; use Selected class for within-class outliers.">?</span></label>
-                                <div class="class-split-radio">
-                                    <label><input type="radio" name="classSplitScope" id="classSplitScopeSelected" value="selected_class" /> Selected class</label>
-                                    <label><input type="radio" name="classSplitScope" id="classSplitScopeAll" value="all_classes" checked /> All classes</label>
-                                </div>
-                            </div>
-                            <div class="class-split-field" id="classSplitClassField" hidden>
-                                <label for="classSplitClassSelect">Class<span class="help-icon" title="Choose the class to inspect when Selected class is active.">?</span></label>
-                                <select id="classSplitClassSelect"></select>
-                            </div>
-                            <div class="class-split-field class-split-field--projection">
-                                <label for="classSplitProjection">Map<span class="help-icon" title="Changes only the 2D view. Review ranking stays in the full embedding space.">?</span></label>
-                                <select id="classSplitProjection">
+                        <div class="class-split-guided-setup" id="classSplitGuidedSetup">
+                  <div class="class-split-preset-row">
+                    <label class="class-split-field class-split-preset-field" for="classSplitRecipePreset"><span>Starting recipe</span><select id="classSplitRecipePreset">
+                                    <option value="thorough_quality_v1" selected>Thorough multi-backbone (recommended)</option>
+                                    <option value="precise_compact_v1">Balanced compact fusion</option>
+                                    <option value="fast_map_v1">Fast single-backbone</option>
+                                    <option value="custom">Custom recipe</option>
+                                </select></label>
+                    <p class="class-split-preset-copy" id="classSplitPresetSummary">Start from a measured recipe, then change any step to create a custom recipe.</p>
+                  </div>
+
+                  <section class="class-split-step" aria-labelledby="classSplitStepScopeTitle">
+                    <span class="class-split-step__number" aria-hidden="true">1</span>
+                    <div class="class-split-step__body">
+                      <div class="class-split-step__header"><h4 id="classSplitStepScopeTitle">Choose what to inspect</h4><p>Review one class closely or compare every class in the open dataset.</p></div>
+                      <div class="class-split-choice-grid class-split-choice-grid--scope">
+                        <label class="class-split-choice"><input type="radio" name="classSplitScope" id="classSplitScopeSelected" value="selected_class" /><span><strong>One class</strong><small>Best for subtle label errors within a class.</small></span></label>
+                        <label class="class-split-choice"><input type="radio" name="classSplitScope" id="classSplitScopeAll" value="all_classes" checked /><span><strong>All classes</strong><small>Best for cross-class confusion and broad structure.</small></span></label>
+                        <label class="class-split-field" id="classSplitClassField" for="classSplitClassSelect"><span>Class to inspect</span><select id="classSplitClassSelect"></select></label>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section class="class-split-step" aria-labelledby="classSplitStepMapTitle">
+                    <span class="class-split-step__number" aria-hidden="true">2</span>
+                    <div class="class-split-step__body">
+                      <div class="class-split-step__header"><h4 id="classSplitStepMapTitle">Choose the map</h4><p>The 2D map is for navigation. Review priority still uses the richer high-dimensional features.</p></div>
+                      <div class="class-split-choice-grid"><label class="class-split-field" for="classSplitProjection"><span>Visualization</span><select id="classSplitProjection">
                                     <option value="class_balanced_pca">Class-balanced PCA</option>
                                     <option value="global_pca">Global PCA</option>
                                     <option value="between_class_pca">Between-class PCA</option>
                                     <option value="within_filter_pca">Within-filter PCA</option>
                                     <option value="umap" selected>UMAP local neighborhoods</option>
-                                </select>
-                                <div id="classSplitProjectionHint" class="class-split-projection-hint" hidden>UMAP is the default visual aid for wrong-label review.</div>
-                            </div>
-                            <div class="class-split-field">
-                                <label for="classSplitRecipePreset">Quality preset<span class="help-icon" title="Thorough is the strongest default. Precise is lighter; Fast favors map exploration.">?</span></label>
-                                <select id="classSplitRecipePreset">
-                                    <option value="thorough_quality_v1" selected>Thorough quality (recommended)</option>
-                                    <option value="precise_compact_v1">Precise compact</option>
-                                    <option value="fast_map_v1">Fast map</option>
-                                    <option value="custom">Custom advanced</option>
-                                </select>
-                            </div>
-                        </div>
-                        <details id="classSplitAdvancedSetup" class="class-split-advanced class-split-advanced--setup">
-                            <summary>Advanced setup <span>Memory, review budget, encoders, crops, and projection tuning</span></summary>
-                            <div class="class-split-grid">
-                            <div class="class-split-field">
-                                <label for="classSplitQualityMemoryPolicy">Analysis memory<span class="help-icon" title="Automatic selects maximum-fidelity only when its all-phase estimate fits. Maximum fidelity uses every object for exact quality and neighbor calculations and warns before risky runs. Memory-limited bounds incremental scoring, projection, clustering, neighbor, and serialization workspaces; model weights and immutable input state are reported separately.">?</span></label>
-                                <select id="classSplitQualityMemoryPolicy">
-                                    <option value="auto" selected>Automatic (recommended)</option>
-                                    <option value="full">Maximum fidelity / high RAM</option>
-                                    <option value="budgeted">Memory-limited one-run analysis</option>
-                                </select>
-                                <label class="class-split-toggle" for="classSplitQualityMemoryOverride">
-                                    <input type="checkbox" id="classSplitQualityMemoryOverride" />
-                                    Override automatic target
-                                </label>
-                                <label for="classSplitQualityMemoryBudget">Incremental workspace budget (GiB)</label>
-                                <input type="number" id="classSplitQualityMemoryBudget" min="1" max="256" step="1" value="8" disabled />
-                                <span id="classSplitQualityMemoryStatus" class="training-help" role="status" aria-live="polite">Automatic target is loading from the backend.</span>
-                            </div>
-                            <div class="class-split-field">
-                                <label for="classSplitQualityReviewFraction">Quality-score review budget<span class="help-icon" title="Controls how many quality-score candidates enter the queue. Every independently strong legacy, overlap, and Deep-evidence candidate remains priority. Relative smallness never removes a candidate.">?</span></label>
-                                <input type="range" id="classSplitQualityReviewFraction" min="1" max="25" step="1" value="5" />
-                                <output id="classSplitQualityReviewFractionValue" for="classSplitQualityReviewFraction">5%</output>
-                            </div>
-                            <div class="class-split-field">
-                                <label for="classSplitLowDetailMinSide">Low-detail minimum side (source px)<span class="help-icon" title="Objects whose source bounding box has a side below this threshold are marked low-detail. Relative size is tracked separately. A strong quality, legacy, overlap, or Deep-evidence flag still keeps the object in priority review.">?</span></label>
-                                <input type="number" id="classSplitLowDetailMinSide" min="1" max="1024" step="1" value="32" />
-                            </div>
-                            <div class="class-split-field">
-                                <label for="classSplitEncoderType">Encoder<span class="help-icon" title="Backbone family used to embed object crops. DINOv3 is the stable image-only default. CLIP is available for semantic comparison. C-RADIOv4 is a slower image-only candidate; on Mac it uses the local MLX runtime by default when ~/cradio_mlx is available.">?</span></label>
-                                <select id="classSplitEncoderType">
-                                    <option value="dinov3" selected>DINOv3</option>
-                                    <option value="clip">CLIP</option>
-                                    <option value="cradio">C-RADIOv4</option>
-                                </select>
-                            </div>
-                            <div class="class-split-field">
-                                <label for="classSplitBackbone">Backbone<span class="help-icon" title="Specific model checkpoint for the selected encoder. Larger backbones may improve separation but can be slower or exceed local memory. C-RADIOv4 SO400M is the practical candidate; H is larger.">?</span></label>
-                                <select id="classSplitBackbone"></select>
-                            </div>
-                        </div>
-                            <details class="class-split-projection-guide">
-                                <summary>Projection guide<span class="help-icon" title="The graph projection changes the visible plot. Wrong-class scoring stays in original embeddings; UMAP island subclass search builds its own local UMAP proposal map.">?</span></summary>
-                                <div class="class-split-projection-guide__grid">
-                                    <div><strong>UMAP</strong><span>Best default for visually checking likely wrong labels and selected-class subclass islands. It preserves local neighborhoods, but axes and far-apart island distances are not literal.</span></div>
-                                    <div><strong>Class-balanced PCA</strong><span>Fast linear all-class overview that keeps large classes from dominating. Use it when global structure matters more than local mislabel evidence.</span></div>
-                                    <div><strong>Between-class PCA</strong><span>Best for a class-separation overview. It intentionally spreads labels apart.</span></div>
-                                    <div><strong>Within-filter PCA</strong><span>Best PCA fallback for one selected class/filter. It recomputes linear axes inside that subset.</span></div>
-                                </div>
-                            </details>
-                            <details class="class-split-advanced">
-                            <summary>Embedding and projection internals</summary>
-                            <div class="class-split-grid">
-                            <div class="class-split-field">
-                                <label for="classSplitProjectionNeighborK">UMAP neighbors<span class="help-icon" title="UMAP-only layout setting. The default 10 emphasizes the same local evidence used to surface likely wrong labels. Higher values preserve broader/global structure. PCA modes ignore this value. Use 0 for all available neighbors.">?</span></label>
-                                <input type="number" id="classSplitProjectionNeighborK" min="0" max="5000" value="10" />
-                            </div>
-                            <div class="class-split-field">
-                                <label for="classSplitProjectionMinDist">UMAP min distance<span class="help-icon" title="UMAP-only layout setting. Lower values pack local islands more tightly for subclass hunting; higher values spread nearby points apart. This changes the graph only, not embedding scoring.">?</span></label>
-                                <input type="number" id="classSplitProjectionMinDist" min="0" max="0.99" step="0.01" value="0.08" />
-                            </div>
-                            <div class="class-split-field">
-                                <label for="classSplitProjectionMetric">UMAP metric<span class="help-icon" title="UMAP-only metric for neighborhood distance. Cosine is the practical default for embeddings; try correlation for angular structure.">?</span></label>
-                                <select id="classSplitProjectionMetric">
+                                </select><small id="classSplitProjectionHint">UMAP emphasizes local neighborhoods; PCA gives a stable global view.</small></label></div>
+                      <details class="class-split-tune" id="classSplitProjectionTuning"><summary>Map tuning</summary>
+                        <div class="class-split-tune__grid">
+                          <label class="class-split-field" for="classSplitProjectionNeighborK"><span>UMAP neighbors</span><input type="number" id="classSplitProjectionNeighborK" min="0" max="5000" value="10" /></label>
+                          <label class="class-split-field" for="classSplitProjectionMinDist"><span>UMAP minimum distance</span><input type="number" id="classSplitProjectionMinDist" min="0" max="0.99" step="0.01" value="0.08" /></label>
+                          <label class="class-split-field" for="classSplitProjectionMetric"><span>Distance metric</span><select id="classSplitProjectionMetric">
                                     <option value="cosine" selected>cosine</option>
                                     <option value="euclidean">euclidean</option>
                                     <option value="manhattan">manhattan</option>
                                     <option value="correlation">correlation</option>
                                     <option value="canberra">canberra</option>
-                                </select>
-                            </div>
-                            <div class="class-split-field">
-                                <label for="classSplitProjectionSpread">UMAP spread<span class="help-icon" title="UMAP-only layout scale. Lower values pack islands tighter for local structure; higher values expand the map more evenly.">?</span></label>
-                                <input type="number" id="classSplitProjectionSpread" min="0.1" max="10" step="0.1" value="1" />
-                            </div>
-                            <div class="class-split-field">
-                                <label for="classSplitProjectionPreprocess">Projection normalization<span class="help-icon" title="Preprocess vectors only for projection. None preserves model embeddings; L2 normalizes direction; Center subtracts dimension means; Z-score standardizes each dimension.">?</span></label>
-                                <select id="classSplitProjectionPreprocess">
+                                </select></label>
+                          <label class="class-split-field" for="classSplitProjectionSpread"><span>UMAP spread</span><input type="number" id="classSplitProjectionSpread" min="0.1" max="10" step="0.1" value="1" /></label>
+                          <label class="class-split-field" for="classSplitProjectionPreprocess"><span>Projection preprocessing</span><select id="classSplitProjectionPreprocess">
                                     <option value="none" selected>None</option>
                                     <option value="l2">L2 normalized</option>
                                     <option value="center">Centered</option>
                                     <option value="zscore">Z-score</option>
-                                </select>
-                            </div>
-                            <div class="class-split-field">
-                                <label for="classSplitSampleCap">Sample cap<span class="help-icon" title="Optional. Leave blank to analyze every object in the selected scope. Use a positive number only when you want a faster sampled audit.">?</span></label>
-                                <input type="number" id="classSplitSampleCap" min="0" max="50000" placeholder="All objects" />
-                            </div>
-                            <div class="class-split-field">
-                                <label for="classSplitPadding">Crop padding<span class="help-icon" title="Extra context around each bbox before embedding. 0.08 means 8% of the box size is added on each side, then the crop is made square. More padding helps context-heavy classes; less padding focuses tightly on the object.">?</span></label>
-                                <input type="number" id="classSplitPadding" min="0" max="1" step="0.01" value="0.08" />
-                            </div>
-                            <div class="class-split-field">
-                                <label for="classSplitCanonicalSize">Canonical size<span class="help-icon" title="Pixel size of the fixed square crop sent to the encoder when crop normalization is canonical. Smaller is faster; larger preserves more detail.">?</span></label>
-                                <input type="number" id="classSplitCanonicalSize" min="64" max="1024" step="16" value="336" />
-                            </div>
-                            <div class="class-split-field">
-                                <label for="classSplitPreprocessMode">Crop preprocessing<span class="help-icon" title="Canonical makes every object crop a fixed square before embedding. Non-square crops are padded with the crop mean color, then resized to the canonical size. Native leaves sizing to the model processor and is kept only for expert comparison.">?</span></label>
-                                <select id="classSplitPreprocessMode">
-                                    <option value="canonical" selected>Canonical square resize</option>
-                                    <option value="native">Native encoder resize</option>
-                                </select>
-                            </div>
-                            <div class="class-split-field">
-                                <label for="classSplitSizeBiasMode">Embedding adjustment<span class="help-icon" title="Recommended for DINOv3 review. Remove size/aspect bias regresses out log bbox area, log crop area, bbox aspect, and crop aspect, then L2-normalizes. On the matched benchmark, raw linear size predictability reached R2 0.883-0.909 and fell to about -0.005 after this adjustment. It is targeted residualization, not full whitening.">?</span></label>
-                                <select id="classSplitSizeBiasMode">
-                                    <option value="remove_size_bias" selected>Remove size/aspect bias</option>
-                                    <option value="none">None / raw normalized embeddings</option>
-                                </select>
-                            </div>
-                            <div class="class-split-field">
-                                <label for="classSplitDinov3Pooling">DINOv3 pooling<span class="help-icon" title="Pooler is the built-in quality-preset readout. CLS + patch mean concatenates global and averaged patch information and increases descriptor width. This control affects DINOv3 only; CLIP and C-RADIO ignore it.">?</span></label>
-                                <select id="classSplitDinov3Pooling">
+                                </select></label>
+                          <label class="class-split-field" for="classSplitSampleCap"><span>Maximum plotted objects</span><input type="number" id="classSplitSampleCap" min="0" max="50000" placeholder="All objects" /></label>
+                        </div>
+                      </details>
+                    </div>
+                  </section>
+
+                  <section class="class-split-step" aria-labelledby="classSplitStepFeaturesTitle">
+                    <span class="class-split-step__number" aria-hidden="true">3</span>
+                    <div class="class-split-step__body">
+                      <div class="class-split-step__header"><h4 id="classSplitStepFeaturesTitle">Choose the feature system</h4><p>Complementary encoders usually separate difficult objects better, at the cost of time and memory.</p></div>
+                      <div class="class-split-choice-grid">
+                        <label class="class-split-field" for="classSplitFeatureMode"><span>Feature mode</span><select id="classSplitFeatureMode"><option value="single_backbone">Single backbone - fastest</option><option value="compact_fusion">Compact fusion - balanced</option><option value="multi_backbone_fusion" selected>Multi-backbone fusion - highest quality</option></select></label>
+                        <div class="class-split-recipe-explanation" id="classSplitRecipeExplanation" aria-live="polite"></div>
+                      </div>
+                      <details class="class-split-tune" id="classSplitFeatureTuning"><summary>Feature tuning</summary>
+                        <div class="class-split-tune__grid">
+                          <label class="class-split-field" for="classSplitEncoderType"><span>Primary encoder</span><select id="classSplitEncoderType">
+                                    <option value="dinov3" selected>DINOv3</option>
+                                    <option value="clip">CLIP</option>
+                                    <option value="cradio">C-RADIOv4</option>
+                                </select></label>
+                          <label class="class-split-field" for="classSplitBackbone"><span>Primary backbone</span><select id="classSplitBackbone"></select></label>
+                          <label class="class-split-field" for="classSplitDinov3Pooling"><span>DINOv3 pooling</span><select id="classSplitDinov3Pooling">
                                     <option value="pooler" selected>Pooler</option>
                                     <option value="cls">CLS token</option>
                                     <option value="patch_mean">Patch mean</option>
                                     <option value="cls_patch_concat">CLS + patch mean</option>
-                                </select>
-                            </div>
-                            <div class="class-split-field">
-                                <label for="classSplitEmbeddingAggregation">Feature aggregation<span class="help-icon" title="Pooled uses the selected backbone alone. DINOv3 + SAM3 adds class-agnostic mask features. The SALAD option also trains a bounded label-free local-token aggregator, then encodes every object; it measured stronger UMAP and wrong-label behavior but adds startup work and currently requires Apple Silicon MLX.">?</span></label>
-                                <select id="classSplitEmbeddingAggregation">
+                                </select></label>
+                          <label class="class-split-field" for="classSplitEmbeddingAggregation"><span>Object-view aggregation</span><select id="classSplitEmbeddingAggregation">
                                     <option value="pooled" selected>Selected backbone only</option>
                                     <option value="sam3_mask_fusion_v1">DINOv3 + SAM3 mask (75 / 25)</option>
                                     <option value="sam3_mask_salad_fusion_v1">DINOv3 + SAM3 + SALAD (experimental)</option>
-                                </select>
-                            </div>
-                            <div class="class-split-field" id="classSplitSaladPresetField" hidden>
-                                <label for="classSplitSaladPreset">SALAD size<span class="help-icon" title="Balanced produces a 640-D token-aggregation descriptor and is the built-in default. Large produces an 8,448-D descriptor with more clusters and channel capacity, substantially increasing RAM, cache size, and fitting time; use it only for an explicit comparison.">?</span></label>
-                                <select id="classSplitSaladPreset">
-                                    <option value="balanced" selected>Balanced (640-D, recommended)</option>
-                                    <option value="large">Big Salad (8,448-D, experimental)</option>
-                                </select>
-                            </div>
-                            <div class="class-split-field" id="classSplitSaladWeightField" hidden>
-                                <label for="classSplitSaladWeight">SALAD weight<span class="help-icon" title="Cosine contribution of SALAD. The remaining weight keeps the measured 3:1 DINO-to-SAM ratio. 0.10 passed the balanced-head guardrails; larger values can improve aggregate scores while hurting individual classes.">?</span></label>
-                                <input id="classSplitSaladWeight" type="number" min="0.01" max="0.40" step="0.01" value="0.10">
-                            </div>
-                            <div class="class-split-field" id="classSplitSaladTrainMaxField" hidden>
-                                <label for="classSplitSaladTrainMax">SALAD training reservoir<span class="help-icon" title="Maximum label-free training objects, not an analysis cap. Selection is deterministic and source-diverse; every object is still encoded after training. The token budget may lower the effective reservoir to keep disk use bounded.">?</span></label>
-                                <input id="classSplitSaladTrainMax" type="number" min="2" max="16384" step="1" value="1024">
-                            </div>
-                            <div class="class-split-field" id="classSplitSaladEpochsField" hidden>
-                                <label for="classSplitSaladEpochs">SALAD epochs<span class="help-icon" title="Label-free tight/context contrastive training epochs over the bounded reservoir. Runtime scales with the reservoir, never with all objects after the cap is reached.">?</span></label>
-                                <input id="classSplitSaladEpochs" type="number" min="1" max="64" step="1" value="8">
-                            </div>
-                            <div class="class-split-field" id="classSplitSaladTokenBudgetField" hidden>
-                                <label for="classSplitSaladTokenBudget">Temporary token budget (MB)<span class="help-icon" title="Hard ceiling for temporary float16 DINO patch tokens used to train SALAD. Files are deleted before projection. This bounds disk use independently of dataset size.">?</span></label>
-                                <input id="classSplitSaladTokenBudget" type="number" min="64" max="8192" step="64" value="768">
-                            </div>
-                            <div class="class-split-field">
-                                <label for="classSplitCradioPooling">C-RADIOv4 pooling<span class="help-icon" title="C-RADIOv4-only readout. Summary uses the global descriptor. Spatial mean averages local visual tokens. Summary + spatial mean concatenates both and can preserve more crop detail but doubles feature width. Mac auto mode uses local MLX when available; benchmark carefully before promoting any C-RADIO pooling mode.">?</span></label>
-                                <select id="classSplitCradioPooling">
+                                </select></label>
+                          <label class="class-split-field" for="classSplitCradioPooling"><span>C-RADIO pooling</span><select id="classSplitCradioPooling">
                                     <option value="summary" selected>Summary</option>
                                     <option value="spatial_mean">Spatial mean</option>
                                     <option value="summary_spatial_concat">Summary + spatial mean</option>
-                                </select>
-                            </div>
-                            <div class="class-split-field">
-                                <label for="classSplitBackgroundMode">Background<span class="help-icon" title="Controls pixels outside the bbox inside padded crops. Full crop keeps context; fill/blur/darken suppress background when scene context overwhelms small objects.">?</span></label>
-                                <select id="classSplitBackgroundMode">
+                                </select></label>
+                          <label class="class-split-field" for="classSplitBackgroundMode"><span>Context handling</span><select id="classSplitBackgroundMode">
                                     <option value="full_crop" selected>Full crop</option>
                                     <option value="mean_fill_outside_box">Mean fill outside box</option>
                                     <option value="blur_outside_box">Blur outside box</option>
                                     <option value="darken_outside_box">Darken outside box</option>
-                                </select>
-                            </div>
-                            <div class="class-split-field">
-                                <label for="classSplitViewMode">Embedding views<span class="help-icon" title="Tight + context is the measured DINOv3 review default when paired with Pooler: one view emphasizes the object and one preserves scene context. Single crop with CLS + patch mean gave slightly better UMAP neighbor retention. Multi-view modes are slower because they encode and concatenate two crops.">?</span></label>
-                                <select id="classSplitViewMode">
+                                </select></label>
+                          <label class="class-split-field" for="classSplitViewMode"><span>Crop views</span><select id="classSplitViewMode">
                                     <option value="single">Single crop</option>
                                     <option value="tight_standard">Tight + standard</option>
                                     <option value="standard_context">Standard + context</option>
                                     <option value="tight_context" selected>Tight + context</option>
-                                </select>
-                            </div>
-                            <div class="class-split-field">
-                                <label for="classSplitNeighborK">Scoring neighbors<span class="help-icon" title="How many nearest embedded crops are used for local scoring. In all-classes mode this drives likely-wrong-class flags by comparing each object to nearby classes. Higher values are smoother; lower values are more sensitive to small local clusters.">?</span></label>
-                                <input type="number" id="classSplitNeighborK" min="3" max="100" value="15" />
-                            </div>
-                            </div>
-                        </details>
-                        </details>
-                        <details id="classSplitEmbeddingGuide" class="class-split-embedding-guide">
-                            <summary>
-                                <span>What this preset actually uses</span>
-                                <small>Dimensions, feature weights, and when to choose it</small>
-                            </summary>
-                            <div class="class-split-embedding-guide__body">
-                                <div id="classSplitRecipeExplanation" class="embedding-recipe-note__text"></div>
-                                <p class="class-split-embedding-guide__lead">Select <strong>Custom advanced</strong> to open the controls above and change the encoder, pooling, crop views, SAM3/SALAD fusion, SALAD capacity and weight, or projection parameters. Built-in presets remain locked recipes so runs are comparable.</p>
-                                <p id="classSplitEmbeddingGuidanceStatus" class="class-split-embedding-guide__status" aria-live="polite">Current preset applies to the next analysis. The displayed graph will not change until you run it.</p>
-                            </div>
-                        </details>
-                        <div class="class-split-run-strip">
-                        <div id="classSplitRefinementControl" class="class-split-refinement-control">
-                            <label for="classSplitRefineOutliers">
-                                <input type="checkbox" id="classSplitRefineOutliers" aria-describedby="classSplitRefinementHint classSplitSelectorExplanation" />
-                                Deep evidence
-                            </label>
-                            <span class="help-icon" role="img" tabindex="0" aria-label="Adds spatial, token-cut, scale, overlap, and source context to VLM review. It does not edit labels." title="Adds spatial, token-cut, scale, overlap, and source context to VLM review. It does not edit labels.">?</span>
-                            <span id="classSplitRefinementHint" class="class-split-refinement-hint">Optional VLM evidence pass</span>
-                            <details id="classSplitSelectorExplanation" class="class-split-selector-explanation">
-                                <summary>How review ranking works</summary>
-                                <ol>
-                                    <li><strong>Find possible issues:</strong> visual similarity finds objects whose current label disagrees with nearby examples.</li>
-                                    <li><strong>Check the object in context:</strong> detailed patches, object size, same-image objects, position, and annotation overlap add evidence.</li>
-                                    <li><strong>Recognize common overlaps:</strong> dataset statistics can lower priority for recurring, well-supported class combinations. The candidate image is left out of those statistics, and no reviewed decisions are used to train this adjustment.</li>
-                                    <li><strong>Rank for human review:</strong> the combined evidence orders the queue only. It never hides candidates, changes a status, or edits a label.</li>
-                                </ol>
-                                <p>Common-overlap evidence affects rank only when the current object is visibly supported, the competing class is localized to a real overlapping annotation, and the dataset pattern has enough independent support.</p>
-                            </details>
+                                </select></label>
+                          <label class="class-split-field" for="classSplitPadding"><span>Crop padding</span><input type="number" id="classSplitPadding" min="0" max="1" step="0.01" value="0.08" /></label>
+                          <label class="class-split-field" for="classSplitCanonicalSize"><span>Canonical crop size</span><input type="number" id="classSplitCanonicalSize" min="64" max="1024" step="16" value="336" /></label>
+                          <label class="class-split-field" for="classSplitPreprocessMode"><span>Resize strategy</span><select id="classSplitPreprocessMode">
+                                    <option value="canonical" selected>Canonical square resize</option>
+                                    <option value="native">Native encoder resize</option>
+                                </select></label>
+                          <label class="class-split-field" for="classSplitSizeBiasMode"><span>Size-bias handling</span><select id="classSplitSizeBiasMode">
+                                    <option value="remove_size_bias" selected>Remove size/aspect bias</option>
+                                    <option value="none">None / raw normalized embeddings</option>
+                                </select></label>
                         </div>
-                        <div class="class-split-actions">
-                            <button type="button" id="classSplitRunButton" class="training-button">Run analysis</button>
-                            <button type="button" id="classSplitCancelButton" class="training-button danger" disabled>Cancel</button>
-                            <button type="button" id="classSplitRerunButton" class="training-button secondary" disabled>Rerun</button>
+                        <div class="class-split-weight-row" id="classSplitFusionBalance"><label class="class-split-field" for="classSplitCompactWeight"><span>Compact branch weight</span><input id="classSplitCompactWeight" type="range" min="0" max="100" step="5" value="75"><output id="classSplitCompactWeightValue" for="classSplitCompactWeight">75%</output></label><span class="class-split-weight-complement">C-RADIO <output id="classSplitCradioWeightValue">25%</output></span></div>
+                        <label class="class-split-toggle class-split-toggle--compact" for="classSplitUseEl2n"><input id="classSplitUseEl2n" type="checkbox" checked><span><strong>Use EL2N ranking evidence</strong><small>Adds a difficulty signal to review ordering; it never creates synthetic review items.</small></span></label>
+                        <div class="class-split-tune__grid class-split-salad-controls">
+                          <label class="class-split-field" id="classSplitSaladPresetField" for="classSplitSaladPreset"><span>SALAD descriptor size</span><select id="classSplitSaladPreset">
+                                    <option value="balanced" selected>Balanced (640-D, recommended)</option>
+                                    <option value="large">Big Salad (8,448-D, experimental)</option>
+                                </select></label>
+                          <label class="class-split-field" id="classSplitSaladWeightField" for="classSplitSaladWeight"><span>SALAD fusion weight</span><input id="classSplitSaladWeight" type="number" min="0.01" max="0.40" step="0.01" value="0.10"></label>
+                          <label class="class-split-field" id="classSplitSaladTrainMaxField" for="classSplitSaladTrainMax"><span>SALAD training sample cap</span><input id="classSplitSaladTrainMax" type="number" min="2" max="16384" step="1" value="1024"></label>
+                          <label class="class-split-field" id="classSplitSaladEpochsField" for="classSplitSaladEpochs"><span>SALAD training epochs</span><input id="classSplitSaladEpochs" type="number" min="1" max="64" step="1" value="8"></label>
+                          <label class="class-split-field" id="classSplitSaladTokenBudgetField" for="classSplitSaladTokenBudget"><span>SALAD token budget</span><input id="classSplitSaladTokenBudget" type="number" min="64" max="8192" step="64" value="768"></label>
+                          <label class="class-split-field" for="classSplitNeighborK"><span>High-dimensional neighbors</span><input type="number" id="classSplitNeighborK" min="3" max="100" value="15" /></label>
                         </div>
-                        </div>
-                        <div class="class-split-progress" id="classSplitProgress" hidden>
+                      </details>
+                    </div>
+                  </section>
+
+                  <section class="class-split-step" aria-labelledby="classSplitStepMemoryTitle">
+                    <span class="class-split-step__number" aria-hidden="true">4</span>
+                    <div class="class-split-step__body">
+                      <div class="class-split-step__header"><h4 id="classSplitStepMemoryTitle">Choose the memory policy</h4><p>Automatic is safest. Set a limit when this analysis must share RAM with other work.</p></div>
+                      <div class="class-split-choice-grid">
+                        <label class="class-split-field" for="classSplitQualityMemoryPolicy"><span>Memory policy</span><select id="classSplitQualityMemoryPolicy">
+                                    <option value="auto" selected>Automatic (recommended)</option>
+                                    <option value="full">Maximum fidelity / high RAM</option>
+                                    <option value="budgeted">Memory-limited one-run analysis</option>
+                                </select></label>
+                        <label class="class-split-field" for="classSplitQualityMemoryBudget"><span>Maximum analysis memory</span><input type="number" id="classSplitQualityMemoryBudget" min="1" max="256" step="1" value="8" disabled /></label>
+                        <label class="class-split-toggle class-split-toggle--compact" for="classSplitQualityMemoryOverride"><input type="checkbox" id="classSplitQualityMemoryOverride" /><span><strong>Allow full-memory execution</strong><small>Use available RAM rather than a conservative cap.</small></span></label>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section class="class-split-step" aria-labelledby="classSplitStepRefineTitle">
+                    <span class="class-split-step__number" aria-hidden="true">5</span>
+                    <div class="class-split-step__body">
+                      <div class="class-split-step__header"><h4 id="classSplitStepRefineTitle">Add spatial evidence</h4><p>Optional. Prepare token-level object evidence for later review without asking a VLM to judge labels.</p></div>
+                      <div id="classSplitRefinementControl" class="class-split-refinement-control">
+                        <label class="class-split-toggle" for="classSplitRefineOutliers"><input type="checkbox" id="classSplitRefineOutliers" aria-describedby="classSplitRefinementHint classSplitSelectorExplanation" /><span><strong>Spatial evidence refinement</strong><small id="classSplitRefinementHint">Builds TokenCut overlays and spatial diagnostics for likely errors. Analysis itself remains deterministic.</small></span></label>
+                        <details class="class-split-tune" id="classSplitSelectorExplanation"><summary>How candidates are prepared</summary><p>Embedding distance, class structure, scale, and spatial-token evidence prioritize real dataset objects. The review queue never invents synthetic candidates.</p></details>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section class="class-split-step class-split-step--run" aria-labelledby="classSplitStepRunTitle">
+                    <span class="class-split-step__number" aria-hidden="true">6</span>
+                    <div class="class-split-step__body">
+                      <div class="class-split-step__header"><h4 id="classSplitStepRunTitle">Review the recipe and run</h4><p>Confirm the resolved representation, ranking signals, map, and memory policy before analysis starts.</p></div>
+                      <div class="class-split-choice-grid class-split-review-controls">
+                        <label class="class-split-field" for="classSplitQualityReviewFraction"><span>Review queue size</span><input type="range" id="classSplitQualityReviewFraction" min="1" max="25" step="1" value="5" /><output id="classSplitQualityReviewFractionValue" for="classSplitQualityReviewFraction"></output></label>
+                        <label class="class-split-field" for="classSplitLowDetailMinSide"><span>Tiny-object threshold</span><input type="number" id="classSplitLowDetailMinSide" min="1" max="1024" step="1" value="32" /></label>
+                      </div>
+                      <div class="class-split-resolved-summary" id="classSplitResolvedSummary" aria-live="polite"></div>
+                      <p class="class-split-guidance-status" id="classSplitEmbeddingGuidanceStatus"></p>
+                      <div class="class-split-actions class-split-actions--guided"><button type="button" id="classSplitRunButton" class="training-button">Run analysis</button><button type="button" id="classSplitCancelButton" class="training-button danger" disabled>Cancel</button><button type="button" id="classSplitRerunButton" class="training-button secondary" disabled>Rerun</button></div>
+                    </div>
+                  </section>
+                </div>
+                <div class="class-split-progress" id="classSplitProgress" hidden>
                             <div class="class-split-progress__bar" role="progressbar" aria-label="Data Quality Explorer progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="classSplitProgressFill"></div></div>
                             <div id="classSplitProgressText" class="training-help"></div>
                         </div>
@@ -2665,7 +2585,7 @@
                                     <option value="fast">Fast coarse</option>
                                     <option value="precise">Precise slow</option>
                                     <option value="cradio">C-RADIOv4 summary</option>
-                                    <option value="custom">Custom advanced</option>
+                                    <option value="custom">Custom recipe</option>
                                 </select>
                                 <div class="training-help">Applies the same fast/balanced/precise recipe family as Data Quality Explorer. Custom keeps the fields below.</div>
                             </div>

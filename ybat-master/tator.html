@@ -1653,10 +1653,15 @@
                     </div>
                   </section>
                 </div>
-                <div class="class-split-progress" id="classSplitProgress" hidden>
-                            <div class="class-split-progress__bar" role="progressbar" aria-label="Data Quality Explorer progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="classSplitProgressFill"></div></div>
-                            <div id="classSplitProgressText" class="training-help"></div>
-                        </div>
+                <div class="class-split-progress" id="classSplitProgress" data-state="idle" hidden>
+                    <div class="class-split-progress__header">
+                        <div><span class="class-split-progress__eyebrow">Analysis progress</span><strong id="classSplitProgressPhase">Preparing analysis</strong></div>
+                        <output id="classSplitProgressPercent">0%</output>
+                    </div>
+                    <div class="class-split-progress__bar" role="progressbar" aria-label="Data Quality Explorer progress" aria-describedby="classSplitProgressText" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="classSplitProgressFill"></div></div>
+                    <div class="class-split-progress__steps" id="classSplitProgressSteps" role="list" aria-label="Analysis stages"></div>
+                    <div id="classSplitProgressText" class="training-help" role="status" aria-live="polite"></div>
+                </div>
                         <div class="class-split-results" id="classSplitResults" hidden>
                             <div class="class-split-toolbar">
                                 <label for="classSplitGraphProjection">Map layout</label>

@@ -5405,6 +5405,9 @@ def test_class_split_explorer_panel_contract():
         "classSplitRefineOutliers",
         "classSplitResolvedSummary",
         "classSplitRunButton",
+        "classSplitProgressPhase",
+        "classSplitProgressPercent",
+        "classSplitProgressSteps",
     )
     for element_id in guided_ids:
         assert html.count(f'id="{element_id}"') == 1
@@ -5447,6 +5450,16 @@ def test_class_split_explorer_panel_contract():
     assert 'id="classSplitSizeBiasMode"' in html
     assert 'id="classSplitAdvancedSetup"' not in html
     assert 'id="classSplitEmbeddingGuide"' not in html
+    assert "classSplitAdvancedSetup" not in js
+    assert 'thorough_quality_v1: { mode: "multi_backbone_fusion"' in js
+    assert 'precise_compact_v1: { mode: "compact_fusion"' in js
+    assert 'fast_map_v1: { mode: "single_backbone"' in js
+    assert "renderClassSplitGuidedRecipeExplanation" in js
+    assert "control.disabled = setupLocked" in js
+    assert html.count('id="classSplitProgressText"') == 1
+    assert 'id="classSplitProgressText" class="training-help" role="status" aria-live="polite"' in html
+    assert "progressState.progress" in js
+    assert "renderClassSplitProgressPhases(job, progress, stageIndex, stageLabel);" in js
     assert 'id="classSplitGraph" class="class-split-graph"' in html
     assert 'id="classSplitDisplayMode"' in html
     assert 'id="classSplitGraphProjection"' in html

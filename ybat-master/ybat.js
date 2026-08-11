@@ -21015,6 +21015,10 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function renderEmbeddingRecipeExplanation(element, values, context) {
+        if (typeof window.renderClassSplitGuidedRecipeExplanation === "function") {
+            window.renderClassSplitGuidedRecipeExplanation();
+            return;
+        }
         if (!element) {
             return;
         }
@@ -51357,13 +51361,131 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
+    function getClassSplitProgressPhasePlan(job = null) {
+        const progressState = job?.progress_state && typeof job.progress_state === "object"
+            ? job.progress_state
+            : {};
+        const supplied = progressState.phase_plan
+            || progressState.phases
+            || job?.phase_plan
+            || job?.phases;
+        if (Array.isArray(supplied) && supplied.length) {
+            const phases = supplied
+                .filter((phase) => phase?.enabled !== false)
+                .map((phase, index) => ({
+                    id: String(phase?.id || phase?.key || phase?.name || index),
+                    label: String(phase?.label || phase?.name || phase?.phase || phase || "").trim(),
+                    status: String(phase?.status || "").trim(),
+                }))
+                .filter((phase) => phase.label);
+            if (phases.length) {
+                return { phases, supplied: true };
+            }
+        }
+        const mode = document.getElementById("classSplitFeatureMode")?.value || "single_backbone";
+        const projection = document.getElementById("classSplitProjection");
+        const projectionLabel = projection?.options?.[projection.selectedIndex]?.textContent?.trim() || "2D";
+        const backbone = document.getElementById("classSplitBackbone");
+        const backboneLabel = backbone?.options?.[backbone.selectedIndex]?.textContent?.trim() || "primary";
+        const labels = ["Prepare dataset", `Extract ${backboneLabel} features`];
+        if (mode !== "single_backbone") {
+            labels.push("Build SAM3 + SALAD descriptors");
+        }
+        if (mode === "multi_backbone_fusion") {
+            labels.push("Fuse C-RADIO features");
+        }
+        labels.push(document.getElementById("classSplitUseEl2n")?.checked
+            ? "Rank with class structure + EL2N"
+            : "Rank review candidates");
+        labels.push(`Build ${projectionLabel} map`);
+        if (document.getElementById("classSplitRefineOutliers")?.checked) {
+            labels.push("Prepare spatial evidence");
+        }
+        labels.push("Finalize review queue");
+        return {
+            phases: labels.map((label, index) => ({ id: String(index), label, status: "" })),
+            supplied: false,
+        };
+    }
+
+    function renderClassSplitProgressPhases(job, progress, stageIndex, stageLabel) {
+        const root = classSplitElements.progress;
+        if (!root) {
+            return;
+        }
+        const status = String(job?.status || "").toLowerCase();
+        const setupLocked = Boolean(classSplitState.active)
+            && !["completed", "failed", "cancelled"].includes(status);
+        ["classSplitFeatureMode", "classSplitUseEl2n", "classSplitCompactWeight"].forEach((id) => {
+            const control = document.getElementById(id);
+            if (control) control.disabled = setupLocked;
+        });
+        const semanticState = status === "failed"
+            ? "failed"
+            : status === "cancelled"
+                ? "cancelled"
+                : status === "completed"
+                    ? "completed"
+                    : "running";
+        root.dataset.state = semanticState;
+        const progressPercent = Math.round(progress * 100);
+        const percentOutput = document.getElementById("classSplitProgressPercent");
+        if (percentOutput) {
+            percentOutput.value = `${progressPercent}%`;
+            percentOutput.textContent = `${progressPercent}%`;
+        }
+        const plan = getClassSplitProgressPhasePlan(job);
+        const phaseCount = plan.phases.length;
+        const progressIndex = Math.min(
+            Math.max(0, phaseCount - 1),
+            Math.floor(progress * phaseCount)
+        );
+        const activeIndex = plan.supplied && Number.isFinite(stageIndex) && stageIndex > 0
+            ? Math.min(phaseCount - 1, Math.max(0, Math.round(stageIndex) - 1))
+            : progressIndex;
+        const phaseTitle = document.getElementById("classSplitProgressPhase");
+        if (phaseTitle) {
+            phaseTitle.textContent = stageLabel
+                || plan.phases[activeIndex]?.label
+                || (semanticState === "completed" ? "Analysis complete" : "Preparing analysis");
+        }
+        const steps = document.getElementById("classSplitProgressSteps");
+        if (!steps) {
+            return;
+        }
+        const fragment = document.createDocumentFragment();
+        plan.phases.forEach((phase, index) => {
+            const item = document.createElement("span");
+            const explicitStatus = phase.status.toLowerCase();
+            const isComplete = semanticState === "completed"
+                || explicitStatus === "completed"
+                || (explicitStatus !== "failed" && index < activeIndex);
+            const isActive = explicitStatus === "running"
+                || explicitStatus === "active"
+                || (index === activeIndex && semanticState !== "completed");
+            item.className = "class-split-progress__step";
+            if (isComplete) item.classList.add("is-complete");
+            if (isActive) item.classList.add(semanticState === "failed" ? "is-failed" : "is-active");
+            item.setAttribute("role", "listitem");
+            item.textContent = phase.label;
+            fragment.appendChild(item);
+        });
+        steps.replaceChildren(fragment);
+    }
+
     function renderClassSplitProgress(job = null) {
         if (!classSplitElements.progress) {
             return;
         }
         const active = classSplitState.active || (job && !["completed", "failed", "cancelled"].includes(String(job.status || "")));
         classSplitElements.progress.hidden = !active && !job;
-        const progress = Math.max(0, Math.min(1, Number(job?.progress) || 0));
+        const progressState = job?.progress_state && typeof job.progress_state === "object"
+            ? job.progress_state
+            : {};
+        const progress = Math.max(
+            0,
+            Math.min(1, Number(progressState.progress ?? progressState.overall_progress ?? job?.progress) || 0)
+        );
         const progressPercent = Math.round(progress * 100);
         if (classSplitElements.progressFill) {
             classSplitElements.progressFill.style.width = `${progressPercent}%`;
@@ -51396,11 +51518,11 @@ async function cancelRfDetrTrainingJobRequest() {
             if (Number(memory.worker_rss_bytes) > 0) {
                 runtimeParts.push(`worker ${formatBytes(Number(memory.worker_rss_bytes))}`);
             }
-            const stageIndex = Number(job?.stage_index);
-            const stageCount = Number(job?.stage_count);
-            const stageProcessed = Number(job?.stage_processed);
-            const stageTotal = Number(job?.stage_total);
-            const stageLabel = String(job?.stage_label || job?.stage || "").trim();
+            const stageIndex = Number(progressState.stage_index ?? job?.stage_index);
+            const stageCount = Number(progressState.stage_count ?? job?.stage_count);
+            const stageProcessed = Number(progressState.stage_processed ?? progressState.processed ?? job?.stage_processed);
+            const stageTotal = Number(progressState.stage_total ?? progressState.total ?? job?.stage_total);
+            const stageLabel = String(progressState.stage_label || progressState.stage || job?.stage_label || job?.stage || "").trim();
             const structuredParts = [];
             if (Number.isFinite(stageIndex) && stageIndex > 0 && Number.isFinite(stageCount) && stageCount > 0) {
                 structuredParts.push(`Stage ${Math.round(stageIndex)}/${Math.round(stageCount)}`);
@@ -51424,6 +51546,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 structuredParts.length ? (message || logTail) : "",
                 runtimeParts.join(" · "),
             ].filter(Boolean).join(" • ");
+            renderClassSplitProgressPhases(job, progress, stageIndex, stageLabel);
         }
     }
 
@@ -69134,7 +69257,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 ).trim().toLowerCase();
                 applyEmbeddingRecipePresetToClassSplit(selectedPreset);
                 if (selectedPreset === "custom") {
-                    const advancedSetup = document.getElementById("classSplitAdvancedSetup");
+                    const advancedSetup = document.getElementById("classSplitFeatureTuning");
                     if (advancedSetup) {
                         advancedSetup.open = true;
                     }
@@ -77793,9 +77916,9 @@ async function cancelRfDetrTrainingJobRequest() {
 // this layer only keeps visible choices and the concise preview synchronized.
 (() => {
     const presetConfig = {
-        thorough: { mode: "multi_backbone_fusion", el2n: true, compactWeight: 75 },
-        precise: { mode: "compact_fusion", el2n: false, compactWeight: 100 },
-        fast: { mode: "single_backbone", el2n: false, compactWeight: 100 },
+        thorough_quality_v1: { mode: "multi_backbone_fusion", el2n: true, compactWeight: 75 },
+        precise_compact_v1: { mode: "compact_fusion", el2n: false, compactWeight: 100 },
+        fast_map_v1: { mode: "single_backbone", el2n: false, compactWeight: 100 },
     };
     const byId = (id) => document.getElementById(id);
     const escapeText = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
@@ -77850,7 +77973,15 @@ async function cancelRfDetrTrainingJobRequest() {
         const current = currentRecipe();
         const resolved = resolvedRecipe || {};
         const mode = resolved.feature_mode || resolved.mode || current.mode;
-        const dimension = resolved.output_dimension ?? resolved.feature_dimension ?? resolved.embedding_dimension ?? resolved.dimension ?? current.dimension;
+        const resolvedDimension = resolved.output_dimension
+            ?? resolved.final_dimension
+            ?? resolved.projection_input_dimension
+            ?? resolved.fused_dimension
+            ?? resolved.feature_dimension
+            ?? resolved.embedding_dimension
+            ?? resolved.feature_dimensions?.total
+            ?? resolved.dimension;
+        const dimension = Number.isFinite(Number(resolvedDimension)) ? Number(resolvedDimension) : current.dimension;
         const scope = byId("classSplitScopeAll")?.checked ? "All classes" : `One class${selectedText("classSplitClassSelect") ? `: ${selectedText("classSplitClassSelect")}` : ""}`;
         target.innerHTML = `<div><span>Scope</span><strong>${escapeText(scope)}</strong></div><div><span>Map</span><strong>${escapeText(current.map)}</strong></div><div><span>Features</span><strong>${escapeText(modeLabel(mode))} · ${Number(dimension).toLocaleString()}D</strong></div><div><span>Review ranking</span><strong>${current.el2n ? "Class structure + EL2N" : "Class structure"}</strong></div><div><span>Spatial evidence</span><strong>${current.refine ? "Prepared" : "Off"}</strong></div><div><span>Memory</span><strong>${escapeText(current.memory)}</strong></div>`;
     }
@@ -77860,12 +77991,23 @@ async function cancelRfDetrTrainingJobRequest() {
         if (byId("classSplitCradioWeightValue")) byId("classSplitCradioWeightValue").textContent = `${recipe.cradioWeight}%`;
         if (byId("classSplitFusionBalance")) byId("classSplitFusionBalance").hidden = recipe.mode !== "multi_backbone_fusion";
     }
-    function renderAll() { syncWeights(); renderExplanation(); renderResolvedRecipe(); }
+    function renderPresetSummary() {
+        const target = byId("classSplitPresetSummary");
+        if (!target) return;
+        const preset = byId("classSplitRecipePreset")?.value || "";
+        const copy = {
+            thorough_quality_v1: "Highest-quality measured recipe. Fuses DINOv3, SAM3, SALAD, and C-RADIO, then includes EL2N in review ranking.",
+            precise_compact_v1: "Balanced recipe. Keeps DINOv3, SAM3, and SALAD separation while avoiding the largest C-RADIO branch.",
+            fast_map_v1: "Fast recipe. Uses one DINOv3 representation for quick iteration and the lowest memory demand.",
+        };
+        target.textContent = copy[preset] || "Custom recipe. The controls below define the exact branches, weighting, map, and memory policy.";
+    }
+    function renderAll() { syncWeights(); renderPresetSummary(); renderExplanation(); renderResolvedRecipe(); }
     function applyPreset() {
         const preset = byId("classSplitRecipePreset")?.value;
         const config = presetConfig[preset];
         if (!config) {
-            if (preset === "custom") byId("classSplitFeatureTuning")?.setAttribute("open", "");
+            if (String(preset || "").startsWith("custom")) byId("classSplitFeatureTuning")?.setAttribute("open", "");
             renderAll(); return;
         }
         if (byId("classSplitFeatureMode")) byId("classSplitFeatureMode").value = config.mode;
@@ -77888,6 +78030,7 @@ async function cancelRfDetrTrainingJobRequest() {
         setup.addEventListener("change", renderAll);
         applyPreset();
     }
+    window.renderClassSplitGuidedRecipeExplanation = renderExplanation;
     window.renderClassSplitResolvedRecipe = renderResolvedRecipe;
     if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", initialize, { once: true });
     else initialize();

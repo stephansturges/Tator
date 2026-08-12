@@ -51517,7 +51517,7 @@ async function cancelRfDetrTrainingJobRequest() {
             salad: "SALAD learns a label-free spatial pooling vocabulary over object tokens, preserving local structure that a single global token can miss.",
             features: "High-dimensional object descriptions retain distinctions that may be compressed or lost in the final two-dimensional map.",
             fusion: "Each feature branch is normalized before weighting so a larger backbone cannot dominate merely because of its scale or dimension.",
-            ranking: "Class structure and EL2N reorder real objects for review; they never create candidates or change labels automatically.",
+            ranking: "Class boundaries, nearest neighbours, EL2N, and source-disjoint proposals score real objects only; they never invent candidates or change labels automatically.",
             projection: "PCA or UMAP is a navigation view only. Candidate scoring continues to use the richer high-dimensional representation.",
             refinement: "This pass prepares TokenCut and spatial evidence for later review; it does not ask a VLM to decide the label.",
             finalization: "The final queue contains only real dataset objects, with tiny-object and overlap evidence kept separately visible.",

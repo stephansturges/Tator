@@ -28,6 +28,30 @@ QUALITY_MEMORY_MIN_MB = 1024
 QUALITY_MEMORY_MAX_MB = 262_144
 QUALITY_MEMORY_AUTO_MAX_MB = 32_768
 QUALITY_LOW_DETAIL_MIN_SIDE_PX = 32.0
+QUALITY_EXACT_RBF_MAX_RECORDS = 5_000
+QUALITY_EXACT_NEIGHBOUR_MAX_RECORDS = 20_000
+QUALITY_FULL_LOGISTIC_FIT_MAX = 8_192
+QUALITY_FULL_RBF_FIT_MAX = 4_096
+QUALITY_FULL_NEIGHBOUR_REFERENCE_MAX = 20_000
+QUALITY_RBF_COMPONENT_MAX = 512
+
+
+def _scaled_quality_progress(
+    callback: Callable[[float, str], None] | None,
+    start: float,
+    end: float,
+) -> Callable[[float, str], None] | None:
+    if callback is None:
+        return None
+    span = max(0.0, float(end) - float(start))
+
+    def report(fraction: float, message: str) -> None:
+        callback(
+            float(start) + span * max(0.0, min(1.0, float(fraction))),
+            message,
+        )
+
+    return report
 
 QUALITY_RECIPE_ALIASES = {
     "balanced": THOROUGH_QUALITY_RECIPE,
@@ -540,17 +564,27 @@ def _oof_logistic_disagreement(
     fit_limit: int,
     predict_chunk_size: int = 2048,
     cancel_callback: Callable[[], bool] | None = None,
+    progress_callback: Callable[[float, str], None] | None = None,
+    progress_label: str = "Learning class boundaries",
 ) -> tuple[np.ndarray, np.ndarray]:
     from sklearn.linear_model import LogisticRegression
 
     if np.unique(labels).size < 2:
+        _quality_progress(progress_callback, 1.0, f"{progress_label}: one class; skipped")
         return np.zeros(labels.size, dtype=np.float64), labels.copy()
     folds = _group_folds(labels.tolist(), groups, seed)
     disagreement = np.full(labels.size, np.nan, dtype=np.float64)
     predictions = np.empty(labels.size, dtype=object)
     predictions[:] = None
-    for fold in sorted(set(folds.tolist())):
+    fold_values = sorted(set(folds.tolist()))
+    fold_count = max(1, len(fold_values))
+    for fold_index, fold in enumerate(fold_values):
         _quality_cancelled(cancel_callback)
+        _quality_progress(
+            progress_callback,
+            fold_index / fold_count,
+            f"{progress_label}: fitting source-disjoint fold {fold_index + 1}/{fold_count}",
+        )
         test = np.flatnonzero(folds == fold)
         train = np.flatnonzero(folds != fold)
         if not test.size or np.unique(labels[train]).size < 2:
@@ -588,6 +622,19 @@ def _oof_logistic_disagreement(
             )
             disagreement[chunk] = 1.0 - true_probability
             predictions[chunk] = model.classes_[np.argmax(probabilities, axis=1)]
+            _quality_progress(
+                progress_callback,
+                (
+                    fold_index
+                    + (start + chunk.size) / max(1, valid_test.size)
+                )
+                / fold_count,
+                (
+                    f"{progress_label}: fold {fold_index + 1}/{fold_count}, "
+                    f"scored {min(valid_test.size, start + chunk.size):,}/{valid_test.size:,} objects"
+                ),
+            )
+    _quality_progress(progress_callback, 1.0, f"{progress_label}: complete")
     return disagreement, predictions
 
 
@@ -602,17 +649,21 @@ def _oof_el2n(
     epochs: int = 5,
     predict_chunk_size: int = 2048,
     cancel_callback: Callable[[], bool] | None = None,
+    progress_callback: Callable[[float, str], None] | None = None,
 ) -> np.ndarray:
     from sklearn.linear_model import SGDClassifier
     from sklearn.utils.class_weight import compute_class_weight
 
     classes = np.unique(labels)
     if classes.size < 2:
+        _quality_progress(progress_callback, 1.0, "Estimating training dynamics: one class; skipped")
         return np.zeros(labels.size, dtype=np.float64)
     class_lookup = {str(value): idx for idx, value in enumerate(classes)}
     folds = _group_folds(labels.tolist(), groups, seed + 23)
     scores = np.full(labels.size, np.nan, dtype=np.float64)
-    for fold in sorted(set(folds.tolist())):
+    fold_values = sorted(set(folds.tolist()))
+    fold_count = max(1, len(fold_values))
+    for fold_index, fold in enumerate(fold_values):
         _quality_cancelled(cancel_callback)
         test = np.flatnonzero(folds == fold)
         train = np.flatnonzero(folds != fold)
@@ -654,6 +705,14 @@ def _oof_el2n(
         epoch_scores = np.zeros(valid_test.size, dtype=np.float64)
         for epoch in range(epochs):
             _quality_cancelled(cancel_callback)
+            _quality_progress(
+                progress_callback,
+                (fold_index + epoch / max(1, epochs)) / fold_count,
+                (
+                    f"Estimating training dynamics: fold {fold_index + 1}/{fold_count}, "
+                    f"pass {epoch + 1}/{epochs}"
+                ),
+            )
             order = np.asarray(
                 sorted(train, key=lambda idx: _stable_u64(ids[int(idx)], seed + epoch)),
                 dtype=np.int64,
@@ -670,6 +729,7 @@ def _oof_el2n(
                     axis=1,
                 )
         scores[valid_test] = epoch_scores / float(epochs)
+    _quality_progress(progress_callback, 1.0, "Estimating training dynamics: complete")
     return scores
 
 
@@ -683,16 +743,25 @@ def _oof_rbf_proposals(
     fit_limit: int,
     predict_chunk_size: int = 2048,
     cancel_callback: Callable[[], bool] | None = None,
+    progress_callback: Callable[[float, str], None] | None = None,
 ) -> np.ndarray:
     from sklearn.svm import SVC
 
     if np.unique(labels).size < 2:
+        _quality_progress(progress_callback, 1.0, "Proposing classes: one class; skipped")
         return labels.copy()
     folds = _group_folds(labels.tolist(), groups, seed + 47)
     proposals = np.empty(labels.size, dtype=object)
     proposals[:] = None
-    for fold in sorted(set(folds.tolist())):
+    fold_values = sorted(set(folds.tolist()))
+    fold_count = max(1, len(fold_values))
+    for fold_index, fold in enumerate(fold_values):
         _quality_cancelled(cancel_callback)
+        _quality_progress(
+            progress_callback,
+            fold_index / fold_count,
+            f"Proposing classes: fitting exact fold {fold_index + 1}/{fold_count}",
+        )
         test = np.flatnonzero(folds == fold)
         train = np.flatnonzero(folds != fold)
         if not test.size or np.unique(labels[train]).size < 2:
@@ -716,6 +785,19 @@ def _oof_rbf_proposals(
             _quality_cancelled(cancel_callback)
             chunk = valid_test[start : start + max(1, int(predict_chunk_size))]
             proposals[chunk] = model.predict(features[chunk])
+            _quality_progress(
+                progress_callback,
+                (
+                    fold_index
+                    + (start + chunk.size) / max(1, valid_test.size)
+                )
+                / fold_count,
+                (
+                    f"Proposing classes: exact fold {fold_index + 1}/{fold_count}, "
+                    f"scored {min(valid_test.size, start + chunk.size):,}/{valid_test.size:,} objects"
+                ),
+            )
+    _quality_progress(progress_callback, 1.0, "Proposing classes: complete")
     return proposals
 
 
@@ -730,6 +812,7 @@ def _oof_bounded_rbf_proposals(
     components: int,
     predict_chunk_size: int,
     cancel_callback: Callable[[], bool] | None = None,
+    progress_callback: Callable[[float, str], None] | None = None,
 ) -> np.ndarray:
     from sklearn.kernel_approximation import Nystroem
     from sklearn.linear_model import LogisticRegression
@@ -737,10 +820,21 @@ def _oof_bounded_rbf_proposals(
     proposals = np.empty(labels.size, dtype=object)
     proposals[:] = None
     if np.unique(labels).size < 2:
+        _quality_progress(progress_callback, 1.0, "Proposing classes: one class; skipped")
         return proposals
     folds = _group_folds(labels.tolist(), groups, seed + 47)
-    for fold in sorted(set(folds.tolist())):
+    fold_values = sorted(set(folds.tolist()))
+    fold_count = max(1, len(fold_values))
+    for fold_index, fold in enumerate(fold_values):
         _quality_cancelled(cancel_callback)
+        _quality_progress(
+            progress_callback,
+            fold_index / fold_count,
+            (
+                f"Proposing classes: learning scalable RBF map for fold "
+                f"{fold_index + 1}/{fold_count}"
+            ),
+        )
         test = np.flatnonzero(folds == fold)
         train = np.flatnonzero(folds != fold)
         if not test.size or np.unique(labels[train]).size < 2:
@@ -761,6 +855,11 @@ def _oof_bounded_rbf_proposals(
             random_state=seed + int(fold),
         )
         transformed_train = mapper.fit_transform(features[train])
+        _quality_progress(
+            progress_callback,
+            (fold_index + 0.35) / fold_count,
+            f"Proposing classes: fitting fold {fold_index + 1}/{fold_count}",
+        )
         model = LogisticRegression(
             C=3.0,
             class_weight="balanced",
@@ -777,6 +876,20 @@ def _oof_bounded_rbf_proposals(
             _quality_cancelled(cancel_callback)
             chunk = valid_test[start : start + max(1, int(predict_chunk_size))]
             proposals[chunk] = model.predict(mapper.transform(features[chunk]))
+            _quality_progress(
+                progress_callback,
+                (
+                    fold_index
+                    + 0.45
+                    + 0.55 * (start + chunk.size) / max(1, valid_test.size)
+                )
+                / fold_count,
+                (
+                    f"Proposing classes: fold {fold_index + 1}/{fold_count}, "
+                    f"scored {min(valid_test.size, start + chunk.size):,}/{valid_test.size:,} objects"
+                ),
+            )
+    _quality_progress(progress_callback, 1.0, "Proposing classes: complete")
     return proposals
 
 
@@ -792,9 +905,12 @@ def _cosine_neighbour_disagreement(
     query_chunk_size: int | None = None,
     cancel_callback: Callable[[], bool] | None = None,
     approximate: bool = False,
+    progress_callback: Callable[[float, str], None] | None = None,
+    progress_label: str = "Comparing nearest neighbours",
 ) -> np.ndarray:
     count = labels.size
     if count <= 1:
+        _quality_progress(progress_callback, 1.0, f"{progress_label}: skipped")
         return np.zeros(count, dtype=np.float64)
     reference = _bounded_indices(ids, labels.tolist(), groups, reference_limit, seed + 311)
     reference_features = features[reference]
@@ -820,6 +936,11 @@ def _cosine_neighbour_disagreement(
             n_jobs=-1,
         )
         model.fit(reference_features)
+    _quality_progress(
+        progress_callback,
+        0.08,
+        f"{progress_label}: reference index ready ({reference.size:,} objects)",
+    )
     result = np.zeros(count, dtype=np.float64)
     chunk_size = query_chunk_size or max(32, min(2048, int(2_000_000 / max(1, reference.size))))
     for start in range(0, count, chunk_size):
@@ -840,6 +961,12 @@ def _cosine_neighbour_disagreement(
                 result[item_index] = float(
                     np.mean(labels[neighbour_indices] != labels[item_index])
                 )
+        _quality_progress(
+            progress_callback,
+            0.08 + 0.92 * end / max(1, count),
+            f"{progress_label}: scored {end:,}/{count:,} objects",
+        )
+    _quality_progress(progress_callback, 1.0, f"{progress_label}: complete")
     return result
 
 
@@ -1088,7 +1215,11 @@ def score_quality_records(
             output_path=workspace / "merged.npy",
             chunk_size=chunk_size,
             cancel_callback=cancel_callback,
-            progress_callback=progress_callback,
+            progress_callback=_scaled_quality_progress(
+                progress_callback,
+                0.0,
+                0.08,
+            ),
         )
         largest_branch = max(compact.shape[1], merged.shape[1], cradio.shape[1] if cradio is not None else 0)
         bounded_reference = max(
@@ -1097,7 +1228,14 @@ def score_quality_records(
         )
         bounded_fit = max(256, min(logistic_fit_limit, bounded_reference))
         bounded_rbf_fit = max(256, min(rbf_fit_limit, bounded_reference))
-        rbf_components = max(128, min(2048, int(plan.get("budget_mb") or 1024)))
+        rbf_components = max(
+            64,
+            min(
+                QUALITY_RBF_COMPONENT_MAX,
+                int(plan.get("budget_mb") or 1024),
+                bounded_rbf_fit,
+            ),
+        )
         if execution_metadata is not None:
             execution_metadata.update(
                 {
@@ -1122,24 +1260,51 @@ def score_quality_records(
             compact_weight=recipe.compact_weight,
             cradio_weight=recipe.cradio_weight,
         )
-        chunk_size = 256
-        # Maximum fidelity has no fixed fit/reference reservoirs. Exact
-        # algorithms consume every eligible object; API preflight warns before
-        # a quadratic run that is unlikely to fit the current machine.
-        bounded_reference = len(records)
-        bounded_fit = len(records)
-        bounded_rbf_fit = len(records)
-        rbf_components = 0
+        chunk_size = 512
+        # Full memory keeps feature storage in RAM and scores every object. It
+        # does not make superlinear estimators consume an unbounded population:
+        # that turns a high-fidelity setting into a multi-hour liveness bug.
+        bounded_reference = min(
+            len(records),
+            max(256, min(neighbour_reference_limit, QUALITY_FULL_NEIGHBOUR_REFERENCE_MAX)),
+        )
+        bounded_fit = min(
+            len(records),
+            max(256, min(logistic_fit_limit, QUALITY_FULL_LOGISTIC_FIT_MAX)),
+        )
+        bounded_rbf_fit = min(
+            len(records),
+            max(256, min(rbf_fit_limit, QUALITY_FULL_RBF_FIT_MAX)),
+        )
+        rbf_components = max(
+            64,
+            min(QUALITY_RBF_COMPONENT_MAX, bounded_rbf_fit),
+        )
+        scalable_neighbours = len(records) > QUALITY_EXACT_NEIGHBOUR_MAX_RECORDS
+        scalable_proposals = len(records) > QUALITY_EXACT_RBF_MAX_RECORDS
         if execution_metadata is not None:
             execution_metadata.update(
                 {
                     "fusion_storage": "in_memory",
-                    "neighbour_algorithm": "exact_brute_cosine",
-                    "proposal_algorithm": "exact_rbf_svc",
-                    "full_population_fit": True,
-                    "logistic_fit_limit": len(records),
-                    "rbf_fit_limit": len(records),
-                    "neighbour_reference_limit": len(records),
+                    "neighbour_algorithm": (
+                        "pynndescent_all_query_bounded_reference"
+                        if scalable_neighbours
+                        else "exact_brute_cosine"
+                    ),
+                    "proposal_algorithm": (
+                        "nystroem_rbf_logistic_all_query"
+                        if scalable_proposals
+                        else "exact_rbf_svc"
+                    ),
+                    "all_objects_scored": True,
+                    "full_population_fit": bool(
+                        bounded_fit >= len(records)
+                        and bounded_rbf_fit >= len(records)
+                    ),
+                    "logistic_fit_limit": bounded_fit,
+                    "rbf_fit_limit": bounded_rbf_fit,
+                    "neighbour_reference_limit": bounded_reference,
+                    "rbf_components": rbf_components,
                 }
             )
     ids = [stable_record_id(record, index) for index, record in enumerate(records)]
@@ -1156,6 +1321,8 @@ def score_quality_records(
         fit_limit=bounded_fit,
         predict_chunk_size=chunk_size,
         cancel_callback=cancel_callback,
+        progress_callback=_scaled_quality_progress(progress_callback, 0.10, 0.23),
+        progress_label="Learning compact class boundaries",
     )
     compact_local = _cosine_neighbour_disagreement(
         compact,
@@ -1166,7 +1333,12 @@ def score_quality_records(
         reference_limit=bounded_reference,
         query_chunk_size=chunk_size,
         cancel_callback=cancel_callback,
-        approximate=resolved_policy == "budgeted",
+        approximate=(
+            resolved_policy == "budgeted"
+            or labels.size > QUALITY_EXACT_NEIGHBOUR_MAX_RECORDS
+        ),
+        progress_callback=_scaled_quality_progress(progress_callback, 0.23, 0.38),
+        progress_label="Comparing compact nearest neighbours",
     )
     compact_score, compact_valid = _weighted_rank_blend(
         (
@@ -1185,6 +1357,8 @@ def score_quality_records(
             fit_limit=bounded_fit,
             predict_chunk_size=chunk_size,
             cancel_callback=cancel_callback,
+            progress_callback=_scaled_quality_progress(progress_callback, 0.38, 0.51),
+            progress_label="Learning C-RADIO class boundaries",
         )
         cradio_local = _cosine_neighbour_disagreement(
             cradio,
@@ -1195,7 +1369,12 @@ def score_quality_records(
             reference_limit=bounded_reference,
             query_chunk_size=chunk_size,
             cancel_callback=cancel_callback,
-            approximate=resolved_policy == "budgeted",
+            approximate=(
+                resolved_policy == "budgeted"
+                or labels.size > QUALITY_EXACT_NEIGHBOUR_MAX_RECORDS
+            ),
+            progress_callback=_scaled_quality_progress(progress_callback, 0.51, 0.66),
+            progress_label="Comparing C-RADIO nearest neighbours",
         )
         cradio_score, cradio_valid = _weighted_rank_blend(
             (
@@ -1225,6 +1404,7 @@ def score_quality_records(
             fit_limit=bounded_fit,
             predict_chunk_size=chunk_size,
             cancel_callback=cancel_callback,
+            progress_callback=_scaled_quality_progress(progress_callback, 0.66, 0.82),
         )
     else:
         el2n = np.zeros(labels.size, dtype=np.float64)
@@ -1235,7 +1415,8 @@ def score_quality_records(
         )
     )
     _quality_progress(progress_callback, 0.82, "Generating source-disjoint class proposals ...")
-    if resolved_policy == "budgeted" and labels.size > 2000:
+    use_scalable_proposals = labels.size > QUALITY_EXACT_RBF_MAX_RECORDS
+    if use_scalable_proposals:
         proposals = _oof_bounded_rbf_proposals(
             merged,
             labels,
@@ -1246,6 +1427,7 @@ def score_quality_records(
             components=rbf_components,
             predict_chunk_size=chunk_size,
             cancel_callback=cancel_callback,
+            progress_callback=_scaled_quality_progress(progress_callback, 0.82, 0.98),
         )
     else:
         proposals = _oof_rbf_proposals(
@@ -1257,11 +1439,12 @@ def score_quality_records(
             fit_limit=bounded_rbf_fit,
             predict_chunk_size=chunk_size,
             cancel_callback=cancel_callback,
+            progress_callback=_scaled_quality_progress(progress_callback, 0.82, 0.98),
         )
     if execution_metadata is not None:
         execution_metadata["proposal_algorithm"] = (
-            "nystroem_rbf_logistic"
-            if resolved_policy == "budgeted" and labels.size > 2000
+            "nystroem_rbf_logistic_all_query"
+            if use_scalable_proposals
             else "exact_fit_bounded_rbf_svc"
             if resolved_policy == "budgeted"
             else "exact_rbf_svc"

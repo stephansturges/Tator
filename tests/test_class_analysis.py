@@ -22407,6 +22407,39 @@ def test_class_analysis_stage1_identity_ignores_labels_but_binds_runtime(
     ) != baseline
 
 
+def test_class_analysis_quality_progress_is_a_live_ranking_heartbeat(
+    monkeypatch,
+):
+    memory = {
+        "backend_rss_bytes": 101,
+        "worker_rss_bytes": 202,
+        "combined_rss_bytes": 303,
+        "system_available_bytes": 404,
+        "system_total_bytes": 505,
+    }
+    monkeypatch.setattr(
+        api,
+        "_class_analysis_memory_snapshot",
+        lambda: dict(memory),
+    )
+    job = api.ClassAnalysisJob(job_id="quality-progress", request={})
+
+    api._class_analysis_publish_quality_progress(
+        job,
+        fraction=0.5,
+        message="Proposing classes: fold 2/5, scored 40/80 objects",
+        record_count=80,
+        execution_metadata={"proposal_algorithm": "bounded"},
+    )
+
+    assert job.phase_id == "ranking"
+    assert job.phase_label == "Testing labels against class structure"
+    assert job.phase_completed_units == 40
+    assert job.phase_total_units == 80
+    assert job.runtime["memory"] == memory
+    assert job.runtime["quality_scoring"]["proposal_algorithm"] == "bounded"
+
+
 def test_class_analysis_stage1_checkpoint_ignores_refinement_contract_and_migrates_legacy_key(
     tmp_path,
     monkeypatch,

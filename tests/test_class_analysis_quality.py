@@ -1,5 +1,6 @@
 import unittest
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import numpy as np
 
@@ -295,6 +296,64 @@ class ClassAnalysisQualityTests(unittest.TestCase):
             self.assertEqual(metadata["fusion_storage"], "temporary_memmap")
             self.assertEqual(metadata["neighbour_algorithm"], "pynndescent")
             self.assertEqual(metadata["proposal_algorithm"], "exact_fit_bounded_rbf_svc")
+
+    def test_large_full_scoring_bounds_superlinear_proposals_and_reports_progress(self):
+        records = self._records(300)
+        metadata = {}
+        progress = []
+
+        def fake_scalable_proposals(_features, labels, *_args, **kwargs):
+            callback = kwargs.get("progress_callback")
+            if callback:
+                callback(0.25, "Proposing classes: fitting fold 1/2")
+                callback(1.0, "Proposing classes: complete")
+            return labels.copy()
+
+        with (
+            patch(
+                "utils.class_analysis_quality.QUALITY_EXACT_RBF_MAX_RECORDS",
+                40,
+            ),
+            patch(
+                "utils.class_analysis_quality._oof_bounded_rbf_proposals",
+                side_effect=fake_scalable_proposals,
+            ) as scalable,
+            patch(
+                "utils.class_analysis_quality._oof_rbf_proposals",
+                side_effect=AssertionError("large full runs must not use exact RBF"),
+            ),
+        ):
+            _, rows, _ = score_quality_records(
+                records,
+                self._features(records),
+                recipe_id="precise_compact_v1",
+                memory_policy="full",
+                logistic_fit_limit=40,
+                rbf_fit_limit=40,
+                neighbour_reference_limit=80,
+                execution_metadata=metadata,
+                progress_callback=lambda fraction, message: progress.append(
+                    (fraction, message)
+                ),
+            )
+
+        self.assertTrue(scalable.called)
+        self.assertEqual(len(rows), len(records))
+        self.assertEqual(
+            metadata["proposal_algorithm"],
+            "nystroem_rbf_logistic_all_query",
+        )
+        self.assertTrue(metadata["all_objects_scored"])
+        self.assertFalse(metadata["full_population_fit"])
+        self.assertTrue(progress)
+        self.assertEqual(progress[-1][0], 1.0)
+        self.assertEqual(
+            [fraction for fraction, _message in progress],
+            sorted(fraction for fraction, _message in progress),
+        )
+        self.assertTrue(
+            any("Proposing classes" in message for _fraction, message in progress)
+        )
 
     def test_adaptive_ranking_inserts_only_real_lower_ranked_audits(self):
         points = []

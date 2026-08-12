@@ -10,9 +10,11 @@ present; CUDA/MPS/CPU Torch remains the fallback path.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import os
 import platform
 import sys
+import threading
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -32,7 +34,15 @@ CRADIO_POOLING_MODES = ["summary", "spatial_mean", "summary_spatial_concat"]
 CRADIO_DEFAULT_POOLING = "summary"
 CRADIO_MLX_DTYPE = os.environ.get("CRADIO_MLX_DTYPE", "bfloat16")
 CRADIO_CACHE_IDENTITY_SCHEMA = "cradio-runtime-identity-v1"
-CRADIO_MLX_IMPLEMENTATION_ABI = "cradio-mlx-python-v2-summary-only"
+CRADIO_MLX_IMPLEMENTATION_ABI = "cradio-mlx-python-v3-native-size-batches"
+CRADIO_INFERENCE_LOCK = threading.RLock()
+
+
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    raw = str(os.environ.get(name) or "").strip().lower()
+    if not raw:
+        return bool(default)
+    return raw in {"1", "true", "yes", "on"}
 
 
 @dataclass(frozen=True)
@@ -254,12 +264,7 @@ def cradio_runtime_identity(
             image_size = _coerce_mlx_size_dimension(int(float(raw_image_size)))
         except (TypeError, ValueError, OverflowError):
             image_size = 512
-    elif str(os.environ.get("CRADIO_MLX_PRESERVE_INPUT_SIZE") or "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }:
+    elif _env_flag("CRADIO_MLX_PRESERVE_INPUT_SIZE", default=True):
         image_size = "preserve-input"
     identity.update(
         {
@@ -271,6 +276,15 @@ def cradio_runtime_identity(
             "checkpoint_sha256": checkpoint_digest,
             "checkpoint_bytes": int(checkpoint_stat.st_size),
             "persistent_cache_safe": True,
+            "persistent_model": True,
+            "serialized_inference": True,
+            "compile_forward": _env_flag("CRADIO_MLX_COMPILE", default=False),
+            "cider_fusion": str(
+                os.environ.get("CRADIO_MLX_CIDER_FUSION") or "auto"
+            ).strip().lower(),
+            "cider_fusion_targets": str(
+                os.environ.get("CRADIO_MLX_CIDER_TARGETS") or "ln"
+            ).strip().lower(),
         }
     )
     return identity
@@ -341,7 +355,28 @@ def load_cradio_backbone(
             MLXHEncoder, MLXSO400MEncoder = _import_cradio_mlx()
             variant = _cradio_mlx_variant(resolved_model)
             encoder_cls = MLXHEncoder if variant == "h" else MLXSO400MEncoder
-            model = encoder_cls.load(_cradio_mlx_checkpoint(resolved_model), dtype=CRADIO_MLX_DTYPE)
+            load_parameters = inspect.signature(encoder_cls.load).parameters
+            optional_load_args = {
+                "compile_forward": _env_flag(
+                    "CRADIO_MLX_COMPILE",
+                    default=False,
+                ),
+                "cider_fusion": str(
+                    os.environ.get("CRADIO_MLX_CIDER_FUSION") or "auto"
+                ).strip().lower(),
+                "cider_fusion_targets": str(
+                    os.environ.get("CRADIO_MLX_CIDER_TARGETS") or "ln"
+                ).strip().lower(),
+            }
+            model = encoder_cls.load(
+                _cradio_mlx_checkpoint(resolved_model),
+                dtype=CRADIO_MLX_DTYPE,
+                **{
+                    key: value
+                    for key, value in optional_load_args.items()
+                    if key in load_parameters
+                },
+            )
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"cradio_mlx_load_failed:{exc}") from exc
         return model, None, resolved_model, "mlx"
@@ -398,12 +433,10 @@ def _resolve_cradio_mlx_image_size(images: Sequence[Image.Image]) -> int | Tuple
             return value
         except Exception:
             pass
-    preserve_input = str(os.environ.get("CRADIO_MLX_PRESERVE_INPUT_SIZE") or "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    preserve_input = _env_flag(
+        "CRADIO_MLX_PRESERVE_INPUT_SIZE",
+        default=True,
+    )
     if not preserve_input:
         return 512
     sizes = [getattr(img, "size", None) for img in images if getattr(img, "size", None)]
@@ -433,15 +466,17 @@ def _encode_cradio_images_mlx(
         and not return_tokens
         and callable(summary_encoder)
     ):
-        summary = np.asarray(
-            summary_encoder(list(images), image_size=image_size),
-            dtype=np.float32,
-        )
+        with CRADIO_INFERENCE_LOCK:
+            summary = np.asarray(
+                summary_encoder(list(images), image_size=image_size),
+                dtype=np.float32,
+            )
         if summary.ndim == 1:
             summary = summary.reshape(1, -1)
         return _l2_normalize_np(summary, axis=-1) if normalize else summary
 
-    result = model.encode_batch(list(images), image_size=image_size)
+    with CRADIO_INFERENCE_LOCK:
+        result = model.encode_batch(list(images), image_size=image_size)
     summary = np.asarray(result.summary, dtype=np.float32)
     spatial = np.asarray(result.spatial, dtype=np.float32)
     if summary.ndim == 1:
@@ -495,7 +530,8 @@ def encode_cradio_images(
     with torch.no_grad():
         inputs = processor(images=list(images), return_tensors="pt", do_resize=True)
         pixel_values = inputs["pixel_values"].to(device_name)
-        outputs = model(pixel_values)
+        with CRADIO_INFERENCE_LOCK:
+            outputs = model(pixel_values)
         summary, spatial = _unpack_cradio_outputs(outputs)
         summary = summary.float()
         spatial = spatial.float()

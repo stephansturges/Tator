@@ -11453,6 +11453,17 @@ def test_cradio_embedding_contract_and_capabilities(monkeypatch):
     assert normalize_cradio_pooling("spatial") == "spatial_mean"
     assert normalize_cradio_pooling("summary+spatial") == "summary_spatial_concat"
     assert normalize_cradio_pooling("anything_else") == "summary"
+    monkeypatch.delenv("CRADIO_MLX_IMAGE_SIZE", raising=False)
+    monkeypatch.delenv("CRADIO_MLX_PRESERVE_INPUT_SIZE", raising=False)
+    native_size_images = [Image.new("RGB", (336, 336))]
+    assert cradio_embedding_utils._resolve_cradio_mlx_image_size(
+        native_size_images
+    ) == 336
+    monkeypatch.setenv("CRADIO_MLX_PRESERVE_INPUT_SIZE", "false")
+    assert cradio_embedding_utils._resolve_cradio_mlx_image_size(
+        native_size_images
+    ) == 512
+    monkeypatch.delenv("CRADIO_MLX_PRESERVE_INPUT_SIZE", raising=False)
 
     monkeypatch.setattr(
         cradio_embedding_utils,
@@ -11493,7 +11504,7 @@ def test_cradio_embedding_contract_and_capabilities(monkeypatch):
     class FakeMLXEncoder:
         def encode_batch(self, images, image_size=512):
             assert len(images) == 2
-            assert image_size == 512
+            assert image_size == 32
             return types.SimpleNamespace(
                 summary=np.asarray([[3.0, 4.0], [0.0, 5.0]], dtype=np.float32),
                 spatial=np.asarray(
@@ -11526,7 +11537,7 @@ def test_cradio_embedding_contract_and_capabilities(monkeypatch):
 
         def encode_summary_batch(self, images, image_size=512):
             assert len(images) == 2
-            assert image_size == 512
+            assert image_size == 32
             return np.asarray(
                 [[3.0, 4.0], [0.0, 5.0]],
                 dtype=np.float32,

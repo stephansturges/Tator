@@ -9,10 +9,12 @@ present; CUDA/MPS/CPU Torch remains the fallback path.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import platform
 import sys
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Tuple
 
@@ -29,6 +31,8 @@ CRADIO_SUPPORTED_MODELS = [
 CRADIO_POOLING_MODES = ["summary", "spatial_mean", "summary_spatial_concat"]
 CRADIO_DEFAULT_POOLING = "summary"
 CRADIO_MLX_DTYPE = os.environ.get("CRADIO_MLX_DTYPE", "bfloat16")
+CRADIO_CACHE_IDENTITY_SCHEMA = "cradio-runtime-identity-v1"
+CRADIO_MLX_IMPLEMENTATION_ABI = "cradio-mlx-python-v1"
 
 
 @dataclass(frozen=True)
@@ -172,6 +176,104 @@ def cradio_backend_status(
         if platform.system().lower() == "darwin" and mlx.available:
             return mlx
     return _cradio_torch_backend_status(raw)
+
+
+@lru_cache(maxsize=8)
+def _cradio_checkpoint_sha256(
+    path_text: str,
+    size: int,
+    mtime_ns: int,
+) -> str:
+    """Hash an immutable checkpoint identity once per path/stat tuple."""
+
+    del size, mtime_ns
+    digest = hashlib.sha256()
+    with Path(path_text).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def cradio_runtime_identity(
+    model_name: Optional[str] = None,
+    *,
+    requested_backend: Optional[str] = None,
+    pooling: Optional[str] = None,
+    output_mode: str = "summary_and_spatial",
+) -> Dict[str, Any]:
+    """Return the resolved C-RADIO runtime and cache provenance.
+
+    MLX checkpoints are content-addressed and safe to reuse across processes.
+    A remote Torch model identifier does not prove the exact downloaded bytes,
+    so callers must scope that cache identity to the current process.
+    """
+
+    resolved_model = normalize_cradio_model(model_name)
+    status = cradio_backend_status(
+        requested_backend,
+        model_name=resolved_model,
+    )
+    requested = str(
+        requested_backend or os.environ.get("CRADIO_BACKEND") or "auto"
+    ).strip().lower()
+    identity: Dict[str, Any] = {
+        "schema": CRADIO_CACHE_IDENTITY_SCHEMA,
+        "model": resolved_model,
+        "requested_backend": requested,
+        "resolved_backend": status.resolved,
+        "available": bool(status.available),
+        "pooling": normalize_cradio_pooling(pooling),
+        "output_mode": str(output_mode or "summary_and_spatial"),
+        "detail": status.detail,
+        "persistent_cache_safe": False,
+    }
+    if status.resolved != "mlx" or not status.available:
+        identity.update(
+            {
+                "dtype": "torch-runtime",
+                "transport": "transformers",
+                "implementation_abi": "cradio-transformers-runtime-v1",
+                "checkpoint_sha256": "",
+                "checkpoint_bytes": 0,
+            }
+        )
+        return identity
+
+    checkpoint = _cradio_mlx_checkpoint(resolved_model)
+    model_path = checkpoint / "model.safetensors" if checkpoint.is_dir() else checkpoint
+    checkpoint_stat = model_path.stat()
+    checkpoint_digest = _cradio_checkpoint_sha256(
+        str(model_path.resolve()),
+        int(checkpoint_stat.st_size),
+        int(checkpoint_stat.st_mtime_ns),
+    )
+    image_size: Any = 512
+    raw_image_size = str(os.environ.get("CRADIO_MLX_IMAGE_SIZE") or "").strip()
+    if raw_image_size:
+        try:
+            image_size = _coerce_mlx_size_dimension(int(float(raw_image_size)))
+        except (TypeError, ValueError, OverflowError):
+            image_size = 512
+    elif str(os.environ.get("CRADIO_MLX_PRESERVE_INPUT_SIZE") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        image_size = "preserve-input"
+    identity.update(
+        {
+            "dtype": str(CRADIO_MLX_DTYPE or "bfloat16").strip().lower(),
+            "transport": "mlx",
+            "implementation_abi": CRADIO_MLX_IMPLEMENTATION_ABI,
+            "input_size": image_size,
+            "checkpoint_path": str(model_path.resolve()),
+            "checkpoint_sha256": checkpoint_digest,
+            "checkpoint_bytes": int(checkpoint_stat.st_size),
+            "persistent_cache_safe": True,
+        }
+    )
+    return identity
 
 
 def cradio_capabilities() -> Dict[str, Any]:

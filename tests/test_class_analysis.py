@@ -22215,7 +22215,125 @@ def test_class_analysis_stream_encoder_bounds_batches_and_reuses_image_packs(
     )
 
     assert np.allclose(warm, encoded)
-    assert cache_stats == {"hits": 5, "misses": 0, "errors": 0, "total": 5}
+    assert {
+        key: cache_stats[key]
+        for key in ("hits", "misses", "errors", "total")
+    } == {"hits": 5, "misses": 0, "errors": 0, "total": 5}
+    assert cache_stats["miss_reasons"] == {}
+    assert warm_job.cache_status["status"] == "full_hit"
+
+    calls.clear()
+    monkeypatch.setattr(api, "_encode_embedding_items_for_head", fake_encode)
+    changed_records = copy.deepcopy(records)
+    changed_records[1]["crop_cache_key"] = "crop-1-edited"
+    changed_out = tmp_path / "changed-job"
+    changed_out.mkdir()
+    changed_job = api.ClassAnalysisJob(
+        job_id="changed",
+        request=dict(payload),
+    )
+    changed_stats = {}
+    changed = api._class_analysis_stream_encode_records(
+        changed_records,
+        payload,
+        job=changed_job,
+        head=head,
+        batch_size=2,
+        out_dir=changed_out,
+        cache_stats=changed_stats,
+    )
+
+    assert changed.shape == encoded.shape
+    assert calls == [1]
+    assert changed_stats["hits"] == 4
+    assert changed_stats["misses"] == 1
+    assert changed_stats["miss_reasons"] == {"object_changed": 1}
+
+
+def test_class_analysis_stage1_identity_ignores_labels_but_binds_runtime(
+    monkeypatch,
+):
+    records = [
+        {
+            **_record("p0", "First class"),
+            "review_object_key": "review-p0",
+            "source_key": "source",
+            "source_id": "source-1",
+            "_image_sha256": "11" * 32,
+            "crop_cache_key": "crop-p0",
+        }
+    ]
+    request = {
+        "crop_mode": "padded_square",
+        "padding_ratio": 0.08,
+        "preprocess_mode": "canonical",
+        "canonical_size": 336,
+        "background_mode": "full_crop",
+        "embedding_view_mode": "single",
+        "embedding_adjustment": "none",
+    }
+    head = {
+        "encoder_type": "cradio",
+        "encoder_model": "unit-cradio",
+        "normalize_embeddings": True,
+        "cradio_pooling": "summary",
+        "embedding_aggregation": "pooled",
+    }
+    runtime = {
+        "schema": "runtime-v1",
+        "model": "unit-cradio",
+        "requested_backend": "auto",
+        "resolved_backend": "mlx",
+        "dtype": "bfloat16",
+        "transport": "mlx",
+        "implementation_abi": "unit-v1",
+        "input_size": 512,
+        "output_mode": "summary_and_spatial",
+        "checkpoint_sha256": "aa" * 32,
+        "checkpoint_bytes": 123,
+        "persistent_cache_safe": True,
+    }
+    monkeypatch.setattr(
+        api,
+        "cradio_runtime_identity",
+        lambda *_args, **_kwargs: dict(runtime),
+    )
+    baseline = api._class_analysis_stage1_embedding_fingerprint(
+        records,
+        request,
+        head,
+    )
+
+    relabeled = copy.deepcopy(records)
+    relabeled[0].update(
+        {
+            "point_id": "different-point-id",
+            "review_object_key": "different-review-key",
+            "class_id": 99,
+            "class_name": "Different class",
+        }
+    )
+    assert api._class_analysis_stage1_embedding_fingerprint(
+        relabeled,
+        request,
+        head,
+    ) == baseline
+
+    geometry_changed = copy.deepcopy(records)
+    geometry_changed[0]["bbox_xyxy"] = [1.0, 2.0, 30.0, 40.0]
+    geometry_changed[0]["crop_cache_key"] = "crop-p0-edited"
+    assert api._class_analysis_stage1_embedding_fingerprint(
+        geometry_changed,
+        request,
+        head,
+    ) != baseline
+
+    runtime["checkpoint_sha256"] = "bb" * 32
+    assert api._class_analysis_stage1_embedding_fingerprint(
+        records,
+        request,
+        head,
+    ) != baseline
 
 
 def test_class_analysis_stage1_checkpoint_ignores_refinement_contract_and_migrates_legacy_key(

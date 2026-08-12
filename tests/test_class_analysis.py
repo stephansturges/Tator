@@ -11520,6 +11520,33 @@ def test_cradio_embedding_contract_and_capabilities(monkeypatch):
     assert mlx_summary.shape == (2, 2)
     assert np.allclose(np.linalg.norm(mlx_feats, axis=1), np.ones(2), atol=1e-6)
 
+    class FakeSummaryOnlyMLXEncoder:
+        def encode_batch(self, *_args, **_kwargs):
+            raise AssertionError("summary pooling must not export spatial tokens")
+
+        def encode_summary_batch(self, images, image_size=512):
+            assert len(images) == 2
+            assert image_size == 512
+            return np.asarray(
+                [[3.0, 4.0], [0.0, 5.0]],
+                dtype=np.float32,
+            )
+
+    summary_only = encode_cradio_images(
+        FakeSummaryOnlyMLXEncoder(),
+        None,
+        "mlx",
+        mlx_images,
+        pooling="summary",
+        normalize=True,
+    )
+    assert summary_only.shape == (2, 2)
+    assert np.allclose(
+        np.linalg.norm(summary_only, axis=1),
+        np.ones(2),
+        atol=1e-6,
+    )
+
     caps = api._class_analysis_capabilities()
     assert "cradio" in caps["encoders"]
     assert caps["default_cradio_model"] == CRADIO_DEFAULT_MODEL

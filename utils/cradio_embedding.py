@@ -32,7 +32,7 @@ CRADIO_POOLING_MODES = ["summary", "spatial_mean", "summary_spatial_concat"]
 CRADIO_DEFAULT_POOLING = "summary"
 CRADIO_MLX_DTYPE = os.environ.get("CRADIO_MLX_DTYPE", "bfloat16")
 CRADIO_CACHE_IDENTITY_SCHEMA = "cradio-runtime-identity-v1"
-CRADIO_MLX_IMPLEMENTATION_ABI = "cradio-mlx-python-v1"
+CRADIO_MLX_IMPLEMENTATION_ABI = "cradio-mlx-python-v2-summary-only"
 
 
 @dataclass(frozen=True)
@@ -425,7 +425,23 @@ def _encode_cradio_images_mlx(
     normalize: bool = True,
     return_tokens: bool = False,
 ) -> np.ndarray | Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    result = model.encode_batch(list(images), image_size=_resolve_cradio_mlx_image_size(images))
+    image_size = _resolve_cradio_mlx_image_size(images)
+    pooling_norm = normalize_cradio_pooling(pooling)
+    summary_encoder = getattr(model, "encode_summary_batch", None)
+    if (
+        pooling_norm == "summary"
+        and not return_tokens
+        and callable(summary_encoder)
+    ):
+        summary = np.asarray(
+            summary_encoder(list(images), image_size=image_size),
+            dtype=np.float32,
+        )
+        if summary.ndim == 1:
+            summary = summary.reshape(1, -1)
+        return _l2_normalize_np(summary, axis=-1) if normalize else summary
+
+    result = model.encode_batch(list(images), image_size=image_size)
     summary = np.asarray(result.summary, dtype=np.float32)
     spatial = np.asarray(result.spatial, dtype=np.float32)
     if summary.ndim == 1:
@@ -433,7 +449,6 @@ def _encode_cradio_images_mlx(
     if spatial.ndim == 2:
         spatial = spatial.reshape(summary.shape[0], -1, spatial.shape[-1])
     spatial_mean = spatial.mean(axis=1) if spatial.size else np.empty((summary.shape[0], 0), dtype=np.float32)
-    pooling_norm = normalize_cradio_pooling(pooling)
     if pooling_norm == "spatial_mean":
         feats = spatial_mean
     elif pooling_norm == "summary_spatial_concat":

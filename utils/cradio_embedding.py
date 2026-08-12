@@ -34,7 +34,7 @@ CRADIO_POOLING_MODES = ["summary", "spatial_mean", "summary_spatial_concat"]
 CRADIO_DEFAULT_POOLING = "summary"
 CRADIO_MLX_DTYPE = os.environ.get("CRADIO_MLX_DTYPE", "bfloat16")
 CRADIO_CACHE_IDENTITY_SCHEMA = "cradio-runtime-identity-v1"
-CRADIO_MLX_IMPLEMENTATION_ABI = "cradio-mlx-python-v3-native-size-batches"
+CRADIO_MLX_IMPLEMENTATION_ABI = "cradio-mlx-python-v4-compiled-native-batches"
 CRADIO_INFERENCE_LOCK = threading.RLock()
 
 
@@ -278,7 +278,7 @@ def cradio_runtime_identity(
             "persistent_cache_safe": True,
             "persistent_model": True,
             "serialized_inference": True,
-            "compile_forward": _env_flag("CRADIO_MLX_COMPILE", default=False),
+            "compile_forward": _env_flag("CRADIO_MLX_COMPILE", default=True),
             "cider_fusion": str(
                 os.environ.get("CRADIO_MLX_CIDER_FUSION") or "auto"
             ).strip().lower(),
@@ -359,7 +359,7 @@ def load_cradio_backbone(
             optional_load_args = {
                 "compile_forward": _env_flag(
                     "CRADIO_MLX_COMPILE",
-                    default=False,
+                    default=True,
                 ),
                 "cider_fusion": str(
                     os.environ.get("CRADIO_MLX_CIDER_FUSION") or "auto"

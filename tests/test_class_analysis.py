@@ -11562,6 +11562,8 @@ def test_cradio_embedding_contract_and_capabilities(monkeypatch):
     assert "cradio" in caps["encoders"]
     assert caps["default_cradio_model"] == CRADIO_DEFAULT_MODEL
     assert "summary_spatial_concat" in caps["cradio_pooling_modes"]
+    assert caps["cradio_execution"]["compiled_mlx_default"] is True
+    assert caps["cradio_execution"]["so400m_bf16_batches"]["up_to_352_px"] == 12
     assert any(recipe["id"] == "cradio_summary" for recipe in caps["class_separation_recipes"])
 
     request = api._normalize_class_analysis_request(
@@ -11576,6 +11578,37 @@ def test_cradio_embedding_contract_and_capabilities(monkeypatch):
     assert request["encoder_model"] == CRADIO_DEFAULT_MODEL
     assert request["cradio_pooling"] == "summary_spatial_concat"
     assert request["embedding_salad_head_id"] == ""
+    assert request["feature_batch_policy"] == "auto"
+
+    monkeypatch.setattr(
+        api,
+        "_class_analysis_encoder_runtime_metadata",
+        lambda _head: {
+            "resolved_backend": "mlx",
+            "model": CRADIO_DEFAULT_MODEL,
+            "compile_forward": True,
+        },
+    )
+    batch_head = {
+        "encoder_type": "cradio",
+        "encoder_model": CRADIO_DEFAULT_MODEL,
+    }
+    assert api._class_analysis_feature_batch_plan(
+        {"canonical_size": 336},
+        batch_head,
+    )["batch_size"] == 12
+    assert api._class_analysis_feature_batch_plan(
+        {"canonical_size": 432},
+        batch_head,
+    )["batch_size"] == 8
+    assert api._class_analysis_feature_batch_plan(
+        {
+            "canonical_size": 336,
+            "feature_batch_policy": "manual",
+            "batch_size": 7,
+        },
+        batch_head,
+    )["batch_size"] == 7
 
 
 def test_cradio_head_encoding_uses_saved_pooling(monkeypatch):

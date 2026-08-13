@@ -332,6 +332,7 @@ def build_class_analysis_router(
             object_size: str = "all",
             reviewed: str = "any",
             limit: int = 50_000,
+            cursor: Optional[str] = None,
         ):
             return get_session_graph_fn(
                 job_id,
@@ -341,6 +342,7 @@ def build_class_analysis_router(
                 object_size=object_size,
                 reviewed=reviewed,
                 limit=limit,
+                cursor=cursor,
             )
 
     if get_session_review_queue_fn is not None:

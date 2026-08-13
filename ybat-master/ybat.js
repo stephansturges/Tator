@@ -3784,6 +3784,8 @@ const AUTOMATION_LOCKED_TABS = new Set([
         boundedInitialProjectionMode: "",
         boundedGraphQueryKey: "",
         boundedGraphLoad: null,
+        boundedGraphLoadToken: 0,
+        boundedAllPointsLoaded: false,
         boundedReviewQueueNextCursor: "",
         boundedReviewQueueTotal: 0,
         boundedReviewQueueLoading: false,
@@ -3844,6 +3846,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         reviewDispositionHydrationTimer: null,
         reviewDispositionHydrationTargets: new Map(),
         reviewDispositionHydrationInFlight: new Set(),
+        reviewDispositionReconciliationAttempts: new Map(),
         reviewHistoryDeleteOperations: new Map(),
         reviewHistoryDeleteSequence: 0,
         backgroundReviewRefreshTimer: null,
@@ -52458,7 +52461,10 @@ async function cancelRfDetrTrainingJobRequest() {
             classSplitState.boundedTransport = false;
             classSplitState.boundedInitialProjectionMode = "";
             classSplitState.boundedGraphQueryKey = "";
+            classSplitState.boundedGraphLoad?.controller?.abort();
             classSplitState.boundedGraphLoad = null;
+            classSplitState.boundedGraphLoadToken += 1;
+            classSplitState.boundedAllPointsLoaded = false;
             classSplitState.boundedReviewQueueNextCursor = "";
             classSplitState.boundedReviewQueueTotal = 0;
             classSplitState.boundedReviewQueueLoading = false;
@@ -53173,18 +53179,168 @@ async function cancelRfDetrTrainingJobRequest() {
         renderClassSplitInspector();
     }
 
-    async function fetchClassSplitBoundedGraph(projectionMode) {
+    function mergeClassSplitBoundedGraphPages(pages) {
+        const source = Array.isArray(pages) ? pages.filter(Boolean) : [];
+        if (!source.length) return null;
+        if (source.length === 1) return source[0];
+        const columns = {};
+        source.forEach((page) => {
+            Object.entries(page.columns || {}).forEach(([name, values]) => {
+                if (!Array.isArray(values)) return;
+                if (!Array.isArray(columns[name])) columns[name] = [];
+                columns[name].push(...values);
+            });
+        });
+        return {
+            ...source[0],
+            returned: Number(columns.point_id?.length || 0),
+            truncated: false,
+            next_cursor: null,
+            columns,
+        };
+    }
+
+    async function fetchClassSplitBoundedGraph(
+        projectionMode,
+        { allPoints = !classSplitElements.limitPlotPoints?.checked } = {}
+    ) {
         const jobId = String(classSplitState.currentJobId || "").trim();
         if (!jobId) return null;
-        const parameters = new URLSearchParams({
-            projection_mode: normalizeClassSplitProjectionChoice(projectionMode),
-            reviewed: "unreviewed",
-            limit: "50000",
-        });
-        return fetchClassSplitBoundedJson(
-            `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/graph?${parameters}`,
-            "bounded graph"
+        const generation = classSplitState.analysisGeneration;
+        const normalizedProjection = normalizeClassSplitProjectionChoice(projectionMode);
+        const loadToken = ++classSplitState.boundedGraphLoadToken;
+        classSplitState.boundedGraphLoad?.controller?.abort();
+        const controller = new AbortController();
+        classSplitState.boundedGraphLoad = { token: loadToken, jobId, generation, controller };
+        const pages = [];
+        const seenCursors = new Set();
+        let cursor = "";
+        let loaded = 0;
+        let total = 0;
+        try {
+            do {
+                const parameters = new URLSearchParams({
+                    projection_mode: normalizedProjection,
+                    reviewed: "unreviewed",
+                    limit: "50000",
+                });
+                if (cursor) parameters.set("cursor", cursor);
+                const page = await fetchClassSplitBoundedJson(
+                    `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/graph?${parameters}`,
+                    "bounded graph",
+                    { signal: controller.signal }
+                );
+                if (
+                    loadToken !== classSplitState.boundedGraphLoadToken
+                    || !classSplitAsyncRequestIsCurrent(generation, jobId)
+                ) return null;
+                pages.push(page);
+                loaded += Number(page.returned || 0);
+                total = Number(page.total_matching || total || loaded);
+                cursor = allPoints ? String(page.next_cursor || "") : "";
+                if (cursor) {
+                    if (seenCursors.has(cursor)) {
+                        throw new Error("The all-points graph cursor repeated unexpectedly.");
+                    }
+                    seenCursors.add(cursor);
+                    if (classSplitElements.graphStatus) {
+                        classSplitElements.graphStatus.textContent =
+                            `Loading all map points: ${loaded.toLocaleString()} of ${total.toLocaleString()} ...`;
+                    }
+                }
+            } while (cursor && allPoints);
+            return mergeClassSplitBoundedGraphPages(pages);
+        } finally {
+            if (classSplitState.boundedGraphLoad?.token === loadToken) {
+                classSplitState.boundedGraphLoad = null;
+            }
+        }
+    }
+
+    function applyClassSplitBoundedGraphReplacement(graph) {
+        if (!graph || !classSplitState.result) return false;
+        const previousById = classSplitState.pointsById;
+        const points = classSplitBoundedGraphPoints(graph).map((point, index) => {
+            const previous = previousById.get(String(point.point_id || ""));
+            const projection = point.projection;
+            if (previous) Object.assign(point, previous);
+            point.projection = projection;
+            point._projectionIndex = index;
+            return point;
+        }).filter((point) => !classSplitState.dismissedWrongIds.has(String(point.point_id || "")));
+        classSplitState.result.points = points;
+        classSplitState.pointsById = new Map(
+            points.map((point) => [String(point.point_id || ""), point])
         );
+        classSplitState.result.session_transport = {
+            ...(classSplitState.result.session_transport || {}),
+            graph_returned: Number(graph.returned || points.length),
+            graph_total: Number(graph.total_matching || points.length),
+            graph_truncated: Boolean(graph.next_cursor),
+        };
+        classSplitState.boundedAllPointsLoaded = !graph.next_cursor
+            && Number(graph.returned || points.length) >= Number(graph.total_matching || points.length);
+        const projectionMode = normalizeClassSplitProjectionChoice(
+            graph.projection_mode || getClassSplitProjectionChoice()
+        );
+        classSplitState.projectionCoordinates[projectionMode] = points.map(
+            (point) => point.projection
+        );
+        classSplitState.boundedGraphQueryKey = `${projectionMode}:all:${points.length}`;
+        rebuildClassSplitCandidateIndexes();
+        renderClassSplitWrongList();
+        renderClassSplitInspector();
+        renderClassSplitPlot();
+        return true;
+    }
+
+    async function handleClassSplitPlotPointLimitChange() {
+        if (classSplitElements.limitPlotPoints?.checked) {
+            classSplitState.boundedGraphLoad?.controller?.abort();
+            classSplitState.boundedGraphLoadToken += 1;
+            classSplitState.boundedGraphLoad = null;
+            renderClassSplitPlot();
+            return;
+        }
+        if (!classSplitState.boundedTransport) {
+            renderClassSplitPlot();
+            return;
+        }
+        const total = Number(
+            classSplitState.result?.session_transport?.graph_total
+            || classSplitState.result?.summary?.object_count
+            || 0
+        );
+        const loaded = Number(classSplitState.result?.points?.length || 0);
+        if (classSplitState.boundedAllPointsLoaded || total <= loaded) {
+            renderClassSplitPlot();
+            return;
+        }
+        const estimatedMiB = Math.max(1, Math.ceil(total * 700 / (1024 * 1024)));
+        const approved = window.confirm(
+            `Load all ${total.toLocaleString()} matching points?\n\n`
+            + `This high-memory view may use roughly ${estimatedMiB.toLocaleString()} MiB or more in the browser. `
+            + "The existing map stays visible until loading completes."
+        );
+        if (!approved) {
+            classSplitElements.limitPlotPoints.checked = true;
+            return;
+        }
+        try {
+            const graph = await fetchClassSplitBoundedGraph(
+                getClassSplitProjectionChoice(),
+                { allPoints: true }
+            );
+            if (graph) applyClassSplitBoundedGraphReplacement(graph);
+        } catch (error) {
+            if (error?.name === "AbortError") return;
+            classSplitElements.limitPlotPoints.checked = true;
+            setClassSplitJobStatus(
+                `Could not load every map point: ${error.message || error}`,
+                "error"
+            );
+            renderClassSplitPlot();
+        }
     }
 
     async function loadNextClassSplitBoundedReviewPage() {
@@ -53330,6 +53486,10 @@ async function cancelRfDetrTrainingJobRequest() {
             classSplitState.boundedReviewQueueTotal = 0;
             classSplitState.boundedPointHydrationLoads = new Map();
         }
+        classSplitState.boundedAllPointsLoaded = Boolean(
+            classSplitState.boundedTransport
+            && !result?.session_transport?.graph_truncated
+        );
         classSplitState.result = result;
         if (classSplitRefinementNeedsRoughFallback(result)) {
             classSplitState.showAllRough = true;
@@ -65012,8 +65172,8 @@ async function cancelRfDetrTrainingJobRequest() {
             ) {
                 return;
             }
-            const history = snapshotClassSplitReviewHistory([point])[0];
-            if (!history) {
+            const history = snapshotClassSplitReviewHistory([point])[0] || null;
+            if (!history && !reconcilingUnknownCommit) {
                 return;
             }
             const suppliedPrecondition = clearPreconditionsById instanceof Map
@@ -65067,6 +65227,82 @@ async function cancelRfDetrTrainingJobRequest() {
             );
             renderClassSplitReviewedList();
             try {
+                if (classSplitState.boundedTransport) {
+                    let changed = false;
+                    let retryRequired = false;
+                    for (const target of hydrationTargets) {
+                        if (!classSplitAsyncRequestIsCurrent(generation, safeJobId)) return;
+                        const detailPayload = await fetchClassSplitBoundedJson(
+                            `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(safeJobId)}/points/${encodeURIComponent(target.pointId)}`,
+                            "review state"
+                        );
+                        const point = getClassSplitPointById(target.pointId);
+                        if (point !== target.point) continue;
+                        const receipt = detailPayload?.review_receipt;
+                        const disposition = String(receipt?.disposition || "").trim();
+                        if (disposition) {
+                            point.human_review_disposition = disposition;
+                            point.human_reviewed_at = receipt.human_reviewed_at || "";
+                            point.human_review_revision = receipt.human_review_revision || "";
+                            point.human_review_origin = receipt.origin || "desktop";
+                            point.human_review_persistence = "durable";
+                            classSplitState.reviewedPointsById.set(target.pointId, point);
+                            classSplitState.dismissedWrongIds.add(target.pointId);
+                            classSplitState.reviewDispositionReconciliationPointIds.delete(target.pointId);
+                            classSplitState.reviewDispositionReconciliationAttempts.delete(target.pointId);
+                            removeClassSplitPointFromActiveReviewGraph(target.pointId, { force: true });
+                            changed = true;
+                            continue;
+                        }
+                        if (target.clearPrecondition) {
+                            applyClassSplitReviewClearLocally(target.pointId);
+                            changed = true;
+                            continue;
+                        }
+                        if (classSplitState.reviewDispositionReconciliationPointIds.has(target.pointId)) {
+                            const attempts = Number(
+                                classSplitState.reviewDispositionReconciliationAttempts.get(target.pointId) || 0
+                            ) + 1;
+                            classSplitState.reviewDispositionReconciliationAttempts.set(target.pointId, attempts);
+                            if (attempts < 5) {
+                                retryRequired = true;
+                                classSplitState.reviewDispositionHydrationTargets.set(
+                                    `${safeJobId}:${target.pointId}`,
+                                    target
+                                );
+                            } else {
+                                classSplitState.reviewDispositionReconciliationPointIds.delete(target.pointId);
+                                setClassSplitJobStatus(
+                                    "A review save remains unresolved. The object stays hidden; retry it from pending review recovery.",
+                                    "warn"
+                                );
+                            }
+                        }
+                    }
+                    if (changed) {
+                        persistDataQualityExplorerSession();
+                        syncClassSplitWrongCandidateSummaryCount();
+                        renderClassSplitWrongList();
+                        renderClassSplitReviewedList();
+                        renderClassSplitReport();
+                        renderClassSplitInspector();
+                    }
+                    if (retryRequired) {
+                        const attempts = Math.max(
+                            1,
+                            ...hydrationTargets.map((target) => Number(
+                                classSplitState.reviewDispositionReconciliationAttempts.get(target.pointId) || 1
+                            ))
+                        );
+                        window.setTimeout(() => {
+                            scheduleClassSplitReviewDispositionHydration(
+                                safeJobId,
+                                hydrationTargets.map((target) => target.pointId)
+                            );
+                        }, 500 * (2 ** Math.min(3, attempts - 1)));
+                    }
+                    return;
+                }
                 const { response, detail } = await fetchClassSplitReviewRequest(
                     `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(safeJobId)}/result`,
                     { cache: "no-store" },
@@ -65235,13 +65471,35 @@ async function cancelRfDetrTrainingJobRequest() {
                     "Data Quality Explorer review-state refresh failed",
                     error
                 );
-                const retryPointIds = hydrationTargets
+                let retryPointIds = hydrationTargets
                     .map((target) => target.pointId)
                     .filter((pointId) => (
                         classSplitState.reviewDispositionReconciliationPointIds.has(
                             pointId
                         )
                     ));
+                let retryDelay = 1500;
+                if (classSplitState.boundedTransport && retryPointIds.length) {
+                    retryPointIds = retryPointIds.filter((pointId) => {
+                        const attempts = Number(
+                            classSplitState.reviewDispositionReconciliationAttempts.get(pointId) || 0
+                        ) + 1;
+                        classSplitState.reviewDispositionReconciliationAttempts.set(pointId, attempts);
+                        if (attempts < 5) {
+                            retryDelay = Math.max(
+                                retryDelay,
+                                500 * (2 ** Math.min(3, attempts - 1))
+                            );
+                            return true;
+                        }
+                        classSplitState.reviewDispositionReconciliationPointIds.delete(pointId);
+                        setClassSplitJobStatus(
+                            "A review save remains unresolved. The object stays hidden; retry it from pending review recovery.",
+                            "warn"
+                        );
+                        return false;
+                    });
+                }
                 if (
                     retryPointIds.length
                     && classSplitAsyncRequestIsCurrent(generation, safeJobId)
@@ -65251,7 +65509,7 @@ async function cancelRfDetrTrainingJobRequest() {
                             safeJobId,
                             retryPointIds
                         );
-                    }, 1500);
+                    }, retryDelay);
                 }
             } finally {
                 classSplitState.reviewDispositionHydrationInFlight.delete(
@@ -65611,7 +65869,8 @@ async function cancelRfDetrTrainingJobRequest() {
                 const parsed = parseJsonObjectSafe(detail, {});
                 const apiDetail = parsed?.detail;
                 error.httpStatus = response.status;
-                error.reviewDispositionCommitUnknown = response.status >= 500;
+                error.reviewDispositionCommitUnknown = response.status >= 500
+                    || response.status === 409;
                 error.apiCode = String(
                     apiDetail && typeof apiDetail === "object"
                         ? apiDetail.code || ""
@@ -65637,7 +65896,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 // this exact idempotent action. Do not reserve the point for
                 // hydration, which would prevent that retry from occurring.
                 if (error && typeof error === "object") {
-                    error.reviewDispositionCommitUnknown = false;
+                    error.reviewDispositionCommitUnknown = true;
                 }
                 throw error;
             }
@@ -65841,7 +66100,11 @@ async function cancelRfDetrTrainingJobRequest() {
                 setClassSplitJobStatus("Skipped object and saved that choice for future analyses.", "success");
             }
         } catch (error) {
-            const restored = restoreClassSplitOptimisticReview(safeId, snapshot);
+            const keepHidden = error?.reviewDispositionCommitUnknown === true
+                || Number(error?.httpStatus) === 409;
+            const restored = keepHidden
+                ? false
+                : restoreClassSplitOptimisticReview(safeId, snapshot);
             if (
                 restored
                 && error?.httpStatus === 409
@@ -65943,7 +66206,11 @@ async function cancelRfDetrTrainingJobRequest() {
                 setClassSplitJobStatus("Confirmed current class and saved it for future analyses.", "success");
             }
         } catch (error) {
-            const restored = restoreClassSplitOptimisticReview(safeId, snapshot);
+            const keepHidden = error?.reviewDispositionCommitUnknown === true
+                || Number(error?.httpStatus) === 409;
+            const restored = keepHidden
+                ? false
+                : restoreClassSplitOptimisticReview(safeId, snapshot);
             if (
                 restored
                 && error?.httpStatus === 409
@@ -70208,10 +70475,11 @@ async function cancelRfDetrTrainingJobRequest() {
                 });
             });
         }
-        classSplitElements.limitPlotPoints?.addEventListener(
-            "change",
-            renderClassSplitPlot
-        );
+        classSplitElements.limitPlotPoints?.addEventListener("change", () => {
+            handleClassSplitPlotPointLimitChange().catch((error) => {
+                console.error("Could not change Data Quality Explorer point limit", error);
+            });
+        });
         classSplitElements.projection?.addEventListener("change", () => {
             setClassSplitProjectionChoice(
                 classSplitElements.projection.value,

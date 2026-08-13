@@ -18,7 +18,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 SESSION_STORE_SCHEMA = "class-analysis-session-store-v2"
 SESSION_STORE_FILENAME = "session.sqlite3"
 GRAPH_DEFAULT_ROWS = 50_000
-GRAPH_MAX_ROWS = 300_000
+GRAPH_MAX_ROWS = 50_000
 GRAPH_MAX_BYTES = 64 * 1024 * 1024
 QUEUE_DEFAULT_ROWS = 36
 QUEUE_MAX_ROWS = 100
@@ -766,14 +766,265 @@ def _graph_predicates(
         raise SessionStoreError("class_analysis_graph_size_filter_invalid")
     if size_clauses[size_mode]:
         clauses.append(str(size_clauses[size_mode]))
+    effective_reviewed = (
+        "CASE WHEN r.point_id IS NULL THEN p.reviewed "
+        "WHEN COALESCE(r.disposition, '') = '' THEN 0 ELSE 1 END"
+    )
     reviewed_mode = str(reviewed or "any")
     if reviewed_mode == "reviewed":
-        clauses.append("p.reviewed = 1")
+        clauses.append(f"({effective_reviewed}) = 1")
     elif reviewed_mode == "unreviewed":
-        clauses.append("p.reviewed = 0")
+        clauses.append(f"({effective_reviewed}) = 0")
     elif reviewed_mode != "any":
         raise SessionStoreError("class_analysis_graph_review_filter_invalid")
     return clauses, values
+
+
+def _review_state_version(connection: sqlite3.Connection) -> int:
+    row = connection.execute(
+        "SELECT value FROM session_meta WHERE key = 'review_state_version'"
+    ).fetchone()
+    if row is None:
+        return 0
+    try:
+        return int(json.loads(str(row[0])))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return 0
+
+
+def _bump_review_state_version(connection: sqlite3.Connection) -> int:
+    version = _review_state_version(connection) + 1
+    connection.execute(
+        "INSERT OR REPLACE INTO session_meta(key, value) VALUES (?, ?)",
+        ("review_state_version", _json_text(version)),
+    )
+    return version
+
+
+def upsert_class_analysis_review_state(
+    path: Path | str,
+    *,
+    point_id: str,
+    disposition: str,
+    revision: Any = "",
+    reviewed_at: Any = "",
+    payload: Optional[Mapping[str, Any]] = None,
+) -> int:
+    """Project one durable receipt into the normalized session store."""
+
+    identifier = str(point_id or "").strip()
+    state = str(disposition or "").strip().lower()
+    if not identifier or not state:
+        raise SessionStoreError("class_analysis_review_state_invalid")
+    connection = sqlite3.connect(str(Path(path)))
+    try:
+        connection.execute("PRAGMA busy_timeout=30000")
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("BEGIN IMMEDIATE")
+        review_object_key = str(
+            (payload or {}).get("review_object_key")
+            if isinstance(payload, Mapping)
+            else ""
+        ).strip()
+        identifiers = {
+            str(row[0])
+            for row in connection.execute(
+                """SELECT point_id FROM points_core
+                   WHERE point_id = ?
+                      OR (? <> '' AND review_object_key = ?)
+                      OR (? <> '' AND pair_review_key = ?)""",
+                (
+                    identifier,
+                    review_object_key,
+                    review_object_key,
+                    review_object_key,
+                    review_object_key,
+                ),
+            )
+        }
+        if not identifiers:
+            connection.rollback()
+            return _review_state_version(connection)
+        connection.executemany(
+            """INSERT OR REPLACE INTO review_state
+               (point_id, disposition, revision, reviewed_at, payload)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (
+                    target_id,
+                    state,
+                    str(revision or ""),
+                    str(reviewed_at or ""),
+                    _json_text(dict(payload)) if isinstance(payload, Mapping) else None,
+                )
+                for target_id in identifiers
+            ],
+        )
+        version = _bump_review_state_version(connection)
+        connection.commit()
+        return version
+    finally:
+        connection.close()
+
+
+def clear_class_analysis_review_state(
+    path: Path | str,
+    *,
+    point_id: str,
+    review_object_key: str = "",
+) -> int:
+    """Persist an explicit unreviewed tombstone over immutable build-time state."""
+
+    identifier = str(point_id or "").strip()
+    if not identifier:
+        raise SessionStoreError("class_analysis_review_state_invalid")
+    connection = sqlite3.connect(str(Path(path)))
+    try:
+        connection.execute("PRAGMA busy_timeout=30000")
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("BEGIN IMMEDIATE")
+        review_key = str(review_object_key or "").strip()
+        identifiers = {
+            str(row[0])
+            for row in connection.execute(
+                """SELECT point_id FROM points_core
+                   WHERE point_id = ?
+                      OR (? <> '' AND review_object_key = ?)
+                      OR (? <> '' AND pair_review_key = ?)""",
+                (identifier, review_key, review_key, review_key, review_key),
+            )
+        }
+        if not identifiers:
+            connection.rollback()
+            return _review_state_version(connection)
+        connection.executemany(
+            """INSERT OR REPLACE INTO review_state
+               (point_id, disposition, revision, reviewed_at, payload)
+               VALUES (?, '', '', '', NULL)""",
+            [(target_id,) for target_id in identifiers],
+        )
+        version = _bump_review_state_version(connection)
+        connection.commit()
+        return version
+    finally:
+        connection.close()
+
+
+def replace_class_analysis_review_state(
+    path: Path | str,
+    entries: Sequence[Mapping[str, Any]],
+) -> int:
+    """Reconcile a restored session with the authoritative receipt ledger."""
+
+    connection = sqlite3.connect(str(Path(path)))
+    try:
+        connection.execute("PRAGMA busy_timeout=30000")
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "UPDATE review_state SET disposition = '', revision = '', reviewed_at = '', payload = NULL"
+        )
+        rows = []
+        for entry in entries:
+            point_id = str(entry.get("point_id") or "").strip()
+            disposition = str(entry.get("disposition") or "").strip().lower()
+            if not point_id or not disposition:
+                continue
+            rows.append(
+                (
+                    point_id,
+                    disposition,
+                    str(entry.get("entry_revision") or ""),
+                    str(entry.get("updated_at") or ""),
+                    _json_text(dict(entry)),
+                    str(entry.get("review_object_key") or "").strip(),
+                )
+            )
+        if rows:
+            for point_id, disposition, revision, reviewed_at, payload, review_key in rows:
+                connection.execute(
+                    """INSERT OR REPLACE INTO review_state
+                       (point_id, disposition, revision, reviewed_at, payload)
+                       SELECT p.point_id, ?, ?, ?, ?
+                       FROM points_core p
+                       WHERE p.point_id = ?
+                          OR (? <> '' AND p.review_object_key = ?)
+                          OR (? <> '' AND p.pair_review_key = ?)""",
+                    (
+                        disposition,
+                        revision,
+                        reviewed_at,
+                        payload,
+                        point_id,
+                        review_key,
+                        review_key,
+                        review_key,
+                        review_key,
+                    ),
+                )
+        version = _bump_review_state_version(connection)
+        connection.commit()
+        return version
+    finally:
+        connection.close()
+
+
+def _graph_cursor_query_key(
+    *,
+    mode: str,
+    class_name: Optional[str],
+    objects: str,
+    object_size: str,
+    reviewed: str,
+    review_state_version: int,
+) -> str:
+    return hashlib.sha256(
+        _json_bytes(
+            [
+                mode,
+                str(class_name or ""),
+                str(objects or "all"),
+                str(object_size or "all"),
+                str(reviewed or "any"),
+                int(review_state_version),
+            ]
+        )
+    ).hexdigest()[:24]
+
+
+def _encode_graph_cursor(query_key: str, row: sqlite3.Row) -> str:
+    payload = _json_bytes(
+        [
+            query_key,
+            int(row["review_bucket"]),
+            _finite_float(row["priority_sort"]),
+            int(row["display_rank"]),
+            int(row["ordinal"]),
+        ]
+    )
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _decode_graph_cursor(
+    cursor: Optional[str], query_key: str
+) -> Optional[tuple[int, float, int, int]]:
+    if not cursor:
+        return None
+    try:
+        padded = str(cursor) + "=" * (-len(str(cursor)) % 4)
+        value = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
+        if not isinstance(value, list) or len(value) != 5 or value[0] != query_key:
+            raise ValueError
+        return (
+            int(value[1]),
+            float(value[2]),
+            int(value[3]),
+            int(value[4]),
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise SessionStoreError(
+            "class_analysis_graph_cursor_invalid", status_code=409
+        ) from exc
 
 
 def get_class_analysis_graph_payload(
@@ -785,6 +1036,7 @@ def get_class_analysis_graph_payload(
     object_size: str = "all",
     reviewed: str = "any",
     limit: int = GRAPH_DEFAULT_ROWS,
+    cursor: Optional[str] = None,
 ) -> dict[str, Any]:
     row_limit = _integer(limit, GRAPH_DEFAULT_ROWS)
     if row_limit < 1 or row_limit > GRAPH_MAX_ROWS:
@@ -803,60 +1055,88 @@ def get_class_analysis_graph_payload(
     where = " AND ".join(["q.mode = ?", *clauses])
     parameters = [mode, *values]
     with _open_readonly(path) as connection:
+        review_version = _review_state_version(connection)
+        query_key = _graph_cursor_query_key(
+            mode=mode,
+            class_name=class_name,
+            objects=objects,
+            object_size=object_size,
+            reviewed=reviewed,
+            review_state_version=review_version,
+        )
+        cursor_values = _decode_graph_cursor(cursor, query_key)
         total = int(
             connection.execute(
                 f"""SELECT COUNT(*) FROM point_projections q
                     JOIN points_core p ON p.point_id = q.point_id
+                    LEFT JOIN review_state r ON r.point_id = p.point_id
                     WHERE {where}""",
                 parameters,
             ).fetchone()[0]
         )
+        review_bucket = (
+            "CASE WHEN p.quality_review_candidate = 1 "
+            "OR p.is_wrong_class_candidate = 1 "
+            "OR p.is_rough_outlier_candidate = 1 "
+            "OR p.is_close_overlap_candidate = 1 THEN 0 ELSE 1 END"
+        )
+        priority_sort = "-COALESCE(p.review_priority_score, 0)"
+        page_where = where
+        page_parameters = list(parameters)
+        if cursor_values is not None:
+            page_where += (
+                f" AND ({review_bucket}, {priority_sort}, p.display_rank, p.ordinal) "
+                "> (?, ?, ?, ?)"
+            )
+            page_parameters.extend(cursor_values)
         rows = connection.execute(
             f"""SELECT p.ordinal, p.point_id, p.class_id, p.class_name,
-                       p.reviewed, p.quality_review_candidate,
+                       CASE WHEN r.point_id IS NULL THEN p.reviewed
+                            WHEN COALESCE(r.disposition, '') = '' THEN 0 ELSE 1 END
+                            AS effective_reviewed,
+                       p.quality_review_candidate,
                        p.is_wrong_class_candidate, p.is_rough_outlier_candidate,
                        p.is_close_overlap_candidate, p.is_dual_bbox_conflict,
                        p.tiny_object, p.low_source_detail,
                        p.review_priority_score, p.wrong_class_suspicion,
-                       p.proposed_class, q.x, q.y
+                       p.proposed_class, q.x, q.y,
+                       {review_bucket} AS review_bucket,
+                       {priority_sort} AS priority_sort
                 FROM point_projections q
                 JOIN points_core p ON p.point_id = q.point_id
-                WHERE {where}
-                ORDER BY
-                    CASE WHEN p.quality_review_candidate = 1
-                              OR p.is_wrong_class_candidate = 1
-                              OR p.is_rough_outlier_candidate = 1
-                              OR p.is_close_overlap_candidate = 1
-                         THEN 0 ELSE 1 END,
-                    COALESCE(p.review_priority_score, 0) DESC,
+                LEFT JOIN review_state r ON r.point_id = p.point_id
+                WHERE {page_where}
+                ORDER BY review_bucket ASC, priority_sort ASC,
                     p.display_rank ASC,
                     p.ordinal ASC
                 LIMIT ?""",
-            [*parameters, row_limit],
+            [*page_parameters, row_limit + 1],
         ).fetchall()
+    has_more = len(rows) > row_limit
+    page_rows = rows[:row_limit]
     columns = {
-        "ordinal": [int(row["ordinal"]) for row in rows],
-        "point_id": [str(row["point_id"]) for row in rows],
-        "x": [float(row["x"]) for row in rows],
-        "y": [float(row["y"]) for row in rows],
-        "class_id": [str(row["class_id"] or "") for row in rows],
-        "class_name": [str(row["class_name"] or "") for row in rows],
-        "reviewed": [bool(row["reviewed"]) for row in rows],
-        "quality_review_candidate": [bool(row["quality_review_candidate"]) for row in rows],
-        "wrong_class_candidate": [bool(row["is_wrong_class_candidate"]) for row in rows],
-        "spatial_evidence_candidate": [bool(row["is_rough_outlier_candidate"]) for row in rows],
+        "ordinal": [int(row["ordinal"]) for row in page_rows],
+        "point_id": [str(row["point_id"]) for row in page_rows],
+        "x": [float(row["x"]) for row in page_rows],
+        "y": [float(row["y"]) for row in page_rows],
+        "class_id": [str(row["class_id"] or "") for row in page_rows],
+        "class_name": [str(row["class_name"] or "") for row in page_rows],
+        "reviewed": [bool(row["effective_reviewed"]) for row in page_rows],
+        "quality_review_candidate": [bool(row["quality_review_candidate"]) for row in page_rows],
+        "wrong_class_candidate": [bool(row["is_wrong_class_candidate"]) for row in page_rows],
+        "spatial_evidence_candidate": [bool(row["is_rough_outlier_candidate"]) for row in page_rows],
         "overlap_candidate": [
             bool(row["is_close_overlap_candidate"] or row["is_dual_bbox_conflict"])
-            for row in rows
+            for row in page_rows
         ],
-        "tiny_object": [bool(row["tiny_object"] or row["low_source_detail"]) for row in rows],
+        "tiny_object": [bool(row["tiny_object"] or row["low_source_detail"]) for row in page_rows],
         "review_priority_score": [
-            _optional_float(row["review_priority_score"]) for row in rows
+            _optional_float(row["review_priority_score"]) for row in page_rows
         ],
         "wrong_class_suspicion": [
-            _optional_float(row["wrong_class_suspicion"]) for row in rows
+            _optional_float(row["wrong_class_suspicion"]) for row in page_rows
         ],
-        "proposed_class": [str(row["proposed_class"] or "") for row in rows],
+        "proposed_class": [str(row["proposed_class"] or "") for row in page_rows],
     }
     result = {
         "schema": "class-analysis-graph-v2",
@@ -867,9 +1147,15 @@ def get_class_analysis_graph_payload(
         "point_count": int(metadata.get("point_count") or 0),
         "evidence_count": int(metadata.get("evidence_count") or 0),
         "total_matching": total,
-        "returned": len(rows),
-        "truncated": total > len(rows),
+        "returned": len(page_rows),
+        "truncated": has_more or bool(cursor),
         "limit": row_limit,
+        "next_cursor": (
+            _encode_graph_cursor(query_key, page_rows[-1])
+            if has_more and page_rows
+            else None
+        ),
+        "review_state_version": review_version,
         "columns": columns,
     }
     return _bounded_payload(result, GRAPH_MAX_BYTES, "class_analysis_graph_payload_too_large")
@@ -924,13 +1210,26 @@ def get_class_analysis_review_queue_payload(
                 raise SessionStoreError("class_analysis_review_queue_category_invalid")
         total = int(
             connection.execute(
-                "SELECT COUNT(*) FROM review_queue WHERE category = ?", (queue_category,)
+                """SELECT COUNT(*) FROM review_queue q
+                   JOIN points_core p ON p.point_id = q.point_id
+                   LEFT JOIN review_state r ON r.point_id = p.point_id
+                   WHERE q.category = ?
+                     AND (CASE WHEN r.point_id IS NULL THEN p.reviewed
+                               WHEN COALESCE(r.disposition, '') = '' THEN 0 ELSE 1 END) = 0""",
+                (queue_category,),
             ).fetchone()[0]
         )
         rows = connection.execute(
-            """SELECT q.rank, q.score, p.* FROM review_queue q
+            """SELECT q.rank, q.score, p.*,
+                      CASE WHEN r.point_id IS NULL THEN p.reviewed
+                           WHEN COALESCE(r.disposition, '') = '' THEN 0 ELSE 1 END
+                           AS effective_reviewed
+               FROM review_queue q
                JOIN points_core p ON p.point_id = q.point_id
+               LEFT JOIN review_state r ON r.point_id = p.point_id
                WHERE q.category = ?
+                 AND (CASE WHEN r.point_id IS NULL THEN p.reviewed
+                           WHEN COALESCE(r.disposition, '') = '' THEN 0 ELSE 1 END) = 0
                  AND (q.rank > ? OR (q.rank = ? AND q.point_id > ?))
                ORDER BY q.rank ASC, q.point_id ASC
                LIMIT ?""",
@@ -955,7 +1254,7 @@ def get_class_analysis_review_queue_payload(
                 "width": _optional_float(row["width"]),
                 "height": _optional_float(row["height"]),
                 "proposed_class": str(row["proposed_class"] or ""),
-                "reviewed": bool(row["reviewed"]),
+                "reviewed": bool(row["effective_reviewed"]),
                 "tiny_object": bool(row["tiny_object"] or row["low_source_detail"]),
                 "review_object_key": str(row["review_object_key"] or ""),
                 "pair_review_key": str(row["pair_review_key"] or ""),
@@ -1039,6 +1338,154 @@ def _upgrade_evidence_task_schema(connection: sqlite3.Connection) -> None:
         )
     if "lease_token" not in columns:
         connection.execute("ALTER TABLE evidence_tasks ADD COLUMN lease_token TEXT")
+    if "lease_owner" not in columns:
+        connection.execute("ALTER TABLE evidence_tasks ADD COLUMN lease_owner TEXT")
+    if "lease_expires_at" not in columns:
+        connection.execute("ALTER TABLE evidence_tasks ADD COLUMN lease_expires_at REAL")
+
+
+def get_class_analysis_evidence_candidates(path: Path | str) -> list[dict[str, Any]]:
+    """Return the frozen candidate set used to prepare one session context."""
+
+    connection = sqlite3.connect(str(Path(path)))
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("PRAGMA busy_timeout=30000")
+        _upgrade_evidence_task_schema(connection)
+        rows = connection.execute(
+            """SELECT candidate_payload FROM evidence_tasks
+               ORDER BY priority ASC, point_id ASC"""
+        ).fetchall()
+    finally:
+        connection.close()
+    candidates = []
+    for row in rows:
+        try:
+            value = json.loads(str(row["candidate_payload"] or "{}"))
+        except json.JSONDecodeError:
+            value = {}
+        if isinstance(value, dict) and str(value.get("point_id") or "").strip():
+            candidates.append(value)
+    return candidates
+
+
+def claim_class_analysis_evidence_worker(
+    path: Path | str,
+    *,
+    owner_id: str,
+    lease_seconds: float = 120.0,
+) -> bool:
+    owner = str(owner_id or "").strip()
+    if not owner:
+        raise SessionStoreError("class_analysis_evidence_worker_owner_required")
+    now = time.time()
+    connection = sqlite3.connect(str(Path(path)))
+    try:
+        connection.execute("PRAGMA busy_timeout=30000")
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT value FROM session_meta WHERE key = 'evidence_worker_lease'"
+        ).fetchone()
+        lease: dict[str, Any] = {}
+        if row is not None:
+            try:
+                parsed = json.loads(str(row[0]))
+                if isinstance(parsed, dict):
+                    lease = parsed
+            except json.JSONDecodeError:
+                lease = {}
+        active_owner = str(lease.get("owner_id") or "")
+        active_until = _finite_float(lease.get("expires_at"), 0.0)
+        if active_owner and active_owner != owner and active_until > now:
+            connection.rollback()
+            return False
+        connection.execute(
+            "INSERT OR REPLACE INTO session_meta(key, value) VALUES (?, ?)",
+            (
+                "evidence_worker_lease",
+                _json_text(
+                    {
+                        "owner_id": owner,
+                        "expires_at": now + max(30.0, float(lease_seconds)),
+                        "updated_at": now,
+                    }
+                ),
+            ),
+        )
+        connection.commit()
+        return True
+    finally:
+        connection.close()
+
+
+def heartbeat_class_analysis_evidence_worker(
+    path: Path | str,
+    *,
+    owner_id: str,
+    lease_seconds: float = 120.0,
+) -> bool:
+    owner = str(owner_id or "").strip()
+    connection = sqlite3.connect(str(Path(path)))
+    try:
+        connection.execute("PRAGMA busy_timeout=30000")
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT value FROM session_meta WHERE key = 'evidence_worker_lease'"
+        ).fetchone()
+        try:
+            lease = json.loads(str(row[0])) if row is not None else {}
+        except json.JSONDecodeError:
+            lease = {}
+        if not isinstance(lease, dict) or str(lease.get("owner_id") or "") != owner:
+            connection.rollback()
+            return False
+        now = time.time()
+        connection.execute(
+            "UPDATE session_meta SET value = ? WHERE key = 'evidence_worker_lease'",
+            (
+                _json_text(
+                    {
+                        "owner_id": owner,
+                        "expires_at": now + max(30.0, float(lease_seconds)),
+                        "updated_at": now,
+                    }
+                ),
+            ),
+        )
+        connection.commit()
+        return True
+    finally:
+        connection.close()
+
+
+def release_class_analysis_evidence_worker(
+    path: Path | str,
+    *,
+    owner_id: str,
+) -> bool:
+    owner = str(owner_id or "").strip()
+    connection = sqlite3.connect(str(Path(path)))
+    try:
+        connection.execute("PRAGMA busy_timeout=30000")
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT value FROM session_meta WHERE key = 'evidence_worker_lease'"
+        ).fetchone()
+        try:
+            lease = json.loads(str(row[0])) if row is not None else {}
+        except json.JSONDecodeError:
+            lease = {}
+        if not isinstance(lease, dict) or str(lease.get("owner_id") or "") != owner:
+            connection.rollback()
+            return False
+        connection.execute(
+            "DELETE FROM session_meta WHERE key = 'evidence_worker_lease'"
+        )
+        connection.commit()
+        return True
+    finally:
+        connection.close()
 
 
 def initialize_class_analysis_evidence_tasks(
@@ -1090,6 +1537,7 @@ def initialize_class_analysis_evidence_tasks(
         connection.execute(
             """UPDATE evidence_tasks
                SET status = 'completed', error = NULL, lease_token = NULL,
+                   lease_owner = NULL, lease_expires_at = NULL,
                    updated_at = ?
                WHERE point_id IN (SELECT point_id FROM evidence)""",
             (now,),
@@ -1111,11 +1559,14 @@ def claim_class_analysis_evidence_batch(
     limit: int = 36,
     lease_seconds: float = 1800.0,
     max_attempts: int = 3,
+    owner_id: str = "",
 ) -> dict[str, Any]:
     """Lease one deterministic source-grouped batch for a single worker."""
 
     batch_limit = max(1, min(256, int(limit)))
     now = time.time()
+    lease_duration = max(30.0, float(lease_seconds))
+    owner = str(owner_id or f"legacy:{os.getpid()}").strip()
     lease_token = uuid.uuid4().hex
     connection = sqlite3.connect(str(Path(path)))
     connection.row_factory = sqlite3.Row
@@ -1127,11 +1578,12 @@ def claim_class_analysis_evidence_batch(
         connection.execute(
             """UPDATE evidence_tasks
                SET status = CASE WHEN attempts < ? THEN 'retry' ELSE 'failed' END,
-                   lease_token = NULL,
+                   lease_token = NULL, lease_owner = NULL, lease_expires_at = NULL,
                    error = COALESCE(error, 'worker_lease_expired'),
                    updated_at = ?
-               WHERE status = 'processing' AND updated_at < ?""",
-            (int(max_attempts), now, now - max(30.0, float(lease_seconds))),
+               WHERE status = 'processing'
+                 AND COALESCE(lease_expires_at, updated_at + ?) < ?""",
+            (int(max_attempts), now, lease_duration, now),
         )
         candidates = connection.execute(
             """SELECT point_id, priority, status, attempts, source_key,
@@ -1161,9 +1613,19 @@ def claim_class_analysis_evidence_batch(
             connection.executemany(
                 """UPDATE evidence_tasks
                    SET status = 'processing', attempts = attempts + 1,
-                       error = NULL, lease_token = ?, updated_at = ?
+                       error = NULL, lease_token = ?, lease_owner = ?,
+                       lease_expires_at = ?, updated_at = ?
                    WHERE point_id = ? AND status IN ('pending', 'retry')""",
-                [(lease_token, now, str(row["point_id"])) for row in selected],
+                [
+                    (
+                        lease_token,
+                        owner,
+                        now + lease_duration,
+                        now,
+                        str(row["point_id"]),
+                    )
+                    for row in selected
+                ],
             )
         connection.commit()
         items = []
@@ -1181,7 +1643,11 @@ def claim_class_analysis_evidence_batch(
                     "candidate": candidate if isinstance(candidate, dict) else {},
                 }
             )
-        return {"lease_token": lease_token if items else "", "items": items}
+        return {
+            "lease_token": lease_token if items else "",
+            "lease_owner": owner if items else "",
+            "items": items,
+        }
     finally:
         connection.close()
 
@@ -1190,11 +1656,13 @@ def complete_class_analysis_evidence_batch(
     path: Path | str,
     *,
     lease_token: str,
+    owner_id: str = "",
     rows: Sequence[Mapping[str, Any]],
 ) -> int:
     token = str(lease_token or "").strip()
     if not token:
         raise SessionStoreError("class_analysis_evidence_lease_required")
+    owner = str(owner_id or "").strip()
     now = time.time()
     connection = sqlite3.connect(str(Path(path)))
     try:
@@ -1210,8 +1678,9 @@ def complete_class_analysis_evidence_batch(
                 continue
             task = connection.execute(
                 """SELECT 1 FROM evidence_tasks
-                   WHERE point_id = ? AND status = 'processing' AND lease_token = ?""",
-                (point_id, token),
+                   WHERE point_id = ? AND status = 'processing' AND lease_token = ?
+                     AND (? = '' OR lease_owner = ?)""",
+                (point_id, token, owner, owner),
             ).fetchone()
             if task is None:
                 raise SessionStoreError("class_analysis_evidence_lease_stale", status_code=409)
@@ -1236,9 +1705,11 @@ def complete_class_analysis_evidence_batch(
             connection.execute(
                 """UPDATE evidence_tasks
                    SET status = 'completed', error = NULL, lease_token = NULL,
+                       lease_owner = NULL, lease_expires_at = NULL,
                        updated_at = ?
-                   WHERE point_id = ? AND lease_token = ?""",
-                (now, point_id, token),
+                   WHERE point_id = ? AND lease_token = ?
+                     AND (? = '' OR lease_owner = ?)""",
+                (now, point_id, token, owner, owner),
             )
             completed += 1
         connection.commit()
@@ -1254,6 +1725,7 @@ def fail_class_analysis_evidence_batch(
     path: Path | str,
     *,
     lease_token: str,
+    owner_id: str = "",
     error: str,
     max_attempts: int = 3,
 ) -> int:
@@ -1262,12 +1734,22 @@ def fail_class_analysis_evidence_batch(
         connection.execute("PRAGMA busy_timeout=30000")
         _upgrade_evidence_task_schema(connection)
         now = time.time()
+        owner = str(owner_id or "").strip()
         cursor = connection.execute(
             """UPDATE evidence_tasks
                SET status = CASE WHEN attempts < ? THEN 'retry' ELSE 'failed' END,
-                   error = ?, lease_token = NULL, updated_at = ?
-               WHERE status = 'processing' AND lease_token = ?""",
-            (int(max_attempts), str(error or "evidence_batch_failed")[:1000], now, str(lease_token)),
+                   error = ?, lease_token = NULL, lease_owner = NULL,
+                   lease_expires_at = NULL, updated_at = ?
+               WHERE status = 'processing' AND lease_token = ?
+                 AND (? = '' OR lease_owner = ?)""",
+            (
+                int(max_attempts),
+                str(error or "evidence_batch_failed")[:1000],
+                now,
+                str(lease_token),
+                owner,
+                owner,
+            ),
         )
         connection.commit()
         return max(0, int(cursor.rowcount))
@@ -1345,7 +1827,8 @@ def get_class_analysis_evidence_task(
         row = connection.execute(
             """
             SELECT point_id, status, priority, attempts AS attempt_count,
-                   source_key, error AS last_error, updated_at
+                   source_key, error AS last_error, lease_owner,
+                   lease_expires_at, updated_at
             FROM evidence_tasks
             WHERE point_id = ?
             """,
@@ -1354,21 +1837,67 @@ def get_class_analysis_evidence_task(
     return dict(row) if row is not None else None
 
 
-def release_class_analysis_evidence_leases(path: Path | str) -> int:
-    """Return process-owned leases to the queue after worker loss or restart."""
+def heartbeat_class_analysis_evidence_lease(
+    path: Path | str,
+    *,
+    lease_token: str,
+    owner_id: str,
+    lease_seconds: float = 1800.0,
+) -> int:
+    connection = sqlite3.connect(str(Path(path)))
+    try:
+        connection.execute("PRAGMA busy_timeout=30000")
+        _upgrade_evidence_task_schema(connection)
+        now = time.time()
+        cursor = connection.execute(
+            """UPDATE evidence_tasks
+               SET lease_expires_at = ?, updated_at = ?
+               WHERE status = 'processing' AND lease_token = ? AND lease_owner = ?""",
+            (
+                now + max(30.0, float(lease_seconds)),
+                now,
+                str(lease_token or ""),
+                str(owner_id or ""),
+            ),
+        )
+        connection.commit()
+        return max(0, int(cursor.rowcount or 0))
+    finally:
+        connection.close()
+
+
+def release_class_analysis_evidence_leases(
+    path: Path | str,
+    *,
+    owner_id: str = "",
+    expired_only: bool = True,
+) -> int:
+    """Release only this worker's leases, or leases proven expired."""
 
     connection = sqlite3.connect(str(Path(path)))
     try:
         connection.execute("PRAGMA busy_timeout=30000")
         connection.execute("PRAGMA journal_mode=WAL")
         _upgrade_evidence_task_schema(connection)
+        now = time.time()
+        owner = str(owner_id or "").strip()
+        if owner:
+            predicate = "status = 'processing' AND lease_owner = ?"
+            parameters: tuple[Any, ...] = (now, owner)
+        elif expired_only:
+            predicate = (
+                "status = 'processing' "
+                "AND COALESCE(lease_expires_at, updated_at) < ?"
+            )
+            parameters = (now, now)
+        else:
+            raise SessionStoreError("class_analysis_evidence_lease_owner_required")
         cursor = connection.execute(
-            """
-            UPDATE evidence_tasks
-            SET status = 'retry', lease_token = NULL, updated_at = ?
-            WHERE status = 'processing'
-            """,
-            (time.time(),),
+            f"""UPDATE evidence_tasks
+                SET status = 'retry', lease_token = NULL, lease_owner = NULL,
+                    lease_expires_at = NULL, updated_at = ?
+                WHERE {predicate}""",
+            parameters,
         )
         connection.commit()
         return max(0, int(cursor.rowcount or 0))

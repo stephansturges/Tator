@@ -48,6 +48,10 @@ def build_class_analysis_router(
     reset_review_ranking_fn: Optional[Callable[[str, dict], Any]] = None,
     latest_session_fn: Optional[Callable[[], Any]] = None,
     get_session_manifest_fn: Optional[Callable[[str], Any]] = None,
+    get_session_graph_fn: Optional[Callable[..., Any]] = None,
+    get_session_review_queue_fn: Optional[Callable[..., Any]] = None,
+    get_session_point_detail_fn: Optional[Callable[[str, str], Any]] = None,
+    get_session_point_evidence_fn: Optional[Callable[[str, str], Any]] = None,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -307,5 +311,52 @@ def build_class_analysis_router(
     @router.get("/class_analysis/qwen_review/{review_id}/evidence/{evidence_id}")
     def get_class_analysis_qwen_review_evidence(review_id: str, evidence_id: str):
         return get_qwen_review_evidence_fn(review_id, evidence_id)
+
+    if get_session_graph_fn is not None:
+
+        @router.get("/class_analysis/jobs/{job_id}/graph")
+        def get_class_analysis_session_graph(
+            job_id: str,
+            projection_mode: Optional[str] = None,
+            class_name: Optional[str] = None,
+            objects: str = "all",
+            object_size: str = "all",
+            reviewed: str = "any",
+            limit: int = 50_000,
+        ):
+            return get_session_graph_fn(
+                job_id,
+                projection_mode=projection_mode,
+                class_name=class_name,
+                objects=objects,
+                object_size=object_size,
+                reviewed=reviewed,
+                limit=limit,
+            )
+
+    if get_session_review_queue_fn is not None:
+
+        @router.get("/class_analysis/jobs/{job_id}/review_queue")
+        def get_class_analysis_session_review_queue(
+            job_id: str,
+            category: str = "review",
+            cursor: Optional[str] = None,
+            limit: int = 36,
+        ):
+            return get_session_review_queue_fn(
+                job_id, category=category, cursor=cursor, limit=limit
+            )
+
+    if get_session_point_detail_fn is not None:
+
+        @router.get("/class_analysis/jobs/{job_id}/points/{point_id}")
+        def get_class_analysis_session_point_detail(job_id: str, point_id: str):
+            return get_session_point_detail_fn(job_id, point_id)
+
+    if get_session_point_evidence_fn is not None:
+
+        @router.get("/class_analysis/jobs/{job_id}/points/{point_id}/evidence")
+        def get_class_analysis_session_point_evidence(job_id: str, point_id: str):
+            return get_session_point_evidence_fn(job_id, point_id)
 
     return router

@@ -1003,6 +1003,7 @@
                 vignetteFilterJobId: explorerInitialized
                     ? String(classSplitState?.vignetteFilterJobId || classSplitState?.currentJobId || "")
                     : String(existing.vignetteFilterJobId || existing.jobId || ""),
+                dismissedRestoreJobId: String(existing.dismissedRestoreJobId || ""),
             }));
             return true;
         } catch (error) {
@@ -1011,7 +1012,7 @@
         }
     }
 
-    function restoreDataQualityExplorerSession() {
+    async function restoreDataQualityExplorerSession() {
         const saved = readDataQualityExplorerSession();
         classSplitState.snapshotId = String(saved.snapshotId || "");
         classSplitState.snapshotSignature = String(saved.snapshotSignature || "");
@@ -1087,17 +1088,95 @@
         }
         refreshClassSplitRefinementControl();
         renderClassSplitQwenReviewTraceToast();
-        const jobId = String(saved.jobId || "").trim();
-        if (!jobId || classSplitState.currentJobId) {
+        if (classSplitState.currentJobId) {
+            return;
+        }
+        const savedJobId = String(saved.jobId || "").trim();
+        if (savedJobId) {
+            try {
+                const status = await fetchClassSplitBoundedJson(
+                    `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(savedJobId)}`,
+                    "previous analysis status"
+                );
+                const state = String(status?.status || "").trim().toLowerCase();
+                if (!["completed", "failed", "cancelled"].includes(state)) {
+                    classSplitState.currentJobId = savedJobId;
+                    classSplitState.pendingRestoreSelectedPointId = String(saved.selectedPointId || "");
+                    classSplitState.active = true;
+                    setClassSplitJobStatus("Restoring active analysis ...", "");
+                    renderClassSplitProgress({
+                        progress: Number(status?.progress || 0),
+                        message: "Reconnecting to the active Data Quality Explorer job ...",
+                    });
+                    refreshClassSplitControls();
+                    pollClassSplitJob(savedJobId);
+                    return;
+                }
+            } catch (error) {
+                if (Number(error?.httpStatus) !== 404) {
+                    console.warn("Could not inspect the previous Data Quality Explorer job", error);
+                }
+            }
+        }
+        let manifest = null;
+        try {
+            manifest = await fetchClassSplitBoundedJson(
+                `${API_ROOT}/class_analysis/sessions/latest`,
+                "latest analysis session"
+            );
+        } catch (error) {
+            if (Number(error?.httpStatus) !== 404) {
+                console.warn("Could not inspect the latest Data Quality Explorer session", error);
+            }
+            return;
+        }
+        const jobId = String(manifest?.job_id || "").trim();
+        if (
+            !jobId
+            || !manifest?.artifacts?.session_store?.file
+            || String(saved.dismissedRestoreJobId || "") === jobId
+        ) {
+            return;
+        }
+        const objectCount = Number(manifest?.source?.object_count || 0);
+        const recipe = String(manifest?.recipe?.label || "saved analysis");
+        const accepted = window.confirm(
+            `Restore the latest Data Quality Explorer session?\n\n${recipe}`
+            + `${objectCount > 0 ? ` • ${objectCount.toLocaleString()} objects` : ""}`
+            + "\n\nThe graph and review queue restore immediately. Label changes remain disabled until the exact source dataset is reconnected."
+        );
+        if (!accepted) {
+            try {
+                window.sessionStorage?.setItem(DATA_QUALITY_SESSION_KEY, JSON.stringify({
+                    ...saved,
+                    dismissedRestoreJobId: jobId,
+                }));
+            } catch (error) {
+                console.warn("Could not remember the declined analysis restore", error);
+            }
             return;
         }
         classSplitState.currentJobId = jobId;
         classSplitState.pendingRestoreSelectedPointId = String(saved.selectedPointId || "");
         classSplitState.active = true;
-        setClassSplitJobStatus("Restoring previous analysis ...", "");
-        renderClassSplitProgress({ progress: 0, message: "Reconnecting to the previous Data Quality Explorer job ..." });
+        setClassSplitJobStatus("Restoring saved analysis ...", "");
+        renderClassSplitProgress({
+            progress: 1,
+            message: "Loading a bounded graph and the first review candidates ...",
+        });
         refreshClassSplitControls();
-        pollClassSplitJob(jobId);
+        try {
+            await loadClassSplitResult(jobId, { restoredSession: true, manifest });
+            setClassSplitJobStatus(
+                "Restored for review. Re-run against the current dataset before relabeling or deleting boxes.",
+                "warn"
+            );
+        } catch (error) {
+            classSplitState.active = false;
+            classSplitState.currentJobId = "";
+            setClassSplitJobStatus(`Restore failed: ${error.message || error}`, "error");
+            refreshClassSplitControls();
+        }
     }
 
     function findHorizontalScrollContainer(target, deltaX) {
@@ -3699,6 +3778,17 @@ const AUTOMATION_LOCKED_TABS = new Set([
         capabilities: null,
         clipBackbones: [],
         currentJobId: "",
+        sessionManifest: null,
+        boundedTransport: false,
+        boundedInitialProjectionMode: "",
+        boundedGraphQueryKey: "",
+        boundedGraphLoad: null,
+        boundedReviewQueueNextCursor: "",
+        boundedReviewQueueTotal: 0,
+        boundedReviewQueueLoading: false,
+        boundedPointHydrationLoads: new Map(),
+        restoredSession: false,
+        restoredSourceCompatible: false,
         pollTimer: null,
         pollRequestId: 0,
         pollFailureCount: 0,
@@ -6760,6 +6850,12 @@ const sam3TrainState = {
     }
 
     function annotationEditableGuard(actionLabel) {
+        if (
+            activeTab === TAB_CLASS_SPLIT
+            && classSplitRestoredSessionBlocksDatasetMutation(actionLabel)
+        ) {
+            return false;
+        }
         if (!isAnnotationMutationBlocked()) {
             return true;
         }
@@ -51241,7 +51337,7 @@ async function cancelRfDetrTrainingJobRequest() {
         const loadedCoordinates = classSplitState.projectionCoordinates || {};
         const inlineCoordinates = classSplitState.result?.projection_options?.coordinates || {};
         const coordinates = loadedCoordinates[choice] || inlineCoordinates[choice];
-        if (choice !== "umap" && Number.isInteger(pointIndex) && Array.isArray(coordinates)) {
+        if ((choice !== "umap" || classSplitState.boundedTransport) && Number.isInteger(pointIndex) && Array.isArray(coordinates)) {
             const pair = coordinates[pointIndex];
             const value = Number(Array.isArray(pair) ? pair[axisIndex] : NaN);
             if (Number.isFinite(value)) {
@@ -51310,6 +51406,10 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function classSplitProjectionCoordinatesLoaded(choice = getClassSplitProjectionChoice()) {
         const normalized = normalizeClassSplitProjectionChoice(choice);
+        if (classSplitState.boundedTransport) {
+            return normalized === classSplitState.boundedInitialProjectionMode
+                || Array.isArray(classSplitState.projectionCoordinates?.[normalized]);
+        }
         if (normalized === "umap") {
             return true;
         }
@@ -51326,6 +51426,27 @@ async function cancelRfDetrTrainingJobRequest() {
     async function ensureClassSplitProjectionCoordinates(choice = getClassSplitProjectionChoice()) {
         const normalized = normalizeClassSplitProjectionChoice(choice);
         if (classSplitProjectionCoordinatesLoaded(normalized)) {
+            return true;
+        }
+        if (classSplitState.boundedTransport) {
+            const graph = await fetchClassSplitBoundedGraph(normalized);
+            if (!graph) {
+                return false;
+            }
+            const coordinateById = new Map();
+            const columns = graph.columns || {};
+            (Array.isArray(columns.point_id) ? columns.point_id : []).forEach((pointId, index) => {
+                coordinateById.set(String(pointId), [
+                    Number(columns.x?.[index]) || 0,
+                    Number(columns.y?.[index]) || 0,
+                ]);
+            });
+            classSplitState.projectionCoordinates = {
+                ...(classSplitState.projectionCoordinates || {}),
+                [normalized]: (classSplitState.result?.points || []).map((point) => (
+                    coordinateById.get(String(point?.point_id || "")) || [0, 0]
+                )),
+            };
             return true;
         }
         const available = classSplitState.result?.projection_options?.coordinates_available;
@@ -52328,6 +52449,17 @@ async function cancelRfDetrTrainingJobRequest() {
             classSplitState.clusterSearchRequestId += 1;
             classSplitState.active = true;
             classSplitState.currentJobId = "";
+            classSplitState.sessionManifest = null;
+            classSplitState.boundedTransport = false;
+            classSplitState.boundedInitialProjectionMode = "";
+            classSplitState.boundedGraphQueryKey = "";
+            classSplitState.boundedGraphLoad = null;
+            classSplitState.boundedReviewQueueNextCursor = "";
+            classSplitState.boundedReviewQueueTotal = 0;
+            classSplitState.boundedReviewQueueLoading = false;
+            classSplitState.boundedPointHydrationLoads = new Map();
+            classSplitState.restoredSession = false;
+            classSplitState.restoredSourceCompatible = false;
             classSplitState.result = null;
             clearClassSplitRefinementPreviewCache();
             clearClassSplitContextPreviewCache();
@@ -52864,7 +52996,287 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
-    function applyClassSplitResultPayload(resultPayload, jobId = "") {
+    function classSplitRestoredSessionBlocksDatasetMutation(actionLabel = "Changing labels") {
+        if (!classSplitState.restoredSession || classSplitState.restoredSourceCompatible) {
+            return false;
+        }
+        setClassSplitJobStatus(
+            "This recovered session is review-only until the exact source dataset is reconnected. Re-run analysis against the current workspace before changing labels or boxes.",
+            "warn"
+        );
+        enqueueTaskNotice(
+            `${String(actionLabel || "This action")} is disabled for a recovered graph because its annotation source has not been verified. Confirm and Skip remain available.`,
+            {
+                key: `class-split-restored-source-lock:${classSplitState.currentJobId || "session"}`,
+                durationMs: 7000,
+            }
+        );
+        return true;
+    }
+
+    async function fetchClassSplitBoundedJson(url, label = "analysis data") {
+        const response = await fetch(url, { cache: "no-store" });
+        const detail = await response.text();
+        if (!response.ok) {
+            const error = new Error(parseApiError(detail, `HTTP ${response.status}`));
+            error.httpStatus = response.status;
+            throw error;
+        }
+        const payload = parseJsonObjectSafe(detail, null);
+        if (!payload || typeof payload !== "object") {
+            throw new Error(`Backend returned invalid ${label}.`);
+        }
+        return payload;
+    }
+
+    function classSplitBoundedGraphPoints(payload) {
+        const columns = payload?.columns || {};
+        const pointIds = Array.isArray(columns.point_id) ? columns.point_id : [];
+        const required = [columns.x, columns.y, columns.class_id, columns.class_name];
+        if (required.some((values) => !Array.isArray(values) || values.length !== pointIds.length)) {
+            throw new Error("Bounded graph columns are inconsistent.");
+        }
+        return pointIds.map((pointId, index) => ({
+            point_id: String(pointId || ""),
+            _sourceOrdinal: Number(columns.ordinal?.[index]),
+            class_id: String(columns.class_id[index] || ""),
+            class_name: String(columns.class_name[index] || ""),
+            projection: [Number(columns.x[index]) || 0, Number(columns.y[index]) || 0],
+            quality_review_candidate: Boolean(columns.quality_review_candidate?.[index]),
+            is_wrong_class_candidate: Boolean(columns.wrong_class_candidate?.[index]),
+            is_rough_outlier_candidate: Boolean(columns.spatial_evidence_candidate?.[index]),
+            is_close_overlap_candidate: Boolean(columns.overlap_candidate?.[index]),
+            tiny_object: Boolean(columns.tiny_object?.[index]),
+            review_priority_score: Number(columns.review_priority_score?.[index]) || 0,
+            wrong_class_suspicion: Number(columns.wrong_class_suspicion?.[index]) || 0,
+            proposed_class: String(columns.proposed_class?.[index] || ""),
+            _boundedDetailLoaded: false,
+        })).filter((point) => point.point_id);
+    }
+
+    function mergeClassSplitBoundedQueueItems(result, items) {
+        const points = Array.isArray(result?.points) ? result.points : [];
+        const pointById = new Map(points.map((point) => [String(point?.point_id || ""), point]));
+        const queuePoints = [];
+        (Array.isArray(items) ? items : []).forEach((item) => {
+            const pointId = String(item?.point_id || "").trim();
+            if (!pointId) return;
+            let point = pointById.get(pointId);
+            if (!point) {
+                point = { point_id: pointId, projection: [0, 0], _notPlottable: true };
+                points.push(point);
+                pointById.set(pointId, point);
+            }
+            Object.assign(point, item, {
+                human_review_rank: Number(item.rank) || point.human_review_rank,
+            });
+            queuePoints.push(point);
+        });
+        const appendUnique = (field, candidates) => {
+            const current = Array.isArray(result[field]) ? result[field] : [];
+            const ids = new Set(current.map((point) => String(point?.point_id || "")));
+            candidates.forEach((point) => {
+                const pointId = String(point?.point_id || "");
+                if (pointId && !ids.has(pointId)) {
+                    current.push(point);
+                    ids.add(pointId);
+                }
+            });
+            result[field] = current;
+        };
+        appendUnique("wrong_class_candidates", queuePoints);
+        const refined = queuePoints.filter((point) => point.is_rough_outlier_candidate);
+        appendUnique("refinement_candidates", refined);
+        appendUnique("vignette_candidates", refined);
+        appendUnique("within_class_outlier_candidates", refined);
+        return queuePoints;
+    }
+
+    async function ensureClassSplitBoundedPointHydrated(pointId, { includeEvidence = true } = {}) {
+        const safeId = String(pointId || "").trim();
+        const point = classSplitState.pointsById.get(safeId);
+        if (!classSplitState.boundedTransport || !safeId || !point) {
+            return point || null;
+        }
+        if (point._boundedDetailLoaded && (!includeEvidence || point._boundedEvidenceLoaded)) {
+            return point;
+        }
+        const key = `${safeId}:${includeEvidence ? "evidence" : "detail"}`;
+        if (classSplitState.boundedPointHydrationLoads.has(key)) {
+            return classSplitState.boundedPointHydrationLoads.get(key);
+        }
+        const generation = classSplitState.analysisGeneration;
+        const jobId = String(classSplitState.currentJobId || "").trim();
+        const load = (async () => {
+            const detail = await fetchClassSplitBoundedJson(
+                `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/points/${encodeURIComponent(safeId)}`,
+                "point detail"
+            );
+            let evidence = null;
+            if (includeEvidence) {
+                try {
+                    evidence = await fetchClassSplitBoundedJson(
+                        `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/points/${encodeURIComponent(safeId)}/evidence`,
+                        "point evidence"
+                    );
+                } catch (error) {
+                    if (Number(error?.httpStatus) !== 404) throw error;
+                }
+            }
+            if (!classSplitAsyncRequestIsCurrent(generation, jobId)) {
+                return null;
+            }
+            Object.assign(point, detail.point || {});
+            point._boundedDetailLoaded = true;
+            if (includeEvidence) {
+                if (evidence?.evidence && typeof evidence.evidence === "object") {
+                    point.refined_outlier = evidence.evidence;
+                    point.is_rough_outlier_candidate = true;
+                }
+                point._boundedEvidenceLoaded = true;
+            }
+            return point;
+        })().finally(() => {
+            if (classSplitState.boundedPointHydrationLoads.get(key) === load) {
+                classSplitState.boundedPointHydrationLoads.delete(key);
+            }
+        });
+        classSplitState.boundedPointHydrationLoads.set(key, load);
+        return load;
+    }
+
+    async function hydrateClassSplitBoundedQueue(pointIds) {
+        const ids = Array.from(new Set(
+            (Array.isArray(pointIds) ? pointIds : [])
+                .map((pointId) => String(pointId || ""))
+                .filter(Boolean)
+        ));
+        let cursor = 0;
+        const workers = Array.from({ length: Math.min(6, ids.length) }, async () => {
+            while (cursor < ids.length) {
+                const pointId = ids[cursor++];
+                try {
+                    await ensureClassSplitBoundedPointHydrated(pointId);
+                } catch (error) {
+                    console.warn(`Could not hydrate Data Quality Explorer point ${pointId}`, error);
+                }
+            }
+        });
+        await Promise.all(workers);
+        rebuildClassSplitCandidateIndexes();
+        renderClassSplitWrongList();
+        renderClassSplitInspector();
+    }
+
+    async function fetchClassSplitBoundedGraph(projectionMode) {
+        const jobId = String(classSplitState.currentJobId || "").trim();
+        if (!jobId) return null;
+        const parameters = new URLSearchParams({
+            projection_mode: normalizeClassSplitProjectionChoice(projectionMode),
+            reviewed: "unreviewed",
+            limit: "50000",
+        });
+        return fetchClassSplitBoundedJson(
+            `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/graph?${parameters}`,
+            "bounded graph"
+        );
+    }
+
+    async function loadNextClassSplitBoundedReviewPage() {
+        const cursor = String(classSplitState.boundedReviewQueueNextCursor || "");
+        const jobId = String(classSplitState.currentJobId || "").trim();
+        if (!classSplitState.boundedTransport || !cursor || !jobId || classSplitState.boundedReviewQueueLoading) {
+            return false;
+        }
+        classSplitState.boundedReviewQueueLoading = true;
+        try {
+            const parameters = new URLSearchParams({ category: "review", cursor, limit: "100" });
+            const page = await fetchClassSplitBoundedJson(
+                `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/review_queue?${parameters}`,
+                "review queue"
+            );
+            if (jobId !== String(classSplitState.currentJobId || "")) return false;
+            const points = mergeClassSplitBoundedQueueItems(classSplitState.result, page.items || []);
+            points.forEach((point) => {
+                const pointId = String(point.point_id || "");
+                if (!classSplitState.pointsById.has(pointId)) {
+                    point._projectionIndex = (classSplitState.result?.points || []).indexOf(point);
+                    classSplitState.pointsById.set(pointId, point);
+                }
+            });
+            classSplitState.boundedReviewQueueNextCursor = String(page.next_cursor || "");
+            rebuildClassSplitCandidateIndexes();
+            renderClassSplitWrongList();
+            void hydrateClassSplitBoundedQueue(points.map((point) => point.point_id));
+            return true;
+        } finally {
+            classSplitState.boundedReviewQueueLoading = false;
+        }
+    }
+
+    async function loadClassSplitBoundedResult(jobId, manifest) {
+        const projectionMode = normalizeClassSplitProjectionChoice(
+            manifest?.recipe?.projection || "umap"
+        );
+        const graphParameters = new URLSearchParams({
+            projection_mode: projectionMode,
+            reviewed: "unreviewed",
+            limit: "50000",
+        });
+        const [graph, queue] = await Promise.all([
+            fetchClassSplitBoundedJson(
+                `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/graph?${graphParameters}`,
+                "bounded graph"
+            ),
+            fetchClassSplitBoundedJson(
+                `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/review_queue?category=review&limit=36`,
+                "review queue"
+            ),
+        ]);
+        const points = classSplitBoundedGraphPoints(graph);
+        const summary = {
+            ...(graph.session_summary || {}),
+            analysis_job_id: jobId,
+            object_count: Number(graph.point_count || manifest?.source?.object_count || points.length),
+            class_counts: graph.class_counts || {},
+            projection: projectionMode === "umap" ? "umap" : "pca",
+            refinement: {
+                ...((graph.session_summary || {}).refinement || {}),
+                enabled: Number(graph.evidence_count || 0) > 0,
+                status: String(manifest?.evidence?.status || "completed"),
+                evaluated_count: Number(graph.evidence_count || 0),
+            },
+        };
+        const result = {
+            schema: "class-analysis-result-bounded-v2",
+            summary,
+            points,
+            wrong_class_candidates: [],
+            refinement_candidates: [],
+            vignette_candidates: [],
+            within_class_outlier_candidates: [],
+            projection_options: {
+                selected: projectionMode,
+                coordinates_available: Array.isArray(graph.available_projection_modes)
+                    ? graph.available_projection_modes
+                    : [projectionMode],
+            },
+            session_transport: {
+                graph_returned: Number(graph.returned || points.length),
+                graph_total: Number(graph.total_matching || graph.point_count || points.length),
+                graph_truncated: Boolean(graph.truncated),
+                review_total: Number(queue.total || 0),
+            },
+        };
+        const queuePoints = mergeClassSplitBoundedQueueItems(result, queue.items || []);
+        classSplitState.boundedReviewQueueNextCursor = String(queue.next_cursor || "");
+        classSplitState.boundedReviewQueueTotal = Number(queue.total || 0);
+        classSplitState.boundedInitialProjectionMode = projectionMode;
+        classSplitState.boundedGraphQueryKey = `${projectionMode}:all`;
+        return { result, queuePointIds: queuePoints.map((point) => point.point_id) };
+    }
+
+    function applyClassSplitResultPayload(resultPayload, jobId = "", options = {}) {
         const result = resultPayload && typeof resultPayload === "object" ? resultPayload : {};
         clearClassSplitRefinementPreviewCache();
         clearClassSplitContextPreviewCache();
@@ -52902,6 +53314,17 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         classSplitState.vignetteFilterJobId = appliedJobId;
         classSplitState.active = false;
+        classSplitState.sessionManifest = options.manifest || null;
+        classSplitState.boundedTransport = options.boundedTransport === true;
+        classSplitState.restoredSession = options.restoredSession === true;
+        classSplitState.restoredSourceCompatible = options.restoredSourceCompatible === true;
+        if (!classSplitState.boundedTransport) {
+            classSplitState.boundedInitialProjectionMode = "";
+            classSplitState.boundedGraphQueryKey = "";
+            classSplitState.boundedReviewQueueNextCursor = "";
+            classSplitState.boundedReviewQueueTotal = 0;
+            classSplitState.boundedPointHydrationLoads = new Map();
+        }
         classSplitState.result = result;
         if (classSplitRefinementNeedsRoughFallback(result)) {
             classSplitState.showAllRough = true;
@@ -53036,7 +53459,30 @@ async function cancelRfDetrTrainingJobRequest() {
         persistDataQualityExplorerSession();
     }
 
-    async function loadClassSplitResult(jobId) {
+    async function loadClassSplitResult(jobId, options = {}) {
+        let manifest = options.manifest || null;
+        if (!manifest) {
+            try {
+                manifest = await fetchClassSplitBoundedJson(
+                    `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/manifest`,
+                    "session manifest"
+                );
+            } catch (error) {
+                if (Number(error?.httpStatus) !== 404) throw error;
+            }
+        }
+        if (manifest?.artifacts?.session_store?.file) {
+            const bounded = await loadClassSplitBoundedResult(jobId, manifest);
+            applyClassSplitResultPayload(bounded.result, jobId, {
+                boundedTransport: true,
+                restoredSession: options.restoredSession === true,
+                manifest,
+            });
+            void hydrateClassSplitBoundedQueue(bounded.queuePointIds);
+            await restoreClassSplitQwenReviews(jobId);
+            await retryClassSplitPendingTrainingCommitsAfterAnnotationSave();
+            return;
+        }
         const resp = await fetch(`${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/result`);
         const detail = await resp.text();
         if (!resp.ok) {
@@ -53044,7 +53490,10 @@ async function cancelRfDetrTrainingJobRequest() {
             error.httpStatus = resp.status;
             throw error;
         }
-        applyClassSplitResultPayload(parseJsonObjectSafe(detail, {}), jobId);
+        applyClassSplitResultPayload(parseJsonObjectSafe(detail, {}), jobId, {
+            boundedTransport: false,
+            restoredSession: false,
+        });
         await restoreClassSplitQwenReviews(jobId);
         await retryClassSplitPendingTrainingCommitsAfterAnnotationSave();
     }
@@ -54222,7 +54671,8 @@ async function cancelRfDetrTrainingJobRequest() {
         const result = classSplitState.result;
         const points = (Array.isArray(result?.points) ? result.points : [])
             .filter((point) => (
-                point?.annotation_deleted !== true
+                point?._notPlottable !== true
+                && point?.annotation_deleted !== true
                 && !String(point?.human_review_disposition || "").trim()
                 && !classSplitState.dismissedWrongIds.has(
                     String(point?.point_id || "")
@@ -62070,6 +62520,14 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function renderClassSplitWrongList() {
+        if (
+            classSplitState.boundedTransport
+            && classSplitState.boundedReviewQueueNextCursor
+            && !classSplitState.boundedReviewQueueLoading
+            && getClassSplitVisibleWrongCandidates().length < 24
+        ) {
+            void loadNextClassSplitBoundedReviewPage();
+        }
         const listEl = classSplitElements.wrongList;
         if (!listEl) {
             return;
@@ -63637,6 +64095,17 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         const point = classSplitState.pointsById.get(safeId);
+        if (classSplitState.boundedTransport && !point?._boundedDetailLoaded) {
+            void ensureClassSplitBoundedPointHydrated(safeId).then((hydrated) => {
+                if (hydrated && classSplitState.selectedPointId === safeId) {
+                    rebuildClassSplitCandidateIndexes();
+                    renderClassSplitInspector();
+                    renderClassSplitWrongList();
+                }
+            }).catch((error) => {
+                console.warn("Could not load the selected Data Quality Explorer point", error);
+            });
+        }
         let filterChanged = false;
         const activeFilter = String(classSplitElements.filterClass?.value || "").trim();
         if (focusPlot && activeFilter && String(point?.class_name || "") !== activeFilter) {
@@ -64717,6 +65186,21 @@ async function cancelRfDetrTrainingJobRequest() {
             throw new Error("A valid review disposition is required.");
         }
         await ensureClassSplitReviewDispositionCapabilities(safeDisposition);
+        if (
+            [
+                "reassign_class",
+                "delete_bbox",
+                "delete_current_box",
+                "delete_overlapping_box",
+                "keep_both_boxes",
+            ].includes(safeDisposition)
+            && classSplitRestoredSessionBlocksDatasetMutation("Changing this annotation")
+        ) {
+            throw new Error("Recovered analysis is review-only until its exact source is reconnected.");
+        }
+        if (classSplitState.boundedTransport) {
+            await ensureClassSplitBoundedPointHydrated(safeId);
+        }
         const pairDisposition = CLASS_SPLIT_DUAL_BBOX_DISPOSITIONS.includes(
             safeDisposition
         );
@@ -69834,7 +70318,9 @@ async function cancelRfDetrTrainingJobRequest() {
         loadClassSplitCapabilities().catch((error) => {
             console.warn("Data Quality Explorer capabilities refresh failed", error);
         });
-        restoreDataQualityExplorerSession();
+        restoreDataQualityExplorerSession().catch((error) => {
+            console.warn("Data Quality Explorer session restore failed", error);
+        });
         installTatorTestHooks();
     }
 

@@ -858,6 +858,10 @@ def get_class_analysis_graph_payload(
         "schema": "class-analysis-graph-v2",
         "projection_mode": mode,
         "available_projection_modes": modes,
+        "session_summary": metadata.get("summary") or {},
+        "class_counts": metadata.get("class_counts") or {},
+        "point_count": int(metadata.get("point_count") or 0),
+        "evidence_count": int(metadata.get("evidence_count") or 0),
         "total_matching": total,
         "returned": len(rows),
         "truncated": total > len(rows),
@@ -949,6 +953,8 @@ def get_class_analysis_review_queue_payload(
                 "proposed_class": str(row["proposed_class"] or ""),
                 "reviewed": bool(row["reviewed"]),
                 "tiny_object": bool(row["tiny_object"] or row["low_source_detail"]),
+                "review_object_key": str(row["review_object_key"] or ""),
+                "pair_review_key": str(row["pair_review_key"] or ""),
             }
         )
     next_cursor = None

@@ -46,6 +46,8 @@ def build_class_analysis_router(
     purge_cache_fn: Optional[Callable[[dict], Any]] = None,
     recalibrate_review_ranking_fn: Optional[Callable[[str, dict], Any]] = None,
     reset_review_ranking_fn: Optional[Callable[[str, dict], Any]] = None,
+    latest_session_fn: Optional[Callable[[], Any]] = None,
+    get_session_manifest_fn: Optional[Callable[[str], Any]] = None,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -126,6 +128,18 @@ def build_class_analysis_router(
     @router.post("/class_analysis/jobs/active_workspace/upload_session/{session_id}/cancel")
     def cancel_active_workspace_upload_session(session_id: str):
         return cancel_active_workspace_upload_fn(session_id)
+
+    if latest_session_fn is not None:
+
+        @router.get("/class_analysis/sessions/latest")
+        def get_latest_class_analysis_session():
+            return latest_session_fn()
+
+    if get_session_manifest_fn is not None:
+
+        @router.get("/class_analysis/jobs/{job_id}/manifest")
+        def get_class_analysis_session_manifest(job_id: str):
+            return get_session_manifest_fn(job_id)
 
     @router.get("/class_analysis/jobs/{job_id}")
     def get_class_analysis_job(job_id: str):

@@ -3794,6 +3794,8 @@ const AUTOMATION_LOCKED_TABS = new Set([
         pollTimer: null,
         pollRequestId: 0,
         pollFailureCount: 0,
+        evidencePollTimer: null,
+        evidencePollRequestId: 0,
         active: false,
         startupOperation: null,
         startupOperationToken: 0,
@@ -52451,6 +52453,7 @@ async function cancelRfDetrTrainingJobRequest() {
             classSplitState.clusterSearchRequestId += 1;
             classSplitState.active = true;
             classSplitState.currentJobId = "";
+            stopClassSplitEvidencePoll();
             classSplitState.sessionManifest = null;
             classSplitState.boundedTransport = false;
             classSplitState.boundedInitialProjectionMode = "";
@@ -53480,6 +53483,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 restoredSession: options.restoredSession === true,
                 manifest,
             });
+            startClassSplitEvidencePoll(jobId, manifest);
             void hydrateClassSplitBoundedQueue(bounded.queuePointIds);
             await restoreClassSplitQwenReviews(jobId);
             await retryClassSplitPendingTrainingCommitsAfterAnnotationSave();
@@ -53498,6 +53502,91 @@ async function cancelRfDetrTrainingJobRequest() {
         });
         await restoreClassSplitQwenReviews(jobId);
         await retryClassSplitPendingTrainingCommitsAfterAnnotationSave();
+    }
+
+    function stopClassSplitEvidencePoll() {
+        classSplitState.evidencePollRequestId += 1;
+        if (classSplitState.evidencePollTimer) {
+            window.clearTimeout(classSplitState.evidencePollTimer);
+            classSplitState.evidencePollTimer = null;
+        }
+    }
+
+    function classSplitEvidenceProgressText(evidence) {
+        const processed = Math.max(0, Number(evidence?.processed || 0));
+        const total = Math.max(processed, Number(evidence?.total || 0));
+        const failed = Math.max(0, Number(evidence?.failed || 0));
+        const rate = Math.max(0, Number(evidence?.objects_per_second || 0));
+        const etaSeconds = Number(evidence?.eta_seconds);
+        const backend = String(evidence?.backend || "DINOv3 TokenCut").trim();
+        const cacheHits = Math.max(0, Number(evidence?.cache_hits || 0));
+        const parts = [`Graph ready`, `spatial evidence ${processed.toLocaleString()}/${total.toLocaleString()}`];
+        if (rate > 0) parts.push(`${rate.toFixed(rate >= 10 ? 1 : 2)} objects/s`);
+        if (Number.isFinite(etaSeconds) && etaSeconds >= 0) {
+            const etaMinutes = Math.max(1, Math.ceil(etaSeconds / 60));
+            parts.push(`about ${etaMinutes.toLocaleString()} min remaining`);
+        }
+        if (backend) parts.push(backend);
+        if (cacheHits) parts.push(`${cacheHits.toLocaleString()} cached batches`);
+        if (failed) parts.push(`${failed.toLocaleString()} failed`);
+        return parts.join(" · ");
+    }
+
+    function renderClassSplitEvidenceProgress(manifest) {
+        const evidence = manifest?.evidence;
+        if (!evidence || typeof evidence !== "object" || Number(evidence.total || 0) <= 0) {
+            return false;
+        }
+        const status = String(evidence.status || "").trim().toLowerCase();
+        renderClassSplitProgress({
+            status: ["completed", "partial_failed"].includes(status) ? "completed" : "running",
+            progress: 1,
+            phase_id: "spatial_evidence",
+            phase_label: status === "completed"
+                ? "Spatial evidence ready"
+                : "Graph ready; preparing spatial evidence",
+            message: classSplitEvidenceProgressText(evidence),
+        });
+        if (status === "partial_failed") {
+            setClassSplitJobStatus(
+                "Graph ready; some spatial evidence failed and remains unavailable for VLM review.",
+                "warn"
+            );
+        }
+        return !["completed", "partial_failed"].includes(status);
+    }
+
+    function startClassSplitEvidencePoll(jobId, initialManifest = null) {
+        stopClassSplitEvidencePoll();
+        const safeJobId = String(jobId || "").trim();
+        if (!safeJobId) return;
+        const generation = classSplitState.analysisGeneration;
+        let shouldContinue = renderClassSplitEvidenceProgress(initialManifest);
+        if (!shouldContinue) return;
+        const requestId = classSplitState.evidencePollRequestId;
+        const poll = async () => {
+            try {
+                const manifest = await fetchClassSplitBoundedJson(
+                    `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(safeJobId)}/manifest`,
+                    "spatial evidence progress"
+                );
+                if (
+                    requestId !== classSplitState.evidencePollRequestId
+                    || generation !== classSplitState.analysisGeneration
+                    || safeJobId !== String(classSplitState.currentJobId || "")
+                ) return;
+                classSplitState.sessionManifest = manifest;
+                shouldContinue = renderClassSplitEvidenceProgress(manifest);
+                if (shouldContinue) {
+                    classSplitState.evidencePollTimer = window.setTimeout(poll, 4000);
+                }
+            } catch (error) {
+                if (requestId !== classSplitState.evidencePollRequestId) return;
+                console.warn("Could not refresh spatial-evidence progress", error);
+                classSplitState.evidencePollTimer = window.setTimeout(poll, 8000);
+            }
+        };
+        classSplitState.evidencePollTimer = window.setTimeout(poll, 1000);
     }
 
     function classSplitResultHasRefinement(result = classSplitState.result) {
@@ -61139,7 +61228,7 @@ async function cancelRfDetrTrainingJobRequest() {
             point_id: safePointId,
             status: "queued",
             progress: 0,
-            message: "Starting VLM review ...",
+            message: "Preparing complete spatial evidence for VLM review ...",
             evidence: [],
             result: null,
         });

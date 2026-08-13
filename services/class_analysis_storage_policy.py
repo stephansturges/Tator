@@ -146,7 +146,14 @@ def choose_unpinned_session_evictions(
     cache_bytes: int,
     max_bytes: int,
 ) -> list[dict[str, Any]]:
-    budget = normalize_generated_data_budget(max_bytes)
+    if isinstance(max_bytes, bool):
+        raise StoragePolicyError("class_analysis_storage_budget_invalid")
+    try:
+        budget = int(max_bytes)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise StoragePolicyError("class_analysis_storage_budget_invalid") from exc
+    if budget < 0:
+        raise StoragePolicyError("class_analysis_storage_budget_out_of_range")
     rows = [dict(row) for row in sessions]
     remaining = max(0, int(cache_bytes)) + sum(max(0, int(row.get("bytes") or 0)) for row in rows)
     victims: list[dict[str, Any]] = []

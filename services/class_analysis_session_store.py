@@ -308,6 +308,8 @@ def _schema_sql() -> str:
         attempts INTEGER NOT NULL DEFAULT 0,
         error TEXT,
         source_key TEXT,
+        candidate_payload TEXT NOT NULL DEFAULT '{}',
+        lease_token TEXT,
         updated_at REAL NOT NULL
     );
     """
@@ -327,7 +329,7 @@ def _flush_rows(
         "overlaps": "INSERT OR REPLACE INTO overlap_pairs VALUES (?,?,?,?)",
         "reviews": "INSERT OR REPLACE INTO review_state VALUES (?,?,?,?,?)",
         "evidence": "INSERT OR REPLACE INTO evidence VALUES (?,?,?,?,?,?)",
-        "tasks": "INSERT OR REPLACE INTO evidence_tasks VALUES (?,?,?,?,?,?,?)",
+        "tasks": "INSERT OR REPLACE INTO evidence_tasks VALUES (?,?,?,?,?,?,?,?,?)",
     }
     for key, statement in statements.items():
         rows = buffers[key]
@@ -589,6 +591,8 @@ def build_class_analysis_session_store(
                             or point.get("image_relpath")
                             or ""
                         ),
+                        _json_text(_detail_payload(point)),
+                        None,
                         now,
                     )
                 )
@@ -1010,12 +1014,431 @@ def get_class_analysis_point_evidence_payload(
         ) from exc
     if len(payload) > EVIDENCE_MAX_BYTES:
         raise SessionStoreError("class_analysis_point_evidence_too_large", status_code=413)
+    evidence = json.loads(payload.decode("utf-8"))
+    if isinstance(evidence, dict):
+        evidence.pop("_artifact", None)
     result = {
         "schema": "class-analysis-point-evidence-v2",
         "point_id": identifier,
         "status": str(row["status"]),
         "sidecar_row": int(row["sidecar_row"]),
         "fingerprint": str(row["fingerprint"] or ""),
-        "evidence": json.loads(payload.decode("utf-8")),
+        "evidence": evidence,
     }
     return _bounded_payload(result, EVIDENCE_MAX_BYTES, "class_analysis_point_evidence_too_large")
+
+
+def _upgrade_evidence_task_schema(connection: sqlite3.Connection) -> None:
+    columns = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(evidence_tasks)")
+    }
+    if "candidate_payload" not in columns:
+        connection.execute(
+            "ALTER TABLE evidence_tasks ADD COLUMN candidate_payload TEXT NOT NULL DEFAULT '{}'"
+        )
+    if "lease_token" not in columns:
+        connection.execute("ALTER TABLE evidence_tasks ADD COLUMN lease_token TEXT")
+
+
+def initialize_class_analysis_evidence_tasks(
+    path: Path | str,
+    candidates: Sequence[Mapping[str, Any]],
+) -> dict[str, int]:
+    """Create durable pending tasks without replacing completed evidence."""
+
+    store = Path(path)
+    connection = sqlite3.connect(str(store))
+    try:
+        connection.execute("PRAGMA busy_timeout=30000")
+        connection.execute("PRAGMA journal_mode=WAL")
+        _upgrade_evidence_task_schema(connection)
+        now = time.time()
+        rows = []
+        for index, candidate in enumerate(candidates):
+            if not isinstance(candidate, Mapping):
+                continue
+            point_id = str(candidate.get("point_id") or "").strip()
+            if not point_id:
+                continue
+            source_key = str(
+                candidate.get("source_key")
+                or candidate.get("frontend_image_key")
+                or candidate.get("image_relpath")
+                or ""
+            )
+            rows.append(
+                (
+                    point_id,
+                    index + 1,
+                    "pending",
+                    0,
+                    None,
+                    source_key,
+                    _json_text(dict(candidate)),
+                    None,
+                    now,
+                )
+            )
+        connection.executemany(
+            """INSERT OR IGNORE INTO evidence_tasks
+               (point_id, priority, status, attempts, error, source_key,
+                candidate_payload, lease_token, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            rows,
+        )
+        connection.execute(
+            """UPDATE evidence_tasks
+               SET status = 'completed', error = NULL, lease_token = NULL,
+                   updated_at = ?
+               WHERE point_id IN (SELECT point_id FROM evidence)""",
+            (now,),
+        )
+        connection.commit()
+        counts = dict(
+            connection.execute(
+                "SELECT status, COUNT(*) FROM evidence_tasks GROUP BY status"
+            ).fetchall()
+        )
+        return {str(key): int(value) for key, value in counts.items()}
+    finally:
+        connection.close()
+
+
+def claim_class_analysis_evidence_batch(
+    path: Path | str,
+    *,
+    limit: int = 36,
+    lease_seconds: float = 1800.0,
+    max_attempts: int = 3,
+) -> dict[str, Any]:
+    """Lease one deterministic source-grouped batch for a single worker."""
+
+    batch_limit = max(1, min(256, int(limit)))
+    now = time.time()
+    lease_token = uuid.uuid4().hex
+    connection = sqlite3.connect(str(Path(path)))
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("PRAGMA busy_timeout=30000")
+        connection.execute("PRAGMA journal_mode=WAL")
+        _upgrade_evidence_task_schema(connection)
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            """UPDATE evidence_tasks
+               SET status = CASE WHEN attempts < ? THEN 'retry' ELSE 'failed' END,
+                   lease_token = NULL,
+                   error = COALESCE(error, 'worker_lease_expired'),
+                   updated_at = ?
+               WHERE status = 'processing' AND updated_at < ?""",
+            (int(max_attempts), now, now - max(30.0, float(lease_seconds))),
+        )
+        candidates = connection.execute(
+            """SELECT point_id, priority, status, attempts, source_key,
+                      candidate_payload
+               FROM evidence_tasks
+               WHERE status IN ('pending', 'retry') AND attempts < ?
+               ORDER BY priority ASC, source_key ASC, point_id ASC
+               LIMIT ?""",
+            (int(max_attempts), batch_limit * 8),
+        ).fetchall()
+        selected: list[sqlite3.Row] = []
+        if candidates:
+            source_order: list[str] = []
+            by_source: dict[str, list[sqlite3.Row]] = {}
+            for row in candidates:
+                source_key = str(row["source_key"] or "")
+                if source_key not in by_source:
+                    source_order.append(source_key)
+                    by_source[source_key] = []
+                by_source[source_key].append(row)
+            for source_key in source_order:
+                selected.extend(by_source[source_key])
+                if len(selected) >= batch_limit:
+                    selected = selected[:batch_limit]
+                    break
+        if selected:
+            connection.executemany(
+                """UPDATE evidence_tasks
+                   SET status = 'processing', attempts = attempts + 1,
+                       error = NULL, lease_token = ?, updated_at = ?
+                   WHERE point_id = ? AND status IN ('pending', 'retry')""",
+                [(lease_token, now, str(row["point_id"])) for row in selected],
+            )
+        connection.commit()
+        items = []
+        for row in selected:
+            try:
+                candidate = json.loads(str(row["candidate_payload"] or "{}"))
+            except json.JSONDecodeError:
+                candidate = {}
+            items.append(
+                {
+                    "point_id": str(row["point_id"]),
+                    "priority": int(row["priority"]),
+                    "attempt": int(row["attempts"]) + 1,
+                    "source_key": str(row["source_key"] or ""),
+                    "candidate": candidate if isinstance(candidate, dict) else {},
+                }
+            )
+        return {"lease_token": lease_token if items else "", "items": items}
+    finally:
+        connection.close()
+
+
+def complete_class_analysis_evidence_batch(
+    path: Path | str,
+    *,
+    lease_token: str,
+    rows: Sequence[Mapping[str, Any]],
+) -> int:
+    token = str(lease_token or "").strip()
+    if not token:
+        raise SessionStoreError("class_analysis_evidence_lease_required")
+    now = time.time()
+    connection = sqlite3.connect(str(Path(path)))
+    try:
+        connection.execute("PRAGMA busy_timeout=30000")
+        connection.execute("PRAGMA journal_mode=WAL")
+        _upgrade_evidence_task_schema(connection)
+        connection.execute("BEGIN IMMEDIATE")
+        completed = 0
+        for row in rows:
+            point_id = str(row.get("point_id") or "").strip()
+            evidence = row.get("evidence")
+            if not point_id or not isinstance(evidence, Mapping):
+                continue
+            task = connection.execute(
+                """SELECT 1 FROM evidence_tasks
+                   WHERE point_id = ? AND status = 'processing' AND lease_token = ?""",
+                (point_id, token),
+            ).fetchone()
+            if task is None:
+                raise SessionStoreError("class_analysis_evidence_lease_stale", status_code=409)
+            evidence_bytes = _json_bytes(dict(evidence))
+            if len(evidence_bytes) > EVIDENCE_MAX_BYTES:
+                raise SessionStoreError(
+                    f"class_analysis_point_evidence_too_large:{point_id}",
+                    status_code=413,
+                )
+            connection.execute(
+                """INSERT OR REPLACE INTO evidence
+                   (point_id, status, payload, sidecar_row, fingerprint, updated_at)
+                   VALUES (?, 'completed', ?, ?, ?, ?)""",
+                (
+                    point_id,
+                    sqlite3.Binary(zlib.compress(evidence_bytes, level=6)),
+                    _integer(evidence.get("sidecar_row"), -1),
+                    str(row.get("fingerprint") or ""),
+                    now,
+                ),
+            )
+            connection.execute(
+                """UPDATE evidence_tasks
+                   SET status = 'completed', error = NULL, lease_token = NULL,
+                       updated_at = ?
+                   WHERE point_id = ? AND lease_token = ?""",
+                (now, point_id, token),
+            )
+            completed += 1
+        connection.commit()
+        return completed
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def fail_class_analysis_evidence_batch(
+    path: Path | str,
+    *,
+    lease_token: str,
+    error: str,
+    max_attempts: int = 3,
+) -> int:
+    connection = sqlite3.connect(str(Path(path)))
+    try:
+        connection.execute("PRAGMA busy_timeout=30000")
+        _upgrade_evidence_task_schema(connection)
+        now = time.time()
+        cursor = connection.execute(
+            """UPDATE evidence_tasks
+               SET status = CASE WHEN attempts < ? THEN 'retry' ELSE 'failed' END,
+                   error = ?, lease_token = NULL, updated_at = ?
+               WHERE status = 'processing' AND lease_token = ?""",
+            (int(max_attempts), str(error or "evidence_batch_failed")[:1000], now, str(lease_token)),
+        )
+        connection.commit()
+        return max(0, int(cursor.rowcount))
+    finally:
+        connection.close()
+
+
+def promote_class_analysis_evidence_task(path: Path | str, point_id: str) -> bool:
+    connection = sqlite3.connect(str(Path(path)))
+    try:
+        connection.execute("PRAGMA busy_timeout=30000")
+        _upgrade_evidence_task_schema(connection)
+        cursor = connection.execute(
+            """UPDATE evidence_tasks SET priority = -1, updated_at = ?
+               WHERE point_id = ? AND status IN ('pending', 'retry')""",
+            (time.time(), str(point_id or "").strip()),
+        )
+        connection.commit()
+        return int(cursor.rowcount) > 0
+    finally:
+        connection.close()
+
+
+def class_analysis_evidence_progress(path: Path | str) -> dict[str, Any]:
+    with _open_readonly(path) as connection:
+        rows = connection.execute(
+            "SELECT status, COUNT(*) AS count FROM evidence_tasks GROUP BY status"
+        ).fetchall()
+        first_update = connection.execute(
+            "SELECT MIN(updated_at), MAX(updated_at) FROM evidence_tasks"
+        ).fetchone()
+    counts = {str(row["status"]): int(row["count"]) for row in rows}
+    total = sum(counts.values())
+    completed = counts.get("completed", 0)
+    return {
+        "total": total,
+        "completed": completed,
+        "failed": counts.get("failed", 0),
+        "pending": counts.get("pending", 0) + counts.get("retry", 0),
+        "processing": counts.get("processing", 0),
+        "counts": counts,
+        "started_at": float(first_update[0] or 0) if first_update else 0.0,
+        "updated_at": float(first_update[1] or 0) if first_update else 0.0,
+    }
+
+
+def get_class_analysis_internal_evidence(
+    path: Path | str, point_id: str
+) -> Optional[dict[str, Any]]:
+    with _open_readonly(path) as connection:
+        row = connection.execute(
+            "SELECT payload FROM evidence WHERE point_id = ? AND status = 'completed'",
+            (str(point_id or "").strip(),),
+        ).fetchone()
+    if row is None:
+        return None
+    try:
+        payload = zlib.decompress(bytes(row["payload"]))
+        value = json.loads(payload.decode("utf-8"))
+    except (zlib.error, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SessionStoreError("class_analysis_point_evidence_corrupt", status_code=409) from exc
+    return value if isinstance(value, dict) else None
+
+
+def get_class_analysis_evidence_task(
+    path: Path | str,
+    point_id: str,
+) -> Optional[dict[str, Any]]:
+    """Return one task's durable state without exposing its candidate payload."""
+
+    identifier = str(point_id or "").strip()
+    if not identifier:
+        return None
+    with _open_readonly(path) as connection:
+        row = connection.execute(
+            """
+            SELECT point_id, status, priority, attempts AS attempt_count,
+                   source_key, error AS last_error, updated_at
+            FROM evidence_tasks
+            WHERE point_id = ?
+            """,
+            (identifier,),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def release_class_analysis_evidence_leases(path: Path | str) -> int:
+    """Return process-owned leases to the queue after worker loss or restart."""
+
+    connection = sqlite3.connect(str(Path(path)))
+    try:
+        connection.execute("PRAGMA busy_timeout=30000")
+        connection.execute("PRAGMA journal_mode=WAL")
+        _upgrade_evidence_task_schema(connection)
+        cursor = connection.execute(
+            """
+            UPDATE evidence_tasks
+            SET status = 'retry', lease_token = NULL, updated_at = ?
+            WHERE status = 'processing'
+            """,
+            (time.time(),),
+        )
+        connection.commit()
+        return max(0, int(cursor.rowcount or 0))
+    finally:
+        connection.close()
+
+
+def get_class_analysis_qwen_context(
+    path: Path | str,
+    point_id: str,
+    *,
+    same_source_limit: int = 256,
+    per_class_limit: int = 8,
+) -> dict[str, Any]:
+    identifier = str(point_id or "").strip()
+    metadata = read_session_store_metadata(path)
+    with _open_readonly(path) as connection:
+        target = connection.execute(
+            "SELECT source_key, class_name, proposed_class FROM points_core WHERE point_id = ?",
+            (identifier,),
+        ).fetchone()
+        if target is None:
+            raise SessionStoreError("class_analysis_point_not_found", status_code=404)
+        ids = [identifier]
+        ids.extend(
+            str(row[0])
+            for row in connection.execute(
+                """SELECT point_id FROM points_core
+                   WHERE source_key = ? AND point_id <> ?
+                   ORDER BY ordinal LIMIT ?""",
+                (str(target["source_key"] or ""), identifier, int(same_source_limit)),
+            )
+        )
+        class_names = [
+            str(name)
+            for name in (metadata.get("class_counts") or {})
+            if str(name)
+        ]
+        for class_name in class_names:
+            ids.extend(
+                str(row[0])
+                for row in connection.execute(
+                    """SELECT point_id FROM points_core
+                       WHERE class_name = ? AND point_id <> ?
+                       ORDER BY COALESCE(review_priority_score, 0) DESC,
+                                display_rank ASC LIMIT ?""",
+                    (class_name, identifier, int(per_class_limit)),
+                )
+            )
+        unique_ids = list(dict.fromkeys(ids))
+        points = []
+        for offset in range(0, len(unique_ids), 500):
+            chunk = unique_ids[offset : offset + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = connection.execute(
+                f"SELECT point_id, payload FROM point_details WHERE point_id IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            by_id = {str(row["point_id"]): json.loads(str(row["payload"])) for row in rows}
+            points.extend(by_id[pid] for pid in chunk if pid in by_id)
+    evidence = get_class_analysis_internal_evidence(path, identifier)
+    for point in points:
+        if str(point.get("point_id") or "") == identifier and evidence is not None:
+            public_evidence = dict(evidence)
+            artifact = public_evidence.pop("_artifact", None)
+            point["refined_outlier"] = public_evidence
+            if isinstance(artifact, Mapping):
+                point["_evidence_artifact"] = dict(artifact)
+            break
+    summary = dict(metadata.get("summary") or {})
+    summary.setdefault("class_counts", metadata.get("class_counts") or {})
+    summary.setdefault("object_count", metadata.get("point_count") or 0)
+    return {"summary": summary, "points": points}

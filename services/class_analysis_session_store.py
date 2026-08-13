@@ -1099,7 +1099,7 @@ def get_class_analysis_graph_payload(
                        p.is_close_overlap_candidate, p.is_dual_bbox_conflict,
                        p.tiny_object, p.low_source_detail,
                        p.review_priority_score, p.wrong_class_suspicion,
-                       p.proposed_class, q.x, q.y,
+                       p.proposed_class, p.display_rank, q.x, q.y,
                        {review_bucket} AS review_bucket,
                        {priority_sort} AS priority_sort
                 FROM point_projections q

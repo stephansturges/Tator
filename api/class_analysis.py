@@ -44,6 +44,7 @@ def build_class_analysis_router(
     delete_review_history_fn: Optional[Callable[[str, dict], Any]] = None,
     cache_status_fn: Optional[Callable[[], Any]] = None,
     purge_cache_fn: Optional[Callable[[dict], Any]] = None,
+    set_cache_budget_fn: Optional[Callable[[dict], Any]] = None,
     recalibrate_review_ranking_fn: Optional[Callable[[str, dict], Any]] = None,
     reset_review_ranking_fn: Optional[Callable[[str, dict], Any]] = None,
     latest_session_fn: Optional[Callable[[], Any]] = None,
@@ -72,6 +73,14 @@ def build_class_analysis_router(
             payload: dict = Body(default_factory=dict),  # noqa: B008
         ):
             return purge_cache_fn(payload or {})
+
+    if set_cache_budget_fn is not None:
+
+        @router.post("/class_analysis/cache/budget")
+        def set_class_analysis_cache_budget(
+            payload: dict = Body(...),  # noqa: B008
+        ):
+            return set_cache_budget_fn(payload or {})
 
     @router.post("/class_analysis/jobs")
     def create_class_analysis_job(payload: dict = Body(...)):  # noqa: B008

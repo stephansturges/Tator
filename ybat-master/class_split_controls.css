@@ -86,6 +86,9 @@
     gap: 0.45rem;
     padding: 0.5rem 0.58rem;
 }
+.class-analysis-cache-card__budget { display: grid; gap: 0.2rem; color: var(--dqe-muted); font-size: 0.72rem; font-weight: 750; }
+.class-analysis-cache-card__budget > span:last-child { display: flex; gap: 0.35rem; align-items: center; color: var(--dqe-ink); }
+.class-analysis-cache-card__budget input { width: 6.5rem; }
 
 .class-split-panel--workspace .class-split-grid--primary {
     grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));

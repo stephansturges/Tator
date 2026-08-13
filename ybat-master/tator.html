@@ -1439,6 +1439,11 @@
                                     <span id="classAnalysisCacheStatus" class="class-analysis-cache-card__usage training-help" aria-live="polite">Measuring usage ...</span>
                                 </summary>
                                 <div class="class-analysis-cache-card__actions">
+                                    <label class="class-analysis-cache-card__budget" for="classAnalysisCacheBudgetGiB">
+                                        <span>Generated-data budget</span>
+                                        <span><input type="number" id="classAnalysisCacheBudgetGiB" min="1" max="4096" step="1" value="50" /> GiB</span>
+                                    </label>
+                                    <button type="button" id="classAnalysisCacheBudgetSave" class="training-button secondary" title="Applies to reusable embeddings, crops, and recoverable analysis sessions. The latest session and running jobs are never auto-evicted.">Save budget</button>
                                     <button type="button" id="classAnalysisCacheRefresh" class="training-button secondary">Refresh</button>
                                     <button type="button" id="classAnalysisCacheClear" class="training-button danger" title="Deletes regenerable crop and embedding caches only.">Clear regenerable cache</button>
                                 </div>

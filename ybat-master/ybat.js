@@ -1120,10 +1120,11 @@
         }
         let manifest = null;
         try {
-            manifest = await fetchClassSplitBoundedJson(
+            const latestPayload = await fetchClassSplitBoundedJson(
                 `${API_ROOT}/class_analysis/sessions/latest`,
                 "latest analysis session"
             );
+            manifest = latestPayload?.session || latestPayload;
         } catch (error) {
             if (Number(error?.httpStatus) !== 404) {
                 console.warn("Could not inspect the latest Data Quality Explorer session", error);
@@ -3789,6 +3790,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         boundedPointHydrationLoads: new Map(),
         restoredSession: false,
         restoredSourceCompatible: false,
+        cachePurgeBlocked: false,
         pollTimer: null,
         pollRequestId: 0,
         pollFailureCount: 0,
@@ -53014,8 +53016,8 @@ async function cancelRfDetrTrainingJobRequest() {
         return true;
     }
 
-    async function fetchClassSplitBoundedJson(url, label = "analysis data") {
-        const response = await fetch(url, { cache: "no-store" });
+    async function fetchClassSplitBoundedJson(url, label = "analysis data", options = {}) {
+        const response = await fetch(url, { cache: "no-store", ...options });
         const detail = await response.text();
         if (!response.ok) {
             const error = new Error(parseApiError(detail, `HTTP ${response.status}`));
@@ -69659,6 +69661,116 @@ async function cancelRfDetrTrainingJobRequest() {
         });
     }
 
+    function setClassAnalysisCacheControlsBusy(busy) {
+        [
+            classSplitElements.cacheRefresh,
+            classSplitElements.cacheClear,
+            classSplitElements.cacheBudgetGiB,
+            classSplitElements.cacheBudgetSave,
+        ].filter(Boolean).forEach((control) => {
+            control.disabled = Boolean(busy);
+        });
+        if (!busy && classSplitElements.cacheClear) {
+            classSplitElements.cacheClear.disabled = Boolean(classSplitState.cachePurgeBlocked);
+        }
+    }
+
+    async function refreshClassAnalysisCacheStatus() {
+        const status = classSplitElements.cacheStatus;
+        if (!status) return;
+        setClassAnalysisCacheControlsBusy(true);
+        status.dataset.tone = "";
+        status.textContent = "Measuring generated data ...";
+        try {
+            const payload = await fetchClassSplitBoundedJson(
+                `${API_ROOT}/class_analysis/cache`,
+                "cache status"
+            );
+            const total = Number(payload.generated_total_bytes ?? payload.total_bytes) || 0;
+            const budget = Number(payload.max_bytes) || 0;
+            const cacheBytes = Number(payload.cache_bytes ?? payload.total_bytes) || 0;
+            const sessionBytes = Number(payload.recoverable_session_bytes) || 0;
+            const sessionCount = Number(payload.recoverable_session_count) || 0;
+            const over = Number(payload.over_budget_bytes) || 0;
+            status.textContent = [
+                `${formatBytes(total)} of ${formatBytes(budget)} generated data`,
+                `${formatBytes(cacheBytes)} reusable cache`,
+                `${formatBytes(sessionBytes)} in ${sessionCount} recoverable session${sessionCount === 1 ? "" : "s"}`,
+                over > 0 ? `${formatBytes(over)} over budget; pinned data is retained` : "latest session pinned",
+            ].join(" • ");
+            status.dataset.tone = over > 0 ? "warn" : "success";
+            if (classSplitElements.cacheBudgetGiB && budget > 0) {
+                classSplitElements.cacheBudgetGiB.value = String(Math.round(budget / 1024 ** 3));
+            }
+            const busy = Array.isArray(payload.active_users) && payload.active_users.length > 0;
+            classSplitState.cachePurgeBlocked = busy;
+            if (classSplitElements.cacheClear) {
+                classSplitElements.cacheClear.disabled = busy;
+                classSplitElements.cacheClear.title = busy
+                    ? "Wait for active Data Quality Explorer work before clearing regenerable cache."
+                    : "Deletes regenerable crop and embedding caches only; recoverable sessions and review receipts remain."
+            }
+        } catch (error) {
+            classSplitState.cachePurgeBlocked = false;
+            status.textContent = `Storage measurement failed: ${error.message || error}`;
+            status.dataset.tone = "error";
+        } finally {
+            setClassAnalysisCacheControlsBusy(false);
+        }
+    }
+
+    async function saveClassAnalysisCacheBudget() {
+        const raw = Number(classSplitElements.cacheBudgetGiB?.value);
+        if (!Number.isFinite(raw) || raw < 1 || raw > 4096) {
+            setClassSplitJobStatus("Generated-data budget must be between 1 and 4096 GiB.", "warn");
+            return;
+        }
+        setClassAnalysisCacheControlsBusy(true);
+        try {
+            await fetchClassSplitBoundedJson(
+                `${API_ROOT}/class_analysis/cache/budget`,
+                "storage policy",
+                {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ max_gib: raw }),
+                }
+            );
+        } catch (error) {
+            setClassSplitJobStatus(`Storage budget update failed: ${error.message || error}`, "error");
+            setClassAnalysisCacheControlsBusy(false);
+            return;
+        }
+        setClassSplitJobStatus(`Generated-data budget set to ${Math.round(raw)} GiB.`, "success");
+        await refreshClassAnalysisCacheStatus();
+    }
+
+    async function clearClassAnalysisRegenerableCache() {
+        if (!window.confirm("Delete regenerable Data Quality Explorer crops and embeddings? Recoverable analyses and review receipts will be kept.")) {
+            return;
+        }
+        setClassAnalysisCacheControlsBusy(true);
+        try {
+            const response = await fetch(`${API_ROOT}/class_analysis/cache/purge`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ categories: ["image_packs", "resume_embeddings"] }),
+            });
+            const detail = await response.text();
+            if (!response.ok) throw new Error(parseApiError(detail, `HTTP ${response.status}`));
+            const payload = parseJsonObjectSafe(detail, {});
+            setClassSplitJobStatus(
+                `Regenerable cache cleared; reclaimed ${formatBytes(Number(payload.bytes_reclaimed) || 0)}.`,
+                "success"
+            );
+        } catch (error) {
+            setClassSplitJobStatus(`Cache clear failed: ${error.message || error}`, "error");
+        } finally {
+            setClassAnalysisCacheControlsBusy(false);
+        }
+        await refreshClassAnalysisCacheStatus();
+    }
+
     function updateClassSplitEmbeddingGuidance(announcement = "") {
         updateClassSplitEmbeddingRecipeExplanation();
         if (!classSplitElements.embeddingGuidanceStatus) {
@@ -69679,6 +69791,15 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         classSplitState.initialized = true;
         classSplitElements.datasetStatus = document.getElementById("classSplitDatasetStatus");
+        classSplitElements.cacheStatus = document.getElementById("classAnalysisCacheStatus");
+        classSplitElements.cacheRefresh = document.getElementById("classAnalysisCacheRefresh");
+        classSplitElements.cacheClear = document.getElementById("classAnalysisCacheClear");
+        classSplitElements.cacheBudgetGiB = document.getElementById("classAnalysisCacheBudgetGiB");
+        classSplitElements.cacheBudgetSave = document.getElementById("classAnalysisCacheBudgetSave");
+        classSplitElements.cacheRefresh?.addEventListener("click", refreshClassAnalysisCacheStatus);
+        classSplitElements.cacheBudgetSave?.addEventListener("click", saveClassAnalysisCacheBudget);
+        classSplitElements.cacheClear?.addEventListener("click", clearClassAnalysisRegenerableCache);
+        void refreshClassAnalysisCacheStatus();
         classSplitElements.jobStatus = document.getElementById("classSplitJobStatus");
         classSplitElements.scopeSelected = document.getElementById("classSplitScopeSelected");
         classSplitElements.scopeAll = document.getElementById("classSplitScopeAll");

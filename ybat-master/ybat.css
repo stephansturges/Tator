@@ -3416,6 +3416,14 @@ body.annotation-focus-mode .class-scroll-indicator {
     gap: 4px;
 }
 
+.class-split-progress.class-split-progress--restore-active {
+    position: sticky;
+    top: 10px;
+    z-index: 60;
+    scroll-margin-top: 10px;
+    box-shadow: 0 12px 30px rgb(0 0 0 / 18%);
+}
+
 .class-split-progress__bar {
     height: 9px;
     border-radius: 999px;

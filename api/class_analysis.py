@@ -48,6 +48,7 @@ def build_class_analysis_router(
     recalibrate_review_ranking_fn: Optional[Callable[[str, dict], Any]] = None,
     reset_review_ranking_fn: Optional[Callable[[str, dict], Any]] = None,
     latest_session_fn: Optional[Callable[[], Any]] = None,
+    open_session_annotation_source_fn: Optional[Callable[[str], Any]] = None,
     get_session_manifest_fn: Optional[Callable[[str], Any]] = None,
     get_session_graph_fn: Optional[Callable[..., Any]] = None,
     get_session_review_queue_fn: Optional[Callable[..., Any]] = None,
@@ -148,6 +149,12 @@ def build_class_analysis_router(
         @router.get("/class_analysis/sessions/latest")
         def get_latest_class_analysis_session():
             return latest_session_fn()
+
+    if open_session_annotation_source_fn is not None:
+
+        @router.post("/class_analysis/jobs/{job_id}/annotation_session")
+        def open_class_analysis_session_annotation_source(job_id: str):
+            return open_session_annotation_source_fn(job_id)
 
     if get_session_manifest_fn is not None:
 

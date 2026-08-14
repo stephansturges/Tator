@@ -1144,7 +1144,7 @@
         const accepted = window.confirm(
             `Restore the latest Data Quality Explorer session?\n\n${recipe}`
             + `${objectCount > 0 ? ` • ${objectCount.toLocaleString()} objects` : ""}`
-            + "\n\nThe graph and review queue restore immediately. Label changes remain disabled until the exact source dataset is reconnected."
+            + "\n\nThe graph and review queue restore first, then the exact labeling workspace reconnects so See instance and manual cleanup remain available."
         );
         if (!accepted) {
             try {
@@ -1157,27 +1157,213 @@
             }
             return;
         }
-        classSplitState.currentJobId = jobId;
-        classSplitState.pendingRestoreSelectedPointId = String(saved.selectedPointId || "");
-        classSplitState.active = true;
-        setClassSplitJobStatus("Restoring saved analysis ...", "");
-        renderClassSplitProgress({
-            progress: 1,
-            message: "Loading a bounded graph and the first review candidates ...",
-        });
-        refreshClassSplitControls();
+        // The accepted DQE restore owns source selection. Remove a stale
+        // same-tab pointer before it can reopen an unrelated labeling source.
+        clearAnnotationSourceResumeDescriptor();
         try {
-            await loadClassSplitResult(jobId, { restoredSession: true, manifest });
-            setClassSplitJobStatus(
-                "Restored for review. Re-run against the current dataset before relabeling or deleting boxes.",
-                "warn"
+            setActiveTab(TAB_CLASS_SPLIT);
+            classSplitState.currentJobId = jobId;
+            classSplitState.pendingRestoreSelectedPointId = String(
+                saved.selectedPointId || ""
             );
+            classSplitState.active = true;
+            setClassSplitJobStatus("Restoring saved analysis ...", "");
+            renderClassSplitProgress({
+                progress: 1,
+                message: "Loading the saved graph and first review candidates ...",
+            });
+            refreshClassSplitControls();
+            // The native confirmation dialog blocks painting. Yield once so
+            // the selected tab and restore status are visible before parsing
+            // and rendering the bounded graph payload.
+            await new Promise((resolve) => window.requestAnimationFrame(resolve));
+            renderClassSplitRestoreProgress({
+                phaseId: "restore_graph",
+                phaseLabel: "Restoring the graph and review queue",
+                message: "Loading the saved projection and first review candidates ...",
+                progress: 0.12,
+            });
+            await loadClassSplitResult(jobId, {
+                restoredSession: true,
+                manifest,
+                deferEvidencePoll: true,
+                deferPostRenderWork: true,
+            });
+            try {
+                await reconnectClassSplitRestoredAnnotationSource(jobId, manifest);
+                setClassSplitJobStatus(
+                    "Restored the graph and its exact labeling workspace. See instance, relabel, and delete are available.",
+                    ""
+                );
+            } catch (sourceError) {
+                classSplitState.restoredSourceCompatible = false;
+                classSplitState.currentSourceHandle = null;
+                invalidateClassSplitPointImageLookup();
+                refreshClassSplitControls();
+                classSplitElements.progress?.classList.remove(
+                    "class-split-progress--restore-active"
+                );
+                console.warn(
+                    "Could not reconnect the restored analysis labeling source",
+                    sourceError,
+                );
+                setClassSplitJobStatus(
+                    `Graph restored in review-only mode: ${sourceError.message || sourceError}`,
+                    "warn"
+                );
+            }
+            startClassSplitEvidencePoll(jobId, manifest);
         } catch (error) {
             classSplitState.active = false;
             classSplitState.currentJobId = "";
+            classSplitElements.progress?.classList.remove(
+                "class-split-progress--restore-active"
+            );
             setClassSplitJobStatus(`Restore failed: ${error.message || error}`, "error");
             refreshClassSplitControls();
         }
+    }
+
+    function renderClassSplitRestoreProgress({
+        phaseId,
+        phaseLabel,
+        message,
+        progress,
+        completed = false,
+    }) {
+        const progressRoot = classSplitElements.progress;
+        const wasPinned = Boolean(
+            progressRoot?.classList.contains("class-split-progress--restore-active")
+        );
+        progressRoot?.classList.toggle(
+            "class-split-progress--restore-active",
+            !completed,
+        );
+        const phases = [
+            { id: "restore_graph", label: "Restore graph" },
+            { id: "restore_source", label: "Reconnect labeling workspace" },
+            { id: "load_labels", label: "Load images and labels" },
+            { id: "restore_ready", label: "Ready to review and edit" },
+        ];
+        renderClassSplitProgress({
+            status: completed ? "completed" : "running",
+            progress: Math.max(0, Math.min(1, Number(progress) || 0)),
+            message: String(message || ""),
+            progress_state: {
+                overall_fraction: Math.max(0, Math.min(1, Number(progress) || 0)),
+                phase_id: String(phaseId || "restore_graph"),
+                phase_label: String(phaseLabel || "Restoring saved analysis"),
+                phase_plan: phases,
+            },
+        });
+        if (!completed && !wasPinned && progressRoot) {
+            window.requestAnimationFrame(() => {
+                progressRoot.scrollIntoView({
+                    behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+                        ? "auto"
+                        : "smooth",
+                    block: "start",
+                });
+            });
+        }
+    }
+
+    async function reconnectClassSplitRestoredAnnotationSource(jobId, manifest) {
+        const expectedSnapshotId = String(manifest?.source?.snapshot_id || "").trim();
+        if (!expectedSnapshotId) {
+            throw new Error("This saved analysis does not identify an exact labeling snapshot.");
+        }
+        setClassSplitJobStatus("Reconnecting the exact labeling workspace ...", "");
+        renderClassSplitRestoreProgress({
+            phaseId: "restore_source",
+            phaseLabel: "Reconnecting the exact labeling workspace",
+            message: "Verifying the saved snapshot and preparing its annotation source ...",
+            progress: 0.5,
+        });
+
+        // If normal page restoration already started, let it settle before
+        // replacing that source. openDatasetInAnnotationMode then performs the
+        // standard save-before-close and annotation-lock handoff.
+        if (annotationSourceResumeInFlight) {
+            try {
+                await annotationSourceResumeInFlight;
+            } catch (error) {
+                console.warn("Prior annotation source resume did not complete", error);
+            }
+        }
+        const response = await fetch(
+            `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/annotation_session`,
+            { method: "POST" },
+        );
+        const detail = await response.text();
+        if (!response.ok) {
+            throw new Error(parseApiError(detail, `HTTP ${response.status}`));
+        }
+        const source = parseJsonObjectSafe(detail, {});
+        const sessionId = String(source.session_id || "").trim();
+        const openedSnapshotId = String(source.snapshot_id || "").trim();
+        if (!sessionId || openedSnapshotId !== expectedSnapshotId) {
+            throw new Error("The backend did not return the saved analysis snapshot.");
+        }
+        const imageCount = Math.max(0, Number(source.image_count) || 0);
+        const objectCount = Math.max(0, Number(source.object_count) || 0);
+        const sourceSizeText = [
+            imageCount > 0 ? `${imageCount.toLocaleString()} images` : "",
+            objectCount > 0 ? `${objectCount.toLocaleString()} labels` : "",
+        ].filter(Boolean).join(" and ");
+        await openDatasetInAnnotationMode({
+            mode: "transient",
+            sessionId,
+            datasetLabel: String(
+                source.dataset_label || "Restored Data Quality Explorer source"
+            ),
+            transientOpenPath: "",
+            activateLabeling: false,
+            progressCallback: ({ fraction, message }) => {
+                const localFraction = Math.max(0, Math.min(1, Number(fraction) || 0));
+                renderClassSplitRestoreProgress({
+                    phaseId: localFraction < 0.2 ? "restore_source" : "load_labels",
+                    phaseLabel: localFraction < 0.2
+                        ? "Opening the labeling workspace"
+                        : "Loading images and labels",
+                    message: `${String(message || "Loading labeling data ...")}`
+                        + `${sourceSizeText ? ` • ${sourceSizeText}` : ""}`,
+                    progress: 0.55 + localFraction * 0.4,
+                });
+            },
+        });
+        const loadedSnapshotId = String(
+            annotationSourceState.manifest?.class_analysis_snapshot_id || ""
+        ).trim();
+        if (loadedSnapshotId !== expectedSnapshotId) {
+            await closeAnnotationDataset({
+                clearCanvas: false,
+                clearResumeDescriptor: true,
+            });
+            throw new Error("The labeling workspace identity did not match the restored graph.");
+        }
+        const sourceHandle = getClassSplitServerSourceHandle();
+        if (!sourceHandle) {
+            await closeAnnotationDataset({
+                clearCanvas: false,
+                clearResumeDescriptor: true,
+            });
+            throw new Error("The restored labeling workspace is not available to the explorer.");
+        }
+        classSplitState.currentSourceHandle = sourceHandle;
+        classSplitState.restoredSourceCompatible = true;
+        invalidateClassSplitPointImageLookup();
+        refreshClassSplitControls();
+        renderClassSplitRestoreProgress({
+            phaseId: "restore_ready",
+            phaseLabel: "Labeling workspace ready",
+            message: `${sourceSizeText || "Images and labels"} loaded; See instance and manual edits are ready.`,
+            progress: 1,
+            completed: true,
+        });
+        void retryClassSplitPendingTrainingCommitsAfterAnnotationSave().catch((error) => {
+            console.warn("Could not retry pending training captures after source restore", error);
+        });
     }
 
     function findHorizontalScrollContainer(target, deltaX) {
@@ -6884,6 +7070,7 @@ const sam3TrainState = {
         datasetTypeHint = "",
         transientOpenPath = "",
         activateLabeling = true,
+        progressCallback = null,
     }) {
         const normalizedMode = String(mode || "").trim().toLowerCase();
         if (normalizedMode !== "linked" && normalizedMode !== "transient") {
@@ -6895,7 +7082,21 @@ const sam3TrainState = {
         if (normalizedMode === "transient" && !String(sessionId || "").trim()) {
             throw new Error("Transient session id is required.");
         }
+        const reportLoadProgress = (fraction, message) => {
+            if (typeof progressCallback !== "function") {
+                return;
+            }
+            try {
+                progressCallback({
+                    fraction: Math.max(0, Math.min(1, Number(fraction) || 0)),
+                    message: String(message || ""),
+                });
+            } catch (error) {
+                console.warn("Annotation load progress callback failed", error);
+            }
+        };
 
+        reportLoadProgress(0.02, "Closing the previous labeling source safely ...");
         const closed = await closeAnnotationDataset({
             clearCanvas: false,
             clearResumeDescriptor: false,
@@ -6923,6 +7124,7 @@ const sam3TrainState = {
             annotationSourceState.sessionRevision = null;
             annotationSourceState.librarySaveInFlight = false;
             annotationSourceState.statusMessage = "Acquiring annotation session…";
+            reportLoadProgress(0.08, "Acquiring the annotation session ...");
             if (annotationSourceState.mode === "transient" && annotationSourceState.transientOpenPath) {
                 datasetManagerState.transientOpenPath = annotationSourceState.transientOpenPath;
             }
@@ -6941,6 +7143,7 @@ const sam3TrainState = {
                 return;
             }
             annotationSourceState.statusMessage = "Loading manifest…";
+            reportLoadProgress(0.16, "Loading the image and label manifest ...");
             updateAnnotationSourceUi();
             syncLabelingSourceControls();
             const manifestResp = await fetch(`${base}/manifest`);
@@ -6979,7 +7182,12 @@ const sam3TrainState = {
                 console.warn("Failed to load active dataset caption glossary", error);
             });
             const rows = Array.isArray(manifest.images) ? manifest.images : [];
-            rows.forEach((row, idx) => {
+            reportLoadProgress(
+                0.24,
+                `Preparing ${rows.length.toLocaleString()} images for the labeling view ...`,
+            );
+            for (let idx = 0; idx < rows.length; idx += 1) {
+                const row = rows[idx];
                 const key = annotationRowKey(row);
                 const labelLines = normalizeAnnotationLabelLines(row.label_lines);
                 const textLabel = String(row.text_label || "");
@@ -7032,7 +7240,20 @@ const sam3TrainState = {
                     option.selected = true;
                 }
                 imageList.appendChild(option);
-            });
+                if (
+                    typeof progressCallback === "function"
+                    && ((idx + 1) % 500 === 0 || idx + 1 === rows.length)
+                ) {
+                    reportLoadProgress(
+                        0.24 + 0.68 * ((idx + 1) / Math.max(1, rows.length)),
+                        `Loaded ${(idx + 1).toLocaleString()} of ${rows.length.toLocaleString()} images and their labels ...`,
+                    );
+                    await new Promise((resolve) => window.setTimeout(resolve, 0));
+                    if (loadToken !== annotationSourceState.loadToken) {
+                        return;
+                    }
+                }
+            }
 
             const segHint = String(datasetTypeHint || "").toLowerCase() === "seg";
             const detectedSeg = detectSegDatasetFromManifestRows(rows);
@@ -7054,6 +7275,7 @@ const sam3TrainState = {
             if (loadToken !== annotationSourceState.loadToken) {
                 return;
             }
+            reportLoadProgress(0.96, "Finalizing image lookup and annotation controls ...");
             persistAnnotationSourceResumeDescriptor(annotationSourceState);
             updateAnnotationSourceUi();
             syncLabelingSourceControls();
@@ -7069,6 +7291,7 @@ const sam3TrainState = {
                     : `Opened ${annotationSourceState.datasetLabel} in annotation view.`,
                 { variant: openedReadOnly ? "warn" : "success", duration: 3200 }
             );
+            reportLoadProgress(1, "Labeling workspace ready.");
         } catch (error) {
             // If loading fails, reset annotation linkage but preserve any existing local workspace.
             await stopAnnotationSession();
@@ -53927,8 +54150,16 @@ async function cancelRfDetrTrainingJobRequest() {
                 restoredSession: options.restoredSession === true,
                 manifest,
             });
-            startClassSplitEvidencePoll(jobId, manifest);
+            if (options.deferEvidencePoll !== true) {
+                startClassSplitEvidencePoll(jobId, manifest);
+            }
             void hydrateClassSplitBoundedQueue(bounded.queuePointIds);
+            if (options.deferPostRenderWork === true) {
+                void restoreClassSplitQwenReviews(jobId).catch((error) => {
+                    console.warn("Could not restore saved Qwen reviews", error);
+                });
+                return;
+            }
             await restoreClassSplitQwenReviews(jobId);
             await retryClassSplitPendingTrainingCommitsAfterAnnotationSave();
             return;

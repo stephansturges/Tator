@@ -1354,6 +1354,11 @@
         classSplitState.restoredSourceCompatible = true;
         invalidateClassSplitPointImageLookup();
         refreshClassSplitControls();
+        // These action surfaces were rendered while source verification was
+        // still pending, so refresh them without rebuilding the projection.
+        renderClassSplitWrongList();
+        renderClassSplitInspector();
+        renderClassSplitBulkPanel();
         renderClassSplitRestoreProgress({
             phaseId: "restore_ready",
             phaseLabel: "Labeling workspace ready",
@@ -53843,6 +53848,23 @@ async function cancelRfDetrTrainingJobRequest() {
         const summary = {
             ...(graph.session_summary || {}),
             analysis_job_id: jobId,
+            source_mode: String(
+                graph.session_summary?.source_mode || manifest?.source?.mode || ""
+            ),
+            source_id: String(
+                graph.session_summary?.source_id || manifest?.source?.id || ""
+            ),
+            source_key: String(
+                graph.session_summary?.source_key || manifest?.source?.key || ""
+            ),
+            snapshot_id: String(
+                graph.session_summary?.snapshot_id || manifest?.source?.snapshot_id || ""
+            ),
+            analysis_input_digest: String(
+                graph.session_summary?.analysis_input_digest
+                || manifest?.source?.analysis_input_digest
+                || ""
+            ),
             object_count: Number(graph.point_count || manifest?.source?.object_count || points.length),
             class_counts: graph.class_counts || {},
             projection: projectionMode === "umap" ? "umap" : "pca",
@@ -55422,10 +55444,15 @@ async function cancelRfDetrTrainingJobRequest() {
         ].includes(String(point?.human_review_disposition || "").trim())) {
             return false;
         }
-        if (classSplitState.primaryCandidateIds?.has(pointId) || point?.include_in_refined_vignettes) {
+        const refined = classSplitResultHasRefinement();
+        if (
+            classSplitState.primaryCandidateIds?.has(pointId)
+            || point?.include_in_refined_vignettes
+            || (refined && point?.quality_review_candidate === true)
+        ) {
             return true;
         }
-        if (!classSplitResultHasRefinement()) {
+        if (!refined) {
             return Boolean(point?.is_wrong_class_candidate);
         }
         return ["confirmed_outlier", "pair_conflict"].includes(
@@ -62127,6 +62154,33 @@ async function cancelRfDetrTrainingJobRequest() {
             ) >= 2
         );
     }
+    function classSplitRestoredAnnotationTargetMatchesCurrentAnalysis(annotationTarget) {
+        const sourceHandle = classSplitState.currentSourceHandle || {};
+        const restoredManifest = annotationSourceState.manifest || {};
+        const sessionSource = classSplitState.sessionManifest?.source || {};
+        const currentJobId = String(classSplitState.currentJobId || "").trim();
+        const expectedSnapshotId = String(sessionSource.snapshot_id || "").trim();
+        const expectedInputDigest = String(
+            sessionSource.analysis_input_digest || ""
+        ).trim();
+        return Boolean(
+            classSplitState.restoredSession
+            && classSplitState.restoredSourceCompatible
+            && annotationTarget?.source_mode === "transient"
+            && annotationTarget.source_id
+            && String(sourceHandle.sourceMode || "") === "transient"
+            && String(sourceHandle.sessionId || "") === annotationTarget.source_id
+            && currentJobId
+            && String(restoredManifest.class_analysis_job_id || "").trim()
+                === currentJobId
+            && expectedSnapshotId
+            && String(restoredManifest.class_analysis_snapshot_id || "").trim()
+                === expectedSnapshotId
+            && expectedInputDigest
+            && String(restoredManifest.class_analysis_input_digest || "").trim()
+                === expectedInputDigest
+        );
+    }
 
     function getClassSplitDualBBoxDeletionMode(contract) {
         if (!contract?.point) {
@@ -62144,6 +62198,12 @@ async function cancelRfDetrTrainingJobRequest() {
         ).trim();
         if (isAnnotationDatasetModeActive()) {
             const annotationTarget = getClassSplitAnnotationTarget(contract.point);
+            // Restored active-workspace analyses reopen as isolated transient
+            // annotation sessions. Accept only the session whose manifest is
+            // bound to this exact job, snapshot, and analysis input.
+            if (classSplitRestoredAnnotationTargetMatchesCurrentAnalysis(annotationTarget)) {
+                return "server";
+            }
             const expectedMode = pointSourceMode === "dataset"
                 ? "linked"
                 : pointSourceMode === "open_path"

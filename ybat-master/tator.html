@@ -1614,11 +1614,11 @@
                       <div class="class-split-choice-grid">
                         <label class="class-split-field" for="classSplitQualityMemoryPolicy"><span>Memory policy</span><select id="classSplitQualityMemoryPolicy">
                                     <option value="auto" selected>Automatic (recommended)</option>
-                                    <option value="full">Maximum fidelity / high RAM</option>
-                                    <option value="budgeted">Memory-limited one-run analysis</option>
+                                    <option value="full">Maximum fidelity / use available RAM</option>
+                                    <option value="budgeted">Memory-limited / set a RAM target</option>
                                 </select></label>
                         <label class="class-split-toggle class-split-toggle--compact" id="classSplitQualityMemoryOverrideField" for="classSplitQualityMemoryOverride"><input type="checkbox" id="classSplitQualityMemoryOverride" /><span><strong>Set a custom Automatic-mode RAM target</strong><small>When off, Automatic derives a safe target from currently available backend memory.</small></span></label>
-                        <label class="class-split-field" id="classSplitQualityMemoryBudgetField" for="classSplitQualityMemoryBudget" hidden><span>Analysis memory target</span><input type="number" id="classSplitQualityMemoryBudget" min="1" max="256" step="1" value="8" disabled /><small>This is an analysis-workspace target; loaded models and input images use additional memory.</small></label>
+                        <label class="class-split-field" id="classSplitQualityMemoryBudgetField" for="classSplitQualityMemoryBudget" hidden><span>Analysis memory target (GiB)</span><input type="number" id="classSplitQualityMemoryBudget" min="1" max="256" step="1" value="8" disabled /><small>Editable in Memory-limited mode, or when a custom Automatic target is enabled. Loaded models and input images use additional memory.</small></label>
                       </div>
                     </div>
                   </section>

@@ -23,6 +23,9 @@ GRAPH_MAX_BYTES = 64 * 1024 * 1024
 QUEUE_DEFAULT_ROWS = 36
 QUEUE_MAX_ROWS = 100
 QUEUE_MAX_BYTES = 4 * 1024 * 1024
+REVIEW_HISTORY_DEFAULT_ROWS = 250
+REVIEW_HISTORY_MAX_ROWS = 500
+REVIEW_HISTORY_MAX_BYTES = 16 * 1024 * 1024
 DETAIL_MAX_BYTES = 256 * 1024
 EVIDENCE_MAX_BYTES = 2 * 1024 * 1024
 
@@ -818,7 +821,9 @@ def upsert_class_analysis_review_state(
         raise SessionStoreError("class_analysis_review_state_invalid")
     connection = sqlite3.connect(str(Path(path)))
     try:
-        connection.execute("PRAGMA busy_timeout=30000")
+        # Receipt projection is a disposable index over the durable ledger.
+        # Do not hold an interactive review request behind a long store writer.
+        connection.execute("PRAGMA busy_timeout=1000")
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("BEGIN IMMEDIATE")
         review_object_key = str(
@@ -830,15 +835,14 @@ def upsert_class_analysis_review_state(
             str(row[0])
             for row in connection.execute(
                 """SELECT point_id FROM points_core
-                   WHERE point_id = ?
-                      OR (? <> '' AND review_object_key = ?)
-                      OR (? <> '' AND pair_review_key = ?)""",
+                   WHERE ((? <> '' AND (review_object_key = ? OR pair_review_key = ?))
+                          OR (? = '' AND point_id = ?))""",
                 (
+                    review_object_key,
+                    review_object_key,
+                    review_object_key,
+                    review_object_key,
                     identifier,
-                    review_object_key,
-                    review_object_key,
-                    review_object_key,
-                    review_object_key,
                 ),
             )
         }
@@ -880,7 +884,7 @@ def clear_class_analysis_review_state(
         raise SessionStoreError("class_analysis_review_state_invalid")
     connection = sqlite3.connect(str(Path(path)))
     try:
-        connection.execute("PRAGMA busy_timeout=30000")
+        connection.execute("PRAGMA busy_timeout=1000")
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("BEGIN IMMEDIATE")
         review_key = str(review_object_key or "").strip()
@@ -888,10 +892,9 @@ def clear_class_analysis_review_state(
             str(row[0])
             for row in connection.execute(
                 """SELECT point_id FROM points_core
-                   WHERE point_id = ?
-                      OR (? <> '' AND review_object_key = ?)
-                      OR (? <> '' AND pair_review_key = ?)""",
-                (identifier, review_key, review_key, review_key, review_key),
+                   WHERE ((? <> '' AND (review_object_key = ? OR pair_review_key = ?))
+                          OR (? = '' AND point_id = ?))""",
+                (review_key, review_key, review_key, review_key, identifier),
             )
         }
         if not identifiers:
@@ -921,23 +924,37 @@ def replace_class_analysis_review_state(
         connection.execute("PRAGMA busy_timeout=30000")
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("BEGIN IMMEDIATE")
-        connection.execute(
-            "UPDATE review_state SET disposition = '', revision = '', reviewed_at = '', payload = NULL"
-        )
+        def review_state_digest() -> bytes:
+            digest = hashlib.sha256()
+            for row in connection.execute(
+                """SELECT point_id, disposition, revision, reviewed_at, payload
+                   FROM review_state ORDER BY point_id"""
+            ):
+                encoded = _json_bytes(list(row))
+                digest.update(len(encoded).to_bytes(8, "big"))
+                digest.update(encoded)
+            return digest.digest()
+
+        previous_digest = review_state_digest()
+        # This table is a ledger projection, not the source of build-time
+        # review state. Deleting absent rows preserves points_core.reviewed as
+        # the fallback; explicit clear receipts are projected as blank rows.
+        connection.execute("DELETE FROM review_state")
         rows = []
         for entry in entries:
             point_id = str(entry.get("point_id") or "").strip()
+            review_key = str(entry.get("review_object_key") or "").strip()
             disposition = str(entry.get("disposition") or "").strip().lower()
-            if not point_id or not disposition:
+            if (not point_id and not review_key) or not disposition:
                 continue
             rows.append(
                 (
                     point_id,
-                    disposition,
+                    "" if disposition == "clear" else disposition,
                     str(entry.get("entry_revision") or ""),
                     str(entry.get("updated_at") or ""),
                     _json_text(dict(entry)),
-                    str(entry.get("review_object_key") or "").strip(),
+                    review_key,
                 )
             )
         if rows:
@@ -947,22 +964,26 @@ def replace_class_analysis_review_state(
                        (point_id, disposition, revision, reviewed_at, payload)
                        SELECT p.point_id, ?, ?, ?, ?
                        FROM points_core p
-                       WHERE p.point_id = ?
-                          OR (? <> '' AND p.review_object_key = ?)
-                          OR (? <> '' AND p.pair_review_key = ?)""",
+                       WHERE ((? <> '' AND (p.review_object_key = ? OR p.pair_review_key = ?))
+                              OR (? = '' AND p.point_id = ?))""",
                     (
                         disposition,
                         revision,
                         reviewed_at,
                         payload,
+                        review_key,
+                        review_key,
+                        review_key,
+                        review_key,
                         point_id,
-                        review_key,
-                        review_key,
-                        review_key,
-                        review_key,
                     ),
                 )
-        version = _bump_review_state_version(connection)
+        current_digest = review_state_digest()
+        version = (
+            _review_state_version(connection)
+            if current_digest == previous_digest
+            else _bump_review_state_version(connection)
+        )
         connection.commit()
         return version
     finally:
@@ -1274,6 +1295,105 @@ def get_class_analysis_review_queue_payload(
         "next_cursor": next_cursor,
     }
     return _bounded_payload(result, QUEUE_MAX_BYTES, "class_analysis_review_queue_payload_too_large")
+
+
+def get_class_analysis_review_history_payload(
+    path: Path | str,
+    *,
+    projection_mode: Optional[str] = None,
+    limit: int = REVIEW_HISTORY_DEFAULT_ROWS,
+) -> dict[str, Any]:
+    """Return durable review receipts independently from graph visibility."""
+
+    row_limit = _integer(limit, REVIEW_HISTORY_DEFAULT_ROWS)
+    if row_limit < 1 or row_limit > REVIEW_HISTORY_MAX_ROWS:
+        raise SessionStoreError("class_analysis_review_history_limit_invalid")
+    metadata = read_session_store_metadata(path)
+    modes = [str(mode) for mode in metadata.get("projection_modes") or []]
+    selected_mode = _mode_name(
+        projection_mode or metadata.get("selected_projection_mode")
+    )
+    if selected_mode not in modes:
+        raise SessionStoreError(
+            "class_analysis_projection_mode_unavailable",
+            status_code=409,
+        )
+    with _open_readonly(path) as connection:
+        total = int(
+            connection.execute(
+                """SELECT COUNT(*) FROM review_state
+                   WHERE COALESCE(disposition, '') <> ''"""
+            ).fetchone()[0]
+        )
+        rows = connection.execute(
+            """SELECT r.point_id, r.disposition, r.revision, r.reviewed_at,
+                      r.payload AS review_payload,
+                      d.payload AS detail_payload
+               FROM review_state r
+               JOIN point_details d ON d.point_id = r.point_id
+               WHERE COALESCE(r.disposition, '') <> ''
+               ORDER BY r.rowid DESC, r.point_id ASC
+               LIMIT ?""",
+            (row_limit,),
+        ).fetchall()
+        point_ids = [str(row["point_id"]) for row in rows]
+        projection_rows = (
+            connection.execute(
+                f"""SELECT point_id, mode, x, y
+                    FROM point_projections
+                    WHERE point_id IN ({','.join('?' for _ in point_ids)})""",
+                point_ids,
+            ).fetchall()
+            if point_ids
+            else []
+        )
+    projections: dict[str, dict[str, list[float]]] = {}
+    for row in projection_rows:
+        projections.setdefault(str(row["point_id"]), {})[str(row["mode"])] = [
+            float(row["x"]),
+            float(row["y"]),
+        ]
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            point = json.loads(str(row["detail_payload"] or "{}"))
+        except json.JSONDecodeError:
+            point = {}
+        if not isinstance(point, dict):
+            point = {}
+        try:
+            receipt = json.loads(str(row["review_payload"] or "{}"))
+        except json.JSONDecodeError:
+            receipt = {}
+        receipt = receipt if isinstance(receipt, dict) else {}
+        point_id = str(row["point_id"])
+        point_coordinates = projections.get(point_id, {})
+        point.update(
+            {
+                "point_id": point_id,
+                "reviewed": True,
+                "human_review_disposition": str(row["disposition"] or ""),
+                "human_review_revision": str(row["revision"] or ""),
+                "human_reviewed_at": str(row["reviewed_at"] or ""),
+                "human_review_origin": str(receipt.get("origin") or ""),
+                "human_review_persistence": "durable",
+                "_bounded_projection_coordinates": point_coordinates,
+                "projection": point_coordinates.get(selected_mode, [0.0, 0.0]),
+            }
+        )
+        items.append(point)
+    return _bounded_payload(
+        {
+            "schema": "class-analysis-review-history-v1",
+            "projection_mode": selected_mode,
+            "total": total,
+            "returned": len(items),
+            "truncated": total > len(items),
+            "items": items,
+        },
+        REVIEW_HISTORY_MAX_BYTES,
+        "class_analysis_review_history_payload_too_large",
+    )
 
 
 def get_class_analysis_point_detail_payload(

@@ -401,7 +401,9 @@ html.theme-pipboy .class-split-workspace {
 
 
 /* Guided Data Quality Explorer setup */
+[hidden] { display: none !important; }
 .class-split-guided-setup { display: grid; gap: 0.75rem; margin-top: 0.75rem; }
+.class-split-guided-setup details:not([open]) > :not(summary) { display: none !important; }
 .class-split-preset-row, .class-split-step { border: 1px solid var(--dqe-border); border-radius: 0.75rem; background: var(--dqe-surface); }
 .class-split-preset-row { display: grid; grid-template-columns: minmax(14rem, 0.7fr) minmax(18rem, 1.3fr); gap: 0.8rem; align-items: end; padding: 0.8rem; }
 .class-split-preset-copy, .class-split-step__header p, .class-split-choice small, .class-split-toggle small, .class-split-recipe-explanation small, .class-split-field small { color: var(--dqe-muted); }
@@ -419,6 +421,20 @@ html.theme-pipboy .class-split-workspace {
 .class-split-tune { border-top: 1px solid var(--dqe-border); padding-top: 0.5rem; }
 .class-split-tune > summary { width: fit-content; cursor: pointer; color: var(--dqe-accent); font-size: 0.8rem; font-weight: 750; }
 .class-split-tune[open] > summary { margin-bottom: 0.65rem; }
+.class-split-guided-setup .class-split-refinement-control {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+    gap: 0.55rem;
+    padding: 0;
+    border: 0;
+    background: transparent;
+}
+.class-split-guided-setup .class-split-refinement-control > * {
+    min-width: 0;
+    width: 100%;
+    box-sizing: border-box;
+}
 .class-split-recipe-explanation { padding: 0.65rem; border-left: 3px solid var(--dqe-accent); border-radius: 0.35rem; background: var(--dqe-subtle); color: var(--dqe-ink); font-size: 0.82rem; }
 .class-split-weight-row { display: grid; grid-template-columns: minmax(14rem, 1fr) auto; gap: 0.7rem; align-items: end; margin: 0.6rem 0; }
 .class-split-weight-complement { padding-bottom: 0.55rem; color: var(--dqe-muted); font-size: 0.8rem; white-space: nowrap; }

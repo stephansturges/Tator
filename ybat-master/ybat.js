@@ -3788,7 +3788,9 @@ const AUTOMATION_LOCKED_TABS = new Set([
         boundedAllPointsLoaded: false,
         boundedReviewQueueNextCursor: "",
         boundedReviewQueueTotal: 0,
+        boundedReviewQueuePointIds: new Set(),
         boundedReviewQueueLoading: false,
+        boundedReviewQueueLoadToken: 0,
         boundedPointHydrationLoads: new Map(),
         restoredSession: false,
         restoredSourceCompatible: false,
@@ -3838,6 +3840,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         reviewDispositionInFlight: new Set(),
         reviewActionPendingPointIds: new Set(),
         reviewDispositionReconciliationPointIds: new Set(),
+        reviewDispositionBackgroundReconciliationPointIds: new Set(),
         reviewDispositionRetryTokens: new Map(),
         lastReviewAction: null,
         lastReviewDisposition: null,
@@ -4151,6 +4154,8 @@ const AUTOMATION_LOCKED_TABS = new Set([
         classSplitState.reviewDispositionHydrationInFlight.clear();
         classSplitState.reviewActionPendingPointIds.clear();
         classSplitState.reviewDispositionReconciliationPointIds.clear();
+        classSplitState.reviewDispositionBackgroundReconciliationPointIds.clear();
+        classSplitState.reviewDispositionReconciliationAttempts.clear();
         if (classSplitState.dualBBoxTransactionToken) {
             // The backend request cannot be cancelled once its exact
             // annotation compare-and-swap has started. Prevent a newly opened
@@ -51414,8 +51419,11 @@ async function cancelRfDetrTrainingJobRequest() {
     function classSplitProjectionCoordinatesLoaded(choice = getClassSplitProjectionChoice()) {
         const normalized = normalizeClassSplitProjectionChoice(choice);
         if (classSplitState.boundedTransport) {
-            return normalized === classSplitState.boundedInitialProjectionMode
-                || Array.isArray(classSplitState.projectionCoordinates?.[normalized]);
+            const coordinates = classSplitState.projectionCoordinates?.[normalized];
+            return Array.isArray(coordinates)
+                && coordinates.length === Number(
+                    classSplitState.result?.points?.length || 0
+                );
         }
         if (normalized === "umap") {
             return true;
@@ -51436,7 +51444,12 @@ async function cancelRfDetrTrainingJobRequest() {
             return true;
         }
         if (classSplitState.boundedTransport) {
-            const graph = await fetchClassSplitBoundedGraph(normalized);
+            const graph = await fetchClassSplitBoundedGraph(normalized, {
+                allPoints: Boolean(
+                    classSplitState.boundedAllPointsLoaded
+                    || !classSplitElements.limitPlotPoints?.checked
+                ),
+            });
             if (!graph) {
                 return false;
             }
@@ -52467,6 +52480,8 @@ async function cancelRfDetrTrainingJobRequest() {
             classSplitState.boundedAllPointsLoaded = false;
             classSplitState.boundedReviewQueueNextCursor = "";
             classSplitState.boundedReviewQueueTotal = 0;
+            classSplitState.boundedReviewQueuePointIds = new Set();
+            classSplitState.boundedReviewQueueLoadToken += 1;
             classSplitState.boundedReviewQueueLoading = false;
             classSplitState.boundedPointHydrationLoads = new Map();
             classSplitState.restoredSession = false;
@@ -53026,18 +53041,61 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function fetchClassSplitBoundedJson(url, label = "analysis data", options = {}) {
-        const response = await fetch(url, { cache: "no-store", ...options });
-        const detail = await response.text();
-        if (!response.ok) {
-            const error = new Error(parseApiError(detail, `HTTP ${response.status}`));
-            error.httpStatus = response.status;
+        const requestOptions = { ...options };
+        const timeoutMs = Math.max(
+            1000,
+            Number(requestOptions.timeoutMs || 120000)
+        );
+        delete requestOptions.timeoutMs;
+        const externalSignal = requestOptions.signal || null;
+        const controller = new AbortController();
+        let timedOut = false;
+        const forwardAbort = () => controller.abort(externalSignal?.reason);
+        if (externalSignal) {
+            if (externalSignal.aborted) {
+                forwardAbort();
+            } else {
+                externalSignal.addEventListener("abort", forwardAbort, {
+                    once: true,
+                });
+            }
+        }
+        const timeout = window.setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+        }, timeoutMs);
+        requestOptions.signal = controller.signal;
+        try {
+            const response = await fetch(url, {
+                cache: "no-store",
+                ...requestOptions,
+            });
+            const detail = await response.text();
+            if (!response.ok) {
+                const error = new Error(
+                    parseApiError(detail, "HTTP " + response.status)
+                );
+                error.httpStatus = response.status;
+                throw error;
+            }
+            const payload = parseJsonObjectSafe(detail, null);
+            if (!payload || typeof payload !== "object") {
+                throw new Error("Backend returned invalid " + label + ".");
+            }
+            return payload;
+        } catch (error) {
+            if (timedOut) {
+                const timeoutError = new Error(
+                    "Loading " + label + " timed out."
+                );
+                timeoutError.name = "TimeoutError";
+                throw timeoutError;
+            }
             throw error;
+        } finally {
+            window.clearTimeout(timeout);
+            externalSignal?.removeEventListener?.("abort", forwardAbort);
         }
-        const payload = parseJsonObjectSafe(detail, null);
-        if (!payload || typeof payload !== "object") {
-            throw new Error(`Backend returned invalid ${label}.`);
-        }
-        return payload;
     }
 
     function classSplitBoundedGraphPoints(payload) {
@@ -53157,6 +53215,8 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function hydrateClassSplitBoundedQueue(pointIds) {
+        const generation = classSplitState.analysisGeneration;
+        const jobId = String(classSplitState.currentJobId || "").trim();
         const ids = Array.from(new Set(
             (Array.isArray(pointIds) ? pointIds : [])
                 .map((pointId) => String(pointId || ""))
@@ -53165,6 +53225,7 @@ async function cancelRfDetrTrainingJobRequest() {
         let cursor = 0;
         const workers = Array.from({ length: Math.min(6, ids.length) }, async () => {
             while (cursor < ids.length) {
+                if (!classSplitAsyncRequestIsCurrent(generation, jobId)) return;
                 const pointId = ids[cursor++];
                 try {
                     await ensureClassSplitBoundedPointHydrated(pointId);
@@ -53174,30 +53235,10 @@ async function cancelRfDetrTrainingJobRequest() {
             }
         });
         await Promise.all(workers);
+        if (!classSplitAsyncRequestIsCurrent(generation, jobId)) return;
         rebuildClassSplitCandidateIndexes();
         renderClassSplitWrongList();
         renderClassSplitInspector();
-    }
-
-    function mergeClassSplitBoundedGraphPages(pages) {
-        const source = Array.isArray(pages) ? pages.filter(Boolean) : [];
-        if (!source.length) return null;
-        if (source.length === 1) return source[0];
-        const columns = {};
-        source.forEach((page) => {
-            Object.entries(page.columns || {}).forEach(([name, values]) => {
-                if (!Array.isArray(values)) return;
-                if (!Array.isArray(columns[name])) columns[name] = [];
-                columns[name].push(...values);
-            });
-        });
-        return {
-            ...source[0],
-            returned: Number(columns.point_id?.length || 0),
-            truncated: false,
-            next_cursor: null,
-            columns,
-        };
     }
 
     async function fetchClassSplitBoundedGraph(
@@ -53212,7 +53253,7 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitState.boundedGraphLoad?.controller?.abort();
         const controller = new AbortController();
         classSplitState.boundedGraphLoad = { token: loadToken, jobId, generation, controller };
-        const pages = [];
+        let mergedGraph = null;
         const seenCursors = new Set();
         let cursor = "";
         let loaded = 0;
@@ -53234,7 +53275,22 @@ async function cancelRfDetrTrainingJobRequest() {
                     loadToken !== classSplitState.boundedGraphLoadToken
                     || !classSplitAsyncRequestIsCurrent(generation, jobId)
                 ) return null;
-                pages.push(page);
+                if (mergedGraph === null) {
+                    mergedGraph = page;
+                } else {
+                    Object.entries(page.columns || {}).forEach(([name, values]) => {
+                        if (!Array.isArray(values)) return;
+                        if (!Array.isArray(mergedGraph.columns?.[name])) {
+                            if (!mergedGraph.columns || typeof mergedGraph.columns !== "object") {
+                                mergedGraph.columns = {};
+                            }
+                            mergedGraph.columns[name] = [];
+                        }
+                        for (const value of values) {
+                            mergedGraph.columns[name].push(value);
+                        }
+                    });
+                }
                 loaded += Number(page.returned || 0);
                 total = Number(page.total_matching || total || loaded);
                 cursor = allPoints ? String(page.next_cursor || "") : "";
@@ -53249,7 +53305,20 @@ async function cancelRfDetrTrainingJobRequest() {
                     }
                 }
             } while (cursor && allPoints);
-            return mergeClassSplitBoundedGraphPages(pages);
+            if (mergedGraph && allPoints) {
+                const mergedCount = Number(
+                    mergedGraph.columns?.point_id?.length || loaded
+                );
+                if (total > mergedCount) {
+                    throw new Error(
+                        `The all-points graph ended early at ${mergedCount.toLocaleString()} of ${total.toLocaleString()} points.`
+                    );
+                }
+                mergedGraph.returned = mergedCount;
+                mergedGraph.truncated = false;
+                mergedGraph.next_cursor = null;
+            }
+            return mergedGraph;
         } finally {
             if (classSplitState.boundedGraphLoad?.token === loadToken) {
                 classSplitState.boundedGraphLoad = null;
@@ -53260,31 +53329,96 @@ async function cancelRfDetrTrainingJobRequest() {
     function applyClassSplitBoundedGraphReplacement(graph) {
         if (!graph || !classSplitState.result) return false;
         const previousById = classSplitState.pointsById;
+        const previousResultPoints = Array.isArray(classSplitState.result.points)
+            ? classSplitState.result.points
+            : [];
+        const loadedReviewQueuePointIds = classSplitState.boundedReviewQueuePointIds
+            instanceof Set
+            ? classSplitState.boundedReviewQueuePointIds
+            : new Set();
         const points = classSplitBoundedGraphPoints(graph).map((point, index) => {
             const previous = previousById.get(String(point.point_id || ""));
             const projection = point.projection;
             if (previous) Object.assign(point, previous);
             point.projection = projection;
+            delete point._notPlottable;
             point._projectionIndex = index;
             return point;
         }).filter((point) => !classSplitState.dismissedWrongIds.has(String(point.point_id || "")));
+        if (graph.next_cursor) {
+            const graphPointIds = new Set(
+                points.map((point) => String(point?.point_id || ""))
+            );
+            previousResultPoints.forEach((point) => {
+                const pointId = String(point?.point_id || "");
+                const preserveForReview = Boolean(
+                    point?._notPlottable
+                    || loadedReviewQueuePointIds.has(pointId)
+                );
+                if (
+                    !preserveForReview
+                    || !pointId
+                    || graphPointIds.has(pointId)
+                    || classSplitState.dismissedWrongIds.has(pointId)
+                ) {
+                    return;
+                }
+                point._notPlottable = true;
+                point._projectionIndex = points.length;
+                points.push(point);
+                graphPointIds.add(pointId);
+            });
+        }
         classSplitState.result.points = points;
-        classSplitState.pointsById = new Map(
+        const nextPointsById = new Map(
             points.map((point) => [String(point.point_id || ""), point])
+        );
+        classSplitState.reviewedPointsById.forEach((point, pointId) => {
+            nextPointsById.set(String(pointId), point);
+        });
+        classSplitState.pointsById = nextPointsById;
+        const rawGraphReturned = Number(graph.returned);
+        const graphReturned = Number.isFinite(rawGraphReturned) && rawGraphReturned >= 0
+            ? rawGraphReturned
+            : Number(graph.columns?.point_id?.length || 0);
+        const rawGraphTotal = Number(graph.total_matching ?? graph.point_count);
+        const graphTotal = Number.isFinite(rawGraphTotal) && rawGraphTotal >= 0
+            ? rawGraphTotal
+            : graphReturned;
+        const graphTruncated = Boolean(
+            graph.truncated
+            || graph.next_cursor
+            || graphReturned < graphTotal
         );
         classSplitState.result.session_transport = {
             ...(classSplitState.result.session_transport || {}),
-            graph_returned: Number(graph.returned || points.length),
-            graph_total: Number(graph.total_matching || points.length),
-            graph_truncated: Boolean(graph.next_cursor),
+            graph_returned: graphReturned,
+            graph_total: graphTotal,
+            graph_truncated: graphTruncated,
         };
-        classSplitState.boundedAllPointsLoaded = !graph.next_cursor
-            && Number(graph.returned || points.length) >= Number(graph.total_matching || points.length);
+        classSplitState.boundedAllPointsLoaded = !graphTruncated;
         const projectionMode = normalizeClassSplitProjectionChoice(
             graph.projection_mode || getClassSplitProjectionChoice()
         );
+        Object.entries(classSplitState.projectionCoordinates || {}).forEach(
+            ([mode, coordinates]) => {
+                if (
+                    mode !== projectionMode
+                    && (
+                        !Array.isArray(coordinates)
+                        || coordinates.length !== points.length
+                    )
+                ) {
+                    delete classSplitState.projectionCoordinates[mode];
+                }
+            }
+        );
         classSplitState.projectionCoordinates[projectionMode] = points.map(
-            (point) => point.projection
+            (point) => (
+                point?._notPlottable || !Array.isArray(point?.projection)
+                    ? [0, 0]
+                    : point.projection
+            )
         );
         classSplitState.boundedGraphQueryKey = `${projectionMode}:all:${points.length}`;
         rebuildClassSplitCandidateIndexes();
@@ -53299,6 +53433,34 @@ async function cancelRfDetrTrainingJobRequest() {
             classSplitState.boundedGraphLoad?.controller?.abort();
             classSplitState.boundedGraphLoadToken += 1;
             classSplitState.boundedGraphLoad = null;
+            const resolvedTotal = Number(
+                classSplitState.result?.session_transport?.graph_total
+                ?? classSplitState.result?.summary?.object_count
+                ?? 0
+            );
+            const total = Number.isFinite(resolvedTotal) && resolvedTotal >= 0
+                ? resolvedTotal
+                : 0;
+            if (
+                classSplitState.boundedTransport
+                && classSplitState.boundedAllPointsLoaded
+                && total > CLASS_SPLIT_MAX_PLOT_POINTS
+            ) {
+                try {
+                    const graph = await fetchClassSplitBoundedGraph(
+                        getClassSplitProjectionChoice(),
+                        { allPoints: false }
+                    );
+                    if (graph) applyClassSplitBoundedGraphReplacement(graph);
+                    return;
+                } catch (error) {
+                    if (error?.name === "AbortError") return;
+                    setClassSplitJobStatus(
+                        `The map is capped, but the full point set could not be released from browser memory: ${error.message || error}`,
+                        "warn"
+                    );
+                }
+            }
             renderClassSplitPlot();
             return;
         }
@@ -53306,12 +53468,20 @@ async function cancelRfDetrTrainingJobRequest() {
             renderClassSplitPlot();
             return;
         }
-        const total = Number(
+        const resolvedTotal = Number(
             classSplitState.result?.session_transport?.graph_total
-            || classSplitState.result?.summary?.object_count
-            || 0
+            ?? classSplitState.result?.summary?.object_count
+            ?? 0
         );
-        const loaded = Number(classSplitState.result?.points?.length || 0);
+        const total = Number.isFinite(resolvedTotal) && resolvedTotal >= 0
+            ? resolvedTotal
+            : 0;
+        const returnedCount = Number(
+            classSplitState.result?.session_transport?.graph_returned ?? 0
+        );
+        const loaded = Number.isFinite(returnedCount) && returnedCount >= 0
+            ? returnedCount
+            : 0;
         if (classSplitState.boundedAllPointsLoaded || total <= loaded) {
             renderClassSplitPlot();
             return;
@@ -53346,9 +53516,11 @@ async function cancelRfDetrTrainingJobRequest() {
     async function loadNextClassSplitBoundedReviewPage() {
         const cursor = String(classSplitState.boundedReviewQueueNextCursor || "");
         const jobId = String(classSplitState.currentJobId || "").trim();
+        const generation = classSplitState.analysisGeneration;
         if (!classSplitState.boundedTransport || !cursor || !jobId || classSplitState.boundedReviewQueueLoading) {
             return false;
         }
+        const loadToken = ++classSplitState.boundedReviewQueueLoadToken;
         classSplitState.boundedReviewQueueLoading = true;
         try {
             const parameters = new URLSearchParams({ category: "review", cursor, limit: "100" });
@@ -53356,22 +53528,60 @@ async function cancelRfDetrTrainingJobRequest() {
                 `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/review_queue?${parameters}`,
                 "review queue"
             );
-            if (jobId !== String(classSplitState.currentJobId || "")) return false;
+            if (
+                loadToken !== classSplitState.boundedReviewQueueLoadToken
+                || !classSplitAsyncRequestIsCurrent(generation, jobId)
+            ) return false;
+            const nextCursor = String(page.next_cursor || "");
+            const repeatedCursor = Boolean(nextCursor && nextCursor === cursor);
             const points = mergeClassSplitBoundedQueueItems(classSplitState.result, page.items || []);
             points.forEach((point) => {
                 const pointId = String(point.point_id || "");
+                if (pointId) {
+                    classSplitState.boundedReviewQueuePointIds.add(pointId);
+                }
                 if (!classSplitState.pointsById.has(pointId)) {
                     point._projectionIndex = (classSplitState.result?.points || []).indexOf(point);
                     classSplitState.pointsById.set(pointId, point);
                 }
             });
-            classSplitState.boundedReviewQueueNextCursor = String(page.next_cursor || "");
+            classSplitState.boundedReviewQueueNextCursor = repeatedCursor
+                ? ""
+                : nextCursor;
+            const pageTotal = Number(page.total);
+            if (Number.isFinite(pageTotal) && pageTotal >= 0) {
+                classSplitState.boundedReviewQueueTotal = pageTotal;
+            }
+            if (classSplitState.result?.session_transport) {
+                classSplitState.result.session_transport.review_next_cursor =
+                    classSplitState.boundedReviewQueueNextCursor;
+                classSplitState.result.session_transport.review_total =
+                    classSplitState.boundedReviewQueueTotal;
+                classSplitState.result.session_transport.review_queue_point_ids =
+                    Array.from(classSplitState.boundedReviewQueuePointIds);
+            }
             rebuildClassSplitCandidateIndexes();
             renderClassSplitWrongList();
             void hydrateClassSplitBoundedQueue(points.map((point) => point.point_id));
+            if (repeatedCursor) {
+                setClassSplitJobStatus(
+                    "Review queue paging stopped because the backend repeated its cursor. Reload the analysis before requesting more candidates.",
+                    "warn"
+                );
+            }
             return true;
+        } catch (error) {
+            if (classSplitAsyncRequestIsCurrent(generation, jobId)) {
+                setClassSplitJobStatus(
+                    `Could not load the next review page: ${error.message || error}`,
+                    "warn"
+                );
+            }
+            return false;
         } finally {
-            classSplitState.boundedReviewQueueLoading = false;
+            if (loadToken === classSplitState.boundedReviewQueueLoadToken) {
+                classSplitState.boundedReviewQueueLoading = false;
+            }
         }
     }
 
@@ -53384,7 +53594,7 @@ async function cancelRfDetrTrainingJobRequest() {
             reviewed: "unreviewed",
             limit: "50000",
         });
-        const [graph, queue] = await Promise.all([
+        const [graph, queue, reviewHistory] = await Promise.all([
             fetchClassSplitBoundedJson(
                 `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/graph?${graphParameters}`,
                 "bounded graph"
@@ -53393,8 +53603,20 @@ async function cancelRfDetrTrainingJobRequest() {
                 `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/review_queue?category=review&limit=36`,
                 "review queue"
             ),
+            fetchClassSplitBoundedJson(
+                `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/review_history?projection_mode=${encodeURIComponent(projectionMode)}&limit=250`,
+                "review history"
+            ),
         ]);
         const points = classSplitBoundedGraphPoints(graph);
+        const rawGraphReturned = Number(graph.returned);
+        const graphReturned = Number.isFinite(rawGraphReturned) && rawGraphReturned >= 0
+            ? rawGraphReturned
+            : points.length;
+        const rawGraphTotal = Number(graph.total_matching ?? graph.point_count);
+        const graphTotal = Number.isFinite(rawGraphTotal) && rawGraphTotal >= 0
+            ? rawGraphTotal
+            : graphReturned;
         const summary = {
             ...(graph.session_summary || {}),
             analysis_job_id: jobId,
@@ -53416,25 +53638,42 @@ async function cancelRfDetrTrainingJobRequest() {
             refinement_candidates: [],
             vignette_candidates: [],
             within_class_outlier_candidates: [],
+            review_history_points: Array.isArray(reviewHistory?.items)
+                ? reviewHistory.items
+                : [],
             projection_options: {
                 selected: projectionMode,
                 coordinates_available: Array.isArray(graph.available_projection_modes)
                     ? graph.available_projection_modes
                     : [projectionMode],
+                coordinates: {
+                    [projectionMode]: points.map((point) => point.projection),
+                },
             },
             session_transport: {
-                graph_returned: Number(graph.returned || points.length),
-                graph_total: Number(graph.total_matching || graph.point_count || points.length),
-                graph_truncated: Boolean(graph.truncated),
+                graph_returned: graphReturned,
+                graph_total: graphTotal,
+                graph_truncated: Boolean(
+                    graph.truncated
+                    || graph.next_cursor
+                    || graphReturned < graphTotal
+                ),
                 review_total: Number(queue.total || 0),
             },
         };
         const queuePoints = mergeClassSplitBoundedQueueItems(result, queue.items || []);
-        classSplitState.boundedReviewQueueNextCursor = String(queue.next_cursor || "");
-        classSplitState.boundedReviewQueueTotal = Number(queue.total || 0);
-        classSplitState.boundedInitialProjectionMode = projectionMode;
-        classSplitState.boundedGraphQueryKey = `${projectionMode}:all`;
-        return { result, queuePointIds: queuePoints.map((point) => point.point_id) };
+        const queuePointIds = queuePoints
+            .map((point) => String(point?.point_id || ""))
+            .filter(Boolean);
+        result.session_transport.review_next_cursor = String(
+            queue.next_cursor || ""
+        );
+        result.session_transport.review_queue_point_ids = queuePointIds;
+        result.session_transport.initial_projection_mode = projectionMode;
+        result.projection_options.coordinates[projectionMode] = result.points.map(
+            (point) => Array.isArray(point?.projection) ? point.projection : [0, 0]
+        );
+        return { result, queuePointIds };
     }
 
     function applyClassSplitResultPayload(resultPayload, jobId = "", options = {}) {
@@ -53484,6 +53723,33 @@ async function cancelRfDetrTrainingJobRequest() {
             classSplitState.boundedGraphQueryKey = "";
             classSplitState.boundedReviewQueueNextCursor = "";
             classSplitState.boundedReviewQueueTotal = 0;
+            classSplitState.boundedReviewQueuePointIds = new Set();
+            classSplitState.boundedReviewQueueLoadToken += 1;
+            classSplitState.boundedReviewQueueLoading = false;
+            classSplitState.boundedPointHydrationLoads = new Map();
+        } else {
+            const transport = result?.session_transport || {};
+            const projectionMode = normalizeClassSplitProjectionChoice(
+                transport.initial_projection_mode
+                || result?.projection_options?.selected
+                || "umap"
+            );
+            classSplitState.boundedReviewQueueLoadToken += 1;
+            classSplitState.boundedReviewQueueLoading = false;
+            classSplitState.boundedReviewQueueNextCursor = String(
+                transport.review_next_cursor || ""
+            );
+            classSplitState.boundedReviewQueueTotal = Number(
+                transport.review_total || 0
+            );
+            classSplitState.boundedReviewQueuePointIds = new Set(
+                (Array.isArray(transport.review_queue_point_ids)
+                    ? transport.review_queue_point_ids
+                    : []
+                ).map((pointId) => String(pointId || "")).filter(Boolean)
+            );
+            classSplitState.boundedInitialProjectionMode = projectionMode;
+            classSplitState.boundedGraphQueryKey = `${projectionMode}:all`;
             classSplitState.boundedPointHydrationLoads = new Map();
         }
         classSplitState.boundedAllPointsLoaded = Boolean(
@@ -53545,6 +53811,24 @@ async function cancelRfDetrTrainingJobRequest() {
                 }
             }
         });
+        (Array.isArray(result.review_history_points)
+            ? result.review_history_points
+            : []
+        ).forEach((point) => {
+            const pointId = String(point?.point_id || "").trim();
+            if (!pointId) {
+                return;
+            }
+            const graphPoint = classSplitState.pointsById.get(pointId);
+            if (graphPoint) {
+                Object.assign(graphPoint, point);
+                point = graphPoint;
+            }
+            classSplitState.pointsById.set(pointId, point);
+            classSplitState.reviewedPointsById.set(pointId, point);
+            classSplitState.dismissedWrongIds.add(pointId);
+        });
+        delete result.review_history_points;
         const reviewedPairKeys = new Set(
             Array.from(classSplitState.reviewedPointsById.values())
                 .map((point) => String(point?.human_review_pair_key || "").trim())
@@ -55607,7 +55891,10 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function getClassSplitPointById(pointId) {
-        return classSplitState.pointsById.get(String(pointId || "")) || null;
+        const safeId = String(pointId || "");
+        return classSplitState.pointsById.get(safeId)
+            || classSplitState.reviewedPointsById.get(safeId)
+            || null;
     }
 
     function getClassSplitGraphHoverPreview() {
@@ -64464,6 +64751,9 @@ async function cancelRfDetrTrainingJobRequest() {
                 || classSplitState.reviewDispositionReconciliationPointIds.has(
                     safePointId
                 )
+                || classSplitState.reviewDispositionBackgroundReconciliationPointIds.has(
+                    safePointId
+                )
                 || classSplitPointReviewDispositionInFlight(
                     safePointId,
                     jobId
@@ -64489,6 +64779,9 @@ async function cancelRfDetrTrainingJobRequest() {
             safePointId
             && (
                 classSplitState.reviewDispositionReconciliationPointIds.has(
+                    safePointId
+                )
+                || classSplitState.reviewDispositionBackgroundReconciliationPointIds.has(
                     safePointId
                 )
                 || classSplitPointReviewDispositionInFlight(
@@ -65128,6 +65421,20 @@ async function cancelRfDetrTrainingJobRequest() {
                 === expectedReviewedAt;
     }
 
+    function clearClassSplitReviewDispositionRetryTokens(jobId, pointId) {
+        const prefix = [
+            String(jobId || "").trim(),
+            String(pointId || "").trim(),
+            "",
+        ].join("\u001f");
+        Array.from(classSplitState.reviewDispositionRetryTokens.keys())
+            .forEach((key) => {
+                if (String(key || "").startsWith(prefix)) {
+                    classSplitState.reviewDispositionRetryTokens.delete(key);
+                }
+            });
+    }
+
     function scheduleClassSplitReviewDispositionHydration(
         jobId,
         pointIds,
@@ -65160,6 +65467,9 @@ async function cancelRfDetrTrainingJobRequest() {
             const point = getClassSplitPointById(pointId);
             const reconcilingUnknownCommit = (
                 classSplitState.reviewDispositionReconciliationPointIds.has(
+                    pointId
+                )
+                || classSplitState.reviewDispositionBackgroundReconciliationPointIds.has(
                     pointId
                 )
             );
@@ -65234,7 +65544,8 @@ async function cancelRfDetrTrainingJobRequest() {
                         if (!classSplitAsyncRequestIsCurrent(generation, safeJobId)) return;
                         const detailPayload = await fetchClassSplitBoundedJson(
                             `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(safeJobId)}/points/${encodeURIComponent(target.pointId)}`,
-                            "review state"
+                            "review state",
+                            { timeoutMs: 15000 }
                         );
                         const point = getClassSplitPointById(target.pointId);
                         if (point !== target.point) continue;
@@ -65249,7 +65560,16 @@ async function cancelRfDetrTrainingJobRequest() {
                             classSplitState.reviewedPointsById.set(target.pointId, point);
                             classSplitState.dismissedWrongIds.add(target.pointId);
                             classSplitState.reviewDispositionReconciliationPointIds.delete(target.pointId);
+                            classSplitState.reviewDispositionBackgroundReconciliationPointIds.delete(target.pointId);
                             classSplitState.reviewDispositionReconciliationAttempts.delete(target.pointId);
+                            clearClassSplitReviewDispositionRetryTokens(
+                                safeJobId,
+                                target.pointId
+                            );
+                            clearClassSplitPendingReviewCommitsForPoint(
+                                safeJobId,
+                                target.pointId
+                            );
                             removeClassSplitPointFromActiveReviewGraph(target.pointId, { force: true });
                             changed = true;
                             continue;
@@ -65259,7 +65579,10 @@ async function cancelRfDetrTrainingJobRequest() {
                             changed = true;
                             continue;
                         }
-                        if (classSplitState.reviewDispositionReconciliationPointIds.has(target.pointId)) {
+                        if (
+                            classSplitState.reviewDispositionReconciliationPointIds.has(target.pointId)
+                            || classSplitState.reviewDispositionBackgroundReconciliationPointIds.has(target.pointId)
+                        ) {
                             const attempts = Number(
                                 classSplitState.reviewDispositionReconciliationAttempts.get(target.pointId) || 0
                             ) + 1;
@@ -65272,8 +65595,24 @@ async function cancelRfDetrTrainingJobRequest() {
                                 );
                             } else {
                                 classSplitState.reviewDispositionReconciliationPointIds.delete(target.pointId);
+                                classSplitState.reviewDispositionBackgroundReconciliationPointIds.delete(target.pointId);
+                                classSplitState.reviewDispositionReconciliationAttempts.delete(target.pointId);
+                                const serverPoint = detailPayload?.point;
+                                if (serverPoint && typeof serverPoint === "object") {
+                                    const projection = point.projection;
+                                    const projectionIndex = point._projectionIndex;
+                                    Object.assign(point, serverPoint);
+                                    point.projection = projection;
+                                    point._projectionIndex = projectionIndex;
+                                }
+                                clearClassSplitReviewDispositionRetryTokens(
+                                    safeJobId,
+                                    target.pointId
+                                );
+                                applyClassSplitReviewClearLocally(target.pointId);
+                                changed = true;
                                 setClassSplitJobStatus(
-                                    "A review save remains unresolved. The object stays hidden; retry it from pending review recovery.",
+                                    "The backend repeatedly confirmed that no review receipt was saved. The object was restored to the queue.",
                                     "warn"
                                 );
                             }
@@ -65286,6 +65625,7 @@ async function cancelRfDetrTrainingJobRequest() {
                         renderClassSplitReviewedList();
                         renderClassSplitReport();
                         renderClassSplitInspector();
+                        renderClassSplitPlot();
                     }
                     if (retryRequired) {
                         const attempts = Math.max(
@@ -65338,6 +65678,9 @@ async function cancelRfDetrTrainingJobRequest() {
                     const point = getClassSplitPointById(target.pointId);
                     const reconcilingUnknownCommit = (
                         classSplitState.reviewDispositionReconciliationPointIds.has(
+                            target.pointId
+                        )
+                        || classSplitState.reviewDispositionBackgroundReconciliationPointIds.has(
                             target.pointId
                         )
                     );
@@ -65424,6 +65767,16 @@ async function cancelRfDetrTrainingJobRequest() {
                         ) {
                             reconciled = true;
                         }
+                        classSplitState.reviewDispositionBackgroundReconciliationPointIds.delete(
+                            target.pointId
+                        );
+                        classSplitState.reviewDispositionReconciliationAttempts.delete(
+                            target.pointId
+                        );
+                        clearClassSplitReviewDispositionRetryTokens(
+                            safeJobId,
+                            target.pointId
+                        );
                         changed = true;
                         return;
                     }
@@ -65438,6 +65791,20 @@ async function cancelRfDetrTrainingJobRequest() {
                         // action handler, so only the mutation barrier changes.
                         reconciled = true;
                     }
+                    if (
+                        classSplitState.reviewDispositionBackgroundReconciliationPointIds.delete(
+                            target.pointId
+                        )
+                    ) {
+                        reconciled = true;
+                    }
+                    classSplitState.reviewDispositionReconciliationAttempts.delete(
+                        target.pointId
+                    );
+                    clearClassSplitReviewDispositionRetryTokens(
+                        safeJobId,
+                        target.pointId
+                    );
                     if (
                         !target.clearPrecondition
                         || !classSplitReviewPointMatchesClearPrecondition(
@@ -65477,27 +65844,34 @@ async function cancelRfDetrTrainingJobRequest() {
                         classSplitState.reviewDispositionReconciliationPointIds.has(
                             pointId
                         )
+                        || classSplitState.reviewDispositionBackgroundReconciliationPointIds.has(
+                            pointId
+                        )
                     ));
                 let retryDelay = 1500;
-                if (classSplitState.boundedTransport && retryPointIds.length) {
+                if (retryPointIds.length) {
                     retryPointIds = retryPointIds.filter((pointId) => {
                         const attempts = Number(
                             classSplitState.reviewDispositionReconciliationAttempts.get(pointId) || 0
                         ) + 1;
                         classSplitState.reviewDispositionReconciliationAttempts.set(pointId, attempts);
-                        if (attempts < 5) {
-                            retryDelay = Math.max(
-                                retryDelay,
-                                500 * (2 ** Math.min(3, attempts - 1))
-                            );
-                            return true;
+                        if (attempts >= 5) {
+                            classSplitState.reviewDispositionReconciliationPointIds.delete(pointId);
+                            classSplitState.reviewDispositionBackgroundReconciliationPointIds.add(pointId);
                         }
-                        classSplitState.reviewDispositionReconciliationPointIds.delete(pointId);
-                        setClassSplitJobStatus(
-                            "A review save remains unresolved. The object stays hidden; retry it from pending review recovery.",
-                            "warn"
+                        retryDelay = Math.max(
+                            retryDelay,
+                            attempts < 5
+                                ? 500 * (2 ** Math.min(3, attempts - 1))
+                                : 15000
                         );
-                        return false;
+                        if (attempts === 5) {
+                            setClassSplitJobStatus(
+                                "The review result is still unreachable. Only this object remains protected while receipt reconciliation continues in the background.",
+                                "warn"
+                            );
+                        }
+                        return true;
                     });
                 }
                 if (
@@ -66022,11 +66396,13 @@ async function cancelRfDetrTrainingJobRequest() {
         const point = getClassSplitPointById(safeId);
         classSplitState.dismissedWrongIds.delete(safeId);
         if (point) {
-            point.is_wrong_class_candidate = Array.isArray(
-                classSplitState.result?.wrong_class_candidates
-            ) && classSplitState.result.wrong_class_candidates.some(
-                (candidate) => String(candidate?.point_id || "") === safeId
-            );
+            if (!classSplitState.boundedTransport) {
+                point.is_wrong_class_candidate = Array.isArray(
+                    classSplitState.result?.wrong_class_candidates
+                ) && classSplitState.result.wrong_class_candidates.some(
+                    (candidate) => String(candidate?.point_id || "") === safeId
+                );
+            }
             delete point.human_review_disposition;
             delete point.human_reviewed_at;
             delete point.human_review_revision;
@@ -66036,6 +66412,49 @@ async function cancelRfDetrTrainingJobRequest() {
             delete point.human_review_target_class;
             delete point._class_split_review_batch_token;
             delete point._class_split_review_batch_index;
+            const points = classSplitState.result?.points;
+            if (
+                Array.isArray(points)
+                && !points.some(
+                    (candidate) => String(candidate?.point_id || "") === safeId
+                )
+            ) {
+                const pointIndex = points.length;
+                const storedCoordinates = (
+                    point._bounded_projection_coordinates
+                    && typeof point._bounded_projection_coordinates === "object"
+                )
+                    ? point._bounded_projection_coordinates
+                    : {};
+                Object.entries(classSplitState.projectionCoordinates || {})
+                    .forEach(([mode, coordinates]) => {
+                        const pair = storedCoordinates[mode];
+                        if (
+                            Array.isArray(coordinates)
+                            && coordinates.length === pointIndex
+                            && Array.isArray(pair)
+                            && pair.length >= 2
+                        ) {
+                            coordinates.push([
+                                Number(pair[0]) || 0,
+                                Number(pair[1]) || 0,
+                            ]);
+                        } else {
+                            delete classSplitState.projectionCoordinates[mode];
+                        }
+                    });
+                const activeMode = getClassSplitProjectionChoice();
+                const activePair = storedCoordinates[activeMode];
+                if (Array.isArray(activePair) && activePair.length >= 2) {
+                    point.projection = [
+                        Number(activePair[0]) || 0,
+                        Number(activePair[1]) || 0,
+                    ];
+                }
+                point._projectionIndex = pointIndex;
+                points.push(point);
+            }
+            classSplitState.pointsById.set(safeId, point);
         }
         classSplitState.reviewedPointsById.delete(safeId);
         return point;
@@ -69960,18 +70379,20 @@ async function cancelRfDetrTrainingJobRequest() {
         const override = Boolean(classSplitElements.qualityMemoryOverride?.checked);
         const busy = classSplitState.active || classSplitMutationIsBusy();
         const recommendedMb = Number(classSplitState.capabilities?.quality_execution?.recommended_budget_mb || 0);
+        const customTargetActive = policy === "budgeted"
+            || (policy === "auto" && override);
         if (classSplitElements.qualityMemoryOverrideField) {
             classSplitElements.qualityMemoryOverrideField.hidden = policy !== "auto";
         }
         if (classSplitElements.qualityMemoryBudgetField) {
-            classSplitElements.qualityMemoryBudgetField.hidden =
-                policy === "full" || (policy === "auto" && !override);
+            classSplitElements.qualityMemoryBudgetField.hidden = !customTargetActive;
         }
         if (classSplitElements.qualityMemoryOverride) {
             classSplitElements.qualityMemoryOverride.disabled = busy;
         }
         if (classSplitElements.qualityMemoryBudget) {
-            classSplitElements.qualityMemoryBudget.disabled = busy || policy === "full" || (policy === "auto" && !override);
+            classSplitElements.qualityMemoryBudget.disabled =
+                busy || !customTargetActive;
         }
         if (classSplitElements.qualityMemoryPolicy) {
             classSplitElements.qualityMemoryPolicy.disabled = busy;

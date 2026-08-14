@@ -51,6 +51,7 @@ def build_class_analysis_router(
     get_session_manifest_fn: Optional[Callable[[str], Any]] = None,
     get_session_graph_fn: Optional[Callable[..., Any]] = None,
     get_session_review_queue_fn: Optional[Callable[..., Any]] = None,
+    get_session_review_history_fn: Optional[Callable[..., Any]] = None,
     get_session_point_detail_fn: Optional[Callable[[str, str], Any]] = None,
     get_session_point_evidence_fn: Optional[Callable[[str, str], Any]] = None,
 ) -> APIRouter:
@@ -356,6 +357,20 @@ def build_class_analysis_router(
         ):
             return get_session_review_queue_fn(
                 job_id, category=category, cursor=cursor, limit=limit
+            )
+
+    if get_session_review_history_fn is not None:
+
+        @router.get("/class_analysis/jobs/{job_id}/review_history")
+        def get_class_analysis_session_review_history(
+            job_id: str,
+            projection_mode: Optional[str] = None,
+            limit: int = 250,
+        ):
+            return get_session_review_history_fn(
+                job_id,
+                projection_mode=projection_mode,
+                limit=limit,
             )
 
     if get_session_point_detail_fn is not None:

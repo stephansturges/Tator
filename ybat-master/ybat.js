@@ -5589,6 +5589,11 @@ const sam3TrainState = {
             return null;
         }
         const mode = String(value.mode || "").trim().toLowerCase();
+        const lockSessionId = normalizeAnnotationResumeText(
+            value.lockSessionId,
+            128,
+            { allowEmpty: true },
+        );
         if (mode === "linked") {
             const datasetId = normalizeAnnotationResumeText(value.datasetId, 512);
             if (!datasetId) {
@@ -5598,6 +5603,7 @@ const sam3TrainState = {
                 version: ANNOTATION_SOURCE_RESUME_SCHEMA_VERSION,
                 mode,
                 datasetId,
+                lockSessionId,
             };
         }
         if (mode === "transient") {
@@ -5621,6 +5627,7 @@ const sam3TrainState = {
                 sessionId,
                 transientOpenPath,
                 datasetLabel,
+                lockSessionId,
             };
         }
         return null;
@@ -5669,8 +5676,9 @@ const sam3TrainState = {
             if (!storage) {
                 return false;
             }
-            // This deliberately excludes the editor lock session id. A restored
-            // page must negotiate a fresh lock with the backend.
+            // The lock id is scoped to this exact source descriptor. Reusing it
+            // lets a reloaded tab resume its own lease without taking a lock
+            // held by a different editor.
             storage.setItem(
                 ANNOTATION_SOURCE_RESUME_STORAGE_KEY,
                 JSON.stringify(descriptor),
@@ -6996,21 +7004,44 @@ const sam3TrainState = {
         return true;
     }
 
-    async function startAnnotationSession({ force = false } = {}) {
+    async function startAnnotationSession({
+        force = false,
+        resumeSameEditor = false,
+    } = {}) {
         const base = getAnnotationBasePath();
         if (!base) {
             return;
         }
-        const resp = await fetch(`${base}/session/start`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(annotationSessionPayload({ force })),
-        });
-        const detail = await resp.text();
-        if (!resp.ok) {
-            throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+        const editorName = getAnnotationEditorName();
+        const requestSession = async (forceValue) => {
+            const resp = await fetch(`${base}/session/start`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(annotationSessionPayload({
+                    force: forceValue,
+                    editor_name: editorName,
+                })),
+            });
+            const detail = await resp.text();
+            if (!resp.ok) {
+                throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+            }
+            return parseJsonObjectSafe(detail, {});
+        };
+        let payload = await requestSession(force);
+        let resumedSameEditorLease = false;
+        if (
+            !force
+            && resumeSameEditor
+            && String(payload.status || "").toLowerCase() === "warning"
+            && String(payload.lock?.holder || "").trim() === editorName
+        ) {
+            // Older resume descriptors omitted the lease id. Recover only a
+            // lease owned by this same browser editor; never take another
+            // editor's lock automatically.
+            payload = await requestSession(true);
+            resumedSameEditorLease = true;
         }
-        const payload = parseJsonObjectSafe(detail, {});
         if (Number.isFinite(Number(payload.session_revision))) {
             annotationSourceState.sessionRevision = Number(payload.session_revision);
         }
@@ -7020,7 +7051,9 @@ const sam3TrainState = {
             annotationSourceState.statusMessage = "Opened read-only (lock held by another editor).";
         } else {
             annotationSourceState.readOnly = false;
-            annotationSourceState.statusMessage = "";
+            annotationSourceState.statusMessage = resumedSameEditorLease
+                ? "Annotation lock resumed after reload."
+                : "";
         }
         syncLabelingSourceControls();
     }
@@ -7109,6 +7142,19 @@ const sam3TrainState = {
         if (!closed) {
             throw new Error("Current dataset has unsaved changes. Save successfully before opening another dataset.");
         }
+        const resumeDescriptor = readAnnotationSourceResumeDescriptor();
+        const resumeMatchesSource = Boolean(
+            resumeDescriptor
+            && resumeDescriptor.mode === normalizedMode
+            && (
+                normalizedMode === "linked"
+                    ? resumeDescriptor.datasetId === String(datasetId || "").trim()
+                    : resumeDescriptor.sessionId === String(sessionId || "").trim()
+            )
+        );
+        const resumedLockSessionId = resumeMatchesSource
+            ? String(resumeDescriptor.lockSessionId || "").trim()
+            : "";
         try {
             const loadToken = ++annotationSourceState.loadToken;
             annotationSourceState.mode = normalizedMode;
@@ -7116,7 +7162,7 @@ const sam3TrainState = {
             annotationSourceState.sessionId = String(sessionId || "").trim();
             annotationSourceState.transientOpenPath = String(transientOpenPath || "").trim();
             annotationSourceState.datasetLabel = String(datasetLabel || "").trim();
-            annotationSourceState.lockSessionId = generateUUID();
+            annotationSourceState.lockSessionId = resumedLockSessionId || generateUUID();
             annotationSourceState.lock = {};
             annotationSourceState.readOnly = false;
             annotationSourceState.manifest = null;
@@ -7143,7 +7189,10 @@ const sam3TrainState = {
             if (!base) {
                 throw new Error("Unable to resolve annotation API path.");
             }
-            await startAnnotationSession({ force: false });
+            await startAnnotationSession({
+                force: false,
+                resumeSameEditor: resumeMatchesSource,
+            });
             if (loadToken !== annotationSourceState.loadToken) {
                 return;
             }
@@ -62270,6 +62319,28 @@ async function cancelRfDetrTrainingJobRequest() {
         };
     }
 
+    function getClassSplitRelabelUiState(point, { busy = false } = {}) {
+        let reason = "";
+        if (!point) {
+            reason = "This object is no longer available.";
+        } else if (busy || classSplitState.relabelInFlight) {
+            reason = "Wait for the current review or class change to finish.";
+        } else if (classSplitReviewHistoryNeedsDurableClear(point)) {
+            reason = "Restore the saved Confirm or Skip decision from Review history before changing this class.";
+        } else if (
+            classSplitState.restoredSession
+            && !classSplitState.restoredSourceCompatible
+        ) {
+            reason = "Reconnect the analyzed annotation workspace before changing this class.";
+        } else if (isAnnotationMutationBlocked()) {
+            reason = annotationMutationBlockedMessage("Changing this class");
+        }
+        return {
+            disabled: Boolean(reason),
+            reason,
+        };
+    }
+
     function getClassSplitSingleBboxDeletionUiState(point) {
         let reason = "";
         if (!point) {
@@ -63581,6 +63652,12 @@ async function cancelRfDetrTrainingJobRequest() {
             const singleDeletionTitle = singleDeletionState.reason
                 ? ` title="${escapeHtml(singleDeletionState.reason)}"`
                 : "";
+            const relabelState = getClassSplitRelabelUiState(point, {
+                busy: dispositionBusy,
+            });
+            const relabelTitle = relabelState.reason
+                ? ` title="${escapeHtml(relabelState.reason)}"`
+                : "";
             const qwenResult = qwenReview?.result || null;
             const displayedTargetClass = dualOtherClass || suggestedClass;
             const qwenGuarded = qwenResult && typeof qwenResult.guarded_recommendation === "object"
@@ -63620,10 +63697,10 @@ async function cancelRfDetrTrainingJobRequest() {
                 `<button type="button" class="training-button danger training-button-danger" data-action="delete-bbox" data-point-id="${escapeHtml(pointId)}"${singleDeletionState.disabled ? " disabled" : ""}${singleDeletionTitle}>Delete bbox</button>`,
                 `<button type="button" class="training-button secondary" data-action="qwen-review" data-point-id="${escapeHtml(pointId)}"${qwenBusy ? " disabled" : ""}>${qwenBusy ? "VLM reviewing ..." : "Review with VLM"}</button>`,
                 proposedClassAvailable
-                    ? `<div class="class-split-proposed-class"><span>Proposed class: <strong>${escapeHtml(proposedClass)}</strong></span><button type="button" class="training-button secondary" data-action="apply-proposed-class" data-target-class="${escapeHtml(proposedClass)}" data-point-id="${escapeHtml(pointId)}"${dispositionBusy ? " disabled" : ""}>Use proposed class</button></div>`
+                    ? `<div class="class-split-proposed-class"><span>Proposed class: <strong>${escapeHtml(proposedClass)}</strong></span><button type="button" class="training-button secondary" data-action="apply-proposed-class" data-target-class="${escapeHtml(proposedClass)}" data-point-id="${escapeHtml(pointId)}"${relabelState.disabled ? " disabled" : ""}${relabelTitle}>Use proposed class</button></div>`
                     : "",
-                `<select data-action="target-class" data-point-id="${escapeHtml(pointId)}" aria-label="Choose a replacement class for ${escapeHtml(currentClass || "this object")}"${dispositionBusy ? " disabled" : ""}>${options}</select>`,
-                `<button type="button" class="training-button" data-action="reassign-class" data-point-id="${escapeHtml(pointId)}"${dispositionBusy ? " disabled" : ""}>${escapeHtml(preferredTargetClass ? `Switch class to ${preferredTargetClass}` : "Reassign")}</button>`,
+                `<select data-action="target-class" data-point-id="${escapeHtml(pointId)}" aria-label="Choose a replacement class for ${escapeHtml(currentClass || "this object")}"${relabelState.disabled ? " disabled" : ""}${relabelTitle}>${options}</select>`,
+                `<button type="button" class="training-button" data-action="reassign-class" data-point-id="${escapeHtml(pointId)}"${relabelState.disabled ? " disabled" : ""}${relabelTitle}>${escapeHtml(preferredTargetClass ? `Switch class to ${preferredTargetClass}` : "Reassign")}</button>`,
             ].join("");
             const dualReviewActions = [
                 `<div class="class-split-dual-bbox-actions" role="group" aria-label="Resolve overlapping ${escapeHtml(currentClass || "current")} and ${escapeHtml(dualOtherClass || "other")} boxes">`,
@@ -64632,6 +64709,12 @@ async function cancelRfDetrTrainingJobRequest() {
         const singleDeletionTitle = singleDeletionState.reason
             ? ` title="${escapeHtml(singleDeletionState.reason)}"`
             : "";
+        const relabelState = getClassSplitRelabelUiState(point, {
+            busy: pairBusy,
+        });
+        const relabelTitle = relabelState.reason
+            ? ` title="${escapeHtml(relabelState.reason)}"`
+            : "";
         const inspectorActions = dualConflict
             ? [
                 `<button type="button" class="training-button secondary" data-action="jump" data-point-id="${escapeHtml(point.point_id || "")}">See instance</button>`,
@@ -64657,8 +64740,8 @@ async function cancelRfDetrTrainingJobRequest() {
                 `<button type="button" class="training-button secondary" data-action="mark-dual-bbox-resolved" data-point-id="${escapeHtml(point.point_id || "")}">Mark resolved</button>`,
                 `<button type="button" class="training-button danger training-button-danger" data-action="delete-bbox" data-point-id="${escapeHtml(point.point_id || "")}"${singleDeletionState.disabled ? " disabled" : ""}${singleDeletionTitle}>Delete bbox</button>`,
                 `<button type="button" class="training-button secondary" data-action="qwen-review" data-point-id="${escapeHtml(point.point_id || "")}"${isClassSplitQwenReviewActive(getClassSplitQwenReviewForPoint(point.point_id)) ? " disabled" : ""}>Review with VLM</button>`,
-                `<select data-action="class"${pairBusy ? " disabled" : ""}>${classOptions}</select>`,
-                `<button type="button" class="training-button" data-action="change" data-point-id="${escapeHtml(point.point_id || "")}"${pairBusy ? " disabled" : ""}>${escapeHtml(suggestedClass ? `Switch class to ${suggestedClass}` : "Change class")}</button>`,
+                `<select data-action="class"${relabelState.disabled ? " disabled" : ""}${relabelTitle}>${classOptions}</select>`,
+                `<button type="button" class="training-button" data-action="change" data-point-id="${escapeHtml(point.point_id || "")}"${relabelState.disabled ? " disabled" : ""}${relabelTitle}>${escapeHtml(suggestedClass ? `Switch class to ${suggestedClass}` : "Change class")}</button>`,
             ].join("");
         inspector.innerHTML = [
             `<div class="class-split-inspector__crop-shell">`,
@@ -70306,7 +70389,10 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         if (!annotationEditableGuard("Changing class")) {
-            return;
+            throw new Error(
+                annotationMutationBlockedMessage("Changing class")
+                || "Reconnect the analyzed annotation workspace before changing this class."
+            );
         }
         if (
             isAnnotationDatasetModeActive()

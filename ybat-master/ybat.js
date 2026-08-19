@@ -60735,7 +60735,10 @@ async function cancelRfDetrTrainingJobRequest() {
                 const point = event?.points?.[0];
                 const pointId = String(point?.customdata || "");
                 if (pointId) {
-                    selectClassSplitPoint(pointId, { jump: false });
+                    selectClassSplitPoint(pointId, {
+                        jump: false,
+                        replaceBulkSelection: true,
+                    });
                 }
             });
             graphEl.on("plotly_hover", (event) => {
@@ -66844,9 +66847,24 @@ function getClassSplitSingleBboxDeletionUiState(
         renderClassSplitPlot();
     }
 
-    function selectClassSplitPoint(pointId, { jump = false, focusPlot = false, flash = false } = {}) {
+    function selectClassSplitPoint(
+        pointId,
+        {
+            jump = false,
+            focusPlot = false,
+            flash = false,
+            replaceBulkSelection = false,
+        } = {}
+    ) {
         const safeId = String(pointId || "");
         if (!safeId || !classSplitState.pointsById.has(safeId)) {
+            return;
+        }
+        if (replaceBulkSelection && classSplitMutationIsBusy()) {
+            updateClassSplitMultiSelectionActionStatus(
+                "The current Data Quality Explorer mutation owns this selection until it finishes.",
+                "busy"
+            );
             return;
         }
         const point = classSplitState.pointsById.get(safeId);
@@ -66908,7 +66926,21 @@ function getClassSplitSingleBboxDeletionUiState(
             classSplitState.selectedClusterId = "";
             renderClassSplitClusterList();
         }
+        if (replaceBulkSelection) {
+            const selectedIds = classSplitState.lassoPointIds instanceof Set
+                ? classSplitState.lassoPointIds
+                : new Set();
+            if (selectedIds.size !== 1 || !selectedIds.has(safeId)) {
+                classSplitState.lassoPointIds = new Set([safeId]);
+                classSplitState.selectionRevision += 1;
+                classSplitState.multiSelectionSignature = "";
+                cancelClassSplitMultiSelectionLoads();
+            }
+        }
         classSplitState.selectedPointId = safeId;
+        if (replaceBulkSelection) {
+            renderClassSplitBulkPanel();
+        }
         persistDataQualityExplorerSession();
         renderClassSplitInspector();
         const plotRender = renderClassSplitPlot();
@@ -77898,7 +77930,10 @@ function getClassSplitSingleBboxDeletionUiState(
                 if (graphEl && typeof graphEl.emit === "function") {
                     graphEl.emit("plotly_click", { points: [{ customdata: String(pointId || "") }] });
                 } else {
-                    selectClassSplitPoint(pointId, { jump: false });
+                    selectClassSplitPoint(pointId, {
+                        jump: false,
+                        replaceBulkSelection: true,
+                    });
                 }
                 return Promise.resolve(renderClassSplitPlot()).then(getClassSplitPlotTestSnapshot);
             },

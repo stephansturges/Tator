@@ -7246,6 +7246,7 @@ const sam3TrainState = {
             return true;
         }
         const imageKeyCandidates = [
+            imageRecord.annotationSourceKey,
             imageRecord.name,
             imageRecord.meta?.name,
             imageRecord.annotationRelpath
@@ -60465,6 +60466,18 @@ async function cancelRfDetrTrainingJobRequest() {
             if (classSplitGraphHasLivePlot(graphEl)) {
                 await restoreClassSplitGraphViewport(viewport, graphEl);
             }
+            if (!renderSelection && removed && typeof window.requestAnimationFrame === "function") {
+                window.requestAnimationFrame(() => {
+                    if (!classSplitGraphMutationContextIsCurrent(fallbackContext)) {
+                        return;
+                    }
+                    // Aggregated callers commit their final failed/empty selection
+                    // after awaiting this promise. Render on the next frame so the
+                    // panel observes that committed state rather than stale Plotly
+                    // selection data from the graph mutation that just settled.
+                    renderClassSplitMultiSelectionPanel();
+                });
+            }
             return removed;
         });
         return { removed, completion };
@@ -70419,6 +70432,13 @@ function getClassSplitSingleBboxDeletionUiState(
         if (!point) {
             return "";
         }
+        const annotationSourceContext = resolveClassSplitAnnotationSourceContext(point);
+        const annotationFrontendKey = String(
+            annotationSourceContext.frontendImageKey || ""
+        ).trim();
+        if (annotationFrontendKey && images?.[annotationFrontendKey]) {
+            return annotationFrontendKey;
+        }
         const cached = String(point._resolved_frontend_image_key || "").trim();
         if (cached && images?.[cached]) {
             return cached;
@@ -70746,7 +70766,7 @@ function getClassSplitSingleBboxDeletionUiState(
                         entityMatches.push({
                             imageKey,
                             className,
-                            bboxRecord,
+                            bbox: bboxRecord,
                             index,
                             score: 0,
                             identity: "annotation_entity",
@@ -70758,12 +70778,12 @@ function getClassSplitSingleBboxDeletionUiState(
                 point.annotation_entity_id = annotationEntityId;
                 point.annotation_entity_revision = Number(
                     rowEntity?.entity_revision
-                    || entityMatches[0].bboxRecord?._dataset_annotation_entity_revision
+                    || entityMatches[0].bbox?._dataset_annotation_entity_revision
                     || 0
                 );
                 point.annotation_entity_record_revision = String(
                     annotationRow.annotation_entity_record_revision
-                    || entityMatches[0].bboxRecord?._dataset_annotation_entity_record_revision
+                    || entityMatches[0].bbox?._dataset_annotation_entity_record_revision
                     || ""
                 ).trim();
                 return entityMatches[0];
@@ -71010,10 +71030,242 @@ function getClassSplitSingleBboxDeletionUiState(
         return bboxUuid;
     }
 
+    function resolveClassSplitAnnotationSourceContext(
+        point,
+        imageRecord = null,
+        preferredImageKey = ""
+    ) {
+        const split = String(
+            point?.split || imageRecord?.annotationSplit || "train"
+        ).trim() || "train";
+        const candidates = [];
+        const seen = new Set();
+        const addCandidate = (value) => {
+            const candidate = String(value || "").trim().replace(/^\.\//, "");
+            if (!candidate || seen.has(candidate)) {
+                return;
+            }
+            seen.add(candidate);
+            candidates.push(candidate);
+        };
+        const addCandidateFamily = (value) => {
+            const candidate = String(value || "").trim().replace(/^\.\//, "");
+            if (!candidate) {
+                return;
+            }
+            addCandidate(candidate);
+            const colonPrefix = `${split}:`;
+            const slashPrefix = `${split}/`;
+            let relpath = candidate;
+            if (relpath.startsWith(colonPrefix)) {
+                relpath = relpath.slice(colonPrefix.length);
+            } else if (relpath.startsWith(slashPrefix)) {
+                relpath = relpath.slice(slashPrefix.length);
+            }
+            relpath = relpath.replace(/^\/+/, "");
+            if (!relpath) {
+                return;
+            }
+            addCandidate(relpath);
+            addCandidate(`${split}/${relpath}`);
+            addCandidate(annotationImageKey(split, relpath));
+        };
+
+        [
+            preferredImageKey,
+            point?._resolved_frontend_image_key,
+            point?.frontend_image_key,
+            point?.source_record_key,
+            point?.image_relpath,
+            point?.image_name,
+            imageRecord?.annotationSourceKey,
+            imageRecord?.name,
+            imageRecord?.meta?.frontend_image_key,
+            imageRecord?.meta?.name,
+            imageRecord?.annotationRelpath,
+        ].forEach(addCandidateFamily);
+
+        let sourceImageKey = candidates.find((candidate) => (
+            annotationSourceState.imageRowsByKey.has(candidate)
+            || annotationSourceState.rawLabelLinesByKey.has(candidate)
+        )) || "";
+        if (!sourceImageKey) {
+            const wantedRelpath = String(point?.image_relpath || "")
+                .trim()
+                .replace(/^\.\//, "")
+                .replace(new RegExp(`^${split}/`), "");
+            for (const [candidateKey, row] of annotationSourceState.imageRowsByKey.entries()) {
+                const rowSplit = String(row?.split || "train").trim() || "train";
+                const rowRelpath = String(
+                    row?.image_relpath || row?.image_name || row?.frontend_image_key || ""
+                ).trim().replace(/^\.\//, "").replace(new RegExp(`^${rowSplit}/`), "");
+                if (rowSplit === split && wantedRelpath && rowRelpath === wantedRelpath) {
+                    sourceImageKey = candidateKey;
+                    break;
+                }
+            }
+        }
+
+        const sourceRow = sourceImageKey
+            ? (annotationSourceState.imageRowsByKey.get(sourceImageKey) || null)
+            : null;
+        const rawLabelLines = sourceImageKey
+            ? (annotationSourceState.rawLabelLinesByKey.get(sourceImageKey) || [])
+            : [];
+        const frontendCandidates = [
+            sourceRow?.frontend_image_key,
+            point?.frontend_image_key,
+            sourceRow?.image_relpath,
+            point?.image_relpath,
+            sourceImageKey,
+        ].map((value) => String(value || "").trim()).filter(Boolean);
+        const frontendImageKey = frontendCandidates.find((candidate) => images?.[candidate])
+            || frontendCandidates[0]
+            || "";
+        return {
+            split,
+            sourceImageKey,
+            frontendImageKey,
+            sourceRow,
+            rawLabelLines,
+        };
+    }
+
     function recoverClassSplitImageDimensionsFromPoint(point, imageRecord) {
         if (!point || !isDatasetBackedImageRecord(imageRecord)) {
             return false;
         }
+        const originalImageKey = String(
+            point?._resolved_frontend_image_key
+            || point?.frontend_image_key
+            || imageRecord?.name
+            || ""
+        ).trim();
+        const sourceContext = resolveClassSplitAnnotationSourceContext(
+            point,
+            imageRecord,
+            originalImageKey
+        );
+        const preferredImageRecord = sourceContext.frontendImageKey
+            ? (images?.[sourceContext.frontendImageKey] || null)
+            : null;
+        const recordsToUpdate = Array.from(new Set(
+            [imageRecord, preferredImageRecord].filter(Boolean)
+        ));
+        const applyRecoveredDimensions = (width, height) => {
+            const imageWidth = Number(width);
+            const imageHeight = Number(height);
+            if (!(Number.isFinite(imageWidth) && Number.isFinite(imageHeight)
+                && imageWidth > 0 && imageHeight > 0)) {
+                return false;
+            }
+            for (const record of recordsToUpdate) {
+                record.width = imageWidth;
+                record.height = imageHeight;
+                if (sourceContext.sourceImageKey) {
+                    record.annotationSourceKey = sourceContext.sourceImageKey;
+                }
+            }
+            if (sourceContext.frontendImageKey && images?.[sourceContext.frontendImageKey]) {
+                point._resolved_frontend_image_key = sourceContext.frontendImageKey;
+            }
+            return true;
+        };
+
+        const authoritativeWidth = Number(
+            sourceContext.sourceRow?.image_width
+            || sourceContext.sourceRow?.pixel_width
+            || point?.source_image_width
+            || point?.image_width
+            || preferredImageRecord?.width
+        );
+        const authoritativeHeight = Number(
+            sourceContext.sourceRow?.image_height
+            || sourceContext.sourceRow?.pixel_height
+            || point?.source_image_height
+            || point?.image_height
+            || preferredImageRecord?.height
+        );
+        if (applyRecoveredDimensions(authoritativeWidth, authoritativeHeight)) {
+            return true;
+        }
+
+        const bbox = Array.isArray(point?.bbox_xyxy) ? point.bbox_xyxy.map(Number) : [];
+        if (bbox.length === 4 && bbox.every(Number.isFinite)) {
+            const sourceLines = [];
+            const seenLines = new Set();
+            const addSourceLine = (value) => {
+                const line = String(value || "").trim();
+                if (line && !seenLines.has(line)) {
+                    seenLines.add(line);
+                    sourceLines.push(line);
+                }
+            };
+            [
+                point?.label_line,
+                point?.source_label_line,
+                point?._dataset_source_label_line,
+            ].forEach(addSourceLine);
+            const sourceLineIndex = [
+                point?.label_line_index,
+                point?.source_line_index,
+                point?._dataset_source_line_index,
+            ].map(Number).find((value) => Number.isInteger(value) && value >= 0);
+            if (Number.isInteger(sourceLineIndex)) {
+                addSourceLine(sourceContext.rawLabelLines[sourceLineIndex]);
+            }
+            if (sourceLines.length === 0) {
+                sourceContext.rawLabelLines.forEach(addSourceLine);
+            }
+
+            const [targetX1, targetY1, targetX2, targetY2] = bbox;
+            const targetWidth = targetX2 - targetX1;
+            const targetHeight = targetY2 - targetY1;
+            const dimensionPairs = new Map();
+            if (targetWidth > 0 && targetHeight > 0) {
+                for (const sourceLine of sourceLines) {
+                    const cols = sourceLine.split(/\s+/).filter(Boolean);
+                    if (cols.length !== 5) {
+                        continue;
+                    }
+                    const centerX = Number(cols[1]);
+                    const centerY = Number(cols[2]);
+                    const widthNorm = Number(cols[3]);
+                    const heightNorm = Number(cols[4]);
+                    if (!(Number.isFinite(centerX) && Number.isFinite(centerY)
+                        && Number.isFinite(widthNorm) && Number.isFinite(heightNorm)
+                        && widthNorm > 0 && heightNorm > 0)) {
+                        continue;
+                    }
+                    const candidateWidth = Math.round(targetWidth / widthNorm);
+                    const candidateHeight = Math.round(targetHeight / heightNorm);
+                    if (!(candidateWidth > 0 && candidateHeight > 0
+                        && candidateWidth <= 100000 && candidateHeight <= 100000)) {
+                        continue;
+                    }
+                    const reconstructed = [
+                        (centerX - (widthNorm / 2)) * candidateWidth,
+                        (centerY - (heightNorm / 2)) * candidateHeight,
+                        (centerX + (widthNorm / 2)) * candidateWidth,
+                        (centerY + (heightNorm / 2)) * candidateHeight,
+                    ];
+                    if (reconstructed.some((value, index) => Math.abs(value - bbox[index]) > 1.05)) {
+                        continue;
+                    }
+                    dimensionPairs.set(
+                        `${candidateWidth}x${candidateHeight}`,
+                        [candidateWidth, candidateHeight]
+                    );
+                }
+            }
+            if (dimensionPairs.size === 1) {
+                const [[imageWidth, imageHeight]] = dimensionPairs.values();
+                if (applyRecoveredDimensions(imageWidth, imageHeight)) {
+                    return true;
+                }
+            }
+        }
+
         const existingWidth = Number(imageRecord.width);
         const existingHeight = Number(imageRecord.height);
         if (
@@ -71105,14 +71357,19 @@ function getClassSplitSingleBboxDeletionUiState(
         if (!point) {
             throw new Error("No point selected.");
         }
-        const imageKey = getClassSplitPointImageKey(point);
-        const imageRecord = images?.[imageKey];
+        let imageKey = getClassSplitPointImageKey(point);
+        let imageRecord = images?.[imageKey];
         if (!imageRecord) {
             throw new Error(`Image is not loaded in this session: ${imageKey}`);
         }
         if (isDatasetBackedImageRecord(imageRecord) && !annotationSourceState.hydratedKeys.has(imageKey)) {
             if (!recoverClassSplitImageDimensionsFromPoint(point, imageRecord)) {
                 throw new Error(`Could not recover source image dimensions for ${imageKey}`);
+            }
+            const recoveredImageKey = getClassSplitPointImageKey(point);
+            if (recoveredImageKey && images?.[recoveredImageKey]) {
+                imageKey = recoveredImageKey;
+                imageRecord = images[recoveredImageKey];
             }
             const hydrated = hydrateDatasetBboxesForImage(imageRecord);
             if (!hydrated) {
@@ -71909,14 +72166,6 @@ function getClassSplitSingleBboxDeletionUiState(
     }
 
     function applyClassSplitAnnotationEntityRecordReceipt(context, receipt) {
-        const committedRecord = Array.isArray(receipt?.records)
-            ? receipt.records.find((record) => (
-                String(record?.image_key || "") === context.imageKey
-            ))
-            : null;
-        if (!committedRecord || !Array.isArray(committedRecord.label_lines)) {
-            return false;
-        }
         const {
             point,
             pointId,
@@ -71928,6 +72177,22 @@ function getClassSplitSingleBboxDeletionUiState(
             action,
             targetClassName,
         } = context;
+        const receiptImageKey = annotationImageKey(
+            row?.split,
+            row?.image_relpath
+        );
+        const committedRecord = Array.isArray(receipt?.records)
+            ? receipt.records.find((record) => (
+                String(record?.image_key || "") === imageKey
+                || (
+                    receiptImageKey
+                    && String(record?.image_key || "") === receiptImageKey
+                )
+            ))
+            : null;
+        if (!committedRecord || !Array.isArray(committedRecord.label_lines)) {
+            return false;
+        }
         if (
             String(point?.annotation_entity_record_revision || "")
                 === String(committedRecord.record_revision || "")
@@ -71957,7 +72222,7 @@ function getClassSplitSingleBboxDeletionUiState(
         ).trim();
         const oldBucket = bboxes?.[imageKey]?.[match.className];
         if (Array.isArray(oldBucket)) {
-            const currentIndex = oldBucket.indexOf(match.bboxRecord);
+            const currentIndex = oldBucket.indexOf(match.bbox);
             if (currentIndex >= 0) {
                 oldBucket.splice(currentIndex, 1);
             }
@@ -71975,14 +72240,14 @@ function getClassSplitSingleBboxDeletionUiState(
             if (!Array.isArray(bboxes[imageKey][safeTargetClass])) {
                 bboxes[imageKey][safeTargetClass] = [];
             }
-            match.bboxRecord._dataset_annotation_entity_revision = Number(
+            match.bbox._dataset_annotation_entity_revision = Number(
                 updatedEntity?.entity_revision || entityRevision + 1
             );
-            match.bboxRecord._dataset_annotation_entity_id = effectiveEntityId;
-            match.bboxRecord._dataset_annotation_entity_record_revision = String(
+            match.bbox._dataset_annotation_entity_id = effectiveEntityId;
+            match.bbox._dataset_annotation_entity_record_revision = String(
                 committedRecord.record_revision || ""
             );
-            bboxes[imageKey][safeTargetClass].push(match.bboxRecord);
+            bboxes[imageKey][safeTargetClass].push(match.bbox);
         } else {
             point.annotation_deleted = true;
         }
@@ -72062,7 +72327,7 @@ function getClassSplitSingleBboxDeletionUiState(
         );
         const row = annotationSourceState.imageRowsByKey.get(imageKey);
         let applied = false;
-        if (deletedPoint && match?.bboxRecord && row && committedRecord) {
+        if (deletedPoint && match?.bbox && row && committedRecord) {
             applied = applyClassSplitAnnotationEntityRecordReceipt({
                 point: deletedPoint,
                 pointId: deletedPointId,
@@ -72076,7 +72341,7 @@ function getClassSplitSingleBboxDeletionUiState(
             }, receipt);
             const bucket = bboxes?.[imageKey]?.[match.className];
             const staleIndex = Array.isArray(bucket)
-                ? bucket.indexOf(match.bboxRecord)
+                ? bucket.indexOf(match.bbox)
                 : -1;
             if (staleIndex >= 0) {
                 bucket.splice(staleIndex, 1);
@@ -72182,7 +72447,7 @@ function getClassSplitSingleBboxDeletionUiState(
                 match?.imageKey || (point ? getClassSplitPointImageKey(point) : "") || ""
             );
             const row = annotationSourceState.imageRowsByKey.get(imageKey);
-            if (point && match?.bboxRecord && row) {
+            if (point && match?.bbox && row) {
                 applyClassSplitAnnotationEntityRecordReceipt({
                     point,
                     pointId,
@@ -72641,11 +72906,17 @@ function getClassSplitSingleBboxDeletionUiState(
             requestJobId
         );
         const source = getClassSplitAnnotationEntityTransactionSource();
-        const match = findClassSplitBboxMatch(point);
-        if (!requestJobId || !source || !pointId || !match?.bboxRecord) {
+        if (!requestJobId || !source || !pointId) {
             return classSplitRequireAnnotationAuthority();
         }
-        const imageKey = String(match.imageKey || getClassSplitPointImageKey(point) || "");
+        const resolvedMatch = ensureClassSplitPointBboxMatch(point);
+        const match = resolvedMatch.match;
+        if (!match?.bbox) {
+            return classSplitRequireAnnotationAuthority();
+        }
+        const imageKey = String(
+            resolvedMatch.imageKey || getClassSplitPointImageKey(point) || ""
+        );
         const row = annotationSourceState.imageRowsByKey.get(imageKey);
         if (
             !row
@@ -72658,18 +72929,18 @@ function getClassSplitSingleBboxDeletionUiState(
         }
         const annotationEntityId = String(
             point.annotation_entity_id
-            || match.bboxRecord._dataset_annotation_entity_id
+            || match.bbox._dataset_annotation_entity_id
             || ""
         ).trim();
         const entityRevision = Number(
             point.annotation_entity_revision
-            || match.bboxRecord._dataset_annotation_entity_revision
+            || match.bbox._dataset_annotation_entity_revision
             || 0
         );
         const entityRecordRevision = String(
             row.annotation_entity_record_revision
             || point.annotation_entity_record_revision
-            || match.bboxRecord._dataset_annotation_entity_record_revision
+            || match.bbox._dataset_annotation_entity_record_revision
             || ""
         ).trim();
         const mutation = {
@@ -72949,6 +73220,7 @@ function getClassSplitSingleBboxDeletionUiState(
         action,
         targetClassName,
         records,
+        operation = null,
     }) {
         const batchId = `annotation-batch:${generateUUID()}`;
         const items = records.map((record, sequence) => ({
@@ -73016,8 +73288,15 @@ function getClassSplitSingleBboxDeletionUiState(
             });
             if (batch?.chunk_receipt) receipts.push(batch.chunk_receipt);
             const completed = Number(batch?.completed_count || 0);
-            if (classSplitState.multiSelectionOperation) {
-                classSplitState.multiSelectionOperation.completed = completed;
+            if (
+                operation
+                && classSplitState.multiSelectionOperation === operation
+                && classSplitAsyncRequestIsCurrent(
+                    operation.analysisGeneration,
+                    operation.jobId
+                )
+            ) {
+                operation.completed = completed;
                 updateClassSplitMultiSelectionActionStatus(
                     `${completed} of ${Number(batch?.declared_count || items.length)} image records saved; graph updates when complete.`,
                     "info"
@@ -73151,13 +73430,26 @@ function getClassSplitSingleBboxDeletionUiState(
     async function commitClassSplitAnnotationEntityBatchMutationUnlocked(
         points,
         action,
-        targetClassName = ""
+        targetClassName = "",
+        {
+            operation = null,
+            capturedPointIds = [],
+            preflightFailures = new Map(),
+        } = {}
     ) {
         const capturedPoints = Array.isArray(points) ? [...points] : [];
+        const capturedIds = Array.isArray(capturedPointIds) && capturedPointIds.length
+            ? [...capturedPointIds]
+            : capturedPoints
+                .map((point) => String(point?.point_id || "").trim())
+                .filter(Boolean);
+        const preparationFailures = preflightFailures instanceof Map
+            ? new Map(preflightFailures)
+            : new Map();
         const requestJobId = String(classSplitState.currentJobId || "").trim();
         const requestGeneration = classSplitState.analysisGeneration;
         const source = getClassSplitAnnotationEntityTransactionSource();
-        if (!source || capturedPoints.length < 2) {
+        if (!source || capturedPoints.length < 1) {
             return classSplitRequireAnnotationAuthority();
         }
         if (Number(classSplitState.capabilities?.annotation_entity_batch_api_version || 0) < 1) {
@@ -73176,8 +73468,11 @@ function getClassSplitSingleBboxDeletionUiState(
         const contexts = [];
         for (const point of capturedPoints) {
             const pointId = String(point?.point_id || "").trim();
-            const match = findClassSplitBboxMatch(point);
-            const imageKey = String(match?.imageKey || getClassSplitPointImageKey(point) || "");
+            const resolvedMatch = ensureClassSplitPointBboxMatch(point);
+            const match = resolvedMatch.match;
+            const imageKey = String(
+                resolvedMatch.imageKey || getClassSplitPointImageKey(point) || ""
+            );
             const row = annotationSourceState.imageRowsByKey.get(imageKey);
             const liveClass = String(match?.className || "").trim();
             const frozenClass = String(point?.class_name || "").trim();
@@ -73195,23 +73490,23 @@ function getClassSplitSingleBboxDeletionUiState(
             }
             const entityId = String(
                 point?.annotation_entity_id
-                || match?.bboxRecord?._dataset_annotation_entity_id
+                || match?.bbox?._dataset_annotation_entity_id
                 || ""
             ).trim();
             const entityRevision = Number(
                 point?.annotation_entity_revision
-                || match?.bboxRecord?._dataset_annotation_entity_revision
+                || match?.bbox?._dataset_annotation_entity_revision
                 || 0
             );
             const recordRevision = String(
                 row?.annotation_entity_record_revision
                 || point?.annotation_entity_record_revision
-                || match?.bboxRecord?._dataset_annotation_entity_record_revision
+                || match?.bbox?._dataset_annotation_entity_record_revision
                 || ""
             ).trim();
             if (
                 !pointId
-                || !match?.bboxRecord
+                || !match?.bbox
                 || !row
                 || !String(row.annotation_source_identity || "").trim()
                 || !String(row.annotation_record_revision || "").trim()
@@ -73231,6 +73526,21 @@ function getClassSplitSingleBboxDeletionUiState(
                 entityRevision,
                 recordRevision,
             });
+        }
+        if (
+            operation
+            && classSplitState.multiSelectionOperation === operation
+            && classSplitAsyncRequestIsCurrent(requestGeneration, requestJobId)
+        ) {
+            const relabelCount = contexts.length;
+            const confirmCount = unchanged.length;
+            const failureCount = preparationFailures.size;
+            updateClassSplitMultiSelectionActionStatus(
+                action === "relabel"
+                    ? `Saving ${relabelCount} class change${relabelCount === 1 ? "" : "s"} and ${confirmCount} current-label confirmation${confirmCount === 1 ? "" : "s"}${failureCount ? `; ${failureCount} object${failureCount === 1 ? "" : "s"} could not be prepared` : ""}. The graph stays fixed until settlement.`
+                    : `Saving ${contexts.length} bbox deletion${contexts.length === 1 ? "" : "s"}${failureCount ? `; ${failureCount} object${failureCount === 1 ? "" : "s"} could not be prepared` : ""}. The graph stays fixed until settlement.`,
+                "busy"
+            );
         }
         const recordsByImage = new Map();
         contexts.forEach((context) => {
@@ -73280,6 +73590,7 @@ function getClassSplitSingleBboxDeletionUiState(
                 action,
                 targetClassName: targetClass,
                 records: Array.from(recordsByImage.values()),
+                operation,
             });
             receipt = batchResult.receipt;
             successfulContextIds = batchResult.successfulPointIds;
@@ -73295,51 +73606,186 @@ function getClassSplitSingleBboxDeletionUiState(
             }
         }
 
-        const failedUnchanged = [];
-        const confirmedUnchanged = [];
-        for (const point of unchanged) {
-            const pointId = String(point?.point_id || "").trim();
-            try {
-                if (String(point?.class_name || "").trim() === targetClass) {
-                    await saveClassSplitReviewDisposition(
-                        pointId,
-                        "confirm_current",
-                        {
-                            jobId: String(classSplitState.currentJobId || "").trim(),
-                            clientActionId: `batch-confirm:${generateUUID()}`,
-                            deferUi: true,
-                            deferReconciliation: true,
-                        }
-                    );
-                } else {
-                    await changeClassSplitPointClass(
-                        point,
-                        targetClass,
-                        { batchMode: true }
-                    );
-                }
-                confirmedUnchanged.push(point);
-            } catch (error) {
-                failedUnchanged.push(point);
-            }
-        }
-
         const committedRecords = new Map(
             (Array.isArray(receipt?.records) ? receipt.records : []).map((record) => [
                 String(record?.image_key || ""),
                 record,
             ])
         );
+        const committedSnapshotRows = new Map(
+            (
+                Array.isArray(receipt?.annotation_snapshot?.records)
+                    ? receipt.annotation_snapshot.records
+                    : []
+            ).map((record) => [
+                annotationImageKey(record?.split, record?.image_relpath),
+                record,
+            ])
+        );
+
+        // The annotation batch commits before same-class confirmations. Stage
+        // only its authoritative revision metadata here so dependent confirms
+        // on the same image use the new CAS tokens. Graph, selection, and
+        // visible class state still commit once after every request settles.
         contexts.filter((context) => (
             successfulContextIds.has(context.pointId)
         )).forEach((context) => {
-            const committedRecord = committedRecords.get(context.imageKey);
+            const receiptImageKey = annotationImageKey(
+                context.row?.split,
+                context.row?.image_relpath
+            );
+            const committedRecord = committedRecords.get(receiptImageKey)
+                || committedRecords.get(context.imageKey);
+            if (!committedRecord) {
+                return;
+            }
+            if (Array.isArray(committedRecord.annotation_entities)) {
+                context.row.annotation_entities = committedRecord.annotation_entities.map(
+                    (entity) => ({ ...entity })
+                );
+            }
+            context.row.annotation_entity_record_revision = String(
+                committedRecord.record_revision
+                || context.row.annotation_entity_record_revision
+                || ""
+            );
+            context.row.annotation_source_identity = String(
+                committedRecord.annotation_source_identity
+                || context.row.annotation_source_identity
+                || ""
+            );
+            const snapshotRow = committedSnapshotRows.get(receiptImageKey);
+            context.row.annotation_record_revision = String(
+                snapshotRow?.annotation_record_revision
+                || committedRecord.annotation_record_revision
+                || context.row.annotation_record_revision
+                || ""
+            );
+            annotationSourceState.imageRowsByKey.set(
+                context.imageKey,
+                context.row
+            );
+        });
+
+        const failedUnchanged = new Map();
+        const unchangedReceipts = new Map();
+        let unchangedCursor = 0;
+        let unchangedSettled = 0;
+        const confirmUnchangedWorker = async () => {
+            while (unchangedCursor < unchanged.length) {
+                const point = unchanged[unchangedCursor];
+                unchangedCursor += 1;
+                if (!classSplitAsyncRequestIsCurrent(requestGeneration, requestJobId)) {
+                    return;
+                }
+                const pointId = String(point?.point_id || "").trim();
+                try {
+                    const saved = await saveClassSplitReviewDisposition(
+                        pointId,
+                        "confirm_current",
+                        {
+                            jobId: requestJobId,
+                            clientActionId: `batch-confirm:${generateUUID()}`,
+                            deferUi: true,
+                            deferReconciliation: true,
+                        }
+                    );
+                    if (!saved) {
+                        const error = new Error(
+                            "This review choice is already being saved."
+                        );
+                        setClassSplitReviewDispositionCommitState(
+                            error,
+                            "not_sent"
+                        );
+                        throw error;
+                    }
+                    unchangedReceipts.set(pointId, saved);
+                } catch (error) {
+                    failedUnchanged.set(
+                        pointId,
+                        String(error?.message || error)
+                    );
+                } finally {
+                    unchangedSettled += 1;
+                    if (
+                        operation
+                        && classSplitState.multiSelectionOperation === operation
+                        && classSplitAsyncRequestIsCurrent(
+                            requestGeneration,
+                            requestJobId
+                        )
+                    ) {
+                        operation.completed = Math.min(
+                            capturedIds.length,
+                            preparationFailures.size
+                                + contexts.length
+                                + unchangedSettled
+                        );
+                        updateClassSplitMultiSelectionActionStatus(
+                            `${operation.completed} of ${capturedIds.length} selected objects settled; graph updates when complete.`,
+                            "info"
+                        );
+                    }
+                }
+            }
+        };
+        await Promise.all(Array.from(
+            {
+                length: Math.min(
+                    CLASS_SPLIT_MULTI_SELECTION_ACTION_CONCURRENCY,
+                    unchanged.length
+                ),
+            },
+            () => confirmUnchangedWorker()
+        ));
+        if (!classSplitAsyncRequestIsCurrent(requestGeneration, requestJobId)) {
+            return {
+                status: "stale",
+                receipt,
+                saved: successfulContextIds.size + unchangedReceipts.size,
+                failed: preparationFailures.size
+                    + failedContextIds.size
+                    + failedUnchanged.size,
+                _ui_stale: true,
+            };
+        }
+        const capturedIndexById = new Map(
+            capturedIds.map((pointId, index) => [pointId, index])
+        );
+        const confirmedUnchanged = unchanged.filter((point) => {
+            const pointId = String(point?.point_id || "").trim();
+            const saved = unchangedReceipts.get(pointId);
+            if (!saved) {
+                return false;
+            }
+            applyClassSplitSavedReviewDispositionLocally(
+                pointId,
+                "confirm_current",
+                saved,
+                {
+                    batchToken: operation?.token,
+                    batchIndex: capturedIndexById.get(pointId) || 0,
+                }
+            );
+            return true;
+        });
+
+        contexts.filter((context) => (
+            successfulContextIds.has(context.pointId)
+        )).forEach((context) => {
+            const receiptImageKey = annotationImageKey(
+                context.row?.split,
+                context.row?.image_relpath
+            );
+            const committedRecord = committedRecords.get(receiptImageKey)
+                || committedRecords.get(context.imageKey);
             if (!committedRecord) {
                 return;
             }
             const oldBucket = bboxes?.[context.imageKey]?.[context.match.className];
             if (Array.isArray(oldBucket)) {
-                const index = oldBucket.indexOf(context.match.bboxRecord);
+                const index = oldBucket.indexOf(context.match.bbox);
                 if (index >= 0) {
                     oldBucket.splice(index, 1);
                 }
@@ -73367,14 +73813,14 @@ function getClassSplitSingleBboxDeletionUiState(
                     ))?.annotation_entity_id
                     || ""
                 );
-                context.match.bboxRecord._dataset_annotation_entity_id = effectiveEntityId;
-                context.match.bboxRecord._dataset_annotation_entity_revision = Number(
+                context.match.bbox._dataset_annotation_entity_id = effectiveEntityId;
+                context.match.bbox._dataset_annotation_entity_revision = Number(
                     updatedEntity?.entity_revision || context.entityRevision + 1
                 );
-                context.match.bboxRecord._dataset_annotation_entity_record_revision = String(
+                context.match.bbox._dataset_annotation_entity_record_revision = String(
                     committedRecord.record_revision || ""
                 );
-                bboxes[context.imageKey][targetClass].push(context.match.bboxRecord);
+                bboxes[context.imageKey][targetClass].push(context.match.bbox);
                 updateClassSplitSummaryClassCounts(context.point.class_name, targetClass);
                 context.point.class_name = targetClass;
             }
@@ -73385,12 +73831,7 @@ function getClassSplitSingleBboxDeletionUiState(
             context.row.annotation_entity_record_revision = String(
                 committedRecord.record_revision || ""
             );
-            const snapshotRow = Array.isArray(receipt?.annotation_snapshot?.records)
-                ? receipt.annotation_snapshot.records.find((record) => (
-                    annotationImageKey(record?.split, record?.image_relpath)
-                    === context.imageKey
-                ))
-                : null;
+            const snapshotRow = committedSnapshotRows.get(receiptImageKey);
             if (snapshotRow) {
                 context.row.annotation_record_revision = String(
                     snapshotRow.annotation_record_revision
@@ -73421,29 +73862,71 @@ function getClassSplitSingleBboxDeletionUiState(
         if (Number.isFinite(sessionRevision)) {
             annotationSourceState.sessionRevision = sessionRevision;
         }
-        const successfulIds = [
+        const successfulIdSet = new Set([
             ...contexts
                 .filter((context) => successfulContextIds.has(context.pointId))
                 .map((context) => context.pointId),
             ...confirmedUnchanged.map((point) => String(point?.point_id || "").trim()),
-        ].filter(Boolean);
+        ].filter(Boolean));
+        const successfulIds = capturedIds.filter((pointId) => (
+            successfulIdSet.has(pointId)
+        ));
+        const unresolvedIds = capturedIds.filter((pointId) => (
+            !successfulIdSet.has(pointId)
+        ));
+        if (operation) {
+            successfulIds.forEach((pointId) => operation.successes.set(pointId, true));
+            preparationFailures.forEach((message, pointId) => {
+                operation.failures.set(pointId, message);
+            });
+            failedContextIds.forEach((pointId) => {
+                operation.failures.set(
+                    pointId,
+                    "The authoritative annotation batch rejected this object."
+                );
+            });
+            failedUnchanged.forEach((message, pointId) => {
+                operation.failures.set(pointId, message);
+            });
+            operation.completed = capturedIds.length;
+        }
         successfulIds.forEach((pointId) => classSplitState.dismissedWrongIds.add(pointId));
-        await removeClassSplitPointsFromActiveReviewGraph(successfulIds, {
-            force: true,
-            preserveViewport: true,
-        });
-        const failedCount = failedUnchanged.length + failedContextIds.size;
+        const graphMutation = successfulIds.length
+            ? removeClassSplitPointsFromActiveReviewGraph(successfulIds, {
+                force: true,
+                preserveViewport: true,
+                updateSelection: false,
+                renderSelection: false,
+            })
+            : { removed: false, completion: Promise.resolve() };
+        await graphMutation.completion;
+        classSplitState.lassoPointIds = new Set(unresolvedIds);
+        classSplitState.selectionRevision += 1;
+        classSplitState.selectedPointId = unresolvedIds[0] || "";
+        classSplitState.multiSelectionSignature = "";
+        const failedCount = preparationFailures.size
+            + failedUnchanged.size
+            + failedContextIds.size;
         if (failedCount) {
+            const firstFailure = [
+                ...preparationFailures.values(),
+                ...failedUnchanged.values(),
+            ].map((value) => String(value || "").trim()).find(Boolean) || "";
+            renderClassSplitBulkPanel();
+            renderClassSplitInspector();
             updateClassSplitMultiSelectionActionStatus(
                 String(successfulIds.length) + " saved; " + String(failedCount)
                     + " object" + (failedCount === 1 ? "" : "s")
-                    + " failed and remain selected.",
+                    + " failed and remain selected."
+                    + (firstFailure ? ` ${firstFailure}` : ""),
                 "warn"
             );
         } else {
             clearClassSplitBulkSelection({ render: true });
         }
         persistDataQualityExplorerSession();
+        renderClassSplitReviewedList();
+        renderClassSplitPendingReviewRecovery();
         renderClassSplitSessionPersistenceStatus();
         return {
             status: failedCount ? "partial" : "complete",
@@ -73472,14 +73955,86 @@ function getClassSplitSingleBboxDeletionUiState(
             failures: new Map(),
         };
         classSplitState.multiSelectionOperation = operation;
+        const actionLabel = action === "delete"
+            ? "Deleting selected bboxes"
+            : `Changing selected objects to ${String(targetClassName || "").trim()}`;
+        updateClassSplitMultiSelectionActionStatus(
+            `${actionLabel}: preparing ${capturedIds.length} immutable selection record${capturedIds.length === 1 ? "" : "s"}; graph updates only after durable settlement.`,
+            "busy"
+        );
         refreshClassSplitControls();
         updateClassSplitMultiSelectionControls();
         try {
-            return await commitClassSplitAnnotationEntityBatchMutationUnlocked(
-                points,
-                action,
-                targetClassName
+            const detailFailures = await hydrateClassSplitBoundedPointDetails(
+                capturedIds
             );
+            if (!classSplitAsyncRequestIsCurrent(operation.analysisGeneration, operation.jobId)) {
+                return {
+                    status: "stale",
+                    receipt: mergeClassSplitAnnotationBatchReceipts([]),
+                    saved: 0,
+                    failed: 0,
+                    _ui_stale: true,
+                };
+            }
+            const preflightFailures = new Map(detailFailures);
+            const preparedPoints = capturedIds.map((pointId) => {
+                if (preflightFailures.has(pointId)) {
+                    return null;
+                }
+                const point = getClassSplitPointById(pointId);
+                if (!point) {
+                    preflightFailures.set(
+                        pointId,
+                        "The selected object is no longer available."
+                    );
+                    return null;
+                }
+                return point;
+            }).filter(Boolean);
+            if (!preparedPoints.length) {
+                const firstFailure = Array.from(preflightFailures.values())
+                    .map((value) => String(value || "").trim())
+                    .find(Boolean) || "The selected annotation identities could not be prepared.";
+                preflightFailures.forEach((message, pointId) => {
+                    operation.failures.set(pointId, message);
+                });
+                operation.completed = capturedIds.length;
+                updateClassSplitMultiSelectionActionStatus(
+                    `No selected objects were changed. ${firstFailure}`,
+                    "error"
+                );
+                return {
+                    status: "partial",
+                    receipt: mergeClassSplitAnnotationBatchReceipts([]),
+                    saved: 0,
+                    failed: capturedIds.length,
+                };
+            }
+            return await commitClassSplitAnnotationEntityBatchMutationUnlocked(
+                preparedPoints,
+                action,
+                targetClassName,
+                {
+                    operation,
+                    capturedPointIds: capturedIds,
+                    preflightFailures,
+                }
+            );
+        } catch (error) {
+            if (
+                classSplitState.multiSelectionOperation === operation
+                && classSplitAsyncRequestIsCurrent(
+                    operation.analysisGeneration,
+                    operation.jobId
+                )
+            ) {
+                updateClassSplitMultiSelectionActionStatus(
+                    `${actionLabel} failed: ${error?.message || error}`,
+                    "error"
+                );
+            }
+            throw error;
         } finally {
             if (classSplitState.multiSelectionOperation === operation) {
                 classSplitState.multiSelectionOperation = null;
@@ -80329,6 +80884,12 @@ function getClassSplitSingleBboxDeletionUiState(
                 const strokeColor = colorTokens.stroke;
                 const fillColor = colorTokens.fill;
                 const isCurrent = currentBbox && currentBbox.bbox === bbox;
+                const pointerTransformPreview = isCurrent
+                    ? currentBbox.previewGeometry || null
+                    : null;
+                const renderedBbox = pointerTransformPreview
+                    ? { ...bbox, ...pointerTransformPreview }
+                    : bbox;
                 const isSelected = !!bbox.uuid && selectedBboxes.has(bbox.uuid);
                 const isNegativeSelected = !!bbox.uuid && negativeBboxes.has(bbox.uuid);
                 const lineWidth = isCurrent ? Math.max(1.5, 1.5 * scale) : 1;
@@ -80339,16 +80900,16 @@ function getClassSplitSingleBboxDeletionUiState(
 
                 context.font = context.font.replace(/\d+px/, `${Math.max(8, zoom(fontBaseSize))}px`);
                 context.fillStyle = strokeColor;
-                context.fillText(className, zoomX(bbox.x), zoomY(bbox.y - 2));
+                context.fillText(className, zoomX(renderedBbox.x), zoomY(renderedBbox.y - 2));
 
                 context.setLineDash([]);
                 context.lineWidth = lineWidth;
                 context.strokeStyle = strokeColor;
                 context.fillStyle = fillColor;
-                const isPolygon = bbox.type === "polygon" || (Array.isArray(bbox.points) && bbox.points.length >= 3);
+                const isPolygon = renderedBbox.type === "polygon" || (Array.isArray(renderedBbox.points) && renderedBbox.points.length >= 3);
                 if (isPolygon) {
                     context.beginPath();
-                    bbox.points.forEach((pt, idx) => {
+                    renderedBbox.points.forEach((pt, idx) => {
                         const x = zoomX(pt.x);
                         const y = zoomY(pt.y);
                         if (idx === 0) {
@@ -80369,7 +80930,7 @@ function getClassSplitSingleBboxDeletionUiState(
                         context.restore();
                     }
                     if (isCurrent) {
-                        bbox.points.forEach((pt, idx) => {
+                        renderedBbox.points.forEach((pt, idx) => {
                             const x = pt.x;
                             const y = pt.y;
                             drawCornerHandle(context, x, y, strokeColor);
@@ -80385,7 +80946,7 @@ function getClassSplitSingleBboxDeletionUiState(
                         context.setLineDash(highlightDash);
                         context.lineDashOffset = (pulseNow / 20) % (10 * scale);
                         context.beginPath();
-                        bbox.points.forEach((pt, idx) => {
+                        renderedBbox.points.forEach((pt, idx) => {
                             const x = zoomX(pt.x);
                             const y = zoomY(pt.y);
                             if (idx === 0) {
@@ -80400,20 +80961,26 @@ function getClassSplitSingleBboxDeletionUiState(
                     }
                 } else {
                     context.fillRect(
-                        zoomX(bbox.x),
-                        zoomY(bbox.y),
-                        zoom(bbox.width),
-                        zoom(bbox.height)
+                        zoomX(renderedBbox.x),
+                        zoomY(renderedBbox.y),
+                        zoom(renderedBbox.width),
+                        zoom(renderedBbox.height)
                     );
                     context.strokeRect(
-                        zoomX(bbox.x),
-                        zoomY(bbox.y),
-                        zoom(bbox.width),
-                        zoom(bbox.height)
+                        zoomX(renderedBbox.x),
+                        zoomY(renderedBbox.y),
+                        zoom(renderedBbox.width),
+                        zoom(renderedBbox.height)
                     );
-                    drawX(context, bbox.x, bbox.y, bbox.width, bbox.height);
+                    drawX(
+                        context,
+                        renderedBbox.x,
+                        renderedBbox.y,
+                        renderedBbox.width,
+                        renderedBbox.height
+                    );
                     if (isCurrent && currentBbox.resizing) {
-                        const handlePoint = getCornerCoordinates(bbox, currentBbox.resizing);
+                        const handlePoint = getCornerCoordinates(renderedBbox, currentBbox.resizing);
                         if (handlePoint) {
                             drawCornerHandle(context, handlePoint.x, handlePoint.y, strokeColor);
                         }
@@ -80424,10 +80991,10 @@ function getClassSplitSingleBboxDeletionUiState(
                         context.lineWidth = Math.max(2, 2 * scale);
                         context.setLineDash([4 * scale, 4 * scale]);
                         context.strokeRect(
-                            zoomX(bbox.x) - 2,
-                            zoomY(bbox.y) - 2,
-                            zoom(bbox.width) + 4,
-                            zoom(bbox.height) + 4
+                            zoomX(renderedBbox.x) - 2,
+                            zoomY(renderedBbox.y) - 2,
+                            zoom(renderedBbox.width) + 4,
+                            zoom(renderedBbox.height) + 4
                         );
                         context.restore();
                     }
@@ -80438,14 +81005,14 @@ function getClassSplitSingleBboxDeletionUiState(
                         context.setLineDash(highlightDash);
                         context.lineDashOffset = (pulseNow / 20) % (10 * scale);
                         context.strokeRect(
-                            zoomX(bbox.x),
-                            zoomY(bbox.y),
-                            zoom(bbox.width),
-                            zoom(bbox.height)
+                            zoomX(renderedBbox.x),
+                            zoomY(renderedBbox.y),
+                            zoom(renderedBbox.width),
+                            zoom(renderedBbox.height)
                         );
                         context.restore();
                     }
-                    if (bbox.marked === true) {
+                    if (bbox.marked === true && !pointerTransformPreview) {
                         setBboxCoordinates(bbox.x, bbox.y, bbox.width, bbox.height);
                     }
                 }
@@ -80822,7 +81389,7 @@ function getClassSplitSingleBboxDeletionUiState(
         if (shouldSelect) {
             setCurrentBboxFromCornerHit(pending, { resizing: null });
             if (currentBbox) {
-                updateBboxAfterTransform();
+                updateBboxAfterTransform({ commitPointerTransform: true });
             }
         }
         mouse.buttonR = false;
@@ -81158,13 +81725,13 @@ function getClassSplitSingleBboxDeletionUiState(
                             }
                         }
                         else {
-                            updateBboxAfterTransform();
+                            updateBboxAfterTransform({ commitPointerTransform: true });
                         }
                     }
                     else {
                         setBboxMarkedState();
                         if (currentBbox !== null) {
-                            updateBboxAfterTransform();
+                            updateBboxAfterTransform({ commitPointerTransform: true });
                         }
                     }
                 }
@@ -81418,7 +81985,20 @@ function getClassSplitSingleBboxDeletionUiState(
         pendingApiBboxes[bbox.uuid] = bbox;
     };
 
-    const updateBboxAfterTransform = () => {
+    const updateBboxAfterTransform = ({ commitPointerTransform = false } = {}) => {
+        let pointerGeometryChanged = false;
+        if (currentBbox?.previewGeometry) {
+            const preview = currentBbox.previewGeometry;
+            const bbox = currentBbox.bbox;
+            pointerGeometryChanged = ["x", "y", "width", "height"].some(
+                (key) => Number(preview[key]) !== Number(bbox[key])
+            );
+            bbox.x = preview.x;
+            bbox.y = preview.y;
+            bbox.width = preview.width;
+            bbox.height = preview.height;
+            currentBbox.previewGeometry = null;
+        }
         if (currentBbox && currentBbox.resizing !== null) {
             if (currentBbox.bbox.width < 0) {
                 currentBbox.bbox.width = Math.abs(currentBbox.bbox.width);
@@ -81437,11 +82017,19 @@ function getClassSplitSingleBboxDeletionUiState(
             currentBbox.originalWidth = currentBbox.bbox.width;
             currentBbox.originalHeight = currentBbox.bbox.height;
             currentBbox.moving = false;
-            if (currentImage?.name) {
+            setBboxCoordinates(
+                currentBbox.bbox.x,
+                currentBbox.bbox.y,
+                currentBbox.bbox.width,
+                currentBbox.bbox.height
+            );
+            if (currentImage?.name && (!commitPointerTransform || pointerGeometryChanged)) {
                 captureAnnotationDirtyStateForImage(currentImage.name);
             }
         }
-        scheduleAnnotationDiversityMetricRefresh();
+        if (!commitPointerTransform || pointerGeometryChanged) {
+            scheduleAnnotationDiversityMetricRefresh();
+        }
     };
 
     function findBboxAtPoint(x, y) {
@@ -81931,8 +82519,12 @@ function getClassSplitSingleBboxDeletionUiState(
                 currentBbox.moving = true;
             }
             if (currentBbox.moving && !currentBbox.resizing) {
-                bx.x = currentBbox.originalX + (mouse.realX - mouse.startRealX);
-                bx.y = currentBbox.originalY + (mouse.realY - mouse.startRealY);
+                currentBbox.previewGeometry = {
+                    x: currentBbox.originalX + (mouse.realX - mouse.startRealX),
+                    y: currentBbox.originalY + (mouse.realY - mouse.startRealY),
+                    width: currentBbox.originalWidth,
+                    height: currentBbox.originalHeight,
+                };
             }
         }
     };
@@ -81960,26 +82552,33 @@ function getClassSplitSingleBboxDeletionUiState(
                 }
             }
 
-            if (currentBbox.resizing === "topLeft") {
-                bx.x = mouse.realX;
-                bx.y = mouse.realY;
-                bx.width = currentBbox.originalX + currentBbox.originalWidth - mouse.realX;
-                bx.height = currentBbox.originalY + currentBbox.originalHeight - mouse.realY;
-            } else if (currentBbox.resizing === "bottomLeft") {
-                bx.x = mouse.realX;
-                bx.y = mouse.realY - (mouse.realY - currentBbox.originalY);
-                bx.width = currentBbox.originalX + currentBbox.originalWidth - mouse.realX;
-                bx.height = mouse.realY - currentBbox.originalY;
-            } else if (currentBbox.resizing === "topRight") {
-                bx.x = mouse.realX - (mouse.realX - currentBbox.originalX);
-                bx.y = mouse.realY;
-                bx.width = mouse.realX - currentBbox.originalX;
-                bx.height = currentBbox.originalY + currentBbox.originalHeight - mouse.realY;
-            } else if (currentBbox.resizing === "bottomRight") {
-                bx.x = mouse.realX - (mouse.realX - currentBbox.originalX);
-                bx.y = mouse.realY - (mouse.realY - currentBbox.originalY);
-                bx.width = mouse.realX - currentBbox.originalX;
-                bx.height = mouse.realY - currentBbox.originalY;
+            if (currentBbox.resizing) {
+                const right = currentBbox.originalX + currentBbox.originalWidth;
+                const bottom = currentBbox.originalY + currentBbox.originalHeight;
+                const preview = {
+                    x: currentBbox.originalX,
+                    y: currentBbox.originalY,
+                    width: currentBbox.originalWidth,
+                    height: currentBbox.originalHeight,
+                };
+                if (currentBbox.resizing === "topLeft") {
+                    preview.x = mouse.realX;
+                    preview.y = mouse.realY;
+                    preview.width = right - mouse.realX;
+                    preview.height = bottom - mouse.realY;
+                } else if (currentBbox.resizing === "bottomLeft") {
+                    preview.x = mouse.realX;
+                    preview.width = right - mouse.realX;
+                    preview.height = mouse.realY - currentBbox.originalY;
+                } else if (currentBbox.resizing === "topRight") {
+                    preview.y = mouse.realY;
+                    preview.width = mouse.realX - currentBbox.originalX;
+                    preview.height = bottom - mouse.realY;
+                } else if (currentBbox.resizing === "bottomRight") {
+                    preview.width = mouse.realX - currentBbox.originalX;
+                    preview.height = mouse.realY - currentBbox.originalY;
+                }
+                currentBbox.previewGeometry = preview;
             }
         }
     };

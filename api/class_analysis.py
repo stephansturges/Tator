@@ -41,6 +41,26 @@ def build_class_analysis_router(
     commit_dual_bbox_annotation_transaction_fn: Optional[
         Callable[[str, str, dict], Any]
     ] = None,
+    commit_annotation_transaction_fn: Optional[Callable[[str, dict], Any]] = None,
+    get_annotation_transaction_fn: Optional[Callable[[str, str], Any]] = None,
+    get_annotation_recovery_fn: Optional[Callable[[str], Any]] = None,
+    recover_annotation_session_fn: Optional[Callable[[str, dict], Any]] = None,
+    create_annotation_batch_fn: Optional[Callable[[str, dict], Any]] = None,
+    append_annotation_batch_items_fn: Optional[
+        Callable[[str, str, dict], Any]
+    ] = None,
+    start_annotation_batch_fn: Optional[Callable[[str, str], Any]] = None,
+    process_annotation_batch_fn: Optional[
+        Callable[[str, str, dict], Any]
+    ] = None,
+    get_annotation_batch_fn: Optional[Callable[[str, str], Any]] = None,
+    get_annotation_batch_results_fn: Optional[
+        Callable[[str, str, int, int], Any]
+    ] = None,
+    retry_annotation_batch_fn: Optional[
+        Callable[[str, str, dict], Any]
+    ] = None,
+    cancel_annotation_batch_fn: Optional[Callable[[str, str], Any]] = None,
     delete_review_history_fn: Optional[Callable[[str, dict], Any]] = None,
     cache_status_fn: Optional[Callable[[], Any]] = None,
     purge_cache_fn: Optional[Callable[[dict], Any]] = None,
@@ -230,6 +250,145 @@ def build_class_analysis_router(
                 point_id,
                 payload or {},
             )
+
+    if commit_annotation_transaction_fn is not None:
+
+        @router.post("/class_analysis/jobs/{job_id}/annotation_transactions")
+        def commit_annotation_transaction(
+            job_id: str,
+            request: Request,
+            payload: dict = Body(default_factory=dict),  # noqa: B008
+        ):
+            clean_payload = dict(payload or {})
+            captures_training = any(
+                action.get("capture_training_data") is True
+                for record in (clean_payload.get("records") or [])
+                if isinstance(record, dict)
+                for action in (record.get("actions") or [])
+                if isinstance(action, dict)
+            )
+            if captures_training:
+                clean_payload["_training_authorization"] = (
+                    authorize_training_capture_request_fn(request)
+                )
+            else:
+                clean_payload.pop("_training_authorization", None)
+            return commit_annotation_transaction_fn(job_id, clean_payload)
+
+    if get_annotation_transaction_fn is not None:
+
+        @router.get(
+            "/class_analysis/jobs/{job_id}/annotation_transactions/{operation_id}"
+        )
+        def get_annotation_transaction(job_id: str, operation_id: str):
+            return get_annotation_transaction_fn(job_id, operation_id)
+
+    if get_annotation_recovery_fn is not None:
+
+        @router.get("/class_analysis/jobs/{job_id}/annotation_session/recovery")
+        def get_annotation_recovery(job_id: str):
+            return get_annotation_recovery_fn(job_id)
+
+    if recover_annotation_session_fn is not None:
+
+        @router.post("/class_analysis/jobs/{job_id}/annotation_session/recover")
+        def recover_annotation_session(
+            job_id: str,
+            payload: dict = Body(default_factory=dict),  # noqa: B008
+        ):
+            return recover_annotation_session_fn(job_id, payload or {})
+
+    if create_annotation_batch_fn is not None:
+
+        @router.post("/class_analysis/jobs/{job_id}/annotation_batches")
+        def create_annotation_batch(
+            job_id: str,
+            payload: dict = Body(default_factory=dict),  # noqa: B008
+        ):
+            return create_annotation_batch_fn(job_id, payload or {})
+
+    if append_annotation_batch_items_fn is not None:
+
+        @router.post(
+            "/class_analysis/jobs/{job_id}/annotation_batches/{batch_id}/items"
+        )
+        def append_annotation_batch_items(
+            job_id: str,
+            batch_id: str,
+            payload: dict = Body(default_factory=dict),  # noqa: B008
+        ):
+            return append_annotation_batch_items_fn(job_id, batch_id, payload or {})
+
+    if start_annotation_batch_fn is not None:
+
+        @router.post(
+            "/class_analysis/jobs/{job_id}/annotation_batches/{batch_id}/start"
+        )
+        def start_annotation_batch(job_id: str, batch_id: str):
+            return start_annotation_batch_fn(job_id, batch_id)
+
+    if process_annotation_batch_fn is not None:
+
+        @router.post(
+            "/class_analysis/jobs/{job_id}/annotation_batches/{batch_id}/process"
+        )
+        def process_annotation_batch(
+            job_id: str,
+            batch_id: str,
+            request: Request,
+            payload: dict = Body(default_factory=dict),  # noqa: B008
+        ):
+            clean_payload = dict(payload or {})
+            if clean_payload.get("capture_training_data") is True:
+                clean_payload["_training_authorization"] = (
+                    authorize_training_capture_request_fn(request)
+                )
+            else:
+                clean_payload.pop("_training_authorization", None)
+            return process_annotation_batch_fn(job_id, batch_id, clean_payload)
+
+    if get_annotation_batch_fn is not None:
+
+        @router.get(
+            "/class_analysis/jobs/{job_id}/annotation_batches/{batch_id}"
+        )
+        def get_annotation_batch(job_id: str, batch_id: str):
+            return get_annotation_batch_fn(job_id, batch_id)
+
+    if get_annotation_batch_results_fn is not None:
+
+        @router.get(
+            "/class_analysis/jobs/{job_id}/annotation_batches/{batch_id}/results"
+        )
+        def get_annotation_batch_results(
+            job_id: str,
+            batch_id: str,
+            after_sequence: int = -1,
+            limit: int = 500,
+        ):
+            return get_annotation_batch_results_fn(
+                job_id, batch_id, after_sequence, limit
+            )
+
+    if retry_annotation_batch_fn is not None:
+
+        @router.post(
+            "/class_analysis/jobs/{job_id}/annotation_batches/{batch_id}/retry"
+        )
+        def retry_annotation_batch(
+            job_id: str,
+            batch_id: str,
+            payload: dict = Body(default_factory=dict),  # noqa: B008
+        ):
+            return retry_annotation_batch_fn(job_id, batch_id, payload or {})
+
+    if cancel_annotation_batch_fn is not None:
+
+        @router.post(
+            "/class_analysis/jobs/{job_id}/annotation_batches/{batch_id}/cancel"
+        )
+        def cancel_annotation_batch(job_id: str, batch_id: str):
+            return cancel_annotation_batch_fn(job_id, batch_id)
 
     @router.post("/class_analysis/jobs/{job_id}/points/{point_id}/review_disposition")
     def record_class_analysis_review_disposition(

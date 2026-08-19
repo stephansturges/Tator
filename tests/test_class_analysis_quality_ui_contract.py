@@ -41,7 +41,8 @@ class ClassAnalysisQualityUiContractTests(unittest.TestCase):
         self.assertIn('value="thorough_quality_v1" selected', HTML)
         self.assertIn('value="precise_compact_v1"', HTML)
         self.assertIn('value="fast_map_v1"', HTML)
-        self.assertIn("Deep evidence", HTML)
+        self.assertIn("Spatial evidence refinement", HTML)
+        self.assertIn("does not ask a VLM to judge labels", HTML)
         self.assertIn('id="classSplitRefineOutliers"', HTML)
         self.assertIn("classSplitRefinementDefaultForPreset", JS)
 
@@ -79,6 +80,12 @@ class ClassAnalysisQualityUiContractTests(unittest.TestCase):
 
     def test_startup_operation_can_build_its_own_request_only(self):
         mutation_busy = _extract_js_function(JS, "classSplitMutationIsBusy")
+        recovery_reason = _extract_js_function(
+            JS, "classSplitRecoveryMutationBlockReason"
+        )
+        write_blocked = _extract_js_function(
+            JS, "classSplitWriteMutationIsBlocked"
+        )
         build_request = _extract_js_function(JS, "buildClassSplitRequest")
         start_analysis = _extract_js_function(JS, "startClassSplitAnalysis")
         self.assertIn("ignoreStartupOperationToken: startupOperationToken", build_request)
@@ -94,28 +101,125 @@ class ClassAnalysisQualityUiContractTests(unittest.TestCase):
             "function classSplitReviewHistoryDeleteOperation() { return null; }",
             "function classSplitPendingReviewCommitCountForJob() { return 0; }",
             mutation_busy,
+            recovery_reason,
+            write_blocked,
             "assert.strictEqual(classSplitMutationIsBusy({ignoreStartupOperationToken: 17}), false);",
             "assert.strictEqual(classSplitMutationIsBusy({ignoreStartupOperationToken: 18}), true);",
             "assert.strictEqual(classSplitMutationIsBusy(), true);",
             "classSplitState.startupOperation = null;",
             "assert.strictEqual(classSplitMutationIsBusy(), false);",
+            "classSplitState.currentJobId = 'job-1';",
+            "classSplitState.annotationRecovery = {job_id: 'job-1', status: 'rerun_required', rerun_required: true};",
+            "assert.match(classSplitRecoveryMutationBlockReason(), /read-only/);",
+            "assert.strictEqual(classSplitWriteMutationIsBlocked(), true);",
+            "assert.strictEqual(classSplitMutationIsBusy(), false);",
+        ])
+        subprocess.run(["node", "-e", script], cwd=ROOT, check=True)
+
+    def test_review_commit_state_distinguishes_unsent_rejected_and_unknown(self):
+        commit_state = _extract_js_function(
+            JS, "classSplitReviewDispositionCommitState"
+        )
+        script = "\n".join([
+            "const assert = require('assert');",
+            commit_state,
+            "assert.strictEqual(classSplitReviewDispositionCommitState(new Error('preflight')), 'not_sent');",
+            "assert.strictEqual(classSplitReviewDispositionCommitState({reviewDispositionCommitState: 'rejected'}), 'rejected');",
+            "assert.strictEqual(classSplitReviewDispositionCommitState({reviewDispositionCommitUnknown: true}), 'unknown');",
+            "assert.strictEqual(classSplitReviewDispositionCommitState({}, 'unknown'), 'unknown');",
+        ])
+        subprocess.run(["node", "-e", script], cwd=ROOT, check=True)
+
+    def test_terminal_recovery_blocks_pair_vlm_and_adaptive_mutations(self):
+        envelope = _extract_js_function(
+            JS, "classSplitTerminalRecoveryEnvelope"
+        )
+        transition = _extract_js_function(
+            JS, "transitionClassSplitToRerunRequired"
+        )
+        merge_recovery = _extract_js_function(
+            JS, "mergeClassSplitAnnotationRecovery"
+        )
+        adaptive_update = _extract_js_function(
+            JS, "updateClassSplitAdaptiveRanking"
+        )
+        adaptive_reset = _extract_js_function(
+            JS, "resetClassSplitAdaptiveRanking"
+        )
+        qwen_start = _extract_js_function(
+            JS, "startClassSplitQwenReview"
+        )
+        pair_commit = _extract_js_function(
+            JS, "commitClassSplitDualBBoxDeletionTransaction"
+        )
+        controls = _extract_js_function(
+            JS, "refreshClassSplitControls"
+        )
+        self.assertIn("classSplitWriteMutationIsBlocked", adaptive_update)
+        self.assertIn("classSplitWriteMutationIsBlocked", adaptive_reset)
+        self.assertIn("classSplitRecoveryMutationBlockReason", qwen_start)
+        self.assertIn("expected_entity_record_revision", pair_commit)
+        self.assertIn("entity_preconditions", pair_commit)
+        self.assertIn(
+            "transitionClassSplitToRerunRequired",
+            pair_commit,
+        )
+        self.assertIn("writeMutationBlocked", controls)
+        self.assertIn(
+            '"class-analysis-dual-bbox-annotation-commit-v2"',
+            JS,
+        )
+        self.assertIn(
+            "dual_bbox_annotation_transaction_api_version\n"
+            "            ) >= 5",
+            JS,
+        )
+        self.assertIn("dual_bbox_delete_v1", pair_commit)
+        self.assertIn("queueClassSplitAnnotationTransaction", pair_commit)
+        self.assertIn("reconcileClassSplitAnnotationTransactionAfterFailure", pair_commit)
+        drain = _extract_js_function(
+            JS, "drainClassSplitPendingAnnotationTransactions"
+        )
+        self.assertIn("dispatchRequest", drain)
+        self.assertIn("reconcileClassSplitAnnotationTransactionAfterFailure", drain)
+        self.assertIn("classSplitSemanticAnnotationTransactionRequest", JS)
+        script = "\n".join([
+            "const assert = require('assert');",
+            "const classSplitState = {currentJobId: 'job-new', analysisGeneration: 9, annotationRecovery: null};",
+            "function parseJsonObjectSafe(value, fallback) { try { return JSON.parse(value); } catch (_) { return fallback; } }",
+            "function classSplitAsyncRequestIsCurrent(generation, jobId) { return generation === classSplitState.analysisGeneration && jobId === classSplitState.currentJobId; }",
+            "function renderClassSplitSessionPersistenceStatus() {}",
+            "function refreshClassSplitControls() {}",
+            "function renderClassSplitWrongList() {}",
+            "function renderClassSplitReport() {}",
+            envelope,
+            merge_recovery,
+            transition,
+            "assert.strictEqual(transitionClassSplitToRerunRequired({detail: {status: 'rerun_required', rerun_required: true, job_id: 'job-old'}}, {jobId: 'job-old', generation: 8}), false);",
+            "assert.strictEqual(classSplitState.annotationRecovery, null);",
+            "assert.strictEqual(transitionClassSplitToRerunRequired({detail: {code: 'annotation_entity_changed_rerun_required', job_id: 'job-new', reason: 'stale'}}, {jobId: 'job-new', generation: 9}), true);",
+            "assert.strictEqual(classSplitState.annotationRecovery.status, 'rerun_required');",
+            "assert.strictEqual(classSplitState.annotationRecovery.reason, 'stale');",
+            "const retained = mergeClassSplitAnnotationRecovery(classSplitState.annotationRecovery, {status: 'ready', checkpoint_ready: true}, 'job-new');",
+            "assert.strictEqual(retained.status, 'rerun_required');",
+            "assert.strictEqual(retained.rerun_required, true);",
         ])
         subprocess.run(["node", "-e", script], cwd=ROOT, check=True)
 
     def test_default_setup_is_compact_and_advanced_evidence_is_disclosure_only(self):
-        self.assertIn('id="classSplitAdvancedSetup"', HTML)
-        self.assertIn('class="class-split-grid class-split-grid--primary"', HTML)
-        primary = HTML[
-            HTML.index('class="class-split-grid class-split-grid--primary"'):
-            HTML.index('id="classSplitAdvancedSetup"')
-        ]
-        self.assertIn('id="classSplitClassField" hidden', primary)
-        self.assertIn('id="classSplitClassSelect"', primary)
-        self.assertIn('<details id="classSplitEmbeddingGuide"', HTML)
-        self.assertNotIn('class="class-split-embedding-guide__preview" open', HTML)
-        self.assertNotIn('class-split-field--wide embedding-recipe-note" open', HTML)
-        self.assertIn('class="class-split-run-strip"', HTML)
-        self.assertIn("max-height: min(44vh, 360px)", CSS)
+        self.assertIn('id="classSplitGuidedSetup"', HTML)
+        self.assertIn('id="classSplitStepScopeTitle"', HTML)
+        self.assertIn('id="classSplitStepMapTitle"', HTML)
+        self.assertIn('id="classSplitStepFeaturesTitle"', HTML)
+        self.assertIn('id="classSplitStepMemoryTitle"', HTML)
+        self.assertIn('id="classSplitStepRefineTitle"', HTML)
+        self.assertIn('id="classSplitStepRunTitle"', HTML)
+        self.assertIn('id="classSplitClassField"', HTML)
+        self.assertIn('id="classSplitClassSelect"', HTML)
+        self.assertIn('<details class="class-split-tune" id="classSplitFeatureTuning"', HTML)
+        self.assertNotIn('id="classSplitFeatureTuning" open', HTML)
+        self.assertNotIn('id="classSplitRefinementPreview" open', HTML)
+        self.assertIn(".class-split-guided-setup", CSS)
         self.assertIn("html.theme-dark .class-split-workspace", CSS)
         self.assertIn("html.theme-pipboy .class-split-workspace", CSS)
         self.assertIn("body:has(#tabClassSplit.active) .ui-tooltip", CSS)

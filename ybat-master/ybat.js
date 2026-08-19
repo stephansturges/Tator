@@ -786,6 +786,7 @@
         "delete_current_box",
         "delete_overlapping_box",
         "keep_both_boxes",
+        "resolved_no_change",
         "unresolved",
     ]);
     const CLASS_SPLIT_REVIEW_DISPOSITION_RECEIPT_SCHEMA =
@@ -798,11 +799,12 @@
     const CLASS_SPLIT_BBOX_GEOMETRY_EDIT_SCHEMA =
         "class-analysis-bbox-geometry-edit-v1";
     const CLASS_SPLIT_DUAL_BBOX_COMMIT_SCHEMA =
-        "class-analysis-dual-bbox-annotation-commit-v1";
+        "class-analysis-dual-bbox-annotation-commit-v2";
     const CLASS_SPLIT_DUAL_BBOX_DISPOSITIONS = Object.freeze([
         "delete_current_box",
         "delete_overlapping_box",
         "keep_both_boxes",
+        "resolved_no_change",
         "unresolved",
     ]);
     const CLASS_SPLIT_SELECTOR_CURRENT_EVIDENCE_STATES = Object.freeze([
@@ -931,6 +933,82 @@
         updateClassSplitEmbeddingRecipeExplanation();
     }
 
+    function classSplitFailedReviewActionKey(jobId, pointId) {
+        return `${String(jobId || "").trim()}:${String(pointId || "").trim()}`;
+    }
+
+    function serializeClassSplitFailedReviewActions() {
+        return Array.from(
+            classSplitState?.failedReviewDispositionActions?.values?.() || []
+        ).slice(-2048).map((entry) => ({
+            jobId: String(entry?.jobId || "").trim(),
+            pointId: String(entry?.pointId || "").trim(),
+            disposition: String(entry?.disposition || "").trim(),
+            message: String(entry?.message || "").trim().slice(0, 500),
+            failedAt: String(entry?.failedAt || "").trim(),
+        })).filter((entry) => (
+            entry.jobId
+            && entry.pointId
+            && ["confirm_current", "skip"].includes(entry.disposition)
+        ));
+    }
+
+    function restoreClassSplitFailedReviewActions(value, jobId) {
+        const safeJobId = String(jobId || "").trim();
+        classSplitState.failedReviewDispositionActions = new Map();
+        (Array.isArray(value) ? value : []).slice(-2048).forEach((entry) => {
+            const pointId = String(entry?.pointId || "").trim();
+            const disposition = String(entry?.disposition || "").trim();
+            if (
+                !safeJobId
+                || String(entry?.jobId || "").trim() !== safeJobId
+                || !pointId
+                || !["confirm_current", "skip"].includes(disposition)
+            ) {
+                return;
+            }
+            classSplitState.failedReviewDispositionActions.set(
+                classSplitFailedReviewActionKey(safeJobId, pointId),
+                {
+                    jobId: safeJobId,
+                    pointId,
+                    disposition,
+                    message: String(entry?.message || "Review action was not saved.").trim().slice(0, 500),
+                    failedAt: String(entry?.failedAt || "").trim(),
+                }
+            );
+        });
+    }
+
+    function rememberClassSplitFailedReviewAction(jobId, pointId, disposition, error) {
+        const safeJobId = String(jobId || "").trim();
+        const safePointId = String(pointId || "").trim();
+        const safeDisposition = String(disposition || "").trim();
+        if (
+            !safeJobId
+            || !safePointId
+            || !["confirm_current", "skip"].includes(safeDisposition)
+        ) {
+            return;
+        }
+        classSplitState.failedReviewDispositionActions.set(
+            classSplitFailedReviewActionKey(safeJobId, safePointId),
+            {
+                jobId: safeJobId,
+                pointId: safePointId,
+                disposition: safeDisposition,
+                message: String(error?.message || error || "Review action was not saved.").trim().slice(0, 500),
+                failedAt: new Date().toISOString(),
+            }
+        );
+    }
+
+    function clearClassSplitFailedReviewAction(jobId, pointId) {
+        classSplitState.failedReviewDispositionActions.delete(
+            classSplitFailedReviewActionKey(jobId, pointId)
+        );
+    }
+
     function persistDataQualityExplorerSession() {
         try {
             if (
@@ -967,6 +1045,20 @@
                     : (
                         Array.isArray(existing.pendingReviewDispositionCommits)
                             ? existing.pendingReviewDispositionCommits
+                            : []
+                    ),
+                pendingAnnotationTransactions: explorerInitialized
+                    ? serializeClassSplitPendingAnnotationTransactions()
+                    : (
+                        Array.isArray(existing.pendingAnnotationTransactions)
+                            ? existing.pendingAnnotationTransactions
+                            : []
+                    ),
+                failedReviewDispositionActions: explorerInitialized
+                    ? serializeClassSplitFailedReviewActions()
+                    : (
+                        Array.isArray(existing.failedReviewDispositionActions)
+                            ? existing.failedReviewDispositionActions
                             : []
                     ),
                 qwenReviewTraceEnabled: explorerInitialized
@@ -1019,6 +1111,14 @@
         restoreClassSplitPendingTrainingCommits(saved.pendingTrainingClassCommits);
         restoreClassSplitPendingReviewCommits(
             saved.pendingReviewDispositionCommits,
+            String(saved.jobId || "").trim()
+        );
+        restoreClassSplitPendingAnnotationTransactions(
+            saved.pendingAnnotationTransactions,
+            String(saved.jobId || "").trim()
+        );
+        restoreClassSplitFailedReviewActions(
+            saved.failedReviewDispositionActions,
             String(saved.jobId || "").trim()
         );
         classSplitState.qwenReviewTraceEnabled = Boolean(saved.qwenReviewTraceEnabled);
@@ -1157,9 +1257,11 @@
             }
             return;
         }
-        // The accepted DQE restore owns source selection. Remove a stale
-        // same-tab pointer before it can reopen an unrelated labeling source.
-        clearAnnotationSourceResumeDescriptor();
+        // Preserve a matching resume descriptor so this tab can reacquire its
+        // own exact annotation lease after reload. openDatasetInAnnotationMode
+        // ignores descriptors for every other source, so clearing here only
+        // destroys the proof needed to distinguish this lease from another
+        // editor's lock.
         try {
             setActiveTab(TAB_CLASS_SPLIT);
             classSplitState.currentJobId = jobId;
@@ -1191,10 +1293,18 @@
             });
             try {
                 await reconnectClassSplitRestoredAnnotationSource(jobId, manifest);
-                setClassSplitJobStatus(
-                    "Restored the graph and its exact labeling workspace. See instance, relabel, and delete are available.",
-                    ""
-                );
+                if (annotationSourceState.readOnly) {
+                    setClassSplitJobStatus(
+                        annotationMutationBlockedMessage("The restored labeling workspace")
+                        || "The exact labeling workspace was restored read-only. Take over its annotation lock before relabeling or deleting boxes.",
+                        "warn"
+                    );
+                } else {
+                    setClassSplitJobStatus(
+                        "Restored the graph and its exact labeling workspace. See instance, relabel, and delete are available.",
+                        ""
+                    );
+                }
             } catch (sourceError) {
                 classSplitState.restoredSourceCompatible = false;
                 classSplitState.currentSourceHandle = null;
@@ -1291,11 +1401,11 @@
                 console.warn("Prior annotation source resume did not complete", error);
             }
         }
-        const response = await fetch(
+        let response = await fetch(
             `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/annotation_session`,
             { method: "POST" },
         );
-        const detail = await response.text();
+        let detail = await response.text();
         if (!response.ok) {
             throw new Error(parseApiError(detail, `HTTP ${response.status}`));
         }
@@ -1319,6 +1429,16 @@
             ),
             transientOpenPath: "",
             activateLabeling: false,
+            afterSessionStarted: async () => {
+                renderClassSplitRestoreProgress({
+                    phaseId: "restore_source",
+                    phaseLabel: "Recovering saved edits",
+                    message: "Finishing any annotation transactions interrupted before reconnect ...",
+                    progress: 0.54,
+                });
+                await drainClassSplitPendingAnnotationTransactions();
+                await recoverClassSplitBackendAnnotationTransactions(jobId);
+            },
             progressCallback: ({ fraction, message }) => {
                 const localFraction = Math.max(0, Math.min(1, Number(fraction) || 0));
                 renderClassSplitRestoreProgress({
@@ -1361,8 +1481,12 @@
         renderClassSplitBulkPanel();
         renderClassSplitRestoreProgress({
             phaseId: "restore_ready",
-            phaseLabel: "Labeling workspace ready",
-            message: `${sourceSizeText || "Images and labels"} loaded; See instance and manual edits are ready.`,
+            phaseLabel: annotationSourceState.readOnly
+                ? "Labeling workspace loaded read-only"
+                : "Labeling workspace ready",
+            message: annotationSourceState.readOnly
+                ? `${sourceSizeText || "Images and labels"} loaded, but another annotation lease is active. Take over the lock before manual edits.`
+                : `${sourceSizeText || "Images and labels"} loaded; See instance and manual edits are ready.`,
             progress: 1,
             completed: true,
         });
@@ -1852,7 +1976,10 @@
         classSplitBulkClear: "Clear the current lasso/bulk graph selection.",
         classSplitBulkConfirm: "Dismiss the selected review candidates as correctly labeled without changing annotations.",
         classSplitBulkSkip: "Mark the selected review candidates as skipped and unresolved.",
+        classSplitBulkDelete: "Delete all eligible selected bounding boxes from the loaded labels. Overlapping-box pairs remain selected for their dedicated controls.",
         classSplitBulkLoadMore: "Render the next page of selected-object vignettes.",
+        classSplitSaveSessionState: "Flush pending labels and review decisions into recoverable storage on this backend. This does not create or download a dataset ZIP.",
+        classSplitDownloadDataset: "Save the recoverable session first, then download the reconciled dataset ZIP through the browser.",
         classSplitClusterRun: "Compute subclass cluster proposals for the current class-focused graph.",
         classSplitQwenReviewGlossaryReset: "Reset the VLM review glossary editor from the current labelmap defaults.",
         classSplitQwenReviewGlossarySave: "Save the edited VLM review glossary for reuse.",
@@ -3685,6 +3812,13 @@ const AUTOMATION_LOCKED_TABS = new Set([
         clusterStatus: null,
         graph: null,
         graphStatus: null,
+        sessionPersistence: null,
+        sessionPersistenceTitle: null,
+        sessionPersistenceSummary: null,
+        sessionLabelsState: null,
+        sessionReviewsState: null,
+        saveSessionState: null,
+        downloadDataset: null,
         report: null,
         clusterPanel: null,
         clusterList: null,
@@ -3742,6 +3876,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         bulkCount: null,
         bulkClass: null,
         bulkApply: null,
+        bulkDelete: null,
         bulkClear: null,
     };
     const dataIngestionElements = {
@@ -4028,6 +4163,8 @@ const AUTOMATION_LOCKED_TABS = new Set([
         adaptiveRankingOperationToken: 0,
         selectionRevision: 0,
         dismissedWrongIds: new Set(),
+        annotationRecovery: null,
+        failedReviewDispositionActions: new Map(),
         reviewDispositionInFlight: new Set(),
         reviewActionPendingPointIds: new Set(),
         reviewDispositionReconciliationPointIds: new Set(),
@@ -4064,6 +4201,10 @@ const AUTOMATION_LOCKED_TABS = new Set([
         pendingReviewDispositionCommits: new Map(),
         reviewCommitDrainPromise: null,
         reviewCommitDrainRequested: false,
+        pendingAnnotationTransactions: new Map(),
+        annotationTransactionDrainPromise: null,
+        annotationBindingGeneration: 0,
+        annotationBatchOperation: null,
         qwenReviewJobs: new Map(),
         qwenReviewPollTimers: new Map(),
         qwenReviewPollFailures: new Map(),
@@ -4098,12 +4239,25 @@ const AUTOMATION_LOCKED_TABS = new Set([
         snapshotSignature: "",
         pendingRestoreSelectedPointId: "",
         pendingBackboneSelection: "",
+        sessionPersistenceOperation: null,
+        sessionPersistenceToken: 0,
+        sessionPersistenceMonitorTimer: null,
+        sessionPersistenceHadPendingWork: false,
+        sessionPersistenceLastSavedAt: "",
+        sessionPersistenceError: "",
+        sessionPersistenceProgress: "",
+        sessionPersistencePercent: null,
+        sessionExportRecord: null,
+        sessionExportResumePromise: null,
+        sessionExportResumeAttemptedKey: "",
     };
     const CLASS_SPLIT_CONTEXT_PREVIEW_CACHE_LIMIT = 36;
     const CLASS_SPLIT_MULTI_SELECTION_PAGE_SIZE = 36;
     const CLASS_SPLIT_MULTI_SELECTION_LOAD_CONCURRENCY = 6;
     const CLASS_SPLIT_MULTI_SELECTION_LOAD_TIMEOUT_MS = 20000;
     const CLASS_SPLIT_MULTI_SELECTION_ACTION_CONCURRENCY = 3;
+    const CLASS_SPLIT_ANNOTATION_BATCH_PAGE_SIZE = 500;
+    const CLASS_SPLIT_ANNOTATION_BATCH_STALL_LIMIT = 3;
     const CLASS_SPLIT_PENDING_REVIEW_COMMIT_LIMIT = 2048;
     const CLASS_SPLIT_REVIEW_REQUEST_TIMEOUT_MS = 12000;
     const classSplitContextPreviewCache = new Map();
@@ -4169,8 +4323,146 @@ const AUTOMATION_LOCKED_TABS = new Set([
         );
     }
 
+    function classSplitRecoveryMutationBlockReason(
+        jobId = classSplitState.currentJobId
+    ) {
+        const safeJobId = String(jobId || "").trim();
+        const recovery = classSplitState.annotationRecovery;
+        if (
+            !safeJobId
+            || !recovery
+            || String(recovery.job_id || "").trim() !== safeJobId
+            || !(
+                String(recovery.status || "").trim() === "rerun_required"
+                || recovery.rerun_required === true
+            )
+        ) {
+            return "";
+        }
+        return "This restored analysis has stale object identities and is read-only. Rerun the analysis before changing review or annotation state.";
+    }
+
+    function classSplitWriteMutationIsBlocked(options = {}) {
+        return Boolean(
+            classSplitRecoveryMutationBlockReason(options.jobId)
+            || classSplitMutationIsBusy(options)
+        );
+    }
+
+    function classSplitTerminalRecoveryEnvelope(value) {
+        let candidate = value;
+        if (typeof candidate === "string") {
+            candidate = parseJsonObjectSafe(candidate, {});
+        }
+        if (candidate?.detail && typeof candidate.detail === "object") {
+            candidate = candidate.detail;
+        }
+        if (!candidate || typeof candidate !== "object") {
+            return null;
+        }
+        const code = String(candidate.code || "").trim();
+        if (
+            candidate.rerun_required !== true
+            && String(candidate.status || "").trim() !== "rerun_required"
+            && code !== "annotation_entity_changed_rerun_required"
+        ) {
+            return null;
+        }
+        return {
+            ...candidate,
+            code: code || "annotation_entity_changed_rerun_required",
+            status: "rerun_required",
+            rerun_required: true,
+        };
+    }
+
+    function mergeClassSplitAnnotationRecovery(current, incoming, jobId) {
+        const safeJobId = String(jobId || "").trim();
+        const previous = current && typeof current === "object" ? current : null;
+        const next = incoming && typeof incoming === "object" ? incoming : {};
+        const previousTerminal = (
+            previous
+            && String(previous.job_id || "").trim() === safeJobId
+        ) ? classSplitTerminalRecoveryEnvelope(previous) : null;
+        const nextTerminal = classSplitTerminalRecoveryEnvelope(next);
+        if (nextTerminal) {
+            return { ...next, ...nextTerminal, job_id: safeJobId };
+        }
+        if (previousTerminal) {
+            return { ...previous, ...previousTerminal, job_id: safeJobId };
+        }
+        return { ...next, job_id: safeJobId };
+    }
+
+    function transitionClassSplitToRerunRequired(
+        value,
+        {
+            jobId = classSplitState.currentJobId,
+            generation = classSplitState.analysisGeneration,
+        } = {}
+    ) {
+        const safeJobId = String(jobId || "").trim();
+        const envelope = classSplitTerminalRecoveryEnvelope(value);
+        if (
+            !envelope
+            || !safeJobId
+            || !classSplitAsyncRequestIsCurrent(generation, safeJobId)
+            || (
+                String(envelope.job_id || "").trim()
+                && String(envelope.job_id || "").trim() !== safeJobId
+            )
+        ) {
+            return false;
+        }
+        classSplitState.annotationRecovery = mergeClassSplitAnnotationRecovery(
+            classSplitState.annotationRecovery,
+            envelope,
+            safeJobId
+        );
+        renderClassSplitSessionPersistenceStatus();
+        refreshClassSplitControls();
+        renderClassSplitWrongList();
+        renderClassSplitReport();
+        return true;
+    }
+
+    function classSplitReviewDispositionCommitState(error, fallback = "not_sent") {
+        const explicit = String(
+            error?.reviewDispositionCommitState || ""
+        ).trim();
+        if (["not_sent", "rejected", "unknown", "committed"].includes(explicit)) {
+            return explicit;
+        }
+        if (error?.reviewDispositionCommitUnknown === true) {
+            return "unknown";
+        }
+        if (error?.reviewDispositionCommitUnknown === false) {
+            return "rejected";
+        }
+        return ["not_sent", "rejected", "unknown", "committed"].includes(fallback)
+            ? fallback
+            : "not_sent";
+    }
+
+    function setClassSplitReviewDispositionCommitState(error, state) {
+        if (!error || typeof error !== "object") {
+            return error;
+        }
+        const safeState = classSplitReviewDispositionCommitState(
+            { reviewDispositionCommitState: state },
+            "not_sent"
+        );
+        error.reviewDispositionCommitState = safeState;
+        error.reviewDispositionCommitUnknown = safeState === "unknown";
+        return error;
+    }
+
     function classSplitMutationIsBusy({
         jobId = classSplitState.currentJobId,
+        includeReviewDispositionInFlight = true,
+        includeReviewActionPending = true,
+        includeReviewCommitDrain = true,
+        includeAnnotationSave = true,
         includeReconciliation = false,
         includeHydration = false,
         includePendingReviewCommits = true,
@@ -4192,21 +4484,46 @@ const AUTOMATION_LOCKED_TABS = new Set([
                 .map((pointId) => String(pointId || "").trim())
                 .filter(Boolean)
         );
-        const pendingReviewAction = Array.from(
-            classSplitState.reviewActionPendingPointIds || []
-        ).some((pointId) => (
-            !ignoredReviewActionPointIds.has(String(pointId || "").trim())
-        ));
+        const pendingReviewAction = includeReviewActionPending
+            && Array.from(
+                classSplitState.reviewActionPendingPointIds || []
+            ).some((pointId) => (
+                !ignoredReviewActionPointIds.has(String(pointId || "").trim())
+            ));
         return Boolean(
             startupOperationBusy
+            || Boolean(
+                classSplitState.sessionPersistenceOperation
+                && classSplitState.sessionPersistenceOperation.blocksMutations !== false
+            )
             || classSplitState.multiSelectionActionInFlight
+            || Boolean(classSplitState.annotationBatchOperation)
             || Boolean(classSplitState.adaptiveRankingOperation)
             || classSplitState.relabelInFlight
-            || classSplitReviewDispositionInFlightForJob(safeJobId)
+            || Boolean(classSplitState.annotationTransactionDrainPromise)
+            || Array.from(
+                classSplitState.pendingAnnotationTransactions?.values?.() || []
+            ).some((entry) => (
+                String(entry?.jobId || "") === safeJobId
+                && ![
+                    "complete",
+                    "rejected",
+                    "conflict",
+                    "superseded",
+                    "legacy_unrecoverable",
+                ].includes(String(entry?.status || ""))
+            ))
+            || (
+                includeReviewDispositionInFlight
+                && classSplitReviewDispositionInFlightForJob(safeJobId)
+            )
             || pendingReviewAction
             || Boolean(classSplitReviewHistoryDeleteOperation(safeJobId))
-            || Boolean(classSplitState.reviewCommitDrainPromise)
-            || annotationSourceState.saveInFlight
+            || (
+                includeReviewCommitDrain
+                && Boolean(classSplitState.reviewCommitDrainPromise)
+            )
+            || (includeAnnotationSave && annotationSourceState.saveInFlight)
             || (
                 includePendingReviewCommits
                 && classSplitPendingReviewCommitCountForJob(safeJobId) > 0
@@ -5951,12 +6268,18 @@ const sam3TrainState = {
         return !!runningSessionId && !!currentSessionId && runningSessionId === currentSessionId;
     }
 
-    function isAnnotationMutationBlocked({ allowLibrarySave = false } = {}) {
+    function isAnnotationMutationBlocked({
+        allowLibrarySave = false,
+        ignoreCurrentImageHydration = false,
+    } = {}) {
         return isAnnotationReadOnly()
             || isAutoLabelUsingCurrentAnnotationSession()
             || (annotationSourceState.librarySaveInFlight && !allowLibrarySave)
             || classSplitState.dualBBoxTransactionInFlight
-            || isCurrentAnnotationHydrationBlocked();
+            || (
+                !ignoreCurrentImageHydration
+                && isCurrentAnnotationHydrationBlocked()
+            );
     }
 
     function annotationMutationBlockedMessage(actionLabel) {
@@ -6273,12 +6596,12 @@ const sam3TrainState = {
         return clamped.toFixed(6).replace(/\.?0+$/, "") || "0";
     }
 
-    function serializeDatasetBboxesForImage(imageKey, { excludeBbox = null } = {}) {
+    function serializeDatasetBboxEntriesForImage(imageKey, { excludeBbox = null } = {}) {
         const image = images[imageKey];
         if (!image || !Number.isFinite(image.width) || !Number.isFinite(image.height) || image.width <= 0 || image.height <= 0) {
             return [];
         }
-        const rows = [];
+        const entries = [];
         const classBuckets = bboxes[imageKey] || {};
         for (const className of Object.keys(classBuckets)) {
             const classIdx = classes[className];
@@ -6298,7 +6621,10 @@ const sam3TrainState = {
                         coords.push(nx, ny);
                     });
                     if (coords.length >= 6) {
-                        rows.push(`${classIdx} ${coords.join(" ")}`);
+                        entries.push({
+                            bbox,
+                            line: `${classIdx} ${coords.join(" ")}`,
+                        });
                     }
                     continue;
                 }
@@ -6316,10 +6642,78 @@ const sam3TrainState = {
                 const cy = normalizeYoloNumber((y + (h / 2)) / image.height);
                 const wn = normalizeYoloNumber(w / image.width);
                 const hn = normalizeYoloNumber(h / image.height);
-                rows.push(`${classIdx} ${cx} ${cy} ${wn} ${hn}`);
+                entries.push({
+                    bbox,
+                    line: `${classIdx} ${cx} ${cy} ${wn} ${hn}`,
+                });
             }
         }
-        return rows;
+        return entries;
+    }
+
+    function serializeDatasetBboxesForImage(imageKey, options = {}) {
+        return serializeDatasetBboxEntriesForImage(imageKey, options)
+            .map((entry) => entry.line);
+    }
+
+    function rebaseDatasetBboxSourceRowsAfterSave(
+        imageKey,
+        record,
+        annotationRevision,
+        annotationSourceIdentity
+    ) {
+        const safeImageKey = String(imageKey || "").trim();
+        const revision = String(annotationRevision || "").trim();
+        const sourceIdentity = String(annotationSourceIdentity || "").trim();
+        const committedLines = normalizeAnnotationLabelLines(record?.label_lines);
+        const entries = serializeDatasetBboxEntriesForImage(safeImageKey);
+        if (
+            !safeImageKey
+            || !revision
+            || !sourceIdentity
+            || entries.length !== committedLines.length
+            || entries.some((entry, index) => entry.line !== committedLines[index])
+        ) {
+            return false;
+        }
+        const entryByUuid = new Map();
+        entries.forEach((entry, sourceLineIndex) => {
+            const bboxRecord = entry.bbox;
+            bboxRecord._dataset_source_image_key = safeImageKey;
+            bboxRecord._dataset_source_line_index = sourceLineIndex;
+            bboxRecord._dataset_source_label_line = committedLines[sourceLineIndex];
+            bboxRecord._dataset_annotation_revision = revision;
+            bboxRecord._dataset_annotation_source_identity = sourceIdentity;
+            const bboxUuid = String(bboxRecord.uuid || "").trim();
+            if (bboxUuid) {
+                entryByUuid.set(bboxUuid, {
+                    sourceLineIndex,
+                    sourceLabelLine: committedLines[sourceLineIndex],
+                });
+            }
+        });
+        const updateBoundPoint = (point) => {
+            if (
+                !point
+                || String(point._resolved_frontend_bbox_image_key || "").trim()
+                    !== safeImageKey
+            ) {
+                return;
+            }
+            const binding = entryByUuid.get(
+                String(point._resolved_frontend_bbox_uuid || "").trim()
+            );
+            if (!binding) {
+                return;
+            }
+            point._resolved_frontend_bbox_annotation_revision = revision;
+            point._resolved_frontend_bbox_annotation_source_identity = sourceIdentity;
+            point._resolved_frontend_bbox_source_line_index = binding.sourceLineIndex;
+            point._resolved_frontend_bbox_source_label_line = binding.sourceLabelLine;
+        };
+        classSplitState.pointsById?.forEach(updateBoundPoint);
+        classSplitState.reviewedPointsById?.forEach(updateBoundPoint);
+        return true;
     }
 
     function normalizeAnnotationLabelLines(lines) {
@@ -6589,11 +6983,6 @@ const sam3TrainState = {
         if (background && dirtySignature && annotationSourceState.lastFailedSnapshotSignature === dirtySignature) {
             return false;
         }
-        const sentSnapshotByKey = new Map();
-        records.forEach((record) => {
-            const key = annotationImageKey(record.split, record.image_relpath);
-            sentSnapshotByKey.set(key, serializeAnnotationRecord(record));
-        });
         const cursor =
             currentImage && isDatasetBackedImageRecord(currentImage)
                 ? {
@@ -6660,9 +7049,28 @@ const sam3TrainState = {
                     savedContractByKey.set(key, savedRecord);
                 }
             });
+                records.forEach((record) => {
+                    const key = annotationImageKey(
+                        record.split,
+                        record.image_relpath
+                    );
+                    const savedContract = savedContractByKey.get(key);
+                    if (
+                        !savedContract
+                        || !String(
+                            savedContract.annotation_record_revision || ""
+                        ).trim()
+                        || !String(
+                            savedContract.annotation_source_identity || ""
+                        ).trim()
+                    ) {
+                        throw new Error(
+                            `The backend saved ${key} without returning its revisioned annotation receipt.`
+                        );
+                    }
+                });
             records.forEach((record) => {
                 const key = annotationImageKey(record.split, record.image_relpath);
-                const sentSnapshot = sentSnapshotByKey.get(key) || serializeAnnotationRecord(record);
                 const row = annotationSourceState.imageRowsByKey.get(key);
                 const savedContract = savedContractByKey.get(key);
                 if (row && savedContract) {
@@ -6680,16 +7088,42 @@ const sam3TrainState = {
                     }
                     annotationSourceState.imageRowsByKey.set(key, row);
                 }
-                annotationSourceState.savedSnapshotByKey.set(key, sentSnapshot);
+                const committedLabelLines = normalizeAnnotationLabelLines(
+                    Array.isArray(savedContract?.label_lines)
+                        ? savedContract.label_lines
+                        : record.label_lines
+                );
+                annotationSourceState.rawLabelLinesByKey.set(
+                    key,
+                    [...committedLabelLines]
+                );
+                if (row) {
+                    row.label_lines = [...committedLabelLines];
+                    row.text_label = String(record.text_label || "");
+                    annotationSourceState.imageRowsByKey.set(key, row);
+                }
+                const committedRecord = {
+                    ...record,
+                    label_lines: committedLabelLines,
+                    text_label: String(record.text_label || ""),
+                };
+                const committedSnapshot = serializeAnnotationRecord(
+                    committedRecord
+                );
+                annotationSourceState.savedSnapshotByKey.set(
+                    key,
+                    committedSnapshot
+                );
                 const currentRecord = buildAnnotationRecord(key);
                 const currentSnapshot = serializeAnnotationRecord(currentRecord || record);
-                if (currentSnapshot === sentSnapshot) {
+                if (currentSnapshot === committedSnapshot) {
+                    rebaseDatasetBboxSourceRowsAfterSave(
+                        key,
+                        committedRecord,
+                        row?.annotation_record_revision,
+                        row?.annotation_source_identity
+                    );
                     annotationSourceState.dirtyRecordsByKey.delete(key);
-                    if (row) {
-                        row.label_lines = Array.isArray(record.label_lines) ? [...record.label_lines] : [];
-                        row.text_label = String(record.text_label || "");
-                        annotationSourceState.imageRowsByKey.set(key, row);
-                    }
                 } else if (currentRecord) {
                     annotationSourceState.dirtyRecordsByKey.set(key, currentRecord);
                     annotationSourceState.saveQueued = true;
@@ -6811,7 +7245,24 @@ const sam3TrainState = {
         if (!isDatasetBackedImageRecord(imageRecord)) {
             return true;
         }
-        const imageKey = imageRecord.name;
+        const imageKeyCandidates = [
+            imageRecord.name,
+            imageRecord.meta?.name,
+            imageRecord.annotationRelpath
+                ? annotationImageKey(
+                    imageRecord.annotationSplit || "train",
+                    imageRecord.annotationRelpath
+                )
+                : "",
+        ].map((value) => String(value || "").trim()).filter(Boolean);
+        const imageKey = imageKeyCandidates.find((candidate) => (
+            annotationSourceState.imageRowsByKey.has(candidate)
+            || annotationSourceState.rawLabelLinesByKey.has(candidate)
+        )) || imageKeyCandidates[0] || "";
+        if (!imageKey) {
+            return false;
+        }
+        imageRecord.name = imageKey;
         const allowApply = typeof options.allowApply === "function" ? options.allowApply : null;
         const setHydrationFailure = (message) => {
             setAnnotationHydrationState(imageKey, "error");
@@ -6833,9 +7284,39 @@ const sam3TrainState = {
             return false;
         }
         const labelLines = annotationSourceState.rawLabelLinesByKey.get(imageKey) || [];
+        const annotationRow = annotationSourceState.imageRowsByKey.get(imageKey) || {};
+        const annotationRevision = String(
+            annotationRow.annotation_record_revision || ""
+        ).trim();
+        const annotationSourceIdentity = String(
+            annotationRow.annotation_source_identity || ""
+        ).trim();
+        const annotationEntities = Array.isArray(annotationRow.annotation_entities)
+            ? annotationRow.annotation_entities
+            : [];
+        const stampSourceRowIdentity = (bboxRecord, sourceLineIndex, sourceLabelLine) => {
+            const annotationEntity = annotationEntities[sourceLineIndex] || null;
+            if (annotationEntity) {
+                bboxRecord._dataset_annotation_entity_id = String(
+                    annotationEntity.annotation_entity_id || ""
+                ).trim();
+                bboxRecord._dataset_annotation_entity_revision = Number(
+                    annotationEntity.entity_revision || 0
+                );
+                bboxRecord._dataset_annotation_entity_record_revision = String(
+                    annotationRow.annotation_entity_record_revision || ""
+                ).trim();
+            }
+            bboxRecord._dataset_source_image_key = imageKey;
+            bboxRecord._dataset_source_line_index = sourceLineIndex;
+            bboxRecord._dataset_source_label_line = sourceLabelLine;
+            bboxRecord._dataset_annotation_revision = annotationRevision;
+            bboxRecord._dataset_annotation_source_identity = annotationSourceIdentity;
+        };
         const imageBuckets = {};
-        for (const rawLine of labelLines) {
-            const cols = String(rawLine || "").trim().split(/\s+/).filter(Boolean);
+        for (const [sourceLineIndex, rawLine] of labelLines.entries()) {
+            const sourceLabelLine = String(rawLine || "").trim();
+            const cols = sourceLabelLine.split(/\s+/).filter(Boolean);
             if (cols.length < 5) {
                 continue;
             }
@@ -6883,6 +7364,11 @@ const sam3TrainState = {
                         class: className,
                     };
                     stampBboxCreation(bboxRecord);
+                    stampSourceRowIdentity(
+                        bboxRecord,
+                        sourceLineIndex,
+                        sourceLabelLine
+                    );
                     imageBuckets[className].push(bboxRecord);
                     continue;
                 }
@@ -6910,6 +7396,11 @@ const sam3TrainState = {
                 continue;
             }
             stampBboxCreation(bboxRecord);
+            stampSourceRowIdentity(
+                bboxRecord,
+                sourceLineIndex,
+                sourceLabelLine
+            );
             imageBuckets[className].push(bboxRecord);
         }
         if (allowApply && !allowApply()) {
@@ -7085,14 +7576,17 @@ const sam3TrainState = {
         }
     }
 
-    function annotationEditableGuard(actionLabel) {
+    function annotationEditableGuard(
+        actionLabel,
+        { ignoreCurrentImageHydration = false } = {},
+    ) {
         if (
             activeTab === TAB_CLASS_SPLIT
             && classSplitRestoredSessionBlocksDatasetMutation(actionLabel)
         ) {
             return false;
         }
-        if (!isAnnotationMutationBlocked()) {
+        if (!isAnnotationMutationBlocked({ ignoreCurrentImageHydration })) {
             return true;
         }
         const message = annotationMutationBlockedMessage(actionLabel);
@@ -7108,6 +7602,7 @@ const sam3TrainState = {
         datasetTypeHint = "",
         transientOpenPath = "",
         activateLabeling = true,
+        afterSessionStarted = null,
         progressCallback = null,
     }) {
         const normalizedMode = String(mode || "").trim().toLowerCase();
@@ -7196,6 +7691,12 @@ const sam3TrainState = {
             if (loadToken !== annotationSourceState.loadToken) {
                 return;
             }
+            if (typeof afterSessionStarted === "function") {
+                await afterSessionStarted();
+                if (loadToken !== annotationSourceState.loadToken) {
+                    return;
+                }
+            }
             annotationSourceState.statusMessage = "Loading manifest…";
             reportLoadProgress(0.16, "Loading the image and label manifest ...");
             updateAnnotationSourceUi();
@@ -7257,6 +7758,14 @@ const sam3TrainState = {
                     text_label: textLabel,
                     annotation_record_revision: String(row.annotation_record_revision || "").trim(),
                     annotation_source_identity: String(row.annotation_source_identity || "").trim(),
+                    annotation_identity_status: String(row.annotation_identity_status || "").trim(),
+                    annotation_identity_detail: String(row.annotation_identity_detail || "").trim(),
+                    annotation_entity_record_revision: String(
+                        row.annotation_entity_record_revision || ""
+                    ).trim(),
+                    annotation_entities: Array.isArray(row.annotation_entities)
+                        ? row.annotation_entities.map((entity) => ({ ...entity }))
+                        : [],
                 });
                 annotationSourceState.rawLabelLinesByKey.set(
                     key,
@@ -7270,6 +7779,7 @@ const sam3TrainState = {
                     })
                 );
                 images[key] = {
+                    name: key,
                     meta: {
                         name: key,
                         size: 0,
@@ -7382,16 +7892,88 @@ const sam3TrainState = {
         });
     }
 
-    async function reloadAnnotationManifest() {
+    async function waitForAnnotationSnapshotIdle({ timeoutMs = 120000 } = {}) {
+        const startedAt = Date.now();
+        while (
+            annotationSourceState.saveInFlight
+            && Date.now() - startedAt < timeoutMs
+        ) {
+            await new Promise((resolve) => window.setTimeout(resolve, 50));
+        }
+        if (annotationSourceState.saveInFlight) {
+            throw new Error(
+                "Timed out waiting for the active annotation save before reloading."
+            );
+        }
+    }
+
+    async function saveDirtyAnnotationsBeforeReload() {
+        for (let attempt = 0; attempt < 4; attempt += 1) {
+            await waitForAnnotationSnapshotIdle();
+            captureCurrentAnnotationDirtyState();
+            if (!annotationSourceState.dirtyRecordsByKey.size) {
+                return true;
+            }
+            if (annotationSourceState.readOnly) {
+                return false;
+            }
+            annotationSourceState.statusMessage = (
+                `Saving ${annotationSourceState.dirtyRecordsByKey.size} changed image`
+                + `${annotationSourceState.dirtyRecordsByKey.size === 1 ? "" : "s"} before reload…`
+            );
+            updateAnnotationSourceUi();
+            const saveStarted = await flushAnnotationSnapshot({ manual: true });
+            if (!saveStarted && !annotationSourceState.saveInFlight) {
+                break;
+            }
+        }
+        await waitForAnnotationSnapshotIdle();
+        captureCurrentAnnotationDirtyState();
+        return annotationSourceState.dirtyRecordsByKey.size === 0;
+    }
+
+    async function reloadAnnotationManifest({ allowDiscardPrompt = true } = {}) {
         if (!isAnnotationDatasetModeActive()) {
-            return;
+            return false;
         }
         if (isAutoLabelUsingCurrentAnnotationSession()) {
             setSamStatus(
                 "Reload is unavailable while Automatic Labeling is running on this annotation session.",
                 { variant: "warn", duration: 4000 }
             );
-            return;
+            return false;
+        }
+        if (classSplitMutationIsBusy({ includePendingReviewCommits: false })) {
+            setSamStatus(
+                "Wait for the current Data Quality Explorer action to settle before reloading annotations.",
+                { variant: "warn", duration: 5000 }
+            );
+            return false;
+        }
+        const saved = await saveDirtyAnnotationsBeforeReload();
+        const dirtyCount = annotationSourceState.dirtyRecordsByKey.size;
+        if (!saved && dirtyCount) {
+            if (!allowDiscardPrompt) {
+                throw new Error(
+                    `${dirtyCount} local annotation change${dirtyCount === 1 ? " remains" : "s remain"} unsaved; automatic reload was cancelled.`
+                );
+            }
+            const discard = window.confirm(
+                `${dirtyCount} image${dirtyCount === 1 ? " has" : "s have"} local annotation changes that could not be saved.\n\n`
+                + "Reloading now will permanently discard those local bbox, polygon, or caption edits and use the backend version.\n\n"
+                + "Press Cancel to keep the current edits, or OK to discard them and reload."
+            );
+            if (!discard) {
+                annotationSourceState.statusMessage = (
+                    "Reload cancelled; unsaved local annotations were kept."
+                );
+                updateAnnotationSourceUi();
+                setSamStatus(
+                    "Reload cancelled; local annotation changes remain open.",
+                    { variant: "warn", duration: 5000 }
+                );
+                return false;
+            }
         }
         const mode = annotationSourceState.mode;
         const datasetId = annotationSourceState.datasetId;
@@ -7406,6 +7988,7 @@ const sam3TrainState = {
             transientOpenPath,
             datasetTypeHint: datasetType,
         });
+        return true;
     }
 
     async function resumeAnnotationSourceAfterPageRestore() {
@@ -7526,6 +8109,15 @@ const sam3TrainState = {
                 }
                 if (normalized === "annotation_lock_active") {
                     return "This dataset is locked by another annotation session. Use the matching session or wait for the lock to expire.";
+                }
+                if (
+                    normalized.startsWith("annotation_entity_sidecar_out_of_sync:")
+                    || normalized.startsWith("annotation_entity_attestation_required:")
+                    || normalized.startsWith("annotation_entity_rerun_required:")
+                    || normalized.startsWith("annotation_entity_ambiguous_rerun_required:")
+                    || normalized.startsWith("annotation_transaction_snapshot_state_conflict")
+                ) {
+                    return "These labels changed after this graph was calculated, so Tator refused to overwrite them. Rerun the Data Quality Explorer analysis before editing this object from the graph.";
                 }
                 if (normalized === "dataset_delete_blocked_active_jobs:qwen_caption_dataset") {
                     return "Dataset deletion is blocked while a caption dataset job is active. Wait for the job to finish, then retry.";
@@ -31559,6 +32151,10 @@ async function cancelRfDetrTrainingJobRequest() {
         const classes = Array.isArray(metadata.classes) ? metadata.classes.join(", ") : "(not specified)";
         const context = metadata.dataset_context || "(not specified)";
         const runtimePlatform = metadata.runtime_platform || "transformers";
+        const inferenceBackend = metadata.inference_backend || "";
+        const runtimeLabel = inferenceBackend === "mtplx"
+            ? "MLX / MTPLX native MTP"
+            : runtimePlatform;
         const quantization = metadata.quantization || "";
         const minPixelsValue = Number(metadata.min_pixels);
         const maxPixelsValue = Number(metadata.max_pixels);
@@ -31573,15 +32169,27 @@ async function cancelRfDetrTrainingJobRequest() {
         const availability = metadata.availability || {};
         const safeAvailability = escapeHtml(formatQwenAvailability(availability));
         const safeCachePath = availability.cache_path ? escapeHtml(availability.cache_path) : "";
+        const compatibilityNote = metadata.compatibility_note || "";
+        const trainingNote = metadata.training_note || "";
+        const safeCompatibilityNote = escapeHtml(compatibilityNote);
+        const safeTrainingNote = escapeHtml(trainingNote);
+        const approvedCreditUrl = metadata.runtime_credit_url === "https://github.com/youssofal/MTPLX"
+            ? metadata.runtime_credit_url
+            : "";
+        const safeCreditLabel = escapeHtml(metadata.runtime_credit_label || "Powered by MTPLX");
         qwenModelElements.details.innerHTML = `
             <p><strong>Name:</strong> ${safeName}</p>
             <p><strong>Base model:</strong> ${safeBaseModel}</p>
-            <p><strong>Runtime:</strong> ${escapeHtml(runtimePlatform)}${quantization ? ` (${escapeHtml(quantization)})` : ""}</p>
+            <p><strong>Runtime:</strong> ${escapeHtml(runtimeLabel)}${quantization ? ` (${escapeHtml(quantization)})` : ""}</p>
             <p><strong>Backend cache:</strong> ${safeAvailability}${safeCachePath ? ` <br><small>${safeCachePath}</small>` : ""}</p>
             <p><strong>Model family:</strong> ${safeFamily}</p>
             <p><strong>Context hint:</strong> ${safeContext}</p>
             <p><strong>Classes:</strong> ${safeClasses}</p>
             <p><strong>Pixel budget:</strong> ${minPixels}–${maxPixels}</p>
+            ${metadata.experimental ? `<p><strong>Experimental:</strong> This model is opt-in and does not replace the default.</p>` : ""}
+            ${safeCompatibilityNote ? `<p><strong>Compatibility:</strong> ${safeCompatibilityNote}</p>` : ""}
+            ${safeTrainingNote && trainingNote !== compatibilityNote ? `<p><strong>Training:</strong> ${safeTrainingNote}</p>` : ""}
+            ${approvedCreditUrl ? `<p><strong>Runtime credit:</strong> <a href="${approvedCreditUrl}" target="_blank" rel="noopener noreferrer">${safeCreditLabel}</a></p>` : ""}
             <label>System prompt</label>
             <pre>${safePrompt}</pre>
         `;
@@ -31608,11 +32216,12 @@ async function cancelRfDetrTrainingJobRequest() {
             const classes = Array.isArray(entry.metadata?.classes) ? entry.metadata.classes.join(", ") : "";
             const modelFamily = entry.metadata?.model_family || "qwen3";
             const runtimePlatform = entry.metadata?.runtime_platform || "";
+            const inferenceBackend = entry.metadata?.inference_backend || "";
             const quantization = entry.metadata?.quantization || "";
             const isAgentModel = Boolean(entry.metadata?.agent_model || entry.metadata?.agent_supported);
             const legacyTag = modelFamily !== "qwen3" && !isAgentModel ? "Legacy (read-only)" : isAgentModel ? "Agent VLM" : "";
             const runtimeTag = runtimePlatform === "mlx_vlm"
-                ? `MLX ${quantization || ""}`.trim()
+                ? `${inferenceBackend === "mtplx" ? "MLX / MTPLX" : "MLX"} ${quantization || ""}`.trim()
                 : runtimePlatform;
             metaText.textContent = [runtimeTag, context, classes, legacyTag].filter(Boolean).join(" • ") || "No context provided";
             card.appendChild(metaText);
@@ -31641,6 +32250,9 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             if (!inferenceSupported) {
                 addBadge("No vision weights", "warn");
+            }
+            if (entry.metadata?.experimental) {
+                addBadge("Experimental", "warn");
             }
             card.appendChild(badgeWrap);
             const button = document.createElement("button");
@@ -38889,7 +39501,7 @@ async function cancelRfDetrTrainingJobRequest() {
                         setSamStatus(`Automatic labeling complete. Added ${added} labels across ${imagesChanged} images.`, { variant: "success", duration: 4500 });
                         enqueueTaskNotice(`Automatic labeling complete: ${added} labels added.`, { durationMs: 5000 });
                         if (annotationSourceState.mode === "linked") {
-                            reloadAnnotationManifest().catch((error) => {
+                            reloadAnnotationManifest({ allowDiscardPrompt: false }).catch((error) => {
                                 console.error("Annotation manifest reload failed after automatic labeling", error);
                             });
                         }
@@ -52172,6 +52784,9 @@ async function cancelRfDetrTrainingJobRequest() {
         const classSplitEncoderType = String(classSplitElements.encoderType?.value || "dinov3").trim().toLowerCase();
         const projectionChoice = getClassSplitRequestedProjectionChoice();
         const mutationBusy = classSplitMutationIsBusy();
+        const writeMutationBlocked = Boolean(
+            mutationBusy || classSplitRecoveryMutationBlockReason()
+        );
         if (classSplitElements.datasetStatus) {
             if (!stats.imageCount) {
                 classSplitElements.datasetStatus.textContent = "Open images in Label Images to run analysis.";
@@ -52300,16 +52915,16 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         setButtonDisabled(
             classSplitElements.adaptiveRanking,
-            classSplitState.active || mutationBusy
+            classSplitState.active || writeMutationBlocked
         );
         setButtonDisabled(
             classSplitElements.adaptiveRankingUpdate,
-            classSplitState.active || mutationBusy || !classSplitState.result
+            classSplitState.active || writeMutationBlocked || !classSplitState.result
         );
         setButtonDisabled(
             classSplitElements.adaptiveRankingReset,
-            classSplitState.active
-                || mutationBusy
+                classSplitState.active
+                || writeMutationBlocked
                 || !classSplitState.adaptiveRankingRevision
         );
         setButtonDisabled(classSplitElements.runButton, !canRun);
@@ -53396,6 +54011,21 @@ async function cancelRfDetrTrainingJobRequest() {
             review_priority_score: Number(columns.review_priority_score?.[index]) || 0,
             wrong_class_suspicion: Number(columns.wrong_class_suspicion?.[index]) || 0,
             proposed_class: String(columns.proposed_class?.[index] || ""),
+            annotation_entity_id: String(columns.annotation_entity_id?.[index] || ""),
+            annotation_entity_revision: Number(
+                columns.annotation_entity_revision?.[index]
+            ) || 0,
+            annotation_entity_record_revision: String(
+                columns.annotation_entity_record_revision?.[index] || ""
+            ),
+            annotation_source_identity: String(
+                columns.annotation_source_identity?.[index] || ""
+            ),
+            source_record_key: String(columns.source_record_key?.[index] || ""),
+            identity_status: String(columns.identity_status?.[index] || ""),
+            annotation_attestation: String(
+                columns.annotation_attestation?.[index] || ""
+            ),
             _boundedDetailLoaded: false,
         })).filter((point) => point.point_id);
     }
@@ -53447,48 +54077,116 @@ async function cancelRfDetrTrainingJobRequest() {
         if (point._boundedDetailLoaded && (!includeEvidence || point._boundedEvidenceLoaded)) {
             return point;
         }
-        const key = `${safeId}:${includeEvidence ? "evidence" : "detail"}`;
-        if (classSplitState.boundedPointHydrationLoads.has(key)) {
-            return classSplitState.boundedPointHydrationLoads.get(key);
-        }
         const generation = classSplitState.analysisGeneration;
         const jobId = String(classSplitState.currentJobId || "").trim();
-        const load = (async () => {
-            const detail = await fetchClassSplitBoundedJson(
-                `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/points/${encodeURIComponent(safeId)}`,
-                "point detail"
-            );
-            let evidence = null;
-            if (includeEvidence) {
-                try {
-                    evidence = await fetchClassSplitBoundedJson(
-                        `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/points/${encodeURIComponent(safeId)}/evidence`,
-                        "point evidence"
-                    );
-                } catch (error) {
-                    if (Number(error?.httpStatus) !== 404) throw error;
-                }
+        const pointIsCurrent = () => Boolean(
+            classSplitAsyncRequestIsCurrent(generation, jobId)
+            && classSplitState.pointsById.get(safeId) === point
+        );
+
+        // Compact graph rows intentionally omit annotation identity and spatial
+        // evidence. Identity is required for editing; evidence is not. Keep the
+        // stages independent so a slow evidence request can never leave a real
+        // object represented by the unusable `train/` placeholder.
+        if (!point._boundedDetailLoaded) {
+            const detailKey = `${safeId}:detail`;
+            let detailLoad = classSplitState.boundedPointHydrationLoads.get(detailKey);
+            if (!detailLoad) {
+                detailLoad = (async () => {
+                    try {
+                        const detail = await fetchClassSplitBoundedJson(
+                            `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/points/${encodeURIComponent(safeId)}`,
+                            "point detail"
+                        );
+                        if (!pointIsCurrent()) {
+                            return null;
+                        }
+                        Object.assign(point, detail.point || {});
+                        point._boundedDetailLoaded = true;
+                        return point;
+                    } finally {
+                        if (classSplitState.boundedPointHydrationLoads.get(detailKey) === detailLoad) {
+                            classSplitState.boundedPointHydrationLoads.delete(detailKey);
+                        }
+                    }
+                })();
+                classSplitState.boundedPointHydrationLoads.set(detailKey, detailLoad);
             }
-            if (!classSplitAsyncRequestIsCurrent(generation, jobId)) {
+            const hydrated = await detailLoad;
+            if (!hydrated || !pointIsCurrent()) {
                 return null;
             }
-            Object.assign(point, detail.point || {});
-            point._boundedDetailLoaded = true;
-            if (includeEvidence) {
-                if (evidence?.evidence && typeof evidence.evidence === "object") {
-                    point.refined_outlier = evidence.evidence;
-                    point.is_rough_outlier_candidate = true;
-                }
-                point._boundedEvidenceLoaded = true;
-            }
+        }
+
+        if (!includeEvidence || point._boundedEvidenceLoaded) {
             return point;
-        })().finally(() => {
-            if (classSplitState.boundedPointHydrationLoads.get(key) === load) {
-                classSplitState.boundedPointHydrationLoads.delete(key);
+        }
+        const evidenceKey = `${safeId}:evidence`;
+        let evidenceLoad = classSplitState.boundedPointHydrationLoads.get(evidenceKey);
+        if (!evidenceLoad) {
+            evidenceLoad = (async () => {
+                try {
+                    let evidence = null;
+                    try {
+                        evidence = await fetchClassSplitBoundedJson(
+                            `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/points/${encodeURIComponent(safeId)}/evidence`,
+                            "point evidence"
+                        );
+                    } catch (error) {
+                        if (Number(error?.httpStatus) !== 404) throw error;
+                    }
+                    if (!pointIsCurrent()) {
+                        return null;
+                    }
+                    if (evidence?.evidence && typeof evidence.evidence === "object") {
+                        point.refined_outlier = evidence.evidence;
+                        point.is_rough_outlier_candidate = true;
+                    }
+                    point._boundedEvidenceLoaded = true;
+                    return point;
+                } finally {
+                    if (classSplitState.boundedPointHydrationLoads.get(evidenceKey) === evidenceLoad) {
+                        classSplitState.boundedPointHydrationLoads.delete(evidenceKey);
+                    }
+                }
+            })();
+            classSplitState.boundedPointHydrationLoads.set(evidenceKey, evidenceLoad);
+        }
+        return evidenceLoad;
+    }
+
+    async function hydrateClassSplitBoundedPointDetails(pointIds, { concurrency = 6 } = {}) {
+        const failures = new Map();
+        if (!classSplitState.boundedTransport) {
+            return failures;
+        }
+        const ids = Array.from(new Set(
+            (Array.isArray(pointIds) ? pointIds : [])
+                .map((pointId) => String(pointId || "").trim())
+                .filter(Boolean)
+        ));
+        let cursor = 0;
+        const workers = Array.from(
+            { length: Math.min(Math.max(1, Number(concurrency) || 1), ids.length) },
+            async () => {
+                while (cursor < ids.length) {
+                    const pointId = ids[cursor++];
+                    try {
+                        const hydrated = await ensureClassSplitBoundedPointHydrated(
+                            pointId,
+                            { includeEvidence: false }
+                        );
+                        if (!hydrated) {
+                            throw new Error("The analysis changed while object details were loading.");
+                        }
+                    } catch (error) {
+                        failures.set(pointId, String(error?.message || error));
+                    }
+                }
             }
-        });
-        classSplitState.boundedPointHydrationLoads.set(key, load);
-        return load;
+        );
+        await Promise.all(workers);
+        return failures;
     }
 
     async function hydrateClassSplitBoundedQueue(pointIds) {
@@ -55922,6 +56620,12 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function getClassSplitWideContextUrl(point) {
         const pointId = String(point?.point_id || "").trim();
+        const requestJobId = String(classSplitState.currentJobId || "").trim();
+        const requestGeneration = classSplitState.analysisGeneration;
+        const uiIsCurrent = () => classSplitAsyncRequestIsCurrent(
+            requestGeneration,
+            requestJobId
+        );
         const jobId = String(classSplitState.currentJobId || "").trim();
         if (!pointId || !jobId) {
             return "";
@@ -57564,16 +58268,22 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function updateClassSplitMultiSelectionControls() {
         const busy = classSplitMutationIsBusy();
+        const writeBlocked = Boolean(
+            busy || classSplitRecoveryMutationBlockReason()
+        );
         const hasMultiSelection = getClassSplitMultiSelectionIds().length > 1;
         [
             classSplitElements.bulkClass,
             classSplitElements.bulkApply,
             classSplitElements.bulkConfirm,
             classSplitElements.bulkSkip,
-            classSplitElements.bulkClear,
+            classSplitElements.bulkDelete,
         ].filter(Boolean).forEach((control) => {
-            control.disabled = busy || !hasMultiSelection;
+            control.disabled = writeBlocked || !hasMultiSelection;
         });
+        if (classSplitElements.bulkClear) {
+            classSplitElements.bulkClear.disabled = busy || !hasMultiSelection;
+        }
         if (classSplitElements.bulkPanel) {
             classSplitElements.bulkPanel.setAttribute("aria-busy", busy ? "true" : "false");
         }
@@ -57591,7 +58301,7 @@ async function cancelRfDetrTrainingJobRequest() {
         const safePointId = String(pointId || "").trim();
         if (
             !safePointId
-            || classSplitMutationIsBusy()
+            || classSplitWriteMutationIsBlocked()
             || !classSplitState.lassoPointIds.delete(safePointId)
         ) {
             return false;
@@ -57859,10 +58569,15 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
-    async function applyClassSplitMultiSelectionDisposition(disposition) {
-        const selectedIds = getClassSplitMultiSelectionIds();
+    async function applyClassSplitMultiSelectionDisposition(disposition, options = {}) {
+        const suppliedPointIds = Array.isArray(options.pointIds);
+        const selectedIds = Array.from(new Set(
+            (suppliedPointIds ? options.pointIds : getClassSplitMultiSelectionIds())
+                .map((pointId) => String(pointId || "").trim())
+                .filter((pointId) => pointId && classSplitState.pointsById.has(pointId))
+        ));
         if (
-            selectedIds.length < 2
+            selectedIds.length < (suppliedPointIds ? 1 : 2)
             || classSplitMutationIsBusy()
         ) {
             return;
@@ -57870,9 +58585,9 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!["confirm_current", "skip"].includes(disposition)) {
             return;
         }
-        const actionLabel = disposition === "confirm_current"
+        const actionLabel = String(options.actionLabel || "").trim() || (disposition === "confirm_current"
             ? "Confirming current labels"
-            : "Skipping selected objects";
+            : "Skipping selected objects");
         const jobId = String(classSplitState.currentJobId || "");
         const operation = {
             kind: "review",
@@ -57886,6 +58601,9 @@ async function cancelRfDetrTrainingJobRequest() {
             failures: new Map(),
             uncertainPointIds: new Set(),
         };
+        selectedIds.forEach((pointId) => {
+            clearClassSplitFailedReviewAction(jobId, pointId);
+        });
         // Batch workers only persist receipts. They never mutate selection or render;
         // completion order therefore cannot reorder the captured user operation.
         classSplitState.multiSelectionOperation = operation;
@@ -57918,18 +58636,30 @@ async function cancelRfDetrTrainingJobRequest() {
                         const error = new Error(
                             "This review choice is already being saved."
                         );
-                        error.reviewDispositionCommitUnknown = false;
+                        setClassSplitReviewDispositionCommitState(
+                            error,
+                            "not_sent"
+                        );
                         throw error;
                     }
                     operation.successes.set(pointId, saved);
                 } catch (error) {
+                    const commitState = classSplitReviewDispositionCommitState(error);
                     operation.failures.set(pointId, {
                         pointId,
                         message: String(error?.message || error),
-                        uncertain: error?.reviewDispositionCommitUnknown !== false,
+                        uncertain: commitState === "unknown",
+                        commitState,
                     });
-                    if (error?.reviewDispositionCommitUnknown !== false) {
+                    if (commitState === "unknown") {
                         operation.uncertainPointIds.add(pointId);
+                    } else {
+                        rememberClassSplitFailedReviewAction(
+                            jobId,
+                            pointId,
+                            disposition,
+                            error
+                        );
                     }
                 } finally {
                     operation.completed += 1;
@@ -58033,6 +58763,7 @@ async function cancelRfDetrTrainingJobRequest() {
                     Array.from(operation.uncertainPointIds)
                 );
             }
+            persistDataQualityExplorerSession();
         } finally {
             const ownsOperation = classSplitState.multiSelectionOperation === operation;
             const stillCurrent = classSplitMultiSelectionOperationIsCurrent(operation);
@@ -58045,6 +58776,1074 @@ async function cancelRfDetrTrainingJobRequest() {
                 updateClassSplitMultiSelectionControls();
                 updateClassSplitMultiSelectionLoadStatus();
             }
+        }
+    }
+
+    function getClassSplitSessionPersistenceSnapshot() {
+        const dirtyLabelCount = Number(
+            annotationSourceState.dirtyRecordsByKey?.size || 0
+        );
+        const labelsSaving = Boolean(annotationSourceState.saveInFlight);
+        const pendingReviewCount = Number(
+            classSplitState.pendingReviewDispositionCommits?.size || 0
+        );
+        const pendingAnnotationCount = Number(
+            classSplitState.pendingAnnotationTransactions?.size || 0
+        );
+        const activeReviewCount = Number(
+            classSplitState.reviewDispositionInFlight?.size || 0
+        ) + Number(
+            classSplitState.reviewActionPendingPointIds?.size || 0
+        );
+        const reconciliationCount = Number(
+            classSplitState.reviewDispositionReconciliationPointIds?.size || 0
+        ) + Number(
+            classSplitState.reviewDispositionBackgroundReconciliationPointIds?.size || 0
+        );
+        const currentJobId = String(classSplitState.currentJobId || "").trim();
+        const recovery = (
+            classSplitState.annotationRecovery
+            && String(classSplitState.annotationRecovery.job_id || "").trim() === currentJobId
+        ) ? classSplitState.annotationRecovery : null;
+        const recoveryStatus = String(recovery?.status || "ready").trim();
+        const identityConflictCount = Number(
+            recovery?.identity_conflict_count
+            || (Array.isArray(recovery?.conflicts) ? recovery.conflicts.length : 0)
+            || 0
+        );
+        const recoveryBlocked = Boolean(
+            recoveryStatus === "rerun_required"
+            || recovery?.rerun_required === true
+            || identityConflictCount > 0
+        );
+        const failedReviewCount = Array.from(
+            classSplitState.failedReviewDispositionActions?.values?.() || []
+        ).filter((entry) => String(entry?.jobId || "").trim() === currentJobId).length;
+        const reviewsSaving = Boolean(
+            classSplitState.reviewCommitDrainPromise
+            || activeReviewCount
+            || reconciliationCount
+        );
+        return {
+            dirtyLabelCount,
+            labelsSaving,
+            pendingReviewCount,
+            pendingAnnotationCount,
+            activeReviewCount,
+            reconciliationCount,
+            failedReviewCount,
+            reviewsSaving,
+            recoveryStatus,
+            identityConflictCount,
+            recoveryBlocked,
+            canSaveSession: recovery?.can_save_session !== false && !recoveryBlocked,
+            canExportDataset: recovery?.can_export_dataset !== false && !recoveryBlocked,
+            hasPendingWork: Boolean(
+                dirtyLabelCount
+                || labelsSaving
+                || pendingReviewCount
+                || pendingAnnotationCount
+                || reviewsSaving
+                || failedReviewCount
+                || recoveryBlocked
+            ),
+        };
+    }
+
+    function classSplitSessionPersistenceOperationIsCurrent(operation) {
+        return Boolean(
+            operation
+            && classSplitState.sessionPersistenceOperation === operation
+            && operation.token === classSplitState.sessionPersistenceToken
+            && operation.jobId === String(classSplitState.currentJobId || "")
+            && operation.analysisGeneration === classSplitState.analysisGeneration
+        );
+    }
+
+    function formatClassSplitSessionSavedTime(value) {
+        const date = value ? new Date(value) : null;
+        if (!date || Number.isNaN(date.getTime())) {
+            return "";
+        }
+        return date.toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+        });
+    }
+
+    function classSplitAnnotationExportBaseFromUrl(value) {
+        const raw = String(value || "").trim();
+        if (!raw) {
+            return "";
+        }
+        try {
+            const url = new URL(raw, window.location.origin);
+            if (url.origin !== window.location.origin) {
+                return "";
+            }
+            const match = url.pathname.match(
+                /^(.*\/datasets\/(?:transient\/[^/]+|[^/]+)\/annotation)(?:\/.*)?$/
+            );
+            return match ? match[1] : "";
+        } catch (_) {
+            return "";
+        }
+    }
+
+    function getClassSplitAnnotationExportBase() {
+        const source = classSplitState.currentSourceHandle
+            && typeof classSplitState.currentSourceHandle === "object"
+            ? classSplitState.currentSourceHandle
+            : {};
+        const endpointCandidates = [
+            source.annotation_snapshot_url,
+            source.snapshot_url,
+            source.annotation_manifest_url,
+            source.manifest_url,
+            source.endpoints?.snapshot,
+            source.endpoints?.manifest,
+            annotationSourceState.snapshotUrl,
+            annotationSourceState.snapshot_url,
+            annotationSourceState.manifestUrl,
+            annotationSourceState.manifest_url,
+        ];
+        for (const candidate of endpointCandidates) {
+            const base = classSplitAnnotationExportBaseFromUrl(candidate);
+            if (base) {
+                return base;
+            }
+        }
+        const sessionId = String(
+            source.session_id
+            || source.sessionId
+            || source.transient_session_id
+            || annotationSourceState.session_id
+            || annotationSourceState.sessionId
+            || ""
+        ).trim();
+        if (sessionId) {
+            return `/datasets/transient/${encodeURIComponent(sessionId)}/annotation`;
+        }
+        const datasetId = String(
+            source.dataset_id
+            || source.datasetId
+            || annotationSourceState.dataset_id
+            || annotationSourceState.datasetId
+            || ""
+        ).trim();
+        return datasetId
+            ? `/datasets/${encodeURIComponent(datasetId)}/annotation`
+            : "";
+    }
+
+    const CLASS_SPLIT_EXPORT_RECORD_STORAGE_KEY = "tator.dqe.annotation-export.v1";
+
+    function getClassSplitAnnotationSessionRevision() {
+        const source = classSplitState.currentSourceHandle
+            && typeof classSplitState.currentSourceHandle === "object"
+            ? classSplitState.currentSourceHandle
+            : {};
+        const candidates = [
+            annotationSourceState.sessionRevision,
+            source.annotation_revision,
+            source.annotationRevision,
+            source.session_revision,
+            source.sessionRevision,
+        ];
+        for (const value of candidates) {
+            const parsed = Number(value);
+            if (Number.isSafeInteger(parsed) && parsed >= 0) {
+                return parsed;
+            }
+        }
+        return null;
+    }
+
+    function classSplitExportRecordMatchesCurrent(record) {
+        const currentRevision = getClassSplitAnnotationSessionRevision();
+        const recordRevision = Number(record?.expectedRevision);
+        return Boolean(
+            record
+            && record.backendOrigin === window.location.origin
+            && record.analysisJobId === String(classSplitState.currentJobId || "")
+            && record.exportBase === getClassSplitAnnotationExportBase()
+            && Number.isSafeInteger(recordRevision)
+            && recordRevision >= 0
+            && (currentRevision === null || recordRevision === currentRevision)
+        );
+    }
+
+    function getClassSplitExportRecord() {
+        if (classSplitExportRecordMatchesCurrent(classSplitState.sessionExportRecord)) {
+            return classSplitState.sessionExportRecord;
+        }
+        try {
+            const parsed = JSON.parse(
+                window.localStorage.getItem(CLASS_SPLIT_EXPORT_RECORD_STORAGE_KEY) || "null"
+            );
+            if (classSplitExportRecordMatchesCurrent(parsed)) {
+                classSplitState.sessionExportRecord = parsed;
+                return parsed;
+            }
+        } catch (_) {
+            // Export recovery is best effort; the backend job remains authoritative.
+        }
+        return null;
+    }
+
+    function persistClassSplitExportRecord(record) {
+        const normalized = {
+            ...record,
+            backendOrigin: window.location.origin,
+            analysisJobId: String(classSplitState.currentJobId || ""),
+            updatedAt: new Date().toISOString(),
+        };
+        classSplitState.sessionExportRecord = normalized;
+        try {
+            window.localStorage.setItem(
+                CLASS_SPLIT_EXPORT_RECORD_STORAGE_KEY,
+                JSON.stringify(normalized)
+            );
+        } catch (_) {
+            // The active page can finish even when browser recovery storage is full.
+        }
+        return normalized;
+    }
+
+    function clearClassSplitExportRecord() {
+        classSplitState.sessionExportRecord = null;
+        try {
+            window.localStorage.removeItem(CLASS_SPLIT_EXPORT_RECORD_STORAGE_KEY);
+        } catch (_) {
+            // Ignore unavailable browser storage.
+        }
+    }
+
+    function renderClassSplitSessionPersistenceStatus() {
+        const panel = classSplitElements.sessionPersistence;
+        if (!panel) {
+            return;
+        }
+        const snapshot = getClassSplitSessionPersistenceSnapshot();
+        const operation = classSplitState.sessionPersistenceOperation;
+        const exportRecord = getClassSplitExportRecord();
+        const hasSession = Boolean(
+            classSplitState.currentJobId
+            && classSplitState.result
+        );
+        const foregroundBusy = Boolean(
+            classSplitState.active
+            || classSplitState.startupOperation
+            || classSplitState.multiSelectionActionInFlight
+            || classSplitState.relabelInFlight
+            || classSplitState.dualBBoxTransactionInFlight
+            || classSplitState.adaptiveRankingOperation
+        );
+        let tone = "idle";
+        let title = hasSession
+            ? "No unsaved backend changes detected"
+            : "Run or restore an analysis to save its session";
+        let summary = (
+            "Session state can be restored only by reopening this browser and reconnecting to this backend. It is not a dataset ZIP."
+        );
+        if (classSplitState.sessionPersistenceError) {
+            tone = "error";
+            title = "Session state needs attention";
+            summary = classSplitState.sessionPersistenceError;
+        } else if (snapshot.recoveryBlocked) {
+            tone = "error";
+            title = "Rerun required before saving or exporting";
+            summary = `${snapshot.identityConflictCount || "An"} annotation identity conflict${snapshot.identityConflictCount === 1 ? "" : "s"} prevent this graph from being safely reconciled with the current labels.`;
+        } else if (operation?.kind === "download") {
+            tone = "saving";
+            title = operation.phase === "choosing"
+                ? "Choose where to save the dataset ZIP"
+                : operation.phase === "saving"
+                    ? "Saving session before export"
+                    : operation.phase === "writing"
+                        ? "Writing dataset ZIP to disk"
+                        : operation.phase === "reconnecting"
+                            ? "Reconnecting to dataset export"
+                            : "Preparing dataset ZIP";
+            summary = classSplitState.sessionPersistenceProgress
+                || "The recoverable session is saved. The backend is preparing one immutable revision.";
+        } else if (operation?.kind === "save") {
+            tone = "saving";
+            title = operation.forDownload
+                ? "Saving session before download"
+                : "Saving recoverable session state";
+            summary = classSplitState.sessionPersistenceProgress
+                || "Flushing labels and review decisions to this backend. No ZIP is being written.";
+        } else if (snapshot.hasPendingWork) {
+            tone = "saving";
+            title = "Saving graph interactions";
+            summary = "Visible graph changes are optimistic until the label and review counters below return to saved.";
+        } else if (exportRecord?.status === "saved") {
+            tone = "saved";
+            title = "Dataset ZIP saved locally";
+            summary = `${exportRecord.localFileName || "The selected ZIP"} was closed successfully. It contains saved annotation revision ${exportRecord.expectedRevision}.`;
+        } else if (exportRecord?.status === "handed_off") {
+            tone = "saved";
+            title = "Dataset ZIP handed to browser downloads";
+            summary = "Tator cannot confirm completion in this browser. Verify the ZIP in the browser downloads list.";
+        } else if (exportRecord?.status === "ready") {
+            tone = "saved";
+            title = "Dataset ZIP prepared";
+            summary = `Saved annotation revision ${exportRecord.expectedRevision} is ready. Choose Download dataset ZIP to write it locally without rebuilding.`;
+        } else if (hasSession && classSplitState.sessionPersistenceLastSavedAt) {
+            tone = "saved";
+            title = `Session state saved at ${formatClassSplitSessionSavedTime(
+                classSplitState.sessionPersistenceLastSavedAt
+            )}`;
+        } else if (hasSession) {
+            tone = "saved";
+        }
+        panel.dataset.tone = tone;
+        if (classSplitElements.sessionPersistenceTitle) {
+            classSplitElements.sessionPersistenceTitle.textContent = title;
+        }
+        if (classSplitElements.sessionPersistenceSummary) {
+            classSplitElements.sessionPersistenceSummary.textContent = summary;
+        }
+        if (classSplitElements.sessionLabelsState) {
+            classSplitElements.sessionLabelsState.textContent = snapshot.labelsSaving
+                ? `Saving${snapshot.dirtyLabelCount ? ` ${snapshot.dirtyLabelCount} image change${snapshot.dirtyLabelCount === 1 ? "" : "s"}` : ""}`
+                : snapshot.dirtyLabelCount
+                    ? `${snapshot.dirtyLabelCount} image change${snapshot.dirtyLabelCount === 1 ? "" : "s"} pending`
+                    : "Durably saved on this backend";
+        }
+        if (classSplitElements.sessionReviewsState) {
+            const active = snapshot.activeReviewCount + snapshot.reconciliationCount;
+            classSplitElements.sessionReviewsState.textContent = snapshot.recoveryBlocked
+                ? `${snapshot.identityConflictCount || "Annotation"} identity conflict${snapshot.identityConflictCount === 1 ? "" : "s"}; rerun required`
+                : snapshot.failedReviewCount
+                ? `${snapshot.failedReviewCount} review action${snapshot.failedReviewCount === 1 ? "" : "s"} failed; select and retry`
+                : snapshot.reviewsSaving
+                ? `Saving${active ? ` ${active} decision${active === 1 ? "" : "s"}` : ""}`
+                : snapshot.pendingReviewCount
+                    ? `${snapshot.pendingReviewCount} receipt${snapshot.pendingReviewCount === 1 ? "" : "s"} pending`
+                    : snapshot.pendingAnnotationCount
+                        ? `${snapshot.pendingAnnotationCount} annotation transaction${snapshot.pendingAnnotationCount === 1 ? "" : "s"} awaiting recovery`
+                        : "Durably saved on this backend";
+        }
+        if (classSplitElements.sessionExportState) {
+            classSplitElements.sessionExportState.textContent = operation?.kind === "download"
+                ? classSplitState.sessionPersistenceProgress || "Preparing"
+                : exportRecord?.status === "saved"
+                    ? `Labels ZIP saved locally at revision ${exportRecord.expectedRevision}`
+                    : exportRecord?.status === "handed_off"
+                        ? "Browser download started; verify completion"
+                        : exportRecord?.status === "ready"
+                            ? `Labels ZIP prepared at revision ${exportRecord.expectedRevision}`
+                            : exportRecord?.status === "preparing"
+                                ? `Preparation can resume at revision ${exportRecord.expectedRevision}`
+                                : "Not prepared";
+        }
+        const showExportProgress = Boolean(
+            operation?.kind === "download"
+            || exportRecord?.status === "preparing"
+        );
+        if (classSplitElements.sessionExportProgress) {
+            classSplitElements.sessionExportProgress.hidden = !showExportProgress;
+        }
+        if (classSplitElements.sessionExportProgressBar) {
+            const percent = Number(classSplitState.sessionPersistencePercent);
+            if (showExportProgress && Number.isFinite(percent)) {
+                classSplitElements.sessionExportProgressBar.value = Math.max(0, Math.min(100, percent));
+            } else {
+                classSplitElements.sessionExportProgressBar.removeAttribute("value");
+            }
+        }
+        if (classSplitElements.sessionExportProgressLabel) {
+            classSplitElements.sessionExportProgressLabel.textContent = (
+                classSplitState.sessionPersistenceProgress
+                || (exportRecord?.status === "preparing" ? "Reconnect to continue preparation" : "Preparing dataset ZIP")
+            );
+        }
+        if (classSplitElements.saveSessionState) {
+            classSplitElements.saveSessionState.disabled = Boolean(
+                !hasSession || operation || foregroundBusy || !snapshot.canSaveSession
+            );
+        }
+        if (classSplitElements.downloadDataset) {
+            classSplitElements.downloadDataset.disabled = Boolean(
+                !hasSession
+                || operation
+                || foregroundBusy
+                || !getClassSplitAnnotationExportBase()
+                || !snapshot.canExportDataset
+            );
+            if (operation?.kind === "download") {
+                const percent = Number(classSplitState.sessionPersistencePercent);
+                classSplitElements.downloadDataset.textContent = operation.phase === "writing"
+                    ? `Writing labels ZIP${Number.isFinite(percent) ? ` · ${Math.round(percent)}%` : ""}`
+                    : operation.phase === "choosing"
+                        ? "Choose local file"
+                        : `Preparing labels ZIP${Number.isFinite(percent) ? ` · ${Math.round(percent)}%` : ""}`;
+            } else if (exportRecord?.status === "ready") {
+                classSplitElements.downloadDataset.textContent = "Save prepared labels ZIP";
+            } else {
+                classSplitElements.downloadDataset.textContent = "Download labels ZIP";
+            }
+        }
+    }
+
+    function startClassSplitSessionPersistenceMonitor() {
+        if (classSplitState.sessionPersistenceMonitorTimer) {
+            return;
+        }
+        const tick = () => {
+            const snapshot = getClassSplitSessionPersistenceSnapshot();
+            if (
+                classSplitState.sessionPersistenceHadPendingWork
+                && !snapshot.hasPendingWork
+                && !classSplitState.sessionPersistenceOperation
+                && !classSplitState.sessionPersistenceError
+            ) {
+                classSplitState.sessionPersistenceLastSavedAt = new Date().toISOString();
+            }
+            classSplitState.sessionPersistenceHadPendingWork = snapshot.hasPendingWork;
+            renderClassSplitSessionPersistenceStatus();
+            maybeResumeClassSplitExportPreparation();
+            classSplitState.sessionPersistenceMonitorTimer = window.setTimeout(
+                tick,
+                300
+            );
+        };
+        tick();
+    }
+
+    async function waitForClassSplitSessionPersistenceIdle({
+        timeoutMs = 120000,
+    } = {}) {
+        const startedAt = Date.now();
+        while (Date.now() - startedAt < timeoutMs) {
+            const snapshot = getClassSplitSessionPersistenceSnapshot();
+            if (
+                !snapshot.labelsSaving
+                && !snapshot.reviewsSaving
+            ) {
+                return snapshot;
+            }
+            await new Promise((resolve) => window.setTimeout(resolve, 100));
+        }
+        throw new Error(
+            "Timed out waiting for the backend to finish saving this session. The current page remains open; retry before restarting."
+        );
+    }
+
+    async function saveClassSplitSessionState({
+        forDownload = false,
+        operation: suppliedOperation = null,
+    } = {}) {
+        const ownsOperation = !suppliedOperation;
+        if (ownsOperation && classSplitState.sessionPersistenceOperation) {
+            throw new Error("A session save or dataset download is already running.");
+        }
+        const jobId = String(classSplitState.currentJobId || "").trim();
+        if (!jobId || !classSplitState.result) {
+            throw new Error("Run or restore a Data Quality Explorer analysis first.");
+        }
+        const operation = suppliedOperation || {
+            kind: "save",
+            phase: "saving",
+            forDownload: Boolean(forDownload),
+            blocksMutations: true,
+            token: ++classSplitState.sessionPersistenceToken,
+            jobId,
+            analysisGeneration: classSplitState.analysisGeneration,
+        };
+        if (suppliedOperation && classSplitState.sessionPersistenceOperation !== suppliedOperation) {
+            throw new Error("The dataset export no longer owns the active session operation.");
+        }
+        if (ownsOperation) {
+            classSplitState.sessionPersistenceOperation = operation;
+        }
+        operation.phase = "saving";
+        operation.blocksMutations = true;
+        classSplitState.sessionPersistenceError = "";
+        classSplitState.sessionPersistenceProgress = "Saving browser recovery metadata ...";
+        refreshClassSplitControls();
+        renderClassSplitSessionPersistenceStatus();
+        try {
+            if (getClassSplitSessionPersistenceSnapshot().recoveryBlocked) {
+                throw new Error(
+                    "This analysis has a terminal annotation identity conflict. Rerun Data Quality Explorer before saving or exporting."
+                );
+            }
+            if (!persistDataQualityExplorerSession()) {
+                throw new Error(
+                    "Browser recovery metadata could not be saved. Free site storage and retry."
+                );
+            }
+            await waitForClassSplitSessionPersistenceIdle();
+            if (!classSplitSessionPersistenceOperationIsCurrent(operation)) {
+                throw new Error("The active analysis changed while its session was saving.");
+            }
+            let snapshot = getClassSplitSessionPersistenceSnapshot();
+            if (snapshot.dirtyLabelCount) {
+                classSplitState.sessionPersistenceProgress = `Saving ${snapshot.dirtyLabelCount} changed image${snapshot.dirtyLabelCount === 1 ? "" : "s"} to this backend ...`;
+                renderClassSplitSessionPersistenceStatus();
+                const saveStarted = await flushAnnotationSnapshot({ manual: true });
+                if (!saveStarted && !annotationSourceState.saveInFlight) {
+                    throw new Error(
+                        "The backend did not start the pending label save. The dataset ZIP has not been prepared."
+                    );
+                }
+                await waitForClassSplitSessionPersistenceIdle();
+            }
+            snapshot = getClassSplitSessionPersistenceSnapshot();
+            if (snapshot.dirtyLabelCount) {
+                throw new Error(
+                    `${snapshot.dirtyLabelCount} changed image${snapshot.dirtyLabelCount === 1 ? " remains" : "s remain"} unsaved on this backend.`
+                );
+            }
+            if (snapshot.pendingReviewCount) {
+                classSplitState.sessionPersistenceProgress = `Saving ${snapshot.pendingReviewCount} pending review receipt${snapshot.pendingReviewCount === 1 ? "" : "s"} ...`;
+                renderClassSplitSessionPersistenceStatus();
+                await drainClassSplitPendingReviewCommits();
+                await waitForClassSplitSessionPersistenceIdle();
+            }
+            if (snapshot.pendingAnnotationCount) {
+                classSplitState.sessionPersistenceProgress = `Recovering ${snapshot.pendingAnnotationCount} annotation transaction${snapshot.pendingAnnotationCount === 1 ? "" : "s"} ...`;
+                renderClassSplitSessionPersistenceStatus();
+                await drainClassSplitPendingAnnotationTransactions();
+                await waitForClassSplitSessionPersistenceIdle();
+            }
+            classSplitState.sessionPersistenceProgress = "Verifying the backend transaction journal ...";
+            renderClassSplitSessionPersistenceStatus();
+            const recovery = await recoverClassSplitBackendAnnotationTransactions(jobId);
+            snapshot = getClassSplitSessionPersistenceSnapshot();
+            if (
+                snapshot.recoveryBlocked
+                || recovery?.checkpoint_ready !== true
+                || !["ready", "ready_with_warnings"].includes(
+                    String(recovery?.status || "")
+                )
+            ) {
+                throw new Error(
+                    "The backend annotation journal is not checkpoint-ready. Recover pending transactions or rerun the analysis before restarting or exporting."
+                );
+            }
+            if (
+                snapshot.pendingReviewCount
+                || snapshot.reconciliationCount
+                || snapshot.pendingAnnotationCount
+            ) {
+                throw new Error(
+                    `${snapshot.pendingReviewCount + snapshot.reconciliationCount + snapshot.pendingAnnotationCount} annotation or review decision${snapshot.pendingReviewCount + snapshot.reconciliationCount + snapshot.pendingAnnotationCount === 1 ? " remains" : "s remain"} pending or uncertain. Retry before restarting.`
+                );
+            }
+            if (snapshot.failedReviewCount) {
+                throw new Error(
+                    `${snapshot.failedReviewCount} review action${snapshot.failedReviewCount === 1 ? " was" : "s were"} not saved. The affected objects remain reviewable; select them and retry before restarting.`
+                );
+            }
+            if (!persistDataQualityExplorerSession()) {
+                throw new Error(
+                    "The backend changes were saved, but browser recovery metadata could not be updated. Retry before restarting."
+                );
+            }
+            classSplitState.sessionPersistenceLastSavedAt = new Date().toISOString();
+            classSplitState.sessionPersistenceProgress = "";
+            const sessionRevision = getClassSplitAnnotationSessionRevision();
+            if (!forDownload) {
+                setClassSplitJobStatus(
+                    "Recoverable session state saved on this backend. No dataset ZIP was downloaded.",
+                    "success"
+                );
+            }
+            return {
+                jobId,
+                savedAt: classSplitState.sessionPersistenceLastSavedAt,
+                sessionRevision,
+            };
+        } catch (error) {
+            classSplitState.sessionPersistenceError = String(
+                error?.message || error
+            );
+            throw error;
+        } finally {
+            if (ownsOperation && classSplitState.sessionPersistenceOperation === operation) {
+                classSplitState.sessionPersistenceOperation = null;
+            }
+            if (ownsOperation) {
+                classSplitState.sessionPersistenceProgress = "";
+                classSplitState.sessionPersistencePercent = null;
+                refreshClassSplitControls();
+                renderClassSplitSessionPersistenceStatus();
+            }
+        }
+    }
+
+    function classSplitExportProgressText(payload) {
+        const stage = String(payload?.stage || payload?.phase || "").trim().toLowerCase();
+        const stageLabels = {
+            queued: "Waiting for the export worker",
+            indexing: "Scanning annotation files",
+            snapshotting: "Freezing the saved annotation revision",
+            archiving: "Building the dataset ZIP",
+            finalizing: "Finalizing the dataset ZIP",
+            ready: "Dataset ZIP prepared",
+        };
+        const message = String(
+            payload?.message || payload?.detail || stageLabels[stage] || ""
+        ).trim();
+        const completed = Number(
+            payload?.completed ?? payload?.processed ?? payload?.current
+        );
+        const total = Number(payload?.total);
+        if (Number.isFinite(completed) && Number.isFinite(total) && total > 0) {
+            return `${message || "Preparing dataset ZIP"}: ${completed}/${total}`;
+        }
+        const progress = Number(payload?.progress);
+        if (Number.isFinite(progress)) {
+            return `${message || "Preparing dataset ZIP"}: ${Math.max(0, Math.min(100, progress * 100)).toFixed(0)}%`;
+        }
+        const percent = Number(payload?.percent ?? payload?.progress_percent);
+        if (Number.isFinite(percent)) {
+            return `${message || "Preparing dataset ZIP"}: ${Math.max(0, Math.min(100, percent)).toFixed(0)}%`;
+        }
+        return message || "Preparing the reconciled dataset ZIP on this backend ...";
+    }
+
+    function persistClassSplitExportStatus(exportBase, expectedRevision, payload) {
+        const progress = Number(payload?.progress);
+        return persistClassSplitExportRecord({
+            exportBase,
+            expectedRevision,
+            exportJobId: String(payload?.job_id || ""),
+            status: String(payload?.status || "preparing"),
+            stage: String(payload?.stage || "queued"),
+            progress: Number.isFinite(progress) ? progress : 0,
+            token: String(payload?.token || ""),
+            archiveBytes: Number(payload?.archive_bytes) || 0,
+            fileCount: Number(payload?.file_count) || 0,
+        });
+    }
+
+    function applyClassSplitExportStatus(operation, exportBase, expectedRevision, payload) {
+        const stage = String(payload?.stage || "queued").trim().toLowerCase();
+        const progress = Number(payload?.progress);
+        const previouslyBlocked = operation.blocksMutations !== false;
+        operation.phase = stage === "ready" ? "ready" : "preparing";
+        operation.exportJobId = String(payload?.job_id || operation.exportJobId || "");
+        operation.blocksMutations = !["archiving", "finalizing", "ready"].includes(stage);
+        classSplitState.sessionPersistencePercent = Number.isFinite(progress)
+            ? Math.max(0, Math.min(100, progress * 100))
+            : null;
+        classSplitState.sessionPersistenceProgress = classSplitExportProgressText(payload);
+        persistClassSplitExportStatus(exportBase, expectedRevision, payload);
+        if (previouslyBlocked !== (operation.blocksMutations !== false)) {
+            refreshClassSplitControls();
+        }
+        renderClassSplitSessionPersistenceStatus();
+    }
+
+    async function requestClassSplitExportPreparation(
+        operation,
+        exportBase,
+        expectedRevision
+    ) {
+        const response = await fetch(`${exportBase}/export/prepare`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                background: true,
+                expected_revision: expectedRevision,
+                class_analysis_job_id: String(
+                    classSplitState.currentJobId || ""
+                ).trim(),
+            }),
+            signal: operation.abortController?.signal,
+        });
+        const detail = await response.text();
+        const payload = parseJsonObjectSafe(detail, {});
+        if (!response.ok) {
+            throw new Error(parseApiError(detail, `Dataset export failed (${response.status})`));
+        }
+        return payload;
+    }
+
+    async function waitForClassSplitExportPreparation(
+        operation,
+        exportBase,
+        expectedRevision,
+        initialPayload
+    ) {
+        let payload = initialPayload;
+        let networkFailures = 0;
+        let rescheduledAfterRestart = false;
+        while (true) {
+            if (!classSplitSessionPersistenceOperationIsCurrent(operation)) {
+                operation.abortController?.abort();
+                throw new Error("The active analysis changed while its dataset ZIP was being prepared.");
+            }
+            applyClassSplitExportStatus(operation, exportBase, expectedRevision, payload);
+            const status = String(payload?.status || "").trim().toLowerCase();
+            if (status === "ready") {
+                const token = String(payload?.token || "").trim();
+                if (!/^[0-9a-f]{64}$/i.test(token)) {
+                    throw new Error("The backend returned an invalid prepared export token.");
+                }
+                return payload;
+            }
+            if (status === "failed") {
+                throw new Error(String(payload?.error || "Dataset export preparation failed."));
+            }
+            const exportJobId = String(payload?.job_id || operation.exportJobId || "").trim();
+            if (!exportJobId) {
+                throw new Error("The backend did not return an export job identifier.");
+            }
+            operation.exportJobId = exportJobId;
+            await new Promise((resolve) => window.setTimeout(resolve, 750));
+            let response;
+            try {
+                response = await fetch(
+                    `${exportBase}/export/status?job_id=${encodeURIComponent(exportJobId)}`,
+                    {
+                        cache: "no-store",
+                        signal: operation.abortController?.signal,
+                    }
+                );
+                networkFailures = 0;
+            } catch (error) {
+                networkFailures += 1;
+                if (networkFailures >= 5) {
+                    throw new Error(
+                        "Lost contact with the export job. Its identifier was retained; reload this session to reconnect."
+                    );
+                }
+                continue;
+            }
+            const detail = await response.text();
+            if (response.status === 404 && !rescheduledAfterRestart) {
+                rescheduledAfterRestart = true;
+                payload = await requestClassSplitExportPreparation(
+                    operation,
+                    exportBase,
+                    expectedRevision
+                );
+                continue;
+            }
+            if (!response.ok) {
+                throw new Error(parseApiError(detail, `Dataset export status failed (${response.status})`));
+            }
+            payload = parseJsonObjectSafe(detail, {});
+        }
+    }
+
+    async function writeClassSplitExportToLocalFile(
+        operation,
+        downloadUrl,
+        fileHandle,
+        expectedBytes
+    ) {
+        const response = await fetch(downloadUrl, {
+            cache: "no-store",
+            signal: operation.abortController?.signal,
+        });
+        if (!response.ok || !response.body) {
+            throw new Error(`Dataset ZIP transfer failed (${response.status}).`);
+        }
+        const contentLength = Number(response.headers.get("Content-Length"));
+        const totalBytes = Number.isFinite(contentLength) && contentLength > 0
+            ? contentLength
+            : Number(expectedBytes) || 0;
+        const reader = response.body.getReader();
+        let writable = null;
+        let writtenBytes = 0;
+        let closed = false;
+        let lastRenderAt = 0;
+        try {
+            writable = await fileHandle.createWritable();
+            while (true) {
+                if (!classSplitSessionPersistenceOperationIsCurrent(operation)) {
+                    operation.abortController?.abort();
+                    throw new Error("The active analysis changed while the dataset ZIP was being written.");
+                }
+                const { value, done } = await reader.read();
+                if (done) {
+                    break;
+                }
+                await writable.write(value);
+                writtenBytes += value.byteLength;
+                const now = performance.now();
+                if (now - lastRenderAt >= 200) {
+                    const percent = totalBytes > 0
+                        ? Math.max(0, Math.min(100, (writtenBytes / totalBytes) * 100))
+                        : null;
+                    classSplitState.sessionPersistencePercent = percent;
+                    classSplitState.sessionPersistenceProgress = totalBytes > 0
+                        ? `Writing dataset ZIP to disk: ${percent.toFixed(0)}%`
+                        : `Writing dataset ZIP to disk: ${(writtenBytes / (1024 * 1024)).toFixed(1)} MB`;
+                    renderClassSplitSessionPersistenceStatus();
+                    lastRenderAt = now;
+                }
+            }
+            if (totalBytes > 0 && writtenBytes !== totalBytes) {
+                throw new Error(
+                    `Dataset ZIP transfer was incomplete (${writtenBytes} of ${totalBytes} bytes).`
+                );
+            }
+            await writable.close();
+            closed = true;
+            return { writtenBytes, fileName: String(fileHandle.name || "dataset.zip") };
+        } finally {
+            reader.releaseLock();
+            if (writable && !closed) {
+                try {
+                    await writable.abort();
+                } catch (_) {
+                    // The original transfer error is more useful than abort cleanup.
+                }
+            }
+        }
+    }
+
+    function maybeResumeClassSplitExportPreparation() {
+        if (
+            classSplitState.sessionPersistenceOperation
+            || classSplitState.sessionExportResumePromise
+        ) {
+            return;
+        }
+        const record = getClassSplitExportRecord();
+        if (!record || record.status !== "preparing" || !record.exportJobId) {
+            return;
+        }
+        const currentRevision = getClassSplitAnnotationSessionRevision();
+        if (
+            currentRevision !== null
+            && Number(record.expectedRevision) !== currentRevision
+        ) {
+            clearClassSplitExportRecord();
+            return;
+        }
+        const attemptKey = `${record.exportBase}:${record.expectedRevision}:${record.exportJobId}`;
+        if (classSplitState.sessionExportResumeAttemptedKey === attemptKey) {
+            return;
+        }
+        classSplitState.sessionExportResumeAttemptedKey = attemptKey;
+        const operation = {
+            kind: "download",
+            phase: "reconnecting",
+            blocksMutations: !["archiving", "finalizing"].includes(record.stage),
+            token: ++classSplitState.sessionPersistenceToken,
+            jobId: String(classSplitState.currentJobId || ""),
+            analysisGeneration: classSplitState.analysisGeneration,
+            exportJobId: record.exportJobId,
+            abortController: new AbortController(),
+        };
+        classSplitState.sessionPersistenceOperation = operation;
+        classSplitState.sessionPersistenceError = "";
+        classSplitState.sessionPersistenceProgress = "Reconnecting to the prepared dataset revision ...";
+        refreshClassSplitControls();
+        renderClassSplitSessionPersistenceStatus();
+        classSplitState.sessionExportResumePromise = (async () => {
+            const initial = await requestClassSplitExportPreparation(
+                operation,
+                record.exportBase,
+                Number(record.expectedRevision)
+            );
+            const ready = await waitForClassSplitExportPreparation(
+                operation,
+                record.exportBase,
+                Number(record.expectedRevision),
+                initial
+            );
+            persistClassSplitExportRecord({
+                ...record,
+                status: "ready",
+                stage: "ready",
+                progress: 1,
+                token: String(ready.token || ""),
+                archiveBytes: Number(ready.archive_bytes) || 0,
+                fileCount: Number(ready.file_count) || 0,
+            });
+            setClassSplitJobStatus(
+                "Dataset ZIP preparation reconnected and completed. Choose Download dataset ZIP to write it locally.",
+                "success"
+            );
+        })().catch((error) => {
+            classSplitState.sessionPersistenceError = String(error?.message || error);
+        }).finally(() => {
+            if (classSplitState.sessionPersistenceOperation === operation) {
+                classSplitState.sessionPersistenceOperation = null;
+            }
+            classSplitState.sessionExportResumePromise = null;
+            classSplitState.sessionPersistenceProgress = "";
+            classSplitState.sessionPersistencePercent = null;
+            refreshClassSplitControls();
+            renderClassSplitSessionPersistenceStatus();
+        });
+    }
+
+    async function downloadClassSplitReconciledDataset() {
+        if (classSplitState.sessionPersistenceOperation) {
+            throw new Error("A session save or dataset download is already running.");
+        }
+        const analysisJobId = String(classSplitState.currentJobId || "").trim();
+        if (!analysisJobId || !classSplitState.result) {
+            throw new Error("Run or restore a Data Quality Explorer analysis first.");
+        }
+        const operation = {
+            kind: "download",
+            phase: "saving",
+            blocksMutations: true,
+            token: ++classSplitState.sessionPersistenceToken,
+            jobId: analysisJobId,
+            analysisGeneration: classSplitState.analysisGeneration,
+            abortController: new AbortController(),
+        };
+        classSplitState.sessionPersistenceOperation = operation;
+        classSplitState.sessionPersistenceError = "";
+        classSplitState.sessionPersistenceProgress = "Saving and checkpointing this annotation session before choosing a ZIP destination.";
+        classSplitState.sessionPersistencePercent = null;
+        refreshClassSplitControls();
+        renderClassSplitSessionPersistenceStatus();
+        try {
+            const saved = await saveClassSplitSessionState({
+                forDownload: true,
+                operation,
+            });
+            operation.phase = "choosing";
+            classSplitState.sessionPersistenceProgress = "Choose a local ZIP destination. The checkpoint is saved; no ZIP has been prepared yet.";
+            renderClassSplitSessionPersistenceStatus();
+            let fileHandle = null;
+            if (typeof window.showSaveFilePicker === "function") {
+                fileHandle = await window.showSaveFilePicker({
+                    suggestedName: nextYoloExportDownloadFilename("bboxes_yolo.zip"),
+                    types: [{
+                        description: "ZIP archive",
+                        accept: { "application/zip": [".zip"] },
+                    }],
+                });
+            }
+            const postPickerRecovery = await recoverClassSplitBackendAnnotationTransactions(
+                analysisJobId
+            );
+            if (
+                postPickerRecovery?.checkpoint_ready !== true
+                || String(postPickerRecovery?.status || "") !== "ready"
+                || getClassSplitSessionPersistenceSnapshot().recoveryBlocked
+            ) {
+                throw new Error(
+                    "The annotation checkpoint changed while choosing the ZIP destination. Recover or rerun before exporting."
+                );
+            }
+            const expectedRevision = Number(saved.sessionRevision);
+            if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+                throw new Error(
+                    "The backend did not expose the saved annotation revision, so a revision-safe ZIP cannot be prepared."
+                );
+            }
+            const exportBase = getClassSplitAnnotationExportBase();
+            if (!exportBase) {
+                throw new Error(
+                    "Reconnect the analyzed labeling workspace before downloading its dataset ZIP."
+                );
+            }
+            operation.phase = "preparing";
+            classSplitState.sessionPersistenceProgress = "Starting one revision-safe background export ...";
+            renderClassSplitSessionPersistenceStatus();
+            const initial = await requestClassSplitExportPreparation(
+                operation,
+                exportBase,
+                expectedRevision
+            );
+            const prepared = await waitForClassSplitExportPreparation(
+                operation,
+                exportBase,
+                expectedRevision,
+                initial
+            );
+            const token = String(prepared.token || "").trim();
+            const downloadUrl = `${exportBase}/export?token=${encodeURIComponent(token)}`;
+            operation.blocksMutations = false;
+            operation.phase = "writing";
+            classSplitState.sessionPersistencePercent = 0;
+            refreshClassSplitControls();
+            let completion;
+            if (fileHandle) {
+                completion = await writeClassSplitExportToLocalFile(
+                    operation,
+                    downloadUrl,
+                    fileHandle,
+                    Number(prepared.archive_bytes) || 0
+                );
+                persistClassSplitExportRecord({
+                    exportBase,
+                    expectedRevision,
+                    exportJobId: String(prepared.job_id || operation.exportJobId || ""),
+                    status: "saved",
+                    stage: "ready",
+                    progress: 1,
+                    token,
+                    archiveBytes: Number(prepared.archive_bytes) || completion.writtenBytes,
+                    fileCount: Number(prepared.file_count) || 0,
+                    localFileName: completion.fileName,
+                    completedAt: new Date().toISOString(),
+                });
+            } else {
+                const link = document.createElement("a");
+                link.href = downloadUrl;
+                link.download = nextYoloExportDownloadFilename("bboxes_yolo.zip");
+                link.rel = "noopener";
+                link.hidden = true;
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                persistClassSplitExportRecord({
+                    exportBase,
+                    expectedRevision,
+                    exportJobId: String(prepared.job_id || operation.exportJobId || ""),
+                    status: "handed_off",
+                    stage: "ready",
+                    progress: 1,
+                    token,
+                    archiveBytes: Number(prepared.archive_bytes) || 0,
+                    fileCount: Number(prepared.file_count) || 0,
+                    completedAt: new Date().toISOString(),
+                });
+            }
+            classSplitState.sessionPersistenceLastSavedAt = new Date().toISOString();
+            setClassSplitJobStatus(
+                fileHandle
+                    ? `Dataset ZIP saved locally as ${completion.fileName}.`
+                    : "Dataset ZIP handed to browser downloads. Verify completion in the browser downloads list.",
+                "success"
+            );
+            enqueueTaskNotice(
+                fileHandle
+                    ? "Dataset ZIP saved locally · backend session remains saved separately."
+                    : "Dataset ZIP handed to browser · verify the download separately.",
+                {
+                    key: `class-split-dataset-download:${operation.jobId}`,
+                    durationMs: 6500,
+                }
+            );
+        } catch (error) {
+            if (error?.name === "AbortError" && operation.phase === "choosing") {
+                setClassSplitJobStatus(
+                    "Dataset ZIP download cancelled before preparation started.",
+                    "info"
+                );
+                return;
+            }
+            classSplitState.sessionPersistenceError = String(
+                error?.message || error
+            );
+            throw error;
+        } finally {
+            if (classSplitState.sessionPersistenceOperation === operation) {
+                classSplitState.sessionPersistenceOperation = null;
+            }
+            classSplitState.sessionPersistenceProgress = "";
+            classSplitState.sessionPersistencePercent = null;
+            refreshClassSplitControls();
+            renderClassSplitSessionPersistenceStatus();
         }
     }
 
@@ -59623,7 +61422,11 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!jobId || !classSplitState.result) {
             throw new Error("Run or load an analysis before updating receipt ranking.");
         }
-        if (classSplitMutationIsBusy({ includeReconciliation: true, includeHydration: true })) {
+        if (classSplitWriteMutationIsBlocked({
+            jobId,
+            includeReconciliation: true,
+            includeHydration: true,
+        })) {
             throw new Error("Wait for the current Data Quality Explorer action to finish.");
         }
         const operation = beginClassSplitAdaptiveRankingOperation("update");
@@ -59668,7 +61471,11 @@ async function cancelRfDetrTrainingJobRequest() {
             renderClassSplitWrongList();
             return;
         }
-        if (classSplitMutationIsBusy({ includeReconciliation: true, includeHydration: true })) {
+        if (classSplitWriteMutationIsBlocked({
+            jobId,
+            includeReconciliation: true,
+            includeHydration: true,
+        })) {
             throw new Error("Wait for the current Data Quality Explorer action to finish.");
         }
         const operation = beginClassSplitAdaptiveRankingOperation("reset");
@@ -60033,7 +61840,7 @@ async function cancelRfDetrTrainingJobRequest() {
         return Math.max(1, Math.min(1000, parsed));
     }
 
-    function discardFirstClassSplitWrongCandidates() {
+    async function discardFirstClassSplitWrongCandidates() {
         const visibleCandidates = getClassSplitVisibleWrongCandidates();
         const queuedIds = reconcileClassSplitWrongQueue(visibleCandidates);
         if (!visibleCandidates.length || !queuedIds.length) {
@@ -60048,38 +61855,10 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!discardedIds.length) {
             return;
         }
-        const captureTrainingData = isClassSplitTrainingCaptureEnabled();
-        const clientActionId = createClassSplitTrainingClientActionId();
-        discardedIds.forEach((pointId) => classSplitState.dismissedWrongIds.add(pointId));
-        classSplitState.wrongQueueIds = [];
-        classSplitState.wrongQueueSignature = "";
-        syncClassSplitWrongCandidateSummaryCount();
-        renderClassSplitWrongList();
-        renderClassSplitReport();
-        const discardLabel = classSplitResultHasRefinement()
-            ? getClassSplitVignetteCategoryLabel()
-            : "likely-wrong";
-        setClassSplitJobStatus(
-            `Discarded ${discardedIds.length} ${discardLabel} vignette${discardedIds.length === 1 ? "" : "s"} for this review session.`,
-            "success"
-        );
-        const reviewIds = Object.fromEntries(
-            discardedIds
-                .map((pointId) => [pointId, getClassSplitPointReviewId(pointId)])
-                .filter(([, reviewId]) => !!reviewId)
-        );
-        const capturePayload = {
-            action_type: "discard",
-            point_ids: discardedIds,
-            origin: "desktop",
-            client_action_id: clientActionId,
-        };
-        if (discardedIds.length === 1 && reviewIds[discardedIds[0]]) {
-            capturePayload.review_id = reviewIds[discardedIds[0]];
-        } else if (Object.keys(reviewIds).length) {
-            capturePayload.review_ids = reviewIds;
-        }
-        void captureClassSplitTrainingAction(capturePayload, { enabled: captureTrainingData });
+        await applyClassSplitMultiSelectionDisposition("skip", {
+            pointIds: discardedIds,
+            actionLabel: "Skipping visible review candidates",
+        });
     }
 
 
@@ -60524,17 +62303,18 @@ async function cancelRfDetrTrainingJobRequest() {
             entry
         );
         if (!persistDataQualityExplorerSession()) {
-            if (previous) {
-                classSplitState.pendingReviewDispositionCommits.set(
-                    entry.queueKey,
-                    previous
-                );
-            } else {
-                classSplitState.pendingReviewDispositionCommits.delete(
-                    entry.queueKey
-                );
-            }
-            return "";
+            // Recovery storage is a secondary safeguard. Keep the normalized
+            // intent in memory so the foreground annotation write and its
+            // revisioned review receipt can still complete in this session.
+            // Aborting here made valid relabel/delete actions appear to do
+            // nothing whenever sessionStorage could not accept a checkpoint.
+            console.warn(
+                "Pending review intent could not be checkpointed in browser storage; continuing with the active commit queue",
+                entry.queueKey
+            );
+            classSplitState.sessionPersistenceError = (
+                "Browser recovery state could not be updated. The current label action is still being saved now."
+            );
         }
         if (classSplitState.reviewCommitDrainPromise) {
             classSplitState.reviewCommitDrainRequested = true;
@@ -60806,7 +62586,7 @@ async function cancelRfDetrTrainingJobRequest() {
         );
     }
 
-    async function drainClassSplitPendingReviewCommits() {
+    async function drainClassSplitPendingReviewCommits({ deferUi = false } = {}) {
         if (classSplitReviewHistoryDeleteOperation(
             classSplitState.currentJobId
         )) {
@@ -60865,6 +62645,7 @@ async function cancelRfDetrTrainingJobRequest() {
                                 captureTrainingData: false,
                                 origin: entry.origin,
                                 clientActionId: entry.clientActionId,
+                                deferUi,
                             }
                         );
                         if (!saved) {
@@ -60948,8 +62729,10 @@ async function cancelRfDetrTrainingJobRequest() {
             if (!persistDataQualityExplorerSession()) {
                 complete = false;
             }
-            renderClassSplitReviewedList();
-            refreshClassSplitControls();
+            if (!deferUi) {
+                renderClassSplitReviewedList();
+                refreshClassSplitControls();
+            }
             return complete;
         })();
         classSplitState.reviewCommitDrainPromise = drainPromise;
@@ -60959,8 +62742,10 @@ async function cancelRfDetrTrainingJobRequest() {
             if (classSplitState.reviewCommitDrainPromise === drainPromise) {
                 classSplitState.reviewCommitDrainPromise = null;
             }
-            renderClassSplitPendingReviewRecovery();
-            refreshClassSplitControls();
+            if (!deferUi) {
+                renderClassSplitPendingReviewRecovery();
+                refreshClassSplitControls();
+            }
         }
     }
 
@@ -61974,6 +63759,16 @@ async function cancelRfDetrTrainingJobRequest() {
             setSamStatus("Run Data Quality Explorer analysis before starting a VLM review.", { variant: "warn", duration: 5000 });
             return;
         }
+        const recoveryBlockReason = classSplitRecoveryMutationBlockReason(
+            parentJobId
+        );
+        if (recoveryBlockReason) {
+            setSamStatus(
+                recoveryBlockReason,
+                { variant: "warn", duration: 7000 }
+            );
+            return;
+        }
         const existing = getClassSplitQwenReviewForPoint(safePointId);
         if (isClassSplitQwenReviewActive(existing)) {
             return;
@@ -62200,7 +63995,7 @@ async function cancelRfDetrTrainingJobRequest() {
             classSplitDualBBoxResolutionApiAvailable()
             && Number(
                 classSplitState.capabilities?.dual_bbox_annotation_transaction_api_version
-            ) >= 2
+            ) >= 5
         );
     }
     function classSplitRestoredAnnotationTargetMatchesCurrentAnalysis(annotationTarget) {
@@ -62323,7 +64118,10 @@ async function cancelRfDetrTrainingJobRequest() {
         let reason = "";
         if (!point) {
             reason = "This object is no longer available.";
-        } else if (busy || classSplitState.relabelInFlight) {
+        } else if (
+            busy
+            || classSplitPointMutationIsBusy([point.point_id])
+        ) {
             reason = "Wait for the current review or class change to finish.";
         } else if (classSplitReviewHistoryNeedsDurableClear(point)) {
             reason = "Restore the saved Confirm or Skip decision from Review history before changing this class.";
@@ -62332,7 +64130,9 @@ async function cancelRfDetrTrainingJobRequest() {
             && !classSplitState.restoredSourceCompatible
         ) {
             reason = "Reconnect the analyzed annotation workspace before changing this class.";
-        } else if (isAnnotationMutationBlocked()) {
+        } else if (isAnnotationMutationBlocked({
+            ignoreCurrentImageHydration: true,
+        })) {
             reason = annotationMutationBlockedMessage("Changing this class");
         }
         return {
@@ -62341,10 +64141,18 @@ async function cancelRfDetrTrainingJobRequest() {
         };
     }
 
-    function getClassSplitSingleBboxDeletionUiState(point) {
+function getClassSplitSingleBboxDeletionUiState(
+    point,
+    { ignoreActionReservation = false } = {},
+) {
         let reason = "";
         if (!point) {
             reason = "This object is no longer available.";
+    } else if (classSplitPointMutationIsBusy(
+        [point.point_id],
+        { ignoreActionReservation },
+    )) {
+            reason = "Wait for the current review or annotation change to finish.";
         } else if (classSplitReviewHistoryNeedsDurableClear(point)) {
             reason = "Restore the saved Confirm or Skip decision from Review history before deleting this bbox.";
         } else if (classSplitState.relabelInFlight) {
@@ -64662,8 +66470,14 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         const thumbUrl = getClassSplitThumbnailUrl(point);
+        const boundedDetailPending = Boolean(
+            classSplitState.boundedTransport && !point._boundedDetailLoaded
+        );
         const currentClass = String(point.class_name || "").trim();
         const suggestedClass = String(point.suggested_neighbor_class || "").trim();
+        const actionError = String(
+            point._class_split_last_action_error || ""
+        ).trim();
         const dualContract = getClassSplitDualBBoxContract(point.point_id);
         const dualConflict = getClassSplitDualBBoxConflict(
             getClassSplitCandidateByPointId(point.point_id),
@@ -64701,7 +66515,9 @@ async function cancelRfDetrTrainingJobRequest() {
         const pairDeletionTitle = pairActionState.deletionReason
             ? ` title="${escapeHtml(pairActionState.deletionReason)}"`
             : "";
-        const singleDeletionState = dualConflict
+        const singleDeletionState = boundedDetailPending
+            ? { disabled: true, reason: "Loading exact object details before annotation actions.", mode: "" }
+            : dualConflict
             ? { disabled: true, reason: "Use the overlapping-box controls.", mode: "" }
             : pairBusy
             ? { disabled: true, reason: "Wait for the current review choice to finish saving.", mode: "" }
@@ -64709,11 +66525,20 @@ async function cancelRfDetrTrainingJobRequest() {
         const singleDeletionTitle = singleDeletionState.reason
             ? ` title="${escapeHtml(singleDeletionState.reason)}"`
             : "";
-        const relabelState = getClassSplitRelabelUiState(point, {
-            busy: pairBusy,
-        });
+        const relabelState = boundedDetailPending
+            ? { disabled: true, reason: "Loading exact object details before annotation actions." }
+            : getClassSplitRelabelUiState(point, {
+                busy: pairBusy,
+            });
         const relabelTitle = relabelState.reason
             ? ` title="${escapeHtml(relabelState.reason)}"`
+            : "";
+        const annotationActionUnavailableReason = (
+            !dualConflict
+            && relabelState.disabled
+            && singleDeletionState.disabled
+        )
+            ? String(relabelState.reason || singleDeletionState.reason || "").trim()
             : "";
         const inspectorActions = dualConflict
             ? [
@@ -64750,7 +66575,9 @@ async function cancelRfDetrTrainingJobRequest() {
             `</div>`,
             `<div class="class-split-inspector__meta">`,
             `<strong>${escapeHtml(currentClass || "")}</strong><br>`,
-            `${escapeHtml(point.split || "train")}/${escapeHtml(point.image_relpath || "")}<br>`,
+            boundedDetailPending
+                ? `<span class="training-help">Loading exact object details ...</span><br>`
+                : `${escapeHtml(point.split || "train")}/${escapeHtml(point.image_relpath || "")}<br>`,
             `Cluster ${escapeHtml(point.cluster_id ?? "")} • outlier ${(Number(point.outlier_score) || 0).toFixed(2)}<br>`,
             `Neighbor mix: same ${Math.round((Number(point.same_class_neighbor_ratio) || 0) * 100)}%`,
             point.suggested_neighbor_class
@@ -64760,6 +66587,9 @@ async function cancelRfDetrTrainingJobRequest() {
             `</div>`,
             `<div class="class-split-inspector__actions">`,
             inspectorActions,
+            actionError || boundedDetailPending || annotationActionUnavailableReason
+                ? `<div class="class-split-inspector__action-status training-help" role="status" aria-live="polite">${escapeHtml(actionError || (boundedDetailPending ? "Loading object identity for annotation actions ..." : annotationActionUnavailableReason))}</div>`
+                : "",
             `</div>`,
             `<div data-qwen-review-block="${escapeHtml(point.point_id || "")}">${renderClassSplitQwenReviewBlock(point.point_id)}</div>`,
         ].join("");
@@ -65007,9 +66837,28 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         const point = classSplitState.pointsById.get(safeId);
-        if (classSplitState.boundedTransport && !point?._boundedDetailLoaded) {
-            void ensureClassSplitBoundedPointHydrated(safeId).then((hydrated) => {
+        if (classSplitState.boundedTransport) {
+            const detailLoad = point?._boundedDetailLoaded
+                ? Promise.resolve(point)
+                : ensureClassSplitBoundedPointHydrated(
+                    safeId,
+                    { includeEvidence: false }
+                );
+            void detailLoad.then((hydrated) => {
                 if (hydrated && classSplitState.selectedPointId === safeId) {
+                    rebuildClassSplitCandidateIndexes();
+                    renderClassSplitInspector();
+                    renderClassSplitWrongList();
+                }
+                if (hydrated && !hydrated._boundedEvidenceLoaded) {
+                    return ensureClassSplitBoundedPointHydrated(
+                        safeId,
+                        { includeEvidence: true }
+                    );
+                }
+                return null;
+            }).then((hydratedWithEvidence) => {
+                if (hydratedWithEvidence && classSplitState.selectedPointId === safeId) {
                     rebuildClassSplitCandidateIndexes();
                     renderClassSplitInspector();
                     renderClassSplitWrongList();
@@ -65115,13 +66964,17 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function classSplitPointReviewActionInFlight(
         pointId,
-        jobId = classSplitState.currentJobId
+        jobId = classSplitState.currentJobId,
+        { ignoreActionReservation = false } = {}
     ) {
         const safePointId = String(pointId || "").trim();
         return Boolean(
             safePointId
             && (
-                classSplitState.reviewActionPendingPointIds.has(safePointId)
+                (
+                    !ignoreActionReservation
+                    && classSplitState.reviewActionPendingPointIds.has(safePointId)
+                )
                 || classSplitState.reviewDispositionReconciliationPointIds.has(
                     safePointId
                 )
@@ -65144,13 +66997,58 @@ async function cancelRfDetrTrainingJobRequest() {
         );
     }
 
+    function classSplitPointMutationIsBusy(
+        pointIds,
+        {
+            jobId = classSplitState.currentJobId,
+            ignoreActionReservation = false,
+        } = {}
+    ) {
+        const safePointIds = Array.from(new Set(
+            Array.from(pointIds || [])
+                .map((pointId) => String(pointId || "").trim())
+                .filter(Boolean)
+        ));
+        // Foreground analysis and batch mutations remain global barriers. The
+        // per-object path deliberately ignores unrelated background saves and
+        // receipt drains: annotation snapshots already queue concurrent edits,
+        // while review receipts are revisioned per object. The same object is
+        // still serialized through classSplitPointReviewActionInFlight.
+        return Boolean(
+            classSplitRecoveryMutationBlockReason(jobId)
+            || classSplitMutationIsBusy({
+                jobId,
+                includeReviewDispositionInFlight: false,
+                includeReviewActionPending: false,
+                includeReviewCommitDrain: false,
+                includeAnnotationSave: false,
+                includePendingReviewCommits: false,
+            })
+            || safePointIds.some((pointId) => (
+                classSplitPointReviewActionInFlight(
+                    pointId,
+                    jobId,
+                    { ignoreActionReservation }
+                )
+                || Array.from(
+                    classSplitState.pendingAnnotationTransactions?.values?.() || []
+                ).some((entry) => (
+                    String(entry?.jobId || "") === String(jobId || "").trim()
+                    && Array.isArray(entry?.pointIds)
+                    && entry.pointIds.includes(pointId)
+                ))
+            ))
+        );
+    }
+
     function classSplitPointReviewMutationBlocked(
         pointId,
         jobId = classSplitState.currentJobId
     ) {
         const safePointId = String(pointId || "").trim();
         return Boolean(
-            safePointId
+            classSplitRecoveryMutationBlockReason(jobId)
+            || (safePointId
             && (
                 classSplitState.reviewDispositionReconciliationPointIds.has(
                     safePointId
@@ -65162,7 +67060,7 @@ async function cancelRfDetrTrainingJobRequest() {
                     safePointId,
                     jobId
                 )
-            )
+            ))
         );
     }
 
@@ -65256,36 +67154,46 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const originalText = button.textContent;
         const actionJobId = String(classSplitState.currentJobId || "").trim();
-        if (classSplitReviewHistoryDeleteOperation(actionJobId)) {
-            enqueueTaskNotice(
-                "Wait for review-history deletion to finish before recording another choice.",
-                {
-                    key: `class-split-review-history-delete:${actionJobId || "current"}`,
-                    durationMs: 4200,
-                }
-            );
-            return;
-        }
-        if (classSplitMutationIsBusy()) {
-            enqueueTaskNotice(
-                "Wait for the current Data Quality Explorer mutation to finish before recording another choice.",
-                {
-                    key: `class-split-review-mutation-busy:${actionJobId || "current"}`,
-                    durationMs: 4200,
-                }
-            );
-            return;
-        }
         const actionGeneration = classSplitState.analysisGeneration;
         const actionPointId = String(
             button.getAttribute("data-point-id") || ""
         ).trim();
+        const actionPoint = actionPointId
+            ? getClassSplitPointById(actionPointId)
+            : null;
+        if (actionPoint) {
+            actionPoint._class_split_last_action_error = "";
+        }
         const actionPairPointId = String(
             button.getAttribute("data-pair-point-id") || ""
         ).trim();
         const actionReservationPointIds = Array.from(new Set(
             [actionPointId, actionPairPointId].filter(Boolean)
         ));
+        if (classSplitReviewHistoryDeleteOperation(actionJobId)) {
+            const message = "Wait for review-history deletion to finish before recording another choice.";
+            enqueueTaskNotice(message, {
+                key: `class-split-review-history-delete:${actionJobId || "current"}`,
+                durationMs: 4200,
+            });
+            setClassSplitJobStatus(message, "warn");
+            return;
+        }
+        const mutationBusy = actionReservationPointIds.length
+            ? classSplitPointMutationIsBusy(
+                actionReservationPointIds,
+                { jobId: actionJobId }
+            )
+            : classSplitMutationIsBusy();
+        if (mutationBusy) {
+            const message = "Wait for the current Data Quality Explorer mutation to finish before recording another choice.";
+            enqueueTaskNotice(message, {
+                key: `class-split-review-mutation-busy:${actionJobId || "current"}`,
+                durationMs: 4200,
+            });
+            setClassSplitJobStatus(message, "warn");
+            return;
+        }
         if (actionReservationPointIds.some(
             (pointId) => classSplitState.reviewActionPendingPointIds.has(pointId)
         )) {
@@ -65316,14 +67224,17 @@ async function cancelRfDetrTrainingJobRequest() {
         button.classList.add("class-split-review-action", "is-acknowledged");
         button.dataset.actionPhase = "acknowledged";
         Promise.resolve()
-                .then(() => new Promise((resolve) => {
-                    window.setTimeout(resolve, 280);
-                }))
                 .then(() => {
                     if (!classSplitAsyncRequestIsCurrent(
                         actionGeneration,
                         actionJobId
                     )) {
+                        const message = "The analysis changed before this action could start. Retry it on the current graph.";
+                        enqueueTaskNotice(message, {
+                            key: toastKey || null,
+                            durationMs: 5000,
+                        });
+                        setClassSplitJobStatus(message, "warn");
                         return;
                     }
                     return action();
@@ -65345,11 +67256,18 @@ async function cancelRfDetrTrainingJobRequest() {
                         return;
                     }
                     const message = `${errorLabel}: ${error.message || error}`;
+                    if (
+                        actionPoint
+                        && getClassSplitPointById(actionPointId) === actionPoint
+                    ) {
+                        actionPoint._class_split_last_action_error = message;
+                    }
                     console.error(errorLabel, error);
                     enqueueTaskNotice(message, {
                         key: toastKey || null,
                         durationMs: 6000,
                     });
+                    setClassSplitJobStatus(message, "error");
                     setSamStatus(message, { variant: "error", duration: 6000 });
                 })
                 .finally(() => {
@@ -65454,25 +67372,125 @@ async function cancelRfDetrTrainingJobRequest() {
         }, 650);
     }
 
+    function classSplitPlotCustomDataPointId(value) {
+        if (Array.isArray(value)) {
+            const objectValue = value.find((item) => (
+                item && typeof item === "object" && item.point_id
+            ));
+            return String(objectValue?.point_id || value[0] || "").trim();
+        }
+        if (value && typeof value === "object") {
+            return String(value.point_id || value.id || "").trim();
+        }
+        return String(value || "").trim();
+    }
+
+    function snapshotClassSplitGraphPoint(pointId) {
+        const graphEl = classSplitElements.graph;
+        if (!graphEl || !Array.isArray(graphEl.data)) return [];
+        const snapshots = [];
+        graphEl.data.forEach((trace, traceIndex) => {
+            const customdata = Array.isArray(trace?.customdata) ? trace.customdata : [];
+            customdata.forEach((value, pointIndex) => {
+                if (classSplitPlotCustomDataPointId(value) !== pointId) return;
+                const marker = trace?.marker || {};
+                const markerValues = {};
+                ["color", "size", "opacity", "symbol"].forEach((key) => {
+                    if (Array.isArray(marker[key])) markerValues[key] = marker[key][pointIndex];
+                });
+                const markerLineValues = {};
+                ["color", "width"].forEach((key) => {
+                    if (Array.isArray(marker?.line?.[key])) {
+                        markerLineValues[key] = marker.line[key][pointIndex];
+                    }
+                });
+                snapshots.push({
+                    traceIndex,
+                    pointIndex,
+                    values: Object.fromEntries(
+                        ["x", "y", "customdata", "text", "hovertext", "ids"]
+                            .filter((key) => Array.isArray(trace?.[key]))
+                            .map((key) => [key, trace[key][pointIndex]])
+                    ),
+                    markerValues,
+                    markerLineValues,
+                    selected: Array.isArray(trace?.selectedpoints)
+                        && trace.selectedpoints.includes(pointIndex),
+                });
+            });
+        });
+        return snapshots;
+    }
+
     function snapshotClassSplitOptimisticReview(pointId) {
         const safeId = String(pointId || "").trim();
         const point = getClassSplitPointById(safeId);
         return {
-            jobId: String(classSplitState.currentJobId || "").trim(),
-            analysisGeneration: classSplitState.analysisGeneration,
             pointId: safeId,
             point,
+            jobId: String(classSplitState.currentJobId || "").trim(),
+            analysisGeneration: classSplitState.analysisGeneration,
             wasDismissed: classSplitState.dismissedWrongIds.has(safeId),
-            wasWrongCandidate: point?.is_wrong_class_candidate,
+            wasWrongCandidate: Boolean(point?.is_wrong_class_candidate),
             hadReviewedPoint: classSplitState.reviewedPointsById.has(safeId),
-            reviewedPoint: classSplitState.reviewedPointsById.get(safeId) || null,
+            reviewedPoint: classSplitState.reviewedPointsById.get(safeId),
             reviewDisposition: String(point?.human_review_disposition || "").trim(),
             reviewRevision: String(point?.human_review_revision || "").trim(),
             reviewedAt: classSplitReviewHistoryTimestampSeconds(point),
             reviewOrigin: String(point?.human_review_origin || "").trim(),
             reviewPersistence: String(point?.human_review_persistence || "").trim(),
+            className: String(point?.class_name || "").trim(),
+            graphPointSnapshots: snapshotClassSplitGraphPoint(safeId),
+            graphViewport: captureClassSplitGraphViewport(),
         };
     }
+
+    async function restoreClassSplitOptimisticGraphPoint(snapshot) {
+        const graphEl = classSplitElements.graph;
+        const pointSnapshots = Array.isArray(snapshot?.graphPointSnapshots)
+            ? snapshot.graphPointSnapshots
+            : [];
+        if (!graphEl || !window.Plotly || !pointSnapshots.length) return false;
+        for (const saved of pointSnapshots) {
+            const trace = graphEl.data?.[saved.traceIndex];
+            if (!trace) return false;
+            const existing = (trace.customdata || []).some((value) => (
+                classSplitPlotCustomDataPointId(value) === snapshot.pointId
+            ));
+            if (existing) continue;
+            const update = {};
+            Object.entries(saved.values || {}).forEach(([key, value]) => {
+                const values = Array.isArray(trace[key]) ? [...trace[key]] : [];
+                values.splice(Math.min(saved.pointIndex, values.length), 0, value);
+                update[key] = [values];
+            });
+            Object.entries(saved.markerValues || {}).forEach(([key, value]) => {
+                const values = Array.isArray(trace?.marker?.[key])
+                    ? [...trace.marker[key]]
+                    : [];
+                values.splice(Math.min(saved.pointIndex, values.length), 0, value);
+                update["marker." + key] = [values];
+            });
+            Object.entries(saved.markerLineValues || {}).forEach(([key, value]) => {
+                const values = Array.isArray(trace?.marker?.line?.[key])
+                    ? [...trace.marker.line[key]]
+                    : [];
+                values.splice(Math.min(saved.pointIndex, values.length), 0, value);
+                update["marker.line." + key] = [values];
+            });
+            const selected = Array.isArray(trace.selectedpoints)
+                ? trace.selectedpoints.map((index) => (
+                    index >= saved.pointIndex ? index + 1 : index
+                ))
+                : [];
+            if (saved.selected) selected.push(saved.pointIndex);
+            update.selectedpoints = [selected];
+            await window.Plotly.restyle(graphEl, update, [saved.traceIndex]);
+        }
+        await restoreClassSplitGraphViewport(snapshot.graphViewport, graphEl);
+        return true;
+    }
+
 
     function classSplitOptimisticReviewSnapshotStillOwnsPoint(snapshot) {
         const current = getClassSplitPointById(snapshot?.pointId);
@@ -65532,9 +67550,21 @@ async function cancelRfDetrTrainingJobRequest() {
         } else {
             classSplitState.reviewedPointsById.delete(safeId);
         }
+        if (snapshot?.point) {
+            snapshot.point.class_name = snapshot.className;
+        }
         syncClassSplitWrongCandidateSummaryCount();
         renderClassSplitWrongList();
-        renderClassSplitPlot();
+        restoreClassSplitOptimisticGraphPoint(snapshot).then((restored) => {
+            if (!restored) {
+                renderClassSplitPlot();
+                window.requestAnimationFrame(() => {
+                    restoreClassSplitGraphViewport(snapshot.graphViewport);
+                });
+            }
+        }).catch((error) => {
+            console.warn("Data Quality Explorer optimistic rollback failed", error);
+        });
         return true;
     }
 
@@ -65559,6 +67589,7 @@ async function cancelRfDetrTrainingJobRequest() {
             previousDisposition = "",
             captureTrainingData = false,
             expectedTargetClass = "",
+            expectedConfirmPrecondition = null,
             expectedDeletionCommit = null,
             expectedReassignmentCommit = null,
         }
@@ -65621,6 +67652,53 @@ async function cancelRfDetrTrainingJobRequest() {
                 );
             }
             return result;
+        }
+        if (disposition === "confirm_current" && expectedConfirmPrecondition) {
+            const attestation = result?.annotation_entity_attestation;
+            const validConfirmAttestation = Boolean(
+                attestation
+                && attestation.schema
+                    === "class-analysis-review-annotation-attestation-v1"
+                && String(attestation.analysis_job_id || "").trim() === jobId
+                && String(attestation.point_id || "").trim() === pointId
+                && String(attestation.annotation_entity_id || "").trim()
+                    === String(
+                        expectedConfirmPrecondition.annotation_entity_id || ""
+                    ).trim()
+                && Number(attestation.entity_revision)
+                    === Number(
+                        expectedConfirmPrecondition.expected_entity_revision
+                    )
+                && String(attestation.record_revision || "").trim()
+                    === String(
+                        expectedConfirmPrecondition.expected_record_revision || ""
+                    ).trim()
+                && String(attestation.annotation_record_revision || "").trim()
+                    === String(
+                        expectedConfirmPrecondition.expected_annotation_record_revision
+                        || ""
+                    ).trim()
+                && String(attestation.annotation_source_identity || "").trim()
+                    === String(
+                        expectedConfirmPrecondition.annotation_source_identity || ""
+                    ).trim()
+                && Number(attestation.class_id)
+                    === Number(expectedConfirmPrecondition.expected_class_id)
+                && String(attestation.class_name || "").trim()
+                    === String(
+                        expectedConfirmPrecondition.expected_class_name || ""
+                    ).trim()
+                && attestation.verification_method
+                    === "stable_entity_live_class_cas_v1"
+                && /^[0-9a-f]{64}$/.test(
+                    String(attestation.attestation_sha256 || "").trim()
+                )
+            );
+            if (!validConfirmAttestation) {
+                throw new Error(
+                    "The backend did not prove that this object still has its displayed class."
+                );
+            }
         }
         const alreadyAbsentDeletion = Boolean(
             disposition === "delete_bbox"
@@ -65720,6 +67798,29 @@ async function cancelRfDetrTrainingJobRequest() {
             ) === classSplitCanonicalJson(
                 expectedReassignmentCommit.annotationTarget || null
             );
+            const alreadyCommitted = Boolean(
+                expectedReassignmentCommit.labelCommitStatus
+                    === "already_committed"
+            );
+            const transitionProofValid = alreadyCommitted
+                ? Boolean(
+                    String(attestation?.before_revision || "").trim()
+                        === String(attestation?.committed_revision || "").trim()
+                    && String(attestation?.transition_mode || "").trim()
+                        === "already_committed"
+                    && String(attestation?.verification_method || "").trim()
+                        === "exact_single_label_current_class_geometry_v1"
+                )
+                : Boolean(
+                    String(attestation?.before_revision || "").trim()
+                        !== String(attestation?.committed_revision || "").trim()
+                    && [
+                        "geometry_precommitted",
+                        "geometry_and_class_same_commit",
+                    ].includes(String(attestation?.transition_mode || "").trim())
+                    && String(attestation?.verification_method || "").trim()
+                        === "exact_single_label_class_geometry_transition_v1"
+                );
             const proofValid = Boolean(
                 attestation
                 && attestation.schema
@@ -65749,8 +67850,7 @@ async function cancelRfDetrTrainingJobRequest() {
                     expectedGeometry.edited_bbox_xyxy
                 )
                 && geometryEdit.changed === expectedGeometry.changed
-                && String(attestation.verification_method || "").trim()
-                    === "exact_single_label_class_geometry_transition_v1"
+                && transitionProofValid
                 && /^[0-9a-f]{64}$/.test(
                     String(attestation.attestation_sha256 || "").trim()
                 )
@@ -66282,6 +68382,25 @@ async function cancelRfDetrTrainingJobRequest() {
         ) {
             throw new Error("A valid review disposition is required.");
         }
+        const activeJobId = String(classSplitState.currentJobId || "").trim();
+        const jobId = String(options.jobId || activeJobId).trim();
+        if (!jobId) {
+            throw new Error("No completed Data Quality Explorer job is available.");
+        }
+        if (jobId !== activeJobId) {
+            const error = new Error(
+                "The analysis changed before this review choice could be saved."
+            );
+            error.classSplitReviewActionSuppressed = true;
+            setClassSplitReviewDispositionCommitState(error, "not_sent");
+            throw error;
+        }
+        const recoveryBlockReason = classSplitRecoveryMutationBlockReason(jobId);
+        if (recoveryBlockReason) {
+            const error = new Error(recoveryBlockReason);
+            setClassSplitReviewDispositionCommitState(error, "not_sent");
+            throw error;
+        }
         await ensureClassSplitReviewDispositionCapabilities(safeDisposition);
         if (
             [
@@ -66301,18 +68420,6 @@ async function cancelRfDetrTrainingJobRequest() {
         const pairDisposition = CLASS_SPLIT_DUAL_BBOX_DISPOSITIONS.includes(
             safeDisposition
         );
-        const activeJobId = String(classSplitState.currentJobId || "").trim();
-        const jobId = String(options.jobId || activeJobId).trim();
-        if (!jobId) {
-            throw new Error("No completed Data Quality Explorer job is available.");
-        }
-        if (jobId !== activeJobId) {
-            const error = new Error(
-                "The analysis changed before this review choice could be saved."
-            );
-            error.classSplitReviewActionSuppressed = true;
-            throw error;
-        }
         const requestGeneration = classSplitState.analysisGeneration;
         if (classSplitReviewHistoryDeleteOperation(jobId)) {
             throw new Error(
@@ -66344,6 +68451,18 @@ async function cancelRfDetrTrainingJobRequest() {
                 origin: String(options.origin || "desktop").trim() || "desktop",
                 capture_training_data: captureTrainingData,
             };
+            let expectedConfirmPrecondition = null;
+            if (safeDisposition === "confirm_current") {
+                expectedConfirmPrecondition = (
+                    getClassSplitReviewAnnotationPrecondition(pointAtRequest)
+                );
+                if (!expectedConfirmPrecondition) {
+                    throw new Error(
+                        "The live annotation identity is unavailable. Reconnect the exact dataset or rerun Data Quality Explorer before confirming this class."
+                    );
+                }
+                requestPayload.annotation_precondition = expectedConfirmPrecondition;
+            }
             const dualContract = getClassSplitDualBBoxContract(safeId);
             if (pairDisposition && !dualContract) {
                 throw new Error(
@@ -66464,8 +68583,20 @@ async function cancelRfDetrTrainingJobRequest() {
                         "The class change has invalid bbox geometry provenance. Reopen the instance and retry."
                     );
                 }
+                const labelCommitStatus = String(
+                    options.labelCommitStatus || "committed"
+                ).trim();
+                const alreadyCommitted = labelCommitStatus
+                    === "already_committed";
+                if (!["committed", "already_committed"].includes(
+                    labelCommitStatus
+                )) {
+                    throw new Error(
+                        "The class-change commit status is invalid."
+                    );
+                }
                 requestPayload.target_class = targetClass;
-                requestPayload.label_commit_status = "committed";
+                requestPayload.label_commit_status = labelCommitStatus;
                 requestPayload.annotation_target = annotationTarget;
                 if (geometryEdit) {
                     const imageKey = resolveClassSplitPointImageKey(
@@ -66494,7 +68625,11 @@ async function cancelRfDetrTrainingJobRequest() {
                         || !CLASS_SPLIT_ANNOTATION_REVISION_PATTERN.test(
                             committedRevision
                         )
-                        || beforeRevision === committedRevision
+                        || (
+                            alreadyCommitted
+                                ? beforeRevision !== committedRevision
+                                : beforeRevision === committedRevision
+                        )
                         || !CLASS_SPLIT_ANNOTATION_SOURCE_IDENTITY_PATTERN.test(
                             sourceIdentity
                         )
@@ -66513,6 +68648,7 @@ async function cancelRfDetrTrainingJobRequest() {
                         committedRevision,
                         sourceIdentity,
                         geometryEdit,
+                        labelCommitStatus,
                         sourceReviewObjectKey: String(
                             pointAtRequest.review_object_key || ""
                         ).trim(),
@@ -66560,6 +68696,8 @@ async function cancelRfDetrTrainingJobRequest() {
                     requestPayload.annotation_source_identity || ""
                 ),
                 geometry_edit: requestPayload.geometry_edit || null,
+                annotation_precondition:
+                    requestPayload.annotation_precondition || null,
             });
             retryTokenKey = [
                 jobId,
@@ -66617,13 +68755,23 @@ async function cancelRfDetrTrainingJobRequest() {
                 const parsed = parseJsonObjectSafe(detail, {});
                 const apiDetail = parsed?.detail;
                 error.httpStatus = response.status;
-                error.reviewDispositionCommitUnknown = response.status >= 500
-                    || response.status === 409;
                 error.apiCode = String(
                     apiDetail && typeof apiDetail === "object"
                         ? apiDetail.code || ""
                         : parsed?.code || apiDetail || ""
                 ).trim();
+                const terminalIdentityConflict = response.status === 409
+                    && (
+                        error.apiCode.startsWith("annotation_review_")
+                        || error.apiCode.startsWith("annotation_entity_")
+                    );
+                setClassSplitReviewDispositionCommitState(
+                    error,
+                    response.status >= 500
+                        || (response.status === 409 && !terminalIdentityConflict)
+                        ? "unknown"
+                        : "rejected"
+                );
                 throw error;
             }
             const result = parseJsonObjectSafe(detail, {});
@@ -66636,6 +68784,7 @@ async function cancelRfDetrTrainingJobRequest() {
                     previousDisposition,
                     captureTrainingData,
                     expectedTargetClass: targetClass,
+                    expectedConfirmPrecondition,
                     expectedDeletionCommit,
                     expectedReassignmentCommit,
                 });
@@ -66644,7 +68793,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 // this exact idempotent action. Do not reserve the point for
                 // hydration, which would prevent that retry from occurring.
                 if (error && typeof error === "object") {
-                    error.reviewDispositionCommitUnknown = true;
+                    setClassSplitReviewDispositionCommitState(error, "unknown");
                 }
                 throw error;
             }
@@ -66691,13 +68840,12 @@ async function cancelRfDetrTrainingJobRequest() {
                 unresolved: "unresolved choice",
                 clear: "review undo",
             }[safeDisposition] || "review choice";
-            if (
-                requestDispatched
-                && error?.reviewDispositionCommitUnknown !== false
-            ) {
-                if (error && typeof error === "object") {
-                    error.reviewDispositionCommitUnknown = true;
-                }
+            const commitState = classSplitReviewDispositionCommitState(
+                error,
+                requestDispatched ? "unknown" : "not_sent"
+            );
+            setClassSplitReviewDispositionCommitState(error, commitState);
+            if (commitState === "unknown") {
                 if (classSplitAsyncRequestIsCurrent(requestGeneration, jobId)) {
                     classSplitState.reviewDispositionReconciliationPointIds.add(
                         safeId
@@ -66762,6 +68910,7 @@ async function cancelRfDetrTrainingJobRequest() {
             delete point._class_split_review_batch_index;
         }
         classSplitState.reviewedPointsById.set(safeId, point);
+        clearClassSplitFailedReviewAction(saved.jobId, safeId);
         return point;
     }
 
@@ -66839,14 +68988,16 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!safeId) {
             return;
         }
-        if (classSplitMutationIsBusy({
-            ignoreReviewActionPointIds: [safeId],
+        if (classSplitPointMutationIsBusy([safeId], {
+            ignoreActionReservation: true,
         })) {
             throw new Error(
                 "Wait for the current Data Quality Explorer mutation to finish before skipping this object."
             );
         }
         const quiet = Boolean(options.quiet);
+        const actionJobId = String(classSplitState.currentJobId || "").trim();
+        clearClassSplitFailedReviewAction(actionJobId, safeId);
         const toastKey = classSplitReviewToastKey(safeId, "skip");
         const snapshot = applyClassSplitOptimisticReview(safeId, "skip");
         if (!quiet) {
@@ -66893,8 +69044,16 @@ async function cancelRfDetrTrainingJobRequest() {
                 setClassSplitJobStatus("Skipped object and saved that choice for future analyses.", "success");
             }
         } catch (error) {
-            const keepHidden = error?.reviewDispositionCommitUnknown === true
-                || Number(error?.httpStatus) === 409;
+            if (classSplitReviewDispositionCommitState(error) !== "unknown") {
+                rememberClassSplitFailedReviewAction(
+                    actionJobId,
+                    safeId,
+                    "skip",
+                    error
+                );
+                persistDataQualityExplorerSession();
+            }
+            const keepHidden = classSplitReviewDispositionCommitState(error) === "unknown";
             const restored = keepHidden
                 ? false
                 : restoreClassSplitOptimisticReview(safeId, snapshot);
@@ -66941,14 +69100,16 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!safeId) {
             return;
         }
-        if (classSplitMutationIsBusy({
-            ignoreReviewActionPointIds: [safeId],
+        if (classSplitPointMutationIsBusy([safeId], {
+            ignoreActionReservation: true,
         })) {
             throw new Error(
                 "Wait for the current Data Quality Explorer mutation to finish before confirming this object."
             );
         }
         const quiet = Boolean(options.quiet);
+        const actionJobId = String(classSplitState.currentJobId || "").trim();
+        clearClassSplitFailedReviewAction(actionJobId, safeId);
         const toastKey = classSplitReviewToastKey(safeId, "confirm-current");
         const snapshot = applyClassSplitOptimisticReview(safeId, "confirm_current");
         if (!quiet) {
@@ -66999,8 +69160,16 @@ async function cancelRfDetrTrainingJobRequest() {
                 setClassSplitJobStatus("Confirmed current class and saved it for future analyses.", "success");
             }
         } catch (error) {
-            const keepHidden = error?.reviewDispositionCommitUnknown === true
-                || Number(error?.httpStatus) === 409;
+            if (classSplitReviewDispositionCommitState(error) !== "unknown") {
+                rememberClassSplitFailedReviewAction(
+                    actionJobId,
+                    safeId,
+                    "confirm_current",
+                    error
+                );
+                persistDataQualityExplorerSession();
+            }
+            const keepHidden = classSplitReviewDispositionCommitState(error) === "unknown";
             const restored = keepHidden
                 ? false
                 : restoreClassSplitOptimisticReview(safeId, snapshot);
@@ -67031,7 +69200,7 @@ async function cancelRfDetrTrainingJobRequest() {
 
     async function undoClassSplitReviewBatch(action) {
         if (
-            classSplitMutationIsBusy()
+            classSplitWriteMutationIsBlocked()
             || !action
             || action.kind !== "batch"
             || action.jobId !== String(classSplitState.currentJobId || "")
@@ -67120,12 +69289,14 @@ async function cancelRfDetrTrainingJobRequest() {
                     }
                     operation.successes.set(pointId, saved);
                 } catch (error) {
+                    const commitState = classSplitReviewDispositionCommitState(error);
                     operation.failures.set(pointId, {
                         pointId,
                         message: String(error?.message || error),
-                        uncertain: error?.reviewDispositionCommitUnknown !== false,
+                        uncertain: commitState === "unknown",
+                        commitState,
                     });
-                    if (error?.reviewDispositionCommitUnknown !== false) {
+                    if (commitState === "unknown") {
                         operation.uncertainPointIds.add(pointId);
                     }
                 } finally {
@@ -67647,7 +69818,7 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         if (
-            classSplitMutationIsBusy({
+            classSplitWriteMutationIsBlocked({
                 jobId,
                 includeReconciliation: true,
                 includeHydration: true,
@@ -67913,7 +70084,7 @@ async function cancelRfDetrTrainingJobRequest() {
         const deleteOperation = classSplitReviewHistoryDeleteOperation(
             classSplitState.currentJobId
         );
-        const reviewSaveBusy = classSplitMutationIsBusy({
+        const reviewSaveBusy = classSplitWriteMutationIsBlocked({
             includeReconciliation: true,
             includeHydration: true,
         });
@@ -68337,6 +70508,309 @@ async function cancelRfDetrTrainingJobRequest() {
         };
     }
 
+    function resolveClassSplitDatasetSourceRow(point) {
+        if (!point) {
+            return null;
+        }
+        const imageKey = getClassSplitPointImageKey(point);
+        const imageRecord = images?.[imageKey];
+        if (
+            !imageRecord
+            || !isDatasetBackedImageRecord(imageRecord)
+        ) {
+            return null;
+        }
+        // A dirty image may contain several independent local edits, but its
+        // manifest source-row identities remain immutable. This resolver only
+        // identifies a row; the caller must still find exactly one live bbox
+        // carrying that row's revision/source stamps. Do not reject that safe
+        // lookup merely because another bbox on the image changed. Rehydrating
+        // over dirty geometry remains prohibited by hydrateDatasetBboxesForImage.
+        const imageWidth = Number(imageRecord.width);
+        const imageHeight = Number(imageRecord.height);
+        const target = classSplitDualBBoxCoordinates(
+            point._resolved_frontend_bbox_original_xyxy || point.bbox_xyxy
+        );
+        if (
+            !target
+            || !(Number.isFinite(imageWidth) && imageWidth > 0)
+            || !(Number.isFinite(imageHeight) && imageHeight > 0)
+        ) {
+            return null;
+        }
+        const annotationRow = annotationSourceState.imageRowsByKey.get(imageKey) || {};
+        const annotationRevision = String(
+            annotationRow.annotation_record_revision || ""
+        ).trim();
+        const annotationSourceIdentity = String(
+            annotationRow.annotation_source_identity || ""
+        ).trim();
+        if (
+            !CLASS_SPLIT_ANNOTATION_REVISION_PATTERN.test(annotationRevision)
+            || !CLASS_SPLIT_ANNOTATION_SOURCE_IDENTITY_PATTERN.test(
+                annotationSourceIdentity
+            )
+        ) {
+            return null;
+        }
+        const matches = [];
+        const labelLines = annotationSourceState.rawLabelLinesByKey.get(imageKey) || [];
+        for (const [sourceLineIndex, rawLine] of labelLines.entries()) {
+            const sourceLabelLine = String(rawLine || "").trim();
+            const cols = sourceLabelLine.split(/\s+/).filter(Boolean);
+            if (cols.length !== 5) {
+                continue;
+            }
+            const classIndex = parseInt(cols[0], 10);
+            const className = (
+                (Array.isArray(loadedClassList) && loadedClassList[classIndex])
+                || getClassNameById(classIndex)
+                || ""
+            );
+            const safeClassName = String(className).trim();
+            if (!safeClassName) {
+                continue;
+            }
+            const cx = parseFloat(cols[1]);
+            const cy = parseFloat(cols[2]);
+            const normalizedWidth = parseFloat(cols[3]);
+            const normalizedHeight = parseFloat(cols[4]);
+            if (
+                !Number.isFinite(cx)
+                || !Number.isFinite(cy)
+                || !(normalizedWidth > 0)
+                || !(normalizedHeight > 0)
+            ) {
+                continue;
+            }
+            const coordinates = [
+                Math.max(0, (cx - normalizedWidth / 2) * imageWidth),
+                Math.max(0, (cy - normalizedHeight / 2) * imageHeight),
+                Math.min(imageWidth, (cx + normalizedWidth / 2) * imageWidth),
+                Math.min(imageHeight, (cy + normalizedHeight / 2) * imageHeight),
+            ];
+            if (!classSplitDualBBoxCoordinatesMatch(coordinates, target)) {
+                continue;
+            }
+            matches.push({
+                imageKey,
+                className: safeClassName,
+                sourceLineIndex,
+                sourceLabelLine,
+                annotationRevision,
+                annotationSourceIdentity,
+            });
+        }
+        if (matches.length !== 1) {
+            return null;
+        }
+        const resolved = matches[0];
+        const resolvedAnnotationRow = annotationSourceState.imageRowsByKey.get(imageKey) || {};
+        const annotationEntity = Array.isArray(resolvedAnnotationRow.annotation_entities)
+            ? resolvedAnnotationRow.annotation_entities[resolved.sourceLineIndex]
+            : null;
+        if (annotationEntity) {
+            point.annotation_entity_id = String(
+                annotationEntity.annotation_entity_id || ""
+            ).trim();
+            point.annotation_entity_revision = Number(
+                annotationEntity.entity_revision || 0
+            );
+            point.annotation_entity_record_revision = String(
+                resolvedAnnotationRow.annotation_entity_record_revision || ""
+            ).trim();
+        }
+        return resolved;
+    }
+
+    function inferClassSplitPointAnnotationSourceOrdinal(point, imageKey, annotationRow) {
+        const explicit = [
+            point?.annotation_source_row,
+            point?.source_row_ordinal,
+            point?.source_line_index,
+            point?._dataset_source_line_index,
+        ].map((value) => Number(value)).find((value) => (
+            Number.isInteger(value) && value >= 0
+        ));
+        if (Number.isInteger(explicit)) {
+            return explicit;
+        }
+        const imageRecord = images?.[imageKey];
+        const width = Number(imageRecord?.width);
+        const height = Number(imageRecord?.height);
+        const bbox = Array.isArray(point?.bbox_xyxy)
+            ? point.bbox_xyxy.slice(0, 4).map(Number)
+            : [];
+        const classId = Array.isArray(loadedClassList)
+            ? loadedClassList.indexOf(String(point?.class_name || "").trim())
+            : -1;
+        if (
+            bbox.length !== 4
+            || !bbox.every(Number.isFinite)
+            || !(width > 0 && height > 0)
+            || classId < 0
+        ) {
+            return null;
+        }
+        const normalized = [
+            (bbox[0] + bbox[2]) / (2 * width),
+            (bbox[1] + bbox[3]) / (2 * height),
+            (bbox[2] - bbox[0]) / width,
+            (bbox[3] - bbox[1]) / height,
+        ];
+        const lines = annotationSourceState.rawLabelLinesByKey.get(imageKey) || [];
+        const matchingRows = [];
+        lines.forEach((rawLine, index) => {
+            const cols = String(rawLine || "").trim().split(/\s+/).filter(Boolean);
+            if (cols.length !== 5 || parseInt(cols[0], 10) !== classId) {
+                return;
+            }
+            const values = cols.slice(1).map(Number);
+            if (
+                values.every(Number.isFinite)
+                && values.every((value, axis) => Math.abs(value - normalized[axis]) <= 1e-6)
+            ) {
+                matchingRows.push(index);
+            }
+        });
+        if (matchingRows.length === 1) {
+            return matchingRows[0];
+        }
+        if (matchingRows.length < 2) {
+            return null;
+        }
+        const siblingIds = getClassSplitRawCandidates()
+            .filter((candidate) => {
+                if (
+                    getClassSplitPointImageKey(candidate) !== imageKey
+                    || String(candidate?.class_name || "").trim()
+                        !== String(point?.class_name || "").trim()
+                ) {
+                    return false;
+                }
+                const candidateBox = Array.isArray(candidate?.bbox_xyxy)
+                    ? candidate.bbox_xyxy.slice(0, 4).map(Number)
+                    : [];
+                return candidateBox.length === 4
+                    && candidateBox.every((value, axis) => (
+                        Number.isFinite(value) && Math.abs(value - bbox[axis]) <= 1e-4
+                    ));
+            })
+            .map((candidate) => String(candidate?.point_id || ""))
+            .filter(Boolean)
+            .sort();
+        const occurrence = siblingIds.indexOf(String(point?.point_id || ""));
+        if (occurrence < 0 || occurrence >= matchingRows.length) {
+            return null;
+        }
+        // Duplicate source rows are semantically indistinguishable at initial
+        // migration, but this deterministic binding is stable for the saved
+        // analysis and prevents later class/geometry edits from changing ID.
+        return matchingRows[occurrence];
+    }
+
+    function findClassSplitDatasetSourceRowBboxMatch(point, sourceRow = null) {
+        const imageKey = getClassSplitPointImageKey(point);
+        const annotationRow = annotationSourceState.imageRowsByKey.get(imageKey) || {};
+        const sourceOrdinalCandidates = [
+            point?.annotation_source_row,
+            point?.source_row_ordinal,
+            point?.source_line_index,
+            point?._dataset_source_line_index,
+        ];
+        const sourceOrdinal = sourceOrdinalCandidates
+            .map((value) => Number(value))
+            .find((value) => Number.isInteger(value) && value >= 0)
+            ?? inferClassSplitPointAnnotationSourceOrdinal(point, imageKey, annotationRow);
+        const rowEntity = Number.isInteger(sourceOrdinal)
+            && Array.isArray(annotationRow.annotation_entities)
+            ? annotationRow.annotation_entities[sourceOrdinal]
+            : null;
+        const annotationEntityId = String(
+            point?.annotation_entity_id
+            || point?._dataset_annotation_entity_id
+            || rowEntity?.annotation_entity_id
+            || ""
+        ).trim();
+        if (annotationEntityId) {
+            const entityMatches = [];
+            Object.entries(bboxes?.[imageKey] || {}).forEach(([className, bucket]) => {
+                if (!Array.isArray(bucket)) {
+                    return;
+                }
+                bucket.forEach((bboxRecord, index) => {
+                    if (
+                        String(bboxRecord?._dataset_annotation_entity_id || "").trim()
+                        === annotationEntityId
+                    ) {
+                        entityMatches.push({
+                            imageKey,
+                            className,
+                            bboxRecord,
+                            index,
+                            score: 0,
+                            identity: "annotation_entity",
+                        });
+                    }
+                });
+            });
+            if (entityMatches.length === 1) {
+                point.annotation_entity_id = annotationEntityId;
+                point.annotation_entity_revision = Number(
+                    rowEntity?.entity_revision
+                    || entityMatches[0].bboxRecord?._dataset_annotation_entity_revision
+                    || 0
+                );
+                point.annotation_entity_record_revision = String(
+                    annotationRow.annotation_entity_record_revision
+                    || entityMatches[0].bboxRecord?._dataset_annotation_entity_record_revision
+                    || ""
+                ).trim();
+                return entityMatches[0];
+            }
+            if (entityMatches.length > 1) {
+                return null;
+            }
+        }
+        const resolved = sourceRow || resolveClassSplitDatasetSourceRow(point);
+        if (!resolved) {
+            return null;
+        }
+        const bucket = bboxes?.[resolved.imageKey]?.[resolved.className];
+        if (!Array.isArray(bucket)) {
+            return null;
+        }
+        const matches = [];
+        bucket.forEach((bboxRecord, index) => {
+            if (
+                !bboxRecord
+                || bboxRecord._dataset_source_image_key !== resolved.imageKey
+                || Number(bboxRecord._dataset_source_line_index)
+                    !== resolved.sourceLineIndex
+                || String(bboxRecord._dataset_source_label_line || "").trim()
+                    !== resolved.sourceLabelLine
+                || String(bboxRecord._dataset_annotation_revision || "").trim()
+                    !== resolved.annotationRevision
+                || String(
+                    bboxRecord._dataset_annotation_source_identity || ""
+                ).trim() !== resolved.annotationSourceIdentity
+            ) {
+                return;
+            }
+            matches.push({
+                bbox: bboxRecord,
+                className: resolved.className,
+                index,
+                score: 0,
+                exact: true,
+                identity: "dataset_source_row",
+                sourceLineIndex: resolved.sourceLineIndex,
+                sourceLabelLine: resolved.sourceLabelLine,
+            });
+        });
+        return matches.length === 1 ? matches[0] : null;
+    }
+
     function findClassSplitBboxMatch(point) {
         if (!point) {
             return null;
@@ -68379,10 +70853,18 @@ async function cancelRfDetrTrainingJobRequest() {
             if (uuidMatches.length === 1) {
                 return uuidMatches[0];
             }
+            const sourceRowMatch = findClassSplitDatasetSourceRowBboxMatch(point);
+            if (sourceRowMatch) {
+                return sourceRowMatch;
+            }
             // Once this point has been bound in the open workspace, absence
             // is itself meaningful (deleted/replaced) and must not fall back
             // to a nearby object with the old geometry.
             return null;
+        }
+        const sourceRowMatch = findClassSplitDatasetSourceRowBboxMatch(point);
+        if (sourceRowMatch) {
+            return sourceRowMatch;
         }
         const targetSource = Array.isArray(
             point._resolved_frontend_bbox_original_xyxy
@@ -68408,6 +70890,12 @@ async function cancelRfDetrTrainingJobRequest() {
                     return;
                 }
                 const bounds = getBboxBounds(bboxRecord);
+                const coordinates = [
+                    bounds.left,
+                    bounds.top,
+                    bounds.right,
+                    bounds.bottom,
+                ];
                 const diff =
                     Math.abs(bounds.left - target[0])
                     + Math.abs(bounds.top - target[1])
@@ -68422,20 +70910,49 @@ async function cancelRfDetrTrainingJobRequest() {
                         index,
                         score,
                         identity: "frozen_geometry",
+                        exact: classSplitDualBBoxCoordinatesMatch(
+                            coordinates,
+                            target
+                        ),
                     });
                 }
             });
         });
+        // Restored analysis points do not carry the frontend bbox UUID. Their
+        // frozen geometry is therefore the strongest available identity. Pick
+        // one exact annotation before considering the wider rounding tolerance;
+        // never guess when duplicate annotations share that geometry.
+        const exactCandidates = candidates.filter((candidate) => candidate.exact);
+        if (exactCandidates.length === 1) {
+            return exactCandidates[0];
+        }
+        if (exactCandidates.length > 1) {
+            return null;
+        }
         const currentClassCandidates = candidates.filter(
             (candidate) => candidate.className === targetClass
         );
         const eligible = currentClassCandidates.length
             ? currentClassCandidates
             : candidates;
-        if (eligible.length !== 1) {
+        if (!eligible.length) {
             return null;
         }
-        return eligible[0];
+        if (eligible.length === 1) {
+            return eligible[0];
+        }
+        const ranked = [...eligible].sort((left, right) => (
+            left.score - right.score
+            || left.className.localeCompare(right.className)
+            || left.index - right.index
+        ));
+        // The 0.02 normalized gap requires the runner-up to be meaningfully
+        // farther away (roughly one pixel for a 50-pixel bbox perimeter). Close
+        // candidates remain selected for manual disambiguation.
+        if (ranked[1].score - ranked[0].score < 0.02) {
+            return null;
+        }
+        return ranked[0];
     }
 
     function bindClassSplitPointBboxIdentity(point, imageKey, match) {
@@ -68455,10 +70972,133 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         point._resolved_frontend_bbox_uuid = bboxUuid;
         point._resolved_frontend_bbox_image_key = safeImageKey;
+        const annotationRow = annotationSourceState.imageRowsByKey.get(
+            safeImageKey
+        );
+        const annotationRevision = String(
+            annotationRow?.annotation_record_revision || ""
+        ).trim();
+        const annotationSourceIdentity = String(
+            annotationRow?.annotation_source_identity || ""
+        ).trim();
+        point._resolved_frontend_bbox_annotation_revision =
+            CLASS_SPLIT_ANNOTATION_REVISION_PATTERN.test(annotationRevision)
+                ? annotationRevision
+                : "";
+        point._resolved_frontend_bbox_annotation_source_identity =
+            CLASS_SPLIT_ANNOTATION_SOURCE_IDENTITY_PATTERN.test(
+                annotationSourceIdentity
+            )
+                ? annotationSourceIdentity
+                : "";
+        const sourceLineIndex = Number(
+            match.sourceLineIndex ?? match.bbox._dataset_source_line_index
+        );
+        point._resolved_frontend_bbox_source_line_index = Number.isSafeInteger(
+            sourceLineIndex
+        )
+            ? sourceLineIndex
+            : null;
+        point._resolved_frontend_bbox_source_label_line = String(
+            match.sourceLabelLine
+            || match.bbox._dataset_source_label_line
+            || ""
+        ).trim();
         if (!Array.isArray(point._resolved_frontend_bbox_original_xyxy)) {
             point._resolved_frontend_bbox_original_xyxy = [...original];
         }
         return bboxUuid;
+    }
+
+    function recoverClassSplitImageDimensionsFromPoint(point, imageRecord) {
+        if (!point || !isDatasetBackedImageRecord(imageRecord)) {
+            return false;
+        }
+        const existingWidth = Number(imageRecord.width);
+        const existingHeight = Number(imageRecord.height);
+        if (
+            Number.isFinite(existingWidth)
+            && existingWidth > 0
+            && Number.isFinite(existingHeight)
+            && existingHeight > 0
+        ) {
+            return true;
+        }
+        const imageKey = getClassSplitPointImageKey(point);
+        const target = classSplitDualBBoxCoordinates(
+            point._resolved_frontend_bbox_original_xyxy || point.bbox_xyxy
+        );
+        const targetClass = String(point.class_name || "").trim();
+        const targetClassIndex = Array.isArray(loadedClassList)
+            ? loadedClassList.findIndex(
+                (className) => String(className || "").trim() === targetClass
+            )
+            : -1;
+        if (!imageKey || !target || targetClassIndex < 0) {
+            return false;
+        }
+        const targetWidth = target[2] - target[0];
+        const targetHeight = target[3] - target[1];
+        if (!(targetWidth > 0 && targetHeight > 0)) {
+            return false;
+        }
+        const candidates = new Map();
+        const labelLines = annotationSourceState.rawLabelLinesByKey.get(imageKey) || [];
+        for (const rawLine of labelLines) {
+            const cols = String(rawLine || "").trim().split(/\s+/).filter(Boolean);
+            if (cols.length !== 5 || parseInt(cols[0], 10) !== targetClassIndex) {
+                continue;
+            }
+            const cx = parseFloat(cols[1]);
+            const cy = parseFloat(cols[2]);
+            const normalizedWidth = parseFloat(cols[3]);
+            const normalizedHeight = parseFloat(cols[4]);
+            if (
+                !Number.isFinite(cx)
+                || !Number.isFinite(cy)
+                || !(normalizedWidth > 0)
+                || !(normalizedHeight > 0)
+            ) {
+                continue;
+            }
+            const sourceWidth = Math.round(targetWidth / normalizedWidth);
+            const sourceHeight = Math.round(targetHeight / normalizedHeight);
+            if (
+                !Number.isSafeInteger(sourceWidth)
+                || !Number.isSafeInteger(sourceHeight)
+                || sourceWidth <= 0
+                || sourceHeight <= 0
+                || sourceWidth > 100000
+                || sourceHeight > 100000
+            ) {
+                continue;
+            }
+            const reconstructed = [
+                (cx - normalizedWidth / 2) * sourceWidth,
+                (cy - normalizedHeight / 2) * sourceHeight,
+                (cx + normalizedWidth / 2) * sourceWidth,
+                (cy + normalizedHeight / 2) * sourceHeight,
+            ];
+            if (!classSplitDualBBoxCoordinatesMatch(reconstructed, target)) {
+                continue;
+            }
+            candidates.set(`${sourceWidth}x${sourceHeight}`, {
+                width: sourceWidth,
+                height: sourceHeight,
+            });
+        }
+        if (candidates.size !== 1) {
+            return false;
+        }
+        const dimensions = candidates.values().next().value;
+        imageRecord.width = dimensions.width;
+        imageRecord.height = dimensions.height;
+        const annotationRow = annotationSourceState.imageRowsByKey.get(imageKey);
+        if (annotationRow) {
+            annotationRow.image_width = dimensions.width;
+            annotationRow.image_height = dimensions.height;
+        }
+        return true;
     }
 
     function ensureClassSplitPointBboxMatch(point) {
@@ -68471,12 +71111,115 @@ async function cancelRfDetrTrainingJobRequest() {
             throw new Error(`Image is not loaded in this session: ${imageKey}`);
         }
         if (isDatasetBackedImageRecord(imageRecord) && !annotationSourceState.hydratedKeys.has(imageKey)) {
+            if (!recoverClassSplitImageDimensionsFromPoint(point, imageRecord)) {
+                throw new Error(`Could not recover source image dimensions for ${imageKey}`);
+            }
             const hydrated = hydrateDatasetBboxesForImage(imageRecord);
             if (!hydrated) {
                 throw new Error(`Annotations are not ready for ${imageKey}`);
             }
         }
-        const match = findClassSplitBboxMatch(point);
+        let match = findClassSplitBboxMatch(point);
+        if (
+            !match
+            && isDatasetBackedImageRecord(imageRecord)
+            && !annotationSourceState.dirtyRecordsByKey.has(imageKey)
+        ) {
+            const annotationRow = annotationSourceState.imageRowsByKey.get(
+                imageKey
+            );
+            const currentRevision = String(
+                annotationRow?.annotation_record_revision || ""
+            ).trim();
+            const currentSourceIdentity = String(
+                annotationRow?.annotation_source_identity || ""
+            ).trim();
+            const boundUuid = String(
+                point._resolved_frontend_bbox_uuid || ""
+            ).trim();
+            const boundRevision = String(
+                point._resolved_frontend_bbox_annotation_revision || ""
+            ).trim();
+            const boundSourceIdentity = String(
+                point._resolved_frontend_bbox_annotation_source_identity || ""
+            ).trim();
+            const currentIdentityIsVerified = Boolean(
+                CLASS_SPLIT_ANNOTATION_REVISION_PATTERN.test(currentRevision)
+                && CLASS_SPLIT_ANNOTATION_SOURCE_IDENTITY_PATTERN.test(
+                    currentSourceIdentity
+                )
+            );
+            const boundIdentityStillCurrent = Boolean(
+                currentIdentityIsVerified
+                && (!boundRevision || boundRevision === currentRevision)
+                && (
+                    !boundSourceIdentity
+                    || boundSourceIdentity === currentSourceIdentity
+                )
+            );
+            const canRepairRuntimeIdentity = Boolean(
+                !boundUuid
+                || (
+                    classSplitState.restoredSession
+                    && boundIdentityStillCurrent
+                )
+            );
+            if (canRepairRuntimeIdentity) {
+                const previousBinding = {
+                    uuid: point._resolved_frontend_bbox_uuid,
+                    imageKey: point._resolved_frontend_bbox_image_key,
+                    revision: point._resolved_frontend_bbox_annotation_revision,
+                    sourceIdentity:
+                        point._resolved_frontend_bbox_annotation_source_identity,
+                    sourceLineIndex:
+                        point._resolved_frontend_bbox_source_line_index,
+                    sourceLabelLine:
+                        point._resolved_frontend_bbox_source_label_line,
+                };
+                point._resolved_frontend_bbox_uuid = "";
+                point._resolved_frontend_bbox_image_key = "";
+                const exactSameClassMatch = (candidate) => Boolean(
+                    candidate
+                    && candidate.exact === true
+                    && String(candidate.className || "").trim()
+                        === String(point.class_name || "").trim()
+                );
+                const sourceRow = resolveClassSplitDatasetSourceRow(point);
+                if (sourceRow) {
+                    // Runtime UUIDs are intentionally ephemeral. A clean
+                    // restored annotation may be rebuilt even while its image
+                    // is open because the immutable source row, revision, and
+                    // source identity together are the mutation authority.
+                    annotationSourceState.hydratedKeys.delete(imageKey);
+                    if (hydrateDatasetBboxesForImage(imageRecord)) {
+                        const sourceMatch = findClassSplitDatasetSourceRowBboxMatch(
+                            point,
+                            sourceRow
+                        );
+                        if (exactSameClassMatch(sourceMatch)) {
+                            match = sourceMatch;
+                        }
+                    }
+                } else {
+                    const rebound = findClassSplitBboxMatch(point);
+                    if (exactSameClassMatch(rebound)) {
+                        match = rebound;
+                    }
+                }
+                if (!match) {
+                    point._resolved_frontend_bbox_uuid = previousBinding.uuid;
+                    point._resolved_frontend_bbox_image_key = previousBinding.imageKey;
+                    point._resolved_frontend_bbox_annotation_revision =
+                        previousBinding.revision;
+                    point._resolved_frontend_bbox_annotation_source_identity =
+                        previousBinding.sourceIdentity;
+                    point._resolved_frontend_bbox_source_line_index =
+                        previousBinding.sourceLineIndex;
+                    point._resolved_frontend_bbox_source_label_line =
+                        previousBinding.sourceLabelLine;
+                }
+            }
+        }
         if (!match) {
             throw new Error(
                 `Could not uniquely match the selected bbox for ${imageKey}. Reopen it with See instance before changing it.`
@@ -68537,6 +71280,9 @@ async function cancelRfDetrTrainingJobRequest() {
             isDatasetBackedImageRecord(imageRecord)
             && !annotationSourceState.hydratedKeys.has(imageKey)
         ) {
+            if (!recoverClassSplitImageDimensionsFromPoint(target, imageRecord)) {
+                throw new Error(`Could not recover source image dimensions for ${imageKey}`);
+            }
             const hydrated = hydrateDatasetBboxesForImage(imageRecord);
             if (!hydrated) {
                 throw new Error(`Annotations are not ready for ${imageKey}`);
@@ -68627,32 +71373,7 @@ async function cancelRfDetrTrainingJobRequest() {
         return { current, other };
     }
 
-    function dismissClassSplitStaleDualBBoxPair(contract) {
-        const pointIds = Array.from(new Set([
-            String(contract?.conflict?.point_id || "").trim(),
-            String(contract?.conflict?.other_point_id || "").trim(),
-        ].filter(Boolean)));
-        pointIds.forEach((pointId) => {
-            classSplitState.dismissedWrongIds.add(pointId);
-            removeClassSplitPointFromActiveReviewGraph(pointId, { force: true });
-        });
-        syncClassSplitWrongCandidateSummaryCount();
-        renderClassSplitWrongList();
-        persistDataQualityExplorerSession();
-        enqueueTaskNotice("BBox not found.", {
-            key: classSplitReviewToastKey(
-                contract?.conflict?.point_id,
-                "bbox-not-found"
-            ),
-            durationMs: 3200,
-        });
-        setClassSplitJobStatus(
-            "BBox not found. Removed the stale overlap item from this review.",
-            "success"
-        );
-    }
-
-    function markClassSplitDualBBoxResolved(pointId, pairPointId = "") {
+    async function markClassSplitDualBBoxResolved(pointId, pairPointId = "") {
         const safePointId = String(pointId || "").trim();
         const safePairPointId = String(pairPointId || "").trim();
         if (!safePointId) {
@@ -68663,43 +71384,28 @@ async function cancelRfDetrTrainingJobRequest() {
         const point = getClassSplitPointById(safePointId);
         const candidate = getClassSplitCandidateByPointId(safePointId);
         const contract = point ? getClassSplitDualBBoxContract(safePointId, candidate) : null;
-        const conflict = getClassSplitDualBBoxConflict(candidate, point);
-        const pointIds = new Set([safePointId]);
-        [
-            contract?.conflict?.other_point_id,
-            conflict?.other_point_id,
+        const durablePointIds = Array.from(new Set([
+            safePointId,
             safePairPointId,
-        ].forEach((candidatePointId) => {
-            const safeCandidatePointId = String(candidatePointId || "").trim();
-            if (safeCandidatePointId && safeCandidatePointId !== safePointId) {
-                pointIds.add(safeCandidatePointId);
+            String(contract?.currentPointId || "").trim(),
+            String(contract?.overlappingPointId || "").trim(),
+        ].filter(Boolean)));
+        const receipt = await saveClassSplitReviewDisposition(
+            safePointId,
+            "resolved_no_change",
+            {
+                jobId: String(classSplitState.currentJobId || "").trim(),
+                clientActionId: `resolved:${generateUUID()}`,
             }
-        });
-        const pointIdList = Array.from(pointIds);
-        pointIdList.forEach((resolvedPointId) => {
-            classSplitState.dismissedWrongIds.add(resolvedPointId);
-        });
-        removeClassSplitPointsFromActiveReviewGraph(
-            pointIdList,
-            { force: true, updateSelection: true, renderSelection: true }
         );
-        syncClassSplitWrongCandidateSummaryCount();
-        renderClassSplitWrongList();
+        durablePointIds.forEach((id) => classSplitState.dismissedWrongIds.add(id));
+        await removeClassSplitPointsFromActiveReviewGraph(durablePointIds, {
+            force: true,
+            preserveViewport: true,
+        });
         persistDataQualityExplorerSession();
-        const message = point
-            ? "Marked resolved."
-            : "BBox not found. Removed the stale overlap item from this review.";
-        enqueueTaskNotice(message.startsWith("BBox not found.")
-            ? "BBox not found."
-            : "Marked resolved.", {
-            key: classSplitReviewToastKey(safePointId, "mark-resolved"),
-            durationMs: 3200,
-        });
-        setClassSplitJobStatus(
-            message,
-            "success"
-        );
-        scheduleClassSplitBackgroundReviewRefresh();
+        renderClassSplitReviewedList();
+        return receipt;
     }
 
     function removeClassSplitDualBBoxLocally(target, exactResolution = null) {
@@ -68894,7 +71600,6 @@ async function cancelRfDetrTrainingJobRequest() {
             enqueueTaskNotice(message, { key: toastKey, durationMs: 6500 });
             setClassSplitJobStatus(message, "success");
             scheduleClassSplitBackgroundReviewRefresh({
-                renderPlot: true,
                 renderDataset: true,
             });
             return;
@@ -69006,7 +71711,6 @@ async function cancelRfDetrTrainingJobRequest() {
                 "success"
             );
             scheduleClassSplitBackgroundReviewRefresh({
-                renderPlot: true,
                 renderDataset: true,
             });
         } catch (error) {
@@ -69036,18 +71740,1776 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
+    function getClassSplitAnnotationEntityTransactionSource() {
+        if (annotationSourceState.mode === "transient" && annotationSourceState.sessionId) {
+            return { kind: "transient", id: annotationSourceState.sessionId };
+        }
+        if (annotationSourceState.mode === "linked" && annotationSourceState.datasetId) {
+            return { kind: "dataset", id: annotationSourceState.datasetId };
+        }
+        return null;
+    }
+
+    function getClassSplitReviewAnnotationPrecondition(point) {
+        const source = getClassSplitAnnotationEntityTransactionSource();
+        const imageKey = resolveClassSplitPointImageKey(point);
+        const row = annotationSourceState.imageRowsByKey.get(imageKey);
+        const entityId = String(point?.annotation_entity_id || "").trim();
+        const rowEntity = Array.isArray(row?.annotation_entities)
+            ? row.annotation_entities.find((entity) => (
+                String(entity?.annotation_entity_id || "").trim() === entityId
+            ))
+            : null;
+        const entityRevision = Number(
+            rowEntity?.entity_revision || point?.annotation_entity_revision || 0
+        );
+        const entityRecordRevision = String(
+            row?.annotation_entity_record_revision
+            || point?.annotation_entity_record_revision
+            || ""
+        ).trim();
+        const labelRevision = String(
+            row?.annotation_record_revision || ""
+        ).trim();
+        const sourceIdentity = String(
+            row?.annotation_source_identity
+            || point?.annotation_source_identity
+            || ""
+        ).trim();
+        const className = String(point?.class_name || "").trim();
+        const classId = Array.isArray(loadedClassList)
+            ? loadedClassList.indexOf(className)
+            : -1;
+        if (
+            !source
+            || !row
+            || !entityId
+            || !Number.isInteger(entityRevision)
+            || entityRevision <= 0
+            || !entityRecordRevision
+            || !CLASS_SPLIT_ANNOTATION_REVISION_PATTERN.test(labelRevision)
+            || !CLASS_SPLIT_ANNOTATION_SOURCE_IDENTITY_PATTERN.test(
+                sourceIdentity
+            )
+            || !className
+            || classId < 0
+        ) {
+            return null;
+        }
+        return {
+            annotation_source: source,
+            split: String(row.split || point?.split || "train").trim(),
+            image_relpath: String(
+                row.image_relpath || point?.image_relpath || ""
+            ).trim(),
+            annotation_source_identity: sourceIdentity,
+            annotation_entity_id: entityId,
+            expected_entity_revision: entityRevision,
+            expected_record_revision: entityRecordRevision,
+            expected_annotation_record_revision: labelRevision,
+            expected_class_id: classId,
+            expected_class_name: className,
+        };
+    }
+
+    function classSplitSemanticAnnotationTransactionRequest(request) {
+        const semantic = request && typeof request === "object"
+            ? { ...request }
+            : {};
+        [
+            "annotation_save",
+            "session_id",
+            "lock_session_id",
+            "lock_token",
+            "_training_authorization",
+            "training_authorization",
+        ].forEach((key) => delete semantic[key]);
+        return semantic;
+    }
+
+    function serializeClassSplitPendingAnnotationTransactions() {
+        return Array.from(
+            classSplitState.pendingAnnotationTransactions?.values?.() || []
+        ).map((entry) => ({
+            operationId: String(entry?.operationId || ""),
+            jobId: String(entry?.jobId || ""),
+            transactionKind: String(
+                entry?.transactionKind || "annotation_entity_actions_v1"
+            ),
+            pointId: String(entry?.pointId || ""),
+            request: entry?.request && typeof entry.request === "object"
+                ? classSplitSemanticAnnotationTransactionRequest(entry.request)
+                : null,
+            pointIds: Array.isArray(entry?.pointIds)
+                ? entry.pointIds.map((value) => String(value || "")).filter(Boolean)
+                : [],
+            resolvedPointIds: Array.isArray(entry?.resolvedPointIds)
+                ? entry.resolvedPointIds.map((value) => String(value || "")).filter(Boolean)
+                : [],
+            action: String(entry?.action || ""),
+            targetClassName: String(entry?.targetClassName || ""),
+            status: String(entry?.status || "prepared"),
+            createdAt: String(entry?.createdAt || new Date().toISOString()),
+        })).filter((entry) => entry.operationId && entry.jobId && entry.request);
+    }
+
+    function restoreClassSplitPendingAnnotationTransactions(entries, jobId) {
+        const safeJobId = String(jobId || "").trim();
+        const restored = new Map();
+        (Array.isArray(entries) ? entries : []).forEach((raw) => {
+            const operationId = String(raw?.operationId || "").trim();
+            const entryJobId = String(raw?.jobId || "").trim();
+            if (
+                !operationId
+                || !entryJobId
+                || (safeJobId && entryJobId !== safeJobId)
+                || !raw?.request
+                || typeof raw.request !== "object"
+            ) {
+                return;
+            }
+            restored.set(operationId, {
+                operationId,
+                jobId: entryJobId,
+                transactionKind: String(
+                    raw.transactionKind || "annotation_entity_actions_v1"
+                ),
+                pointId: String(raw.pointId || ""),
+                request: classSplitSemanticAnnotationTransactionRequest(raw.request),
+                pointIds: Array.isArray(raw.pointIds)
+                    ? raw.pointIds.map((value) => String(value || "")).filter(Boolean)
+                    : [],
+                resolvedPointIds: Array.isArray(raw.resolvedPointIds)
+                    ? raw.resolvedPointIds.map((value) => String(value || "")).filter(Boolean)
+                    : [],
+                action: String(raw.action || ""),
+                targetClassName: String(raw.targetClassName || ""),
+                status: String(raw.status || "recovery_required"),
+                createdAt: String(raw.createdAt || new Date().toISOString()),
+            });
+        });
+        classSplitState.pendingAnnotationTransactions = restored;
+    }
+
+    function queueClassSplitAnnotationTransaction(entry) {
+        const operationId = String(entry?.operationId || "").trim();
+        if (!operationId) {
+            throw new Error("Annotation transaction has no operation ID.");
+        }
+        entry.request = classSplitSemanticAnnotationTransactionRequest(entry.request);
+        classSplitState.pendingAnnotationTransactions.set(operationId, entry);
+        if (!persistDataQualityExplorerSession()) {
+            classSplitState.pendingAnnotationTransactions.delete(operationId);
+            throw new Error(
+                "The annotation change was not started because its recovery record could not be saved in this browser."
+            );
+        }
+        renderClassSplitSessionPersistenceStatus();
+        return operationId;
+    }
+
+    function applyClassSplitAnnotationEntityRecordReceipt(context, receipt) {
+        const committedRecord = Array.isArray(receipt?.records)
+            ? receipt.records.find((record) => (
+                String(record?.image_key || "") === context.imageKey
+            ))
+            : null;
+        if (!committedRecord || !Array.isArray(committedRecord.label_lines)) {
+            return false;
+        }
+        const {
+            point,
+            pointId,
+            match,
+            imageKey,
+            row,
+            entityId,
+            entityRevision,
+            action,
+            targetClassName,
+        } = context;
+        if (
+            String(point?.annotation_entity_record_revision || "")
+                === String(committedRecord.record_revision || "")
+            && JSON.stringify(row?.label_lines || [])
+                === JSON.stringify(committedRecord.label_lines)
+        ) {
+            if (committedRecord.annotation_record_revision) {
+                row.annotation_record_revision = String(
+                    committedRecord.annotation_record_revision
+                );
+            }
+            const committedSessionRevision = Number(
+                receipt.annotation_snapshot?.session_revision
+            );
+            if (Number.isFinite(committedSessionRevision)) {
+                annotationSourceState.sessionRevision = committedSessionRevision;
+            }
+            return true;
+        }
+        const actionReceipt = Array.isArray(receipt?.actions)
+            ? receipt.actions.find((result) => (
+                String(result?.point_id || "") === pointId
+            ))
+            : null;
+        const effectiveEntityId = String(
+            entityId || actionReceipt?.annotation_entity_id || ""
+        ).trim();
+        const oldBucket = bboxes?.[imageKey]?.[match.className];
+        if (Array.isArray(oldBucket)) {
+            const currentIndex = oldBucket.indexOf(match.bboxRecord);
+            if (currentIndex >= 0) {
+                oldBucket.splice(currentIndex, 1);
+            }
+        }
+        const updatedEntity = Array.isArray(committedRecord.annotation_entities)
+            ? committedRecord.annotation_entities.find((entity) => (
+                String(entity?.annotation_entity_id || "") === effectiveEntityId
+            ))
+            : null;
+        if (action === "relabel") {
+            const safeTargetClass = String(targetClassName || "").trim();
+            if (!bboxes[imageKey]) {
+                bboxes[imageKey] = {};
+            }
+            if (!Array.isArray(bboxes[imageKey][safeTargetClass])) {
+                bboxes[imageKey][safeTargetClass] = [];
+            }
+            match.bboxRecord._dataset_annotation_entity_revision = Number(
+                updatedEntity?.entity_revision || entityRevision + 1
+            );
+            match.bboxRecord._dataset_annotation_entity_id = effectiveEntityId;
+            match.bboxRecord._dataset_annotation_entity_record_revision = String(
+                committedRecord.record_revision || ""
+            );
+            bboxes[imageKey][safeTargetClass].push(match.bboxRecord);
+        } else {
+            point.annotation_deleted = true;
+        }
+        point.annotation_entity_revision = Number(
+            updatedEntity?.entity_revision || entityRevision + 1
+        );
+        point.annotation_entity_id = effectiveEntityId;
+        point.annotation_entity_record_revision = String(
+            committedRecord.record_revision || ""
+        );
+        row.label_lines = [...committedRecord.label_lines];
+        row.annotation_entities = Array.isArray(committedRecord.annotation_entities)
+            ? committedRecord.annotation_entities.map((entity) => ({ ...entity }))
+            : [];
+        row.annotation_entity_record_revision = String(
+            committedRecord.record_revision || ""
+        );
+        const snapshotRows = receipt.annotation_snapshot?.records;
+        const snapshotRow = Array.isArray(snapshotRows)
+            ? snapshotRows.find((record) => (
+                annotationImageKey(record?.split, record?.image_relpath) === imageKey
+            ))
+            : null;
+        if (snapshotRow) {
+            row.annotation_record_revision = String(
+                snapshotRow.annotation_record_revision
+                || committedRecord.annotation_record_revision
+                || row.annotation_record_revision
+                || ""
+            );
+        } else if (committedRecord.annotation_record_revision) {
+            row.annotation_record_revision = String(
+                committedRecord.annotation_record_revision
+            );
+        }
+        annotationSourceState.imageRowsByKey.set(imageKey, row);
+        annotationSourceState.rawLabelLinesByKey.set(
+            imageKey,
+            [...committedRecord.label_lines]
+        );
+        annotationSourceState.savedSnapshotByKey.set(
+            imageKey,
+            serializeAnnotationRecord({
+                label_lines: committedRecord.label_lines,
+                text_label: String(row.text_label || ""),
+            })
+        );
+        annotationSourceState.dirtyRecordsByKey.delete(imageKey);
+        const sessionRevision = Number(receipt.annotation_snapshot?.session_revision);
+        if (Number.isFinite(sessionRevision)) {
+            annotationSourceState.sessionRevision = sessionRevision;
+        }
+        classSplitState.dismissedWrongIds.add(pointId);
+        return true;
+    }
+
+    async function applyClassSplitRecoveredDualBBoxTransaction(entry, receipt) {
+        const attestation = receipt?.annotation_commit_attestation || {};
+        const deletedPointId = String(
+            attestation.deleted_point_id || receipt?.deleted_point_id || ""
+        ).trim();
+        const resolvedPointIds = Array.from(new Set([
+            ...(Array.isArray(receipt?.resolved_point_ids) ? receipt.resolved_point_ids : []),
+            ...(Array.isArray(entry?.resolvedPointIds) ? entry.resolvedPointIds : []),
+            ...(Array.isArray(entry?.pointIds) ? entry.pointIds : []),
+        ].map((value) => String(value || "").trim()).filter(Boolean)));
+        const committedRecord = Array.isArray(receipt?.records)
+            ? receipt.records[0]
+            : null;
+        const deletedPoint = getClassSplitPointById(deletedPointId);
+        const match = deletedPoint ? findClassSplitBboxMatch(deletedPoint) : null;
+        const imageKey = String(
+            committedRecord?.image_key
+            || match?.imageKey
+            || (deletedPoint ? getClassSplitPointImageKey(deletedPoint) : "")
+            || ""
+        );
+        const row = annotationSourceState.imageRowsByKey.get(imageKey);
+        let applied = false;
+        if (deletedPoint && match?.bboxRecord && row && committedRecord) {
+            applied = applyClassSplitAnnotationEntityRecordReceipt({
+                point: deletedPoint,
+                pointId: deletedPointId,
+                match,
+                imageKey,
+                row,
+                entityId: String(deletedPoint.annotation_entity_id || ""),
+                entityRevision: Number(deletedPoint.annotation_entity_revision || 0),
+                action: "delete",
+                targetClassName: "",
+            }, receipt);
+            const bucket = bboxes?.[imageKey]?.[match.className];
+            const staleIndex = Array.isArray(bucket)
+                ? bucket.indexOf(match.bboxRecord)
+                : -1;
+            if (staleIndex >= 0) {
+                bucket.splice(staleIndex, 1);
+            }
+        }
+        if (!applied && row && committedRecord && Array.isArray(committedRecord.label_lines)) {
+            row.label_lines = [...committedRecord.label_lines];
+            row.annotation_entities = Array.isArray(committedRecord.annotation_entities)
+                ? committedRecord.annotation_entities.map((entity) => ({ ...entity }))
+                : [];
+            row.annotation_record_revision = String(
+                committedRecord.annotation_record_revision
+                || row.annotation_record_revision
+                || ""
+            );
+            row.annotation_entity_record_revision = String(
+                committedRecord.record_revision || ""
+            );
+            annotationSourceState.imageRowsByKey.set(imageKey, row);
+            annotationSourceState.rawLabelLinesByKey.set(
+                imageKey,
+                [...committedRecord.label_lines]
+            );
+            annotationSourceState.savedSnapshotByKey.set(
+                imageKey,
+                serializeAnnotationRecord({
+                    label_lines: committedRecord.label_lines,
+                    text_label: String(row.text_label || ""),
+                })
+            );
+            annotationSourceState.dirtyRecordsByKey.delete(imageKey);
+        }
+        const entityResults = new Map(
+            (Array.isArray(receipt?.annotation_entity_results)
+                ? receipt.annotation_entity_results
+                : []
+            ).map((result) => [
+                String(result?.annotation_entity_id || ""),
+                result,
+            ])
+        );
+        resolvedPointIds.forEach((pointId) => {
+            const point = getClassSplitPointById(pointId);
+            const entityResult = entityResults.get(
+                String(point?.annotation_entity_id || "")
+            );
+            if (point && entityResult) {
+                point.annotation_entity_revision = Number(
+                    entityResult.entity_revision || point.annotation_entity_revision || 0
+                );
+                point.annotation_entity_record_revision = String(
+                    receipt.annotation_entity_record_revision
+                    || point.annotation_entity_record_revision
+                    || ""
+                );
+                point.annotation_deleted = entityResult.deleted === true;
+            }
+            classSplitState.dismissedWrongIds.add(pointId);
+        });
+        const sessionRevision = Number(
+            receipt?.session_revision ?? receipt?.annotation_snapshot?.session_revision
+        );
+        if (Number.isFinite(sessionRevision)) {
+            annotationSourceState.sessionRevision = sessionRevision;
+        }
+        const graphMutation = removeClassSplitPointsFromActiveReviewGraph(
+            resolvedPointIds,
+            { force: true, preserveViewport: true }
+        );
+        await graphMutation.completion;
+    }
+
+    async function applyClassSplitRecoveredAnnotationTransaction(entry, receipt) {
+        const transactionKind = String(
+            receipt?.transaction_kind
+            || entry?.transactionKind
+            || "annotation_entity_actions_v1"
+        );
+        if (transactionKind === "dual_bbox_delete_v1") {
+            await applyClassSplitRecoveredDualBBoxTransaction(entry, receipt);
+            return;
+        }
+        const receiptActions = Array.isArray(receipt?.actions) ? receipt.actions : [];
+        const receiptActionsByPoint = new Map(
+            receiptActions.map((action) => [String(action?.point_id || ""), action])
+        );
+        const pointIds = Array.from(new Set([
+            ...(Array.isArray(entry?.pointIds) ? entry.pointIds : []),
+            ...receiptActions.map((action) => String(action?.point_id || "")),
+        ].map((pointId) => String(pointId || "")).filter(Boolean)));
+        pointIds.forEach((rawPointId) => {
+            const pointId = String(rawPointId || "");
+            const point = getClassSplitPointById(pointId);
+            const actionReceipt = receiptActionsByPoint.get(pointId) || null;
+            const committedAction = String(
+                actionReceipt?.action || entry?.action || ""
+            );
+            const committedTargetClass = String(
+                actionReceipt?.target_class_name || entry?.targetClassName || ""
+            );
+            const match = point ? findClassSplitBboxMatch(point) : null;
+            const imageKey = String(
+                match?.imageKey || (point ? getClassSplitPointImageKey(point) : "") || ""
+            );
+            const row = annotationSourceState.imageRowsByKey.get(imageKey);
+            if (point && match?.bboxRecord && row) {
+                applyClassSplitAnnotationEntityRecordReceipt({
+                    point,
+                    pointId,
+                    match,
+                    imageKey,
+                    row,
+                    entityId: String(point.annotation_entity_id || ""),
+                    entityRevision: Number(point.annotation_entity_revision || 0),
+                    action: committedAction,
+                    targetClassName: committedTargetClass,
+                }, receipt);
+                if (
+                    committedAction === "relabel"
+                    && committedTargetClass
+                    && String(point.class_name || "") !== committedTargetClass
+                ) {
+                    updateClassSplitSummaryClassCounts(
+                        point.class_name,
+                        committedTargetClass
+                    );
+                    point.class_name = committedTargetClass;
+                }
+            }
+            classSplitState.dismissedWrongIds.add(pointId);
+        });
+        const graphMutation = removeClassSplitPointsFromActiveReviewGraph(pointIds, {
+            force: true,
+            preserveViewport: true,
+        });
+        await graphMutation.completion;
+    }
+
+    async function applyClassSplitCommittedRecoveryReceipts(recovery) {
+        const currentJobId = String(classSplitState.currentJobId || "").trim();
+        const receipts = [
+            ...(Array.isArray(recovery?.operations) ? recovery.operations : []),
+            ...(Array.isArray(recovery?.terminal_operations)
+                ? recovery.terminal_operations
+                : []),
+        ].filter((receipt) => (
+            receipt?.mutation_committed === true
+            && String(receipt?.job_id || currentJobId) === currentJobId
+        ));
+        for (const receipt of receipts) {
+            const operationId = String(receipt?.client_action_id || "").trim();
+            const receiptActions = Array.isArray(receipt?.actions) ? receipt.actions : [];
+            const entry = classSplitState.pendingAnnotationTransactions.get(operationId) || {
+                operationId,
+                jobId: currentJobId,
+                transactionKind: String(receipt?.transaction_kind || ""),
+                pointIds: receiptActions
+                    .map((action) => String(action?.point_id || ""))
+                    .filter(Boolean),
+                resolvedPointIds: Array.isArray(receipt?.resolved_point_ids)
+                    ? receipt.resolved_point_ids
+                    : [],
+            };
+            await applyClassSplitRecoveredAnnotationTransaction(entry, receipt);
+            if (["complete", "conflict", "rejected"].includes(
+                String(receipt?.status || "")
+            )) {
+                classSplitState.pendingAnnotationTransactions.delete(operationId);
+            }
+        }
+    }
+
+    async function drainClassSplitPendingAnnotationTransactions() {
+        if (classSplitState.annotationTransactionDrainPromise) {
+            return classSplitState.annotationTransactionDrainPromise;
+        }
+        classSplitState.annotationTransactionDrainPromise = (async () => {
+            const jobId = String(classSplitState.currentJobId || "").trim();
+            const failures = [];
+            for (const entry of Array.from(
+                classSplitState.pendingAnnotationTransactions.values()
+            )) {
+                if (String(entry?.jobId || "") !== jobId) {
+                    continue;
+                }
+                try {
+                    const transactionKind = String(
+                        entry?.transactionKind
+                        || entry?.request?.transaction_kind
+                        || "annotation_entity_actions_v1"
+                    );
+                    const dispatchRequest = transactionKind === "dual_bbox_delete_v1"
+                        ? {
+                            ...(entry.request || {}),
+                            ...getClassSplitAnnotationSaveEnvelope(),
+                        }
+                        : {
+                            ...(entry.request || {}),
+                            annotation_save: getClassSplitAnnotationSaveEnvelope(),
+                        };
+                    const endpoint = transactionKind === "dual_bbox_delete_v1"
+                        ? `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/points/${encodeURIComponent(String(entry.pointId || entry.request?.point_id || ""))}/dual_bbox_annotation_transaction`
+                        : `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/annotation_transactions`;
+                    const response = await fetch(
+                        endpoint,
+                        {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify(dispatchRequest),
+                        }
+                    );
+                    const detail = await response.text();
+                    if (!response.ok) {
+                        const serverError = parseApiError(
+                            detail,
+                            `HTTP ${response.status}`
+                        );
+                        const resolution = await reconcileClassSplitAnnotationTransactionAfterFailure(
+                            entry,
+                            {
+                                jobId,
+                                generation: classSplitState.analysisGeneration,
+                                serverError,
+                                deterministicRejection: response.status < 500,
+                            }
+                        );
+                        if (resolution.kind !== "complete") {
+                            failures.push(resolution.error || serverError);
+                        }
+                        if (resolution.safeToRollback) {
+                            await restoreClassSplitPendingAnnotationGraphEntry(
+                                entry,
+                                jobId,
+                                classSplitState.analysisGeneration
+                            );
+                        }
+                        continue;
+                    }
+                    const receipt = parseJsonObjectSafe(detail, {});
+                    entry.status = String(receipt.status || "");
+                    if (entry.status === "complete") {
+                        await applyClassSplitRecoveredAnnotationTransaction(entry, receipt);
+                        classSplitState.pendingAnnotationTransactions.delete(entry.operationId);
+                    }
+                } catch (error) {
+                    const serverError = String(error?.message || error);
+                    const resolution = await reconcileClassSplitAnnotationTransactionAfterFailure(
+                        entry,
+                        {
+                            jobId,
+                            generation: classSplitState.analysisGeneration,
+                            serverError,
+                            deterministicRejection: false,
+                        }
+                    );
+                    if (resolution.kind !== "complete") {
+                        failures.push(resolution.error || serverError);
+                    }
+                    if (resolution.safeToRollback) {
+                        await restoreClassSplitPendingAnnotationGraphEntry(
+                            entry,
+                            jobId,
+                            classSplitState.analysisGeneration
+                        );
+                    }
+                }
+            }
+            persistDataQualityExplorerSession();
+            renderClassSplitSessionPersistenceStatus();
+            if (failures.length) {
+                throw new Error(
+                    `Could not finish ${failures.length} annotation transaction${failures.length === 1 ? "" : "s"}: ${failures[0]}`
+                );
+            }
+        })().finally(() => {
+            classSplitState.annotationTransactionDrainPromise = null;
+        });
+        return classSplitState.annotationTransactionDrainPromise;
+    }
+
+    function getClassSplitAnnotationSaveEnvelope() {
+        const lockSessionId = String(annotationSourceState.lockSessionId || "").trim();
+        const lockToken = String(
+            annotationSourceState.lock?.lock_token
+            || annotationSourceState.lock?.token
+            || ""
+        ).trim();
+        const envelope = {
+            lock_session_id: lockSessionId,
+            session_id: lockSessionId,
+            lock_token: lockToken,
+        };
+        const rawRevision = annotationSourceState.sessionRevision;
+        if (
+            rawRevision !== null
+            && rawRevision !== undefined
+            && rawRevision !== ""
+            && Number.isFinite(Number(rawRevision))
+        ) {
+            envelope.expected_session_revision = Number(rawRevision);
+        }
+        return envelope;
+    }
+
+    async function recoverClassSplitBackendAnnotationTransactions(jobId) {
+        const safeJobId = String(jobId || "").trim();
+        if (!safeJobId) return;
+        const applyRecovery = (value) => {
+            if (safeJobId === String(classSplitState.currentJobId || "").trim()) {
+                classSplitState.annotationRecovery = mergeClassSplitAnnotationRecovery(
+                    classSplitState.annotationRecovery,
+                    value,
+                    safeJobId
+                );
+                renderClassSplitSessionPersistenceStatus();
+            }
+        };
+        const recoveryResponse = await fetch(
+            `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(safeJobId)}/annotation_session/recovery`
+        );
+        const recoveryDetail = await recoveryResponse.text();
+        if (!recoveryResponse.ok) {
+            throw new Error(parseApiError(recoveryDetail, `HTTP ${recoveryResponse.status}`));
+        }
+        let recovery = parseJsonObjectSafe(recoveryDetail, {});
+        applyRecovery(recovery);
+        await applyClassSplitCommittedRecoveryReceipts(recovery);
+        persistDataQualityExplorerSession();
+        if (
+            String(recovery?.status || "") === "rerun_required"
+            || recovery?.rerun_required === true
+        ) {
+            const conflict = Array.isArray(recovery?.conflicts)
+                ? recovery.conflicts[0]
+                : null;
+            throw new Error(
+                parseApiError(
+                    conflict?.detail,
+                    "Annotation identities no longer match this analysis. Rerun Data Quality Explorer before saving or exporting."
+                )
+            );
+        }
+        const activeBatches = Array.isArray(recovery?.active_batches)
+            ? recovery.active_batches
+            : [];
+        for (const batch of activeBatches) {
+            await resumeClassSplitAnnotationBatch(batch);
+        }
+        if (activeBatches.length) {
+            const refreshedResponse = await fetch(
+                `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(safeJobId)}/annotation_session/recovery`
+            );
+            const refreshedDetail = await refreshedResponse.text();
+            if (!refreshedResponse.ok) {
+                throw new Error(parseApiError(
+                    refreshedDetail,
+                    `HTTP ${refreshedResponse.status}`
+                ));
+            }
+            recovery = parseJsonObjectSafe(refreshedDetail, {});
+            applyRecovery(recovery);
+            persistDataQualityExplorerSession();
+        }
+        const operationIds = Array.isArray(recovery?.operations)
+            ? recovery.operations
+                .map((operation) => String(operation?.client_action_id || "").trim())
+                .filter(Boolean)
+            : [];
+        if (!operationIds.length) return recovery;
+        const retryResponse = await fetch(
+            `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(safeJobId)}/annotation_session/recover`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    mode: "retry_transactions",
+                    operation_ids: operationIds,
+                    annotation_save: getClassSplitAnnotationSaveEnvelope(),
+                }),
+            }
+        );
+        const retryDetail = await retryResponse.text();
+        if (!retryResponse.ok) {
+            throw new Error(parseApiError(retryDetail, `HTTP ${retryResponse.status}`));
+        }
+        const retry = parseJsonObjectSafe(retryDetail, {});
+        applyRecovery(retry);
+        await applyClassSplitCommittedRecoveryReceipts(retry);
+        const completedResults = Array.isArray(retry?.results)
+            ? retry.results.filter((result) => String(result?.status || "") === "complete")
+            : [];
+        for (const receipt of completedResults) {
+            const operationId = String(receipt?.client_action_id || "").trim();
+            const entry = classSplitState.pendingAnnotationTransactions.get(operationId) || {
+                transactionKind: String(receipt?.transaction_kind || ""),
+                resolvedPointIds: Array.isArray(receipt?.resolved_point_ids)
+                    ? receipt.resolved_point_ids
+                    : [],
+            };
+            await applyClassSplitRecoveredAnnotationTransaction(entry, receipt);
+            if (operationId) {
+                classSplitState.pendingAnnotationTransactions.delete(operationId);
+            }
+        }
+        persistDataQualityExplorerSession();
+        if (!["ready", "ready_with_warnings"].includes(String(retry.status || ""))) {
+            const firstFailure = Array.isArray(retry?.failures) ? retry.failures[0] : null;
+            throw new Error(
+                parseApiError(
+                    firstFailure?.detail,
+                    "Backend annotation transactions still require recovery."
+                )
+            );
+        }
+        operationIds.forEach((operationId) => {
+            classSplitState.pendingAnnotationTransactions.delete(operationId);
+        });
+        return retry;
+    }
+
+    async function resolveClassSplitAnnotationTransactionAfterHttpError(
+        jobId,
+        operationId,
+        serverError
+    ) {
+        try {
+            const response = await fetch(
+                `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}`
+                + `/annotation_transactions/${encodeURIComponent(operationId)}`
+            );
+            const detail = await response.text();
+            if (response.status === 404) {
+                return { kind: "absent", receipt: null, error: serverError };
+            }
+            if (!response.ok) {
+                return {
+                    kind: "pending",
+                    receipt: null,
+                    error: parseApiError(detail, serverError),
+                };
+            }
+            const receipt = parseJsonObjectSafe(detail, {});
+            const state = String(receipt?.status || "");
+            if (state === "complete") {
+                return { kind: "complete", receipt, error: "" };
+            }
+            if (state === "conflict" || state === "rejected") {
+                return {
+                    kind: "terminal",
+                    receipt,
+                    error: parseApiError(receipt?.error?.detail, serverError),
+                };
+            }
+            return { kind: "pending", receipt, error: serverError };
+        } catch (error) {
+            return {
+                kind: "pending",
+                receipt: null,
+                error: String(error?.message || serverError),
+            };
+        }
+    }
+
+    async function reconcileClassSplitAnnotationTransactionAfterFailure(
+        entry,
+        {
+            jobId,
+            generation = classSplitState.analysisGeneration,
+            serverError = "Annotation transaction failed.",
+            deterministicRejection = false,
+        } = {}
+    ) {
+        const safeJobId = String(jobId || entry?.jobId || "").trim();
+        const operationId = String(entry?.operationId || "").trim();
+        const resolution = await resolveClassSplitAnnotationTransactionAfterHttpError(
+            safeJobId,
+            operationId,
+            serverError
+        );
+        const receipt = resolution.receipt || null;
+        const mutationCommitted = receipt?.mutation_committed === true;
+        const uiIsCurrent = classSplitAsyncRequestIsCurrent(generation, safeJobId);
+        if (mutationCommitted && uiIsCurrent) {
+            await applyClassSplitRecoveredAnnotationTransaction(entry, receipt);
+        }
+        if (resolution.kind === "complete") {
+            if (uiIsCurrent && !mutationCommitted) {
+                await applyClassSplitRecoveredAnnotationTransaction(entry, receipt);
+            }
+            classSplitState.pendingAnnotationTransactions.delete(operationId);
+        } else if (resolution.kind === "terminal") {
+            if (receipt?.rerun_required === true) {
+                transitionClassSplitToRerunRequired(receipt || {}, {
+                    jobId: safeJobId,
+                    generation,
+                });
+            }
+            classSplitState.pendingAnnotationTransactions.delete(operationId);
+        } else if (resolution.kind === "absent" && deterministicRejection) {
+            classSplitState.pendingAnnotationTransactions.delete(operationId);
+        } else {
+            entry.status = String(receipt?.status || "recovery_required");
+            entry.error = resolution.error || serverError;
+        }
+        persistDataQualityExplorerSession();
+        renderClassSplitSessionPersistenceStatus();
+        return {
+            ...resolution,
+            mutationCommitted,
+            safeToRollback: Boolean(
+                resolution.kind === "terminal" && !mutationCommitted
+                || resolution.kind === "absent" && deterministicRejection
+            ),
+        };
+    }
+
+    async function restoreClassSplitPendingAnnotationGraphEntry(entry, jobId, generation) {
+        if (!classSplitAsyncRequestIsCurrent(generation, jobId)) {
+            return;
+        }
+        const pointIds = Array.from(new Set([
+            ...(Array.isArray(entry?.pointIds) ? entry.pointIds : []),
+            ...(Array.isArray(entry?.resolvedPointIds) ? entry.resolvedPointIds : []),
+        ].map((value) => String(value || "").trim()).filter(Boolean)));
+        if (!pointIds.length) {
+            return;
+        }
+        const viewport = captureClassSplitGraphViewport();
+        pointIds.forEach((pointId) => classSplitState.dismissedWrongIds.delete(pointId));
+        await renderClassSplitPlot();
+        await restoreClassSplitGraphViewport(viewport);
+    }
+
+    function classSplitDatasetMutationRequiresAuthority() {
+        return Boolean(
+            classSplitState.restoredSession
+            || classSplitState.boundedTransport
+            || classSplitState.sessionManifest
+        );
+    }
+
+    function classSplitRequireAnnotationAuthority(message) {
+        if (classSplitDatasetMutationRequiresAuthority()) {
+            throw new Error(
+                message
+                || "The authoritative annotation source is not ready. Reconnect the labeling workspace before editing this graph."
+            );
+        }
+        return null;
+    }
+
+    async function commitClassSplitAnnotationEntityMutation(
+        point,
+        action,
+        targetClassName = ""
+    ) {
+        const pointId = String(point?.point_id || "").trim();
+        const requestJobId = String(classSplitState.currentJobId || "").trim();
+        const requestGeneration = classSplitState.analysisGeneration;
+        const uiIsCurrent = () => classSplitAsyncRequestIsCurrent(
+            requestGeneration,
+            requestJobId
+        );
+        const source = getClassSplitAnnotationEntityTransactionSource();
+        const match = findClassSplitBboxMatch(point);
+        if (!requestJobId || !source || !pointId || !match?.bboxRecord) {
+            return classSplitRequireAnnotationAuthority();
+        }
+        const imageKey = String(match.imageKey || getClassSplitPointImageKey(point) || "");
+        const row = annotationSourceState.imageRowsByKey.get(imageKey);
+        if (
+            !row
+            || !String(row.annotation_source_identity || "").trim()
+            || !String(row.annotation_record_revision || "").trim()
+        ) {
+            return classSplitRequireAnnotationAuthority(
+                "The selected object is not bound to an authoritative annotation revision. Reconnect or rerun before editing it."
+            );
+        }
+        const annotationEntityId = String(
+            point.annotation_entity_id
+            || match.bboxRecord._dataset_annotation_entity_id
+            || ""
+        ).trim();
+        const entityRevision = Number(
+            point.annotation_entity_revision
+            || match.bboxRecord._dataset_annotation_entity_revision
+            || 0
+        );
+        const entityRecordRevision = String(
+            row.annotation_entity_record_revision
+            || point.annotation_entity_record_revision
+            || match.bboxRecord._dataset_annotation_entity_record_revision
+            || ""
+        ).trim();
+        const mutation = {
+            point_id: pointId,
+            action,
+            capture_training_data: isClassSplitTrainingCaptureEnabled(),
+            ...(annotationEntityId ? {
+                annotation_entity_id: annotationEntityId,
+            } : {}),
+            ...(Number.isInteger(entityRevision) && entityRevision > 0 ? {
+                expected_entity_revision: entityRevision,
+            } : {}),
+        };
+        if (action === "relabel") {
+            const targetClassId = Array.isArray(loadedClassList)
+                ? loadedClassList.indexOf(String(targetClassName || "").trim())
+                : -1;
+            if (targetClassId < 0) {
+                throw new Error("Choose a valid target class before changing this object.");
+            }
+            mutation.target_class_id = targetClassId;
+        }
+        const clientActionId = `annotation:${generateUUID()}`;
+        const requestBody = {
+            client_action_id: clientActionId,
+            annotation_source: source,
+            records: [{
+                split: row.split,
+                image_relpath: row.image_relpath,
+                annotation_source_identity: row.annotation_source_identity,
+                expected_annotation_record_revision: row.annotation_record_revision,
+                ...(entityRecordRevision ? {
+                    expected_record_revision: entityRecordRevision,
+                } : {}),
+                actions: [mutation],
+            }],
+        };
+        const optimisticSnapshot = applyClassSplitOptimisticReview(
+            pointId,
+            action === "delete" ? "delete_bbox" : "reassign_class"
+        );
+        const pendingEntry = {
+            operationId: clientActionId,
+            jobId: requestJobId,
+            analysisGeneration: requestGeneration,
+            request: requestBody,
+            pointIds: [pointId],
+            action,
+            targetClassName: String(targetClassName || ""),
+            status: "prepared",
+            createdAt: new Date().toISOString(),
+        };
+        try {
+            queueClassSplitAnnotationTransaction(pendingEntry);
+        } catch (error) {
+            restoreClassSplitOptimisticReview(pointId, optimisticSnapshot);
+            throw error;
+        }
+
+        let response;
+        try {
+            response = await fetch(
+                `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(requestJobId)}/annotation_transactions`,
+                {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        ...requestBody,
+                        annotation_save: getClassSplitAnnotationSaveEnvelope(),
+                    }),
+                }
+            );
+        } catch (error) {
+            const resolution = await reconcileClassSplitAnnotationTransactionAfterFailure(
+                pendingEntry,
+                {
+                    jobId: requestJobId,
+                    generation: requestGeneration,
+                    serverError: String(error?.message || error),
+                }
+            );
+            if (resolution.kind === "complete") {
+                const receipt = resolution.receipt || {};
+                receipt._ui_stale = !uiIsCurrent();
+                return receipt;
+            }
+            if (resolution.safeToRollback) {
+                restoreClassSplitOptimisticReview(pointId, optimisticSnapshot);
+                throw new Error(resolution.error || "Annotation transaction was rejected.");
+            }
+            return {
+                status: "recovery_required",
+                client_action_id: clientActionId,
+                review_pending: [{ point_id: pointId, reason: resolution.error }],
+                _ui_stale: !uiIsCurrent(),
+            };
+        }
+        let detail;
+        try {
+            detail = await response.text();
+        } catch (error) {
+            const resolution = await reconcileClassSplitAnnotationTransactionAfterFailure(
+                pendingEntry,
+                {
+                    jobId: requestJobId,
+                    generation: requestGeneration,
+                    serverError: String(error?.message || error),
+                }
+            );
+            if (resolution.kind === "complete") {
+                const receipt = resolution.receipt || {};
+                receipt._ui_stale = !uiIsCurrent();
+                return receipt;
+            }
+            if (resolution.safeToRollback) {
+                restoreClassSplitOptimisticReview(pointId, optimisticSnapshot);
+                throw new Error(resolution.error || "Annotation transaction was rejected.");
+            }
+            return {
+                status: "recovery_required",
+                client_action_id: clientActionId,
+                review_pending: [{ point_id: pointId, reason: resolution.error }],
+                _ui_stale: !uiIsCurrent(),
+            };
+        }
+        let receipt;
+        if (!response.ok) {
+            const serverError = parseApiError(detail, `HTTP ${response.status}`);
+            const resolution = await reconcileClassSplitAnnotationTransactionAfterFailure(
+                pendingEntry,
+                {
+                    jobId: requestJobId,
+                    generation: requestGeneration,
+                    serverError,
+                    deterministicRejection: response.status < 500,
+                }
+            );
+            if (resolution.kind === "complete") {
+                receipt = resolution.receipt;
+            } else if (resolution.kind === "pending") {
+                pendingEntry.status = String(
+                    resolution.receipt?.status || "recovery_required"
+                );
+                pendingEntry.error = resolution.error;
+                persistDataQualityExplorerSession();
+                renderClassSplitSessionPersistenceStatus();
+                return {
+                    ...(resolution.receipt || {}),
+                    status: "recovery_required",
+                    client_action_id: clientActionId,
+                    review_pending: [{ point_id: pointId, reason: resolution.error }],
+                    _ui_stale: !uiIsCurrent(),
+                };
+            } else {
+                if (resolution.safeToRollback) {
+                    restoreClassSplitOptimisticReview(pointId, optimisticSnapshot);
+                }
+                throw new Error(resolution.error || serverError);
+            }
+        } else {
+            receipt = parseJsonObjectSafe(detail, {});
+        }
+        const bindingGeneration = Number(receipt?.binding_generation || 0);
+        if (Number.isFinite(bindingGeneration) && bindingGeneration > 0) {
+            classSplitState.annotationBindingGeneration = bindingGeneration;
+        }
+        pendingEntry.status = String(receipt.status || "");
+        const mutationCommitted = (
+            receipt?.mutation_committed === true
+            || pendingEntry.status === "complete"
+        );
+        if (uiIsCurrent() && mutationCommitted && !applyClassSplitAnnotationEntityRecordReceipt({
+            point,
+            pointId,
+            match,
+            imageKey,
+            row,
+            entityId: annotationEntityId,
+            entityRevision,
+            action,
+            targetClassName,
+        }, receipt)) {
+            pendingEntry.status = "recovery_required";
+        }
+        if (pendingEntry.status === "complete") {
+            classSplitState.pendingAnnotationTransactions.delete(clientActionId);
+        }
+        persistDataQualityExplorerSession();
+        renderClassSplitSessionPersistenceStatus();
+        receipt._ui_stale = !uiIsCurrent();
+        return receipt;
+    }
+
+    function canonicalClassSplitBatchJson(value) {
+        const normalize = (item) => {
+            if (Array.isArray(item)) return item.map(normalize);
+            if (item && typeof item === "object") {
+                return Object.fromEntries(
+                    Object.keys(item).sort().map((key) => [key, normalize(item[key])])
+                );
+            }
+            return item;
+        };
+        return JSON.stringify(normalize(value)).replace(/[\u007f-\uffff]/g, (char) => (
+            `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`
+        ));
+    }
+
+    async function hashClassSplitBatchManifest(items) {
+        const bytes = new TextEncoder().encode(canonicalClassSplitBatchJson(items));
+        const digest = await crypto.subtle.digest("SHA-256", bytes);
+        return Array.from(new Uint8Array(digest))
+            .map((value) => value.toString(16).padStart(2, "0"))
+            .join("");
+    }
+
+    async function fetchClassSplitAnnotationBatchJson(url, options = {}) {
+        const response = await fetch(url, options);
+        const detail = await response.text();
+        const payload = parseJsonObjectSafe(detail, {});
+        if (!response.ok) {
+            throw new Error(parseApiError(detail, `HTTP ${response.status}`));
+        }
+        return payload;
+    }
+
+    function mergeClassSplitAnnotationBatchReceipts(receipts) {
+        const records = new Map();
+        const actions = new Map();
+        const snapshotRecords = new Map();
+        const reviewReceipts = new Map();
+        const reviewFailures = new Map();
+        let sessionRevision = null;
+        (Array.isArray(receipts) ? receipts : []).forEach((receipt) => {
+            (receipt?.records || []).forEach((record) => {
+                records.set(String(record?.image_key || ""), record);
+            });
+            (receipt?.actions || []).forEach((action) => {
+                actions.set(String(action?.point_id || ""), action);
+            });
+            (receipt?.annotation_snapshot?.records || []).forEach((record) => {
+                snapshotRecords.set(
+                    annotationImageKey(record?.split, record?.image_relpath),
+                    record
+                );
+            });
+            (receipt?.review_receipts || []).forEach((entry) => {
+                reviewReceipts.set(String(entry?.point_id || ""), entry);
+            });
+            (receipt?.review_failures || []).forEach((entry) => {
+                reviewFailures.set(String(entry?.point_id || ""), entry);
+            });
+            const revision = Number(receipt?.annotation_snapshot?.session_revision);
+            if (Number.isFinite(revision)) {
+                sessionRevision = sessionRevision === null
+                    ? revision
+                    : Math.max(sessionRevision, revision);
+            }
+        });
+        return {
+            status: "complete",
+            mutation_committed: true,
+            records: Array.from(records.values()),
+            actions: Array.from(actions.values()),
+            annotation_snapshot: {
+                session_revision: sessionRevision,
+                records: Array.from(snapshotRecords.values()),
+            },
+            review_receipts: Array.from(reviewReceipts.values()),
+            review_failures: Array.from(reviewFailures.values()),
+        };
+    }
+
+    async function runClassSplitAnnotationBatchRequest({
+        jobId,
+        source,
+        action,
+        targetClassName,
+        records,
+    }) {
+        const batchId = `annotation-batch:${generateUUID()}`;
+        const items = records.map((record, sequence) => ({
+            sequence,
+            point_id: String(record?.actions?.[0]?.point_id || ""),
+            payload: record,
+        }));
+        const manifestHash = await hashClassSplitBatchManifest(items);
+        const base = `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}`
+            + `/annotation_batches/${encodeURIComponent(batchId)}`;
+        const recoveryKey = "tator.classSplit.annotationBatch.v1";
+        const recoveryRecord = {
+            batchId,
+            jobId,
+            source,
+            action,
+            targetClassName,
+            createdAt: new Date().toISOString(),
+        };
+        localStorage.setItem(recoveryKey, JSON.stringify(recoveryRecord));
+        classSplitState.annotationBatchOperation = recoveryRecord;
+        let batch = await fetchClassSplitAnnotationBatchJson(
+            `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/annotation_batches`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    batch_id: batchId,
+                    annotation_source: source,
+                    action,
+                    target_class_name: targetClassName,
+                    declared_count: items.length,
+                    manifest_hash: manifestHash,
+                }),
+            }
+        );
+        classSplitState.annotationBindingGeneration = Number(
+            batch?.binding_generation || 0
+        );
+        for (let offset = 0; offset < items.length; offset += CLASS_SPLIT_ANNOTATION_BATCH_PAGE_SIZE) {
+            batch = await fetchClassSplitAnnotationBatchJson(`${base}/items`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    items: items.slice(offset, offset + CLASS_SPLIT_ANNOTATION_BATCH_PAGE_SIZE),
+                }),
+            });
+        }
+        batch = await fetchClassSplitAnnotationBatchJson(`${base}/start`, {
+            method: "POST",
+        });
+        const receipts = [];
+        let previousCompleted = -1;
+        let stalled = 0;
+        while (!["complete", "partial", "cancelled", "conflict"].includes(
+            String(batch?.state || "")
+        )) {
+            batch = await fetchClassSplitAnnotationBatchJson(`${base}/process`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    annotation_save: getClassSplitAnnotationSaveEnvelope(),
+                    capture_training_data: isClassSplitTrainingCaptureEnabled(),
+                }),
+            });
+            if (batch?.chunk_receipt) receipts.push(batch.chunk_receipt);
+            const completed = Number(batch?.completed_count || 0);
+            if (classSplitState.multiSelectionOperation) {
+                classSplitState.multiSelectionOperation.completed = completed;
+                updateClassSplitMultiSelectionActionStatus(
+                    `${completed} of ${Number(batch?.declared_count || items.length)} image records saved; graph updates when complete.`,
+                    "info"
+                );
+            }
+            stalled = completed === previousCompleted ? stalled + 1 : 0;
+            previousCompleted = completed;
+            if (stalled >= CLASS_SPLIT_ANNOTATION_BATCH_STALL_LIMIT) {
+                throw new Error(
+                    "The batch is durably queued on the backend but cannot advance. Use Save session state to retry it."
+                );
+            }
+        }
+        const resultItems = [];
+        let afterSequence = -1;
+        while (true) {
+            const page = await fetchClassSplitAnnotationBatchJson(
+                `${base}/results?after_sequence=${afterSequence}&limit=${CLASS_SPLIT_ANNOTATION_BATCH_PAGE_SIZE}`
+            );
+            const pageItems = Array.isArray(page?.items) ? page.items : [];
+            resultItems.push(...pageItems);
+            if (!pageItems.length || pageItems.length < CLASS_SPLIT_ANNOTATION_BATCH_PAGE_SIZE) break;
+            afterSequence = Number(page.next_after_sequence);
+        }
+        resultItems.forEach((item) => {
+            if (item?.state === "complete" && item?.result) receipts.push(item.result);
+        });
+        const successfulPointIds = new Set();
+        const failedPointIds = new Set();
+        resultItems.forEach((item) => {
+            const target = item?.state === "complete" ? successfulPointIds : failedPointIds;
+            (item?.payload?.actions || []).forEach((entry) => {
+                const pointId = String(entry?.point_id || "").trim();
+                if (pointId) target.add(pointId);
+            });
+        });
+        if (["complete", "partial", "cancelled", "conflict"].includes(String(batch?.state || ""))) {
+            localStorage.removeItem(recoveryKey);
+            classSplitState.annotationBatchOperation = null;
+        }
+        return {
+            batch,
+            receipt: mergeClassSplitAnnotationBatchReceipts(receipts),
+            successfulPointIds,
+            failedPointIds,
+        };
+    }
+
+    async function resumeClassSplitAnnotationBatch(batchSummary) {
+        const jobId = String(batchSummary?.job_id || classSplitState.currentJobId || "").trim();
+        const batchId = String(batchSummary?.batch_id || "").trim();
+        if (!jobId || !batchId) return null;
+        const base = `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}`
+            + `/annotation_batches/${encodeURIComponent(batchId)}`;
+        let batch = batchSummary;
+        const receipts = [];
+        let stalled = 0;
+        let previousCompleted = -1;
+        while (!["complete", "partial", "cancelled", "conflict"].includes(
+            String(batch?.state || "")
+        )) {
+            if (["draft", "uploading"].includes(String(batch?.state || ""))) {
+                batch = await fetchClassSplitAnnotationBatchJson(`${base}/cancel`, {
+                    method: "POST",
+                });
+                localStorage.removeItem("tator.classSplit.annotationBatch.v1");
+                classSplitState.annotationBatchOperation = null;
+                return {
+                    batch,
+                    receipt: mergeClassSplitAnnotationBatchReceipts([]),
+                    successfulPointIds: [],
+                };
+            }
+            batch = await fetchClassSplitAnnotationBatchJson(`${base}/process`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    annotation_save: getClassSplitAnnotationSaveEnvelope(),
+                    capture_training_data: isClassSplitTrainingCaptureEnabled(),
+                }),
+            });
+            if (batch?.chunk_receipt) receipts.push(batch.chunk_receipt);
+            const completed = Number(batch?.completed_count || 0);
+            stalled = completed === previousCompleted ? stalled + 1 : 0;
+            previousCompleted = completed;
+            if (stalled >= CLASS_SPLIT_ANNOTATION_BATCH_STALL_LIMIT) {
+                throw new Error("The backend annotation batch remains pending.");
+            }
+        }
+        const resultItems = [];
+        let afterSequence = -1;
+        while (true) {
+            const page = await fetchClassSplitAnnotationBatchJson(
+                `${base}/results?after_sequence=${afterSequence}&limit=${CLASS_SPLIT_ANNOTATION_BATCH_PAGE_SIZE}`
+            );
+            const items = Array.isArray(page?.items) ? page.items : [];
+            resultItems.push(...items);
+            if (!items.length || items.length < CLASS_SPLIT_ANNOTATION_BATCH_PAGE_SIZE) break;
+            afterSequence = Number(page.next_after_sequence);
+        }
+        const successfulPointIds = [];
+        resultItems.forEach((item) => {
+            if (item?.state !== "complete") return;
+            if (item?.result) receipts.push(item.result);
+            (item?.payload?.actions || []).forEach((action) => {
+                const pointId = String(action?.point_id || "").trim();
+                if (pointId) successfulPointIds.push(pointId);
+            });
+        });
+        const receipt = mergeClassSplitAnnotationBatchReceipts(receipts);
+        if (successfulPointIds.length && classSplitAsyncRequestIsCurrent(
+            classSplitState.analysisGeneration,
+            jobId
+        )) {
+            await applyClassSplitRecoveredAnnotationTransaction(
+                {
+                    operationId: batchId,
+                    jobId,
+                    pointIds: successfulPointIds,
+                    action: String(batch?.action || ""),
+                    targetClassName: String(batch?.target_class_name || ""),
+                },
+                receipt
+            );
+        }
+        localStorage.removeItem("tator.classSplit.annotationBatch.v1");
+        classSplitState.annotationBatchOperation = null;
+        return { batch, receipt, successfulPointIds };
+    }
+
+    async function commitClassSplitAnnotationEntityBatchMutationUnlocked(
+        points,
+        action,
+        targetClassName = ""
+    ) {
+        const capturedPoints = Array.isArray(points) ? [...points] : [];
+        const requestJobId = String(classSplitState.currentJobId || "").trim();
+        const requestGeneration = classSplitState.analysisGeneration;
+        const source = getClassSplitAnnotationEntityTransactionSource();
+        if (!source || capturedPoints.length < 2) {
+            return classSplitRequireAnnotationAuthority();
+        }
+        if (Number(classSplitState.capabilities?.annotation_entity_batch_api_version || 0) < 1) {
+            throw new Error(
+                "This backend does not support authoritative batch annotation edits. Restart it with the current Tator build."
+            );
+        }
+        const targetClass = String(targetClassName || "").trim();
+        const targetClassId = action === "relabel" && Array.isArray(loadedClassList)
+            ? loadedClassList.indexOf(targetClass)
+            : -1;
+        if (action === "relabel" && targetClassId < 0) {
+            throw new Error("Choose a valid target class before changing this selection.");
+        }
+        const unchanged = [];
+        const contexts = [];
+        for (const point of capturedPoints) {
+            const pointId = String(point?.point_id || "").trim();
+            const match = findClassSplitBboxMatch(point);
+            const imageKey = String(match?.imageKey || getClassSplitPointImageKey(point) || "");
+            const row = annotationSourceState.imageRowsByKey.get(imageKey);
+            const liveClass = String(match?.className || "").trim();
+            const frozenClass = String(point?.class_name || "").trim();
+            if (liveClass && liveClass !== frozenClass && liveClass !== targetClass) {
+                throw new Error(
+                    `The live annotation changed from ${frozenClass || "the analyzed class"} to ${liveClass}. Rerun before applying this batch.`
+                );
+            }
+            if (
+                action === "relabel"
+                && liveClass === targetClass
+            ) {
+                unchanged.push(point);
+                continue;
+            }
+            const entityId = String(
+                point?.annotation_entity_id
+                || match?.bboxRecord?._dataset_annotation_entity_id
+                || ""
+            ).trim();
+            const entityRevision = Number(
+                point?.annotation_entity_revision
+                || match?.bboxRecord?._dataset_annotation_entity_revision
+                || 0
+            );
+            const recordRevision = String(
+                row?.annotation_entity_record_revision
+                || point?.annotation_entity_record_revision
+                || match?.bboxRecord?._dataset_annotation_entity_record_revision
+                || ""
+            ).trim();
+            if (
+                !pointId
+                || !match?.bboxRecord
+                || !row
+                || !String(row.annotation_source_identity || "").trim()
+                || !String(row.annotation_record_revision || "").trim()
+                || String(point?.pair_review_key || "").trim()
+            ) {
+                return classSplitRequireAnnotationAuthority(
+                    `Object ${pointId || "unknown"} is not bound to a unique annotation revision. Reconnect or rerun before editing this selection.`
+                );
+            }
+            contexts.push({
+                point,
+                pointId,
+                match,
+                imageKey,
+                row,
+                entityId,
+                entityRevision,
+                recordRevision,
+            });
+        }
+        const recordsByImage = new Map();
+        contexts.forEach((context) => {
+            let record = recordsByImage.get(context.imageKey);
+            if (!record) {
+                record = {
+                    split: context.row.split,
+                    image_relpath: context.row.image_relpath,
+                    annotation_source_identity: context.row.annotation_source_identity,
+                    expected_annotation_record_revision: context.row.annotation_record_revision,
+                    ...(context.recordRevision ? {
+                        expected_record_revision: context.recordRevision,
+                    } : {}),
+                    actions: [],
+                };
+                recordsByImage.set(context.imageKey, record);
+            } else if (
+                record.expected_record_revision
+                && context.recordRevision
+                && record.expected_record_revision !== context.recordRevision
+            ) {
+                throw new Error(
+                    `Selection contains conflicting annotation revisions for ${context.row.image_relpath}.`
+                );
+            }
+            record.actions.push({
+                point_id: context.pointId,
+                ...(context.entityId ? {
+                    annotation_entity_id: context.entityId,
+                } : {}),
+                ...(Number.isInteger(context.entityRevision) && context.entityRevision > 0 ? {
+                    expected_entity_revision: context.entityRevision,
+                } : {}),
+                action,
+                capture_training_data: isClassSplitTrainingCaptureEnabled(),
+                ...(action === "relabel" ? { target_class_id: targetClassId } : {}),
+            });
+        });
+
+        let receipt = mergeClassSplitAnnotationBatchReceipts([]);
+        let successfulContextIds = new Set();
+        let failedContextIds = new Set();
+        if (contexts.length) {
+            const batchResult = await runClassSplitAnnotationBatchRequest({
+                jobId: requestJobId,
+                source,
+                action,
+                targetClassName: targetClass,
+                records: Array.from(recordsByImage.values()),
+            });
+            receipt = batchResult.receipt;
+            successfulContextIds = batchResult.successfulPointIds;
+            failedContextIds = batchResult.failedPointIds;
+            if (!classSplitAsyncRequestIsCurrent(requestGeneration, requestJobId)) {
+                return {
+                    status: String(batchResult.batch?.state || "complete"),
+                    receipt,
+                    saved: successfulContextIds.size,
+                    failed: failedContextIds.size,
+                    _ui_stale: true,
+                };
+            }
+        }
+
+        const failedUnchanged = [];
+        const confirmedUnchanged = [];
+        for (const point of unchanged) {
+            const pointId = String(point?.point_id || "").trim();
+            try {
+                if (String(point?.class_name || "").trim() === targetClass) {
+                    await saveClassSplitReviewDisposition(
+                        pointId,
+                        "confirm_current",
+                        {
+                            jobId: String(classSplitState.currentJobId || "").trim(),
+                            clientActionId: `batch-confirm:${generateUUID()}`,
+                            deferUi: true,
+                            deferReconciliation: true,
+                        }
+                    );
+                } else {
+                    await changeClassSplitPointClass(
+                        point,
+                        targetClass,
+                        { batchMode: true }
+                    );
+                }
+                confirmedUnchanged.push(point);
+            } catch (error) {
+                failedUnchanged.push(point);
+            }
+        }
+
+        const committedRecords = new Map(
+            (Array.isArray(receipt?.records) ? receipt.records : []).map((record) => [
+                String(record?.image_key || ""),
+                record,
+            ])
+        );
+        contexts.filter((context) => (
+            successfulContextIds.has(context.pointId)
+        )).forEach((context) => {
+            const committedRecord = committedRecords.get(context.imageKey);
+            if (!committedRecord) {
+                return;
+            }
+            const oldBucket = bboxes?.[context.imageKey]?.[context.match.className];
+            if (Array.isArray(oldBucket)) {
+                const index = oldBucket.indexOf(context.match.bboxRecord);
+                if (index >= 0) {
+                    oldBucket.splice(index, 1);
+                }
+            }
+            if (action === "relabel") {
+                if (!bboxes[context.imageKey]) {
+                    bboxes[context.imageKey] = {};
+                }
+                if (!Array.isArray(bboxes[context.imageKey][targetClass])) {
+                    bboxes[context.imageKey][targetClass] = [];
+                }
+                const updatedEntity = committedRecord.annotation_entities?.find((entity) => (
+                    String(entity?.annotation_entity_id || "") === String(
+                        context.entityId
+                        || receipt?.actions?.find((result) => (
+                            String(result?.point_id || "") === context.pointId
+                        ))?.annotation_entity_id
+                        || ""
+                    )
+                ));
+                const effectiveEntityId = String(
+                    context.entityId
+                    || receipt?.actions?.find((result) => (
+                        String(result?.point_id || "") === context.pointId
+                    ))?.annotation_entity_id
+                    || ""
+                );
+                context.match.bboxRecord._dataset_annotation_entity_id = effectiveEntityId;
+                context.match.bboxRecord._dataset_annotation_entity_revision = Number(
+                    updatedEntity?.entity_revision || context.entityRevision + 1
+                );
+                context.match.bboxRecord._dataset_annotation_entity_record_revision = String(
+                    committedRecord.record_revision || ""
+                );
+                bboxes[context.imageKey][targetClass].push(context.match.bboxRecord);
+                updateClassSplitSummaryClassCounts(context.point.class_name, targetClass);
+                context.point.class_name = targetClass;
+            }
+            context.row.label_lines = [...committedRecord.label_lines];
+            context.row.annotation_entities = committedRecord.annotation_entities.map(
+                (entity) => ({ ...entity })
+            );
+            context.row.annotation_entity_record_revision = String(
+                committedRecord.record_revision || ""
+            );
+            const snapshotRow = Array.isArray(receipt?.annotation_snapshot?.records)
+                ? receipt.annotation_snapshot.records.find((record) => (
+                    annotationImageKey(record?.split, record?.image_relpath)
+                    === context.imageKey
+                ))
+                : null;
+            if (snapshotRow) {
+                context.row.annotation_record_revision = String(
+                    snapshotRow.annotation_record_revision
+                    || committedRecord.annotation_record_revision
+                    || context.row.annotation_record_revision
+                    || ""
+                );
+            } else if (committedRecord.annotation_record_revision) {
+                context.row.annotation_record_revision = String(
+                    committedRecord.annotation_record_revision
+                );
+            }
+            annotationSourceState.imageRowsByKey.set(context.imageKey, context.row);
+            annotationSourceState.rawLabelLinesByKey.set(
+                context.imageKey,
+                [...committedRecord.label_lines]
+            );
+            annotationSourceState.savedSnapshotByKey.set(
+                context.imageKey,
+                serializeAnnotationRecord({
+                    label_lines: committedRecord.label_lines,
+                    text_label: String(context.row.text_label || ""),
+                })
+            );
+            annotationSourceState.dirtyRecordsByKey.delete(context.imageKey);
+        });
+        const sessionRevision = Number(receipt?.annotation_snapshot?.session_revision);
+        if (Number.isFinite(sessionRevision)) {
+            annotationSourceState.sessionRevision = sessionRevision;
+        }
+        const successfulIds = [
+            ...contexts
+                .filter((context) => successfulContextIds.has(context.pointId))
+                .map((context) => context.pointId),
+            ...confirmedUnchanged.map((point) => String(point?.point_id || "").trim()),
+        ].filter(Boolean);
+        successfulIds.forEach((pointId) => classSplitState.dismissedWrongIds.add(pointId));
+        await removeClassSplitPointsFromActiveReviewGraph(successfulIds, {
+            force: true,
+            preserveViewport: true,
+        });
+        const failedCount = failedUnchanged.length + failedContextIds.size;
+        if (failedCount) {
+            updateClassSplitMultiSelectionActionStatus(
+                String(successfulIds.length) + " saved; " + String(failedCount)
+                    + " object" + (failedCount === 1 ? "" : "s")
+                    + " failed and remain selected.",
+                "warn"
+            );
+        } else {
+            clearClassSplitBulkSelection({ render: true });
+        }
+        persistDataQualityExplorerSession();
+        renderClassSplitSessionPersistenceStatus();
+        return {
+            status: failedCount ? "partial" : "complete",
+            receipt,
+            saved: successfulIds.length,
+            failed: failedCount,
+        };
+    }
+
+    async function commitClassSplitAnnotationEntityBatchMutation(
+        points,
+        action,
+        targetClassName = ""
+    ) {
+        const capturedIds = (Array.isArray(points) ? points : [])
+            .map((point) => String(point?.point_id || "").trim())
+            .filter(Boolean);
+        const operation = {
+            kind: action === "delete" ? "delete_bbox" : "reassign_class",
+            token: ++classSplitState.multiSelectionActionToken,
+            jobId: String(classSplitState.currentJobId || "").trim(),
+            analysisGeneration: classSplitState.analysisGeneration,
+            pointIds: Object.freeze([...capturedIds]),
+            completed: 0,
+            successes: new Map(),
+            failures: new Map(),
+        };
+        classSplitState.multiSelectionOperation = operation;
+        refreshClassSplitControls();
+        updateClassSplitMultiSelectionControls();
+        try {
+            return await commitClassSplitAnnotationEntityBatchMutationUnlocked(
+                points,
+                action,
+                targetClassName
+            );
+        } finally {
+            if (classSplitState.multiSelectionOperation === operation) {
+                classSplitState.multiSelectionOperation = null;
+            }
+            refreshClassSplitControls();
+            updateClassSplitMultiSelectionControls();
+        }
+    }
+
     async function deleteClassSplitPointBbox(pointId) {
         const safePointId = String(pointId || "").trim();
-        const point = getClassSplitPointById(safePointId);
+        let point = getClassSplitPointById(safePointId);
         if (!point) {
             throw new Error("The selected Data Quality Explorer object is no longer available.");
         }
-        if (classSplitMutationIsBusy({
-            ignoreReviewActionPointIds: [safePointId],
+        if (classSplitPointMutationIsBusy([safePointId], {
+            ignoreActionReservation: true,
         })) {
             throw new Error(
                 "Wait for the current Data Quality Explorer mutation to finish before deleting this bbox."
             );
+        }
+        if (classSplitState.boundedTransport && !point._boundedDetailLoaded) {
+            point = await ensureClassSplitBoundedPointHydrated(
+                safePointId,
+                { includeEvidence: false }
+            );
+            if (!point) {
+                throw new Error("The analysis changed while this bbox was being prepared for deletion.");
+            }
         }
         if (getClassSplitDualBBoxConflict(getClassSplitCandidateByPointId(safePointId), point)) {
             throw new Error("Use the two dedicated overlapping-box deletion controls for this pair.");
@@ -69060,11 +73522,18 @@ async function cancelRfDetrTrainingJobRequest() {
                 "Restore the saved review decision from Review history before deleting this bbox."
             );
         }
-        const deletionState = getClassSplitSingleBboxDeletionUiState(point);
+    const deletionState = getClassSplitSingleBboxDeletionUiState(point, {
+        ignoreActionReservation: true,
+    });
         if (deletionState.disabled || !deletionState.mode) {
             throw new Error(deletionState.reason || "This bbox cannot be deleted from the current workspace.");
         }
-        if (!annotationEditableGuard("Deleting this bbox")) {
+        // The Explorer action resolves and hydrates the immutable point target
+        // below. The labeling canvas may currently show an unrelated image,
+        // whose hydration state must not block this target-scoped mutation.
+        if (!annotationEditableGuard("Deleting this bbox", {
+            ignoreCurrentImageHydration: true,
+        })) {
             throw new Error(annotationMutationBlockedMessage("Deleting this bbox"));
         }
         if (classSplitState.relabelInFlight) {
@@ -69089,20 +73558,34 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!operation.jobId || !operationIsCurrent()) {
             throw new Error("The bbox review task changed before deletion started.");
         }
-        const exactGeometry = findClassSplitExactGeometryMatches(point);
-        if (exactGeometry.matches.length === 0) {
-            await reconcileClassSplitAlreadyAbsentBbox(
-                operation,
-                deletionState
-            );
-            return;
+        const hadBoundBboxIdentity = Boolean(
+            String(point._resolved_frontend_bbox_uuid || "").trim()
+        );
+        let resolvedBbox = null;
+        try {
+            // Restored YOLO rows are reconstructed from normalized values and
+            // can differ sub-pixel from the analysis coordinates. Use the
+            // existing unique, class-aware resolver and bind its stable UUID;
+            // the former 0.01 px equality rejected real boxes as absent.
+            resolvedBbox = ensureClassSplitPointBboxMatch(point);
+        } catch (error) {
+            if (hadBoundBboxIdentity) {
+                // A previously bound UUID disappearing is authoritative: the
+                // image view already removed this exact annotation.
+                await reconcileClassSplitAlreadyAbsentBbox(
+                    operation,
+                    deletionState
+                );
+                return;
+            }
+            throw error;
         }
-        if (exactGeometry.matches.length > 1) {
+        if (resolvedBbox.imageKey !== operation.imageKey) {
             throw new Error(
-                "More than one annotation now matches this bbox geometry. Rerun analysis before deleting either box."
+                "The selected bbox resolved to a different image. Reload this analysis before deleting it."
             );
         }
-        const exactMatch = exactGeometry.matches[0];
+        const exactMatch = resolvedBbox.match;
         if (
             String(exactMatch?.className || "").trim()
                 !== String(point.class_name || "").trim()
@@ -69110,6 +73593,23 @@ async function cancelRfDetrTrainingJobRequest() {
             throw new Error(
                 `This geometry is now labeled ${exactMatch?.className || "as another class"}. Rerun analysis instead of deleting the relabeled box.`
             );
+        }
+        const entityReceipt = await commitClassSplitAnnotationEntityMutation(
+            point,
+            "delete"
+        );
+        if (entityReceipt) {
+            if (entityReceipt._ui_stale) {
+                return entityReceipt;
+            }
+            const complete = String(entityReceipt.status || "") === "complete";
+            setClassSplitJobStatus(
+                complete
+                    ? "BBox deleted and durably saved."
+                    : "BBox deleted; its review receipt is queued for recovery.",
+                complete ? "success" : "warn"
+            );
+            return entityReceipt;
         }
         const operationAnnotationRow = annotationSourceState.imageRowsByKey.get(
             operation.imageKey
@@ -69179,7 +73679,7 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitState.relabelInFlight = true;
         try {
             removal = removeClassSplitDualBBoxLocally(point, {
-                imageKey: exactGeometry.imageKey,
+                imageKey: resolvedBbox.imageKey,
                 match: exactMatch,
             });
             point.annotation_deleted = true;
@@ -69231,7 +73731,6 @@ async function cancelRfDetrTrainingJobRequest() {
             setClassSplitJobStatus(message, "success");
             renderClassSplitReviewedList();
             scheduleClassSplitBackgroundReviewRefresh({
-                renderPlot: true,
                 renderDataset: true,
             });
             return;
@@ -69299,9 +73798,402 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         renderClassSplitReviewedList();
         scheduleClassSplitBackgroundReviewRefresh({
-            renderPlot: true,
             renderDataset: true,
         });
+    }
+
+    async function deleteClassSplitSelectedPointBboxes() {
+        const selectedIds = getClassSplitMultiSelectionIds();
+        if (selectedIds.length < 2) {
+            updateClassSplitMultiSelectionActionStatus(
+                "Select at least two graph objects before using batch deletion.",
+                "error"
+            );
+            return;
+        }
+        if (classSplitWriteMutationIsBlocked()) {
+            updateClassSplitMultiSelectionActionStatus(
+                "Wait for the current Data Quality Explorer mutation to finish before deleting this selection.",
+                "busy"
+            );
+            return;
+        }
+        if (!annotationEditableGuard("Deleting selected bboxes", {
+            ignoreCurrentImageHydration: true,
+        })) {
+            return;
+        }
+        const selectedPoints = selectedIds
+            .map((pointId) => getClassSplitPointById(pointId))
+            .filter(Boolean);
+        const entityBatchReceipt = await commitClassSplitAnnotationEntityBatchMutation(
+            selectedPoints,
+            "delete"
+        );
+        if (entityBatchReceipt) {
+            if (entityBatchReceipt._ui_stale) {
+                return entityBatchReceipt;
+            }
+            setClassSplitJobStatus(
+                `${entityBatchReceipt.saved} selected bbox${entityBatchReceipt.saved === 1 ? "" : "es"} deleted and durably saved.`,
+                entityBatchReceipt.failed ? "warn" : "success"
+            );
+            return entityBatchReceipt;
+        }
+
+        const jobId = String(classSplitState.currentJobId || "").trim();
+        const analysisGeneration = classSplitState.analysisGeneration;
+        const operation = {
+            kind: "delete_bbox",
+            token: ++classSplitState.multiSelectionActionToken,
+            jobId,
+            analysisGeneration,
+            pointIds: Object.freeze([...selectedIds]),
+            completed: 0,
+            successes: new Map(),
+            failures: new Map(),
+        };
+        const releaseOperation = () => {
+            if (classSplitState.multiSelectionOperation === operation) {
+                classSplitState.multiSelectionOperation = null;
+            }
+            refreshClassSplitControls();
+            updateClassSplitMultiSelectionControls();
+        };
+        classSplitState.multiSelectionOperation = operation;
+        hideClassSplitGraphHoverPreview();
+        updateClassSplitMultiSelectionControls();
+        refreshClassSplitControls();
+        updateClassSplitMultiSelectionActionStatus(
+            `Loading exact object details for ${selectedIds.length} selected bbox${selectedIds.length === 1 ? "" : "es"} ...`,
+            "busy"
+        );
+        let failures;
+        try {
+            failures = await hydrateClassSplitBoundedPointDetails(selectedIds);
+        } catch (error) {
+            releaseOperation();
+            throw error;
+        }
+        operation.failures = failures;
+        operation.completed = failures.size;
+        if (!classSplitAsyncRequestIsCurrent(analysisGeneration, jobId)) {
+            releaseOperation();
+            return;
+        }
+        const candidates = [];
+        selectedIds.forEach((pointId) => {
+            const point = getClassSplitPointById(pointId);
+            try {
+                if (failures.has(pointId)) {
+                    throw new Error(failures.get(pointId));
+                }
+                if (!point) {
+                    throw new Error("This object is no longer available.");
+                }
+                if (getClassSplitDualBBoxConflict(
+                    getClassSplitCandidateByPointId(pointId),
+                    point
+                )) {
+                    throw new Error(
+                        "This object belongs to an overlapping-box pair; use its dedicated pair controls."
+                    );
+                }
+                const deletionState = getClassSplitSingleBboxDeletionUiState(
+                    point
+                );
+                if (deletionState.disabled || !deletionState.mode) {
+                    throw new Error(
+                        deletionState.reason
+                        || "This bbox cannot be deleted from the current workspace."
+                    );
+                }
+                const resolvedBbox = ensureClassSplitPointBboxMatch(point);
+                const imageKey = resolveClassSplitPointImageKey(point);
+                if (resolvedBbox.imageKey !== imageKey) {
+                    throw new Error(
+                        "This bbox resolved to a different image. Reload the analysis before deleting it."
+                    );
+                }
+                if (
+                    String(resolvedBbox.match?.className || "").trim()
+                        !== String(point.class_name || "").trim()
+                ) {
+                    throw new Error(
+                        "This bbox has already changed class. Rerun the analysis instead of deleting it."
+                    );
+                }
+                candidates.push({
+                    pointId,
+                    point,
+                    imageKey,
+                    resolvedBbox,
+                    mode: deletionState.mode,
+                    annotationTarget: getClassSplitAnnotationTarget(point),
+                    clientActionId: createClassSplitTrainingClientActionId(),
+                    beforeRevision: "",
+                    pendingReviewQueueKey: "",
+                });
+            } catch (error) {
+                failures.set(pointId, String(error?.message || error));
+            }
+        });
+        if (!candidates.length) {
+            updateClassSplitMultiSelectionActionStatus(
+                "None of the selected bboxes can be batch-deleted. Use the individual controls for the selected exceptions.",
+                "error"
+            );
+            releaseOperation();
+            return;
+        }
+
+        const confirmed = window.confirm(
+            `Delete ${candidates.length} selected bounding box${candidates.length === 1 ? "" : "es"} from the loaded labels?\n\n`
+            + "They will disappear from the graph immediately, then the label changes will be saved. Data Quality Explorer Undo cannot restore deleted boxes."
+            + (failures.size
+                ? `\n\n${failures.size} protected or unavailable selection${failures.size === 1 ? "" : "s"} will remain selected.`
+                : "")
+        );
+        if (!confirmed) {
+            releaseOperation();
+            return;
+        }
+        updateClassSplitMultiSelectionActionStatus(
+            `Preparing deletion: ${operation.completed} of ${selectedIds.length} checked; graph updates once`,
+            "busy"
+        );
+
+        const queuedReviewKeys = [];
+        const removals = [];
+        try {
+            const durableCandidates = candidates.filter((candidate) => (
+                candidate.mode !== "local_workspace"
+            ));
+            const durableImages = new Map();
+            durableCandidates.forEach((candidate) => {
+                if (!durableImages.has(candidate.imageKey)) {
+                    durableImages.set(candidate.imageKey, []);
+                }
+                durableImages.get(candidate.imageKey).push(candidate);
+            });
+            for (const [imageKey, imageCandidates] of durableImages) {
+                const annotationRow = annotationSourceState.imageRowsByKey.get(
+                    imageKey
+                );
+                if (!CLASS_SPLIT_ANNOTATION_SOURCE_IDENTITY_PATTERN.test(
+                    String(annotationRow?.annotation_source_identity || "").trim()
+                )) {
+                    throw new Error(
+                        "An affected annotation has no verified source identity. Reload it before batch deletion."
+                    );
+                }
+                if (imageCandidates.some((candidate) => !candidate.annotationTarget)) {
+                    throw new Error(
+                        "An affected annotation target is unavailable. Reload it before batch deletion."
+                    );
+                }
+                const beforeRevision = await classSplitAnnotationLabelRevision(
+                    serializeDatasetBboxesForImage(imageKey)
+                );
+                if (!classSplitMultiSelectionOperationIsCurrent(operation)) {
+                    return;
+                }
+                imageCandidates.forEach((candidate) => {
+                    candidate.beforeRevision = beforeRevision;
+                });
+            }
+
+            const reviewedAt = new Date().toISOString();
+            for (const candidate of durableCandidates) {
+                const queueKey = queueClassSplitPendingReviewCommit({
+                    queueKey: `${jobId}:${candidate.pointId}:delete_bbox`,
+                    jobId,
+                    pointId: candidate.pointId,
+                    disposition: "delete_bbox",
+                    imageKey: candidate.imageKey,
+                    beforeClass: String(candidate.point.class_name || "").trim(),
+                    reviewedAt,
+                    annotationTarget: candidate.annotationTarget,
+                    origin: "desktop",
+                    clientActionId: candidate.clientActionId,
+                    beforeRevision: candidate.beforeRevision,
+                });
+                if (!queueKey) {
+                    throw new Error(
+                        "The recoverable deletion intents could not be saved locally. Free browser storage and retry."
+                    );
+                }
+                candidate.pendingReviewQueueKey = queueKey;
+                queuedReviewKeys.push(queueKey);
+            }
+
+            try {
+                candidates.forEach((candidate) => {
+                    removals.push({
+                        candidate,
+                        removal: removeClassSplitDualBBoxLocally(
+                            candidate.point,
+                            {
+                                imageKey: candidate.resolvedBbox.imageKey,
+                                match: candidate.resolvedBbox.match,
+                            }
+                        ),
+                    });
+                });
+            } catch (error) {
+                removals.slice().reverse().forEach(({ removal }) => {
+                    restoreClassSplitRemovedBboxLocally(removal);
+                });
+                queuedReviewKeys.forEach((queueKey) => {
+                    removeClassSplitPendingReviewCommit(queueKey);
+                });
+                throw error;
+            }
+
+            candidates.forEach((candidate) => {
+                const point = candidate.point;
+                point.annotation_deleted = true;
+                point.human_review_disposition = "delete_bbox";
+                point.human_reviewed_at = reviewedAt;
+                point.human_review_origin = "desktop";
+                point.human_review_persistence = candidate.mode === "local_workspace"
+                    ? "local_workspace_pending_export"
+                    : "label_save_pending";
+                classSplitState.dismissedWrongIds.add(candidate.pointId);
+                classSplitState.reviewedPointsById.set(candidate.pointId, point);
+                operation.successes.set(candidate.pointId, candidate);
+                operation.completed += 1;
+            });
+            setClassSplitLastReviewAction(null);
+            clearClassSplitDatasetAnalysis();
+            syncClassSplitWrongCandidateSummaryCount();
+
+            const successfulIds = operation.pointIds.filter((pointId) => (
+                operation.successes.has(pointId)
+            ));
+            const graphMutation = removeClassSplitPointsFromActiveReviewGraph(
+                successfulIds,
+                {
+                    force: true,
+                    updateSelection: false,
+                    renderSelection: false,
+                }
+            );
+            const savePromise = durableCandidates.length
+                ? Promise.resolve().then(() => flushAnnotationSnapshot({
+                    manual: false,
+                }))
+                : Promise.resolve(true);
+            await graphMutation.completion;
+            if (!classSplitMultiSelectionOperationIsCurrent(operation)) {
+                await savePromise.catch(() => false);
+                return;
+            }
+
+            const failedIds = operation.pointIds.filter((pointId) => (
+                operation.failures.has(pointId)
+                && classSplitState.pointsById.has(pointId)
+            ));
+            classSplitState.lassoPointIds = new Set(failedIds);
+            classSplitState.selectionRevision += 1;
+            classSplitState.selectedPointId = failedIds[0] || "";
+            classSplitState.multiSelectionSignature = "";
+            persistDataQualityExplorerSession();
+            renderClassSplitFilterOptions();
+            refreshClassSplitFilteredReviewUi({ renderPlot: false });
+            renderClassSplitReport();
+            renderClassSplitDatasetAnalysis();
+            renderClassSplitReviewedList();
+            renderClassSplitPendingReviewRecovery();
+            renderClassSplitBulkPanel();
+            renderClassSplitInspector();
+            renderClassSplitWrongList();
+
+            let labelsSaved = durableCandidates.length === 0;
+            let saveError = "";
+            if (durableCandidates.length) {
+                setClassSplitJobStatus(
+                    `Deleted ${successfulIds.length} selected bbox${successfulIds.length === 1 ? "" : "es"} locally; saving the affected labels ...`,
+                    "info"
+                );
+                try {
+                    const saveStarted = await savePromise;
+                    const affectedImageKeys = Array.from(durableImages.keys());
+                    if (saveStarted) {
+                        await Promise.all(affectedImageKeys.map((imageKey) => (
+                            waitForClassSplitAnnotationImageSave(imageKey)
+                        )));
+                    }
+                    labelsSaved = Boolean(
+                        saveStarted
+                        && affectedImageKeys.every((imageKey) => (
+                            !annotationSourceState.dirtyRecordsByKey.has(imageKey)
+                        ))
+                    );
+                    if (labelsSaved) {
+                        await drainClassSplitPendingReviewCommits();
+                    }
+                } catch (error) {
+                    saveError = String(error?.message || error || "label save failed");
+                }
+            }
+            if (!classSplitMultiSelectionOperationIsCurrent(operation)) {
+                return;
+            }
+
+            const pendingReceiptCount = durableCandidates.filter((candidate) => (
+                classSplitState.pendingReviewDispositionCommits.has(
+                    candidate.pendingReviewQueueKey
+                )
+            )).length;
+            const failureSuffix = failedIds.length
+                ? ` ${failedIds.length} protected or unavailable object${failedIds.length === 1 ? " remains" : "s remain"} selected.`
+                : "";
+            let message;
+            let tone;
+            if (!labelsSaved) {
+                tone = "warn";
+                message = saveError
+                    ? `Deleted ${successfulIds.length} bbox${successfulIds.length === 1 ? "" : "es"} locally, but label saving failed: ${saveError}. Use Save labels to retry.${failureSuffix}`
+                    : `Deleted ${successfulIds.length} bbox${successfulIds.length === 1 ? "" : "es"} locally; their label save remains pending. Use Save labels if it does not retry automatically.${failureSuffix}`;
+            } else if (pendingReceiptCount) {
+                tone = "warn";
+                message = `Deleted and saved ${successfulIds.length} bbox${successfulIds.length === 1 ? "" : "es"}; ${pendingReceiptCount} review receipt${pendingReceiptCount === 1 ? " remains" : "s remain"} queued for retry.${failureSuffix}`;
+            } else if (durableCandidates.length) {
+                tone = failedIds.length ? "warn" : "success";
+                message = `Deleted and saved ${successfulIds.length} selected bbox${successfulIds.length === 1 ? "" : "es"}.${failureSuffix}`;
+            } else {
+                tone = failedIds.length ? "warn" : "success";
+                message = `Deleted ${successfulIds.length} bbox${successfulIds.length === 1 ? "" : "es"} locally. Press Shift+Y to export the updated labels.${failureSuffix}`;
+            }
+            setClassSplitJobStatus(message, tone);
+            enqueueTaskNotice(message, {
+                key: `class-split-batch-delete:${jobId}`,
+                durationMs: tone === "success" ? 4500 : 7500,
+            });
+            if (operation.failures.size) {
+                console.warn(
+                    "Data Quality Explorer batch bbox deletion skipped some points",
+                    Array.from(operation.failures.entries())
+                );
+            }
+            renderClassSplitReviewedList();
+            renderClassSplitPendingReviewRecovery();
+            scheduleClassSplitBackgroundReviewRefresh({
+                renderDataset: true,
+            });
+        } finally {
+            const ownsOperation = classSplitState.multiSelectionOperation === operation;
+            const stillCurrent = classSplitMultiSelectionOperationIsCurrent(operation);
+            if (ownsOperation) {
+                classSplitState.multiSelectionOperation = null;
+            }
+            refreshClassSplitControls();
+            if (stillCurrent) {
+                updateClassSplitMultiSelectionControls();
+                updateClassSplitMultiSelectionLoadStatus();
+            }
+        }
     }
 
     function applyClassSplitDualBBoxReviewLocally(
@@ -69445,7 +74337,9 @@ async function cancelRfDetrTrainingJobRequest() {
             operationId,
             annotationTarget,
             conflict,
-            expectedRecordRevision,
+            expectedAnnotationRecordRevision,
+            expectedEntityRecordRevision,
+            entityPreconditions,
             expectedSourceIdentity,
             postRecord,
             point,
@@ -69491,13 +74385,25 @@ async function cancelRfDetrTrainingJobRequest() {
             || String(attestation?.source_identity || "").trim()
                 !== expectedSourceIdentity
             || String(attestation?.before_revision || "").trim()
-                !== expectedRecordRevision
+                !== expectedAnnotationRecordRevision
             || String(attestation?.committed_revision || "").trim()
                 !== committedRevision
             || String(result?.annotation_record_revision || "").trim()
                 !== committedRevision
             || String(result?.annotation_source_identity || "").trim()
                 !== expectedSourceIdentity
+            || String(attestation?.entity_record_revision || "").trim()
+                !== expectedEntityRecordRevision
+            || String(result?.annotation_entity_record_revision || "").trim()
+                !== expectedEntityRecordRevision
+            || classSplitCanonicalJson(
+                attestation?.entity_preconditions || null
+            ) !== classSplitCanonicalJson(entityPreconditions)
+            || !Array.isArray(attestation?.entity_results)
+            || attestation.entity_results.length !== 2
+            || classSplitCanonicalJson(
+                result?.annotation_entity_results || null
+            ) !== classSplitCanonicalJson(attestation.entity_results)
             || !CLASS_SPLIT_ANNOTATION_REVISION_PATTERN.test(committedRevision)
             || !CLASS_SPLIT_ANNOTATION_SOURCE_IDENTITY_PATTERN.test(
                 expectedSourceIdentity
@@ -69509,7 +74415,7 @@ async function cancelRfDetrTrainingJobRequest() {
             || labelCount !== postRecord.label_lines.length
             || !(committedAt > 0)
             || String(attestation?.verification_method || "").trim()
-                !== "single_image_compare_and_swap_exact_pair_v1"
+                !== "stable_two_entity_compare_and_swap_v2"
         ) {
             throw new Error(
                 "The backend returned an invalid annotation deletion receipt. No local box was removed."
@@ -69549,7 +74455,8 @@ async function cancelRfDetrTrainingJobRequest() {
         contract,
         disposition,
         exactPair,
-        jobId
+        jobId,
+        generation = classSplitState.analysisGeneration
     ) {
         if (!classSplitDualBBoxAnnotationTransactionApiAvailable()) {
             throw new Error(
@@ -69562,6 +74469,7 @@ async function cancelRfDetrTrainingJobRequest() {
         const exactTarget = disposition === "delete_current_box"
             ? exactPair.current
             : exactPair.other;
+        const alreadyAbsent = exactTarget?.alreadyAbsent === true;
         const imageKey = String(exactTarget?.imageKey || "").trim();
         const row = annotationSourceState.imageRowsByKey.get(imageKey);
         if (!imageKey || !row) {
@@ -69573,16 +74481,73 @@ async function cancelRfDetrTrainingJobRequest() {
                 "Save this image first. It has unrelated unsaved edits that cannot be folded into an overlapping-box deletion."
             );
         }
-        const expectedRecordRevision = String(
+        const expectedAnnotationRecordRevision = String(
             row.annotation_record_revision || ""
+        ).trim();
+        const expectedEntityRecordRevision = String(
+            row.annotation_entity_record_revision || ""
         ).trim();
         const expectedSourceIdentity = String(
             row.annotation_source_identity || ""
         ).trim();
-        if (!expectedRecordRevision || !expectedSourceIdentity) {
-            throw new Error(
+        const currentEntity = contract.conflict?.current_entity;
+        const otherEntity = contract.conflict?.other_entity;
+        const entityPreconditions = {
+            current: {
+                annotation_entity_id: String(
+                    currentEntity?.annotation_entity_id || ""
+                ).trim(),
+                entity_revision: Number(
+                    currentEntity?.entity_revision || 0
+                ),
+            },
+            other: {
+                annotation_entity_id: String(
+                    otherEntity?.annotation_entity_id || ""
+                ).trim(),
+                entity_revision: Number(
+                    otherEntity?.entity_revision || 0
+                ),
+            },
+        };
+        if (
+            !expectedAnnotationRecordRevision
+            || !expectedEntityRecordRevision
+            || !expectedSourceIdentity
+            || !entityPreconditions.current.annotation_entity_id
+            || !Number.isInteger(
+                entityPreconditions.current.entity_revision
+            )
+            || entityPreconditions.current.entity_revision <= 0
+            || !entityPreconditions.other.annotation_entity_id
+            || !Number.isInteger(
+                entityPreconditions.other.entity_revision
+            )
+            || entityPreconditions.other.entity_revision <= 0
+            || String(currentEntity?.record_revision || "").trim()
+                !== expectedEntityRecordRevision
+            || String(otherEntity?.record_revision || "").trim()
+                !== expectedEntityRecordRevision
+        ) {
+            const detail = {
+                code: "annotation_entity_changed_rerun_required",
+                status: "rerun_required",
+                rerun_required: true,
+                job_id: String(jobId || "").trim(),
+                point_id: String(
+                    contract.conflict?.point_id || ""
+                ).trim(),
+                reason: "dual_bbox_entity_preconditions_missing_or_stale",
+            };
+            transitionClassSplitToRerunRequired(
+                detail,
+                { jobId, generation }
+            );
+            const error = new Error(
                 "Reload this dataset with the current backend before deleting an overlapping box."
             );
+            error.annotationTransactionCommitted = false;
+            throw error;
         }
         const annotationTarget = getClassSplitAnnotationTarget(contract.point);
         if (!annotationTarget) {
@@ -69593,9 +74558,10 @@ async function cancelRfDetrTrainingJobRequest() {
             image_relpath: String(
                 row.image_relpath || annotationTarget.image_relpath || ""
             ),
-            label_lines: serializeDatasetBboxesForImage(imageKey, {
-                excludeBbox: exactTarget.match.bbox,
-            }),
+            label_lines: serializeDatasetBboxesForImage(
+                imageKey,
+                alreadyAbsent ? {} : { excludeBbox: exactTarget.match.bbox }
+            ),
         };
         const operationId = `dual_bbox:${createClassSplitTrainingClientActionId()}`;
         const reviewClientActionId = operationId;
@@ -69603,13 +74569,16 @@ async function cancelRfDetrTrainingJobRequest() {
         const requestPayload = {
             operation_id: operationId,
             review_client_action_id: reviewClientActionId,
-            session_id: annotationSourceState.lockSessionId,
             action: disposition,
             origin: "desktop",
             capture_training_data: captureTrainingData,
             annotation_target: annotationTarget,
             dual_bbox_conflict: contract.conflict,
-            expected_record_revision: expectedRecordRevision,
+            expected_annotation_record_revision:
+                expectedAnnotationRecordRevision,
+            expected_entity_record_revision:
+                expectedEntityRecordRevision,
+            entity_preconditions: entityPreconditions,
             expected_source_identity: expectedSourceIdentity,
             record: postRecord,
         };
@@ -69623,7 +74592,91 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!safeJobId) {
             throw new Error("The analysis job is no longer available.");
         }
+        const resolvedPointIds = Array.from(new Set([
+            String(contract.conflict?.point_id || "").trim(),
+            String(contract.conflict?.other_point_id || "").trim(),
+        ].filter(Boolean)));
+        const pendingEntry = {
+            operationId,
+            jobId: safeJobId,
+            transactionKind: "dual_bbox_delete_v1",
+            pointId: String(contract.conflict?.point_id || "").trim(),
+            request: requestPayload,
+            pointIds: resolvedPointIds,
+            resolvedPointIds,
+            action: "delete",
+            targetClassName: "",
+            status: "prepared",
+            createdAt: new Date().toISOString(),
+        };
+        queueClassSplitAnnotationTransaction(pendingEntry);
+        const optimisticViewport = captureClassSplitGraphViewport();
+        const optimisticGraphMutation = removeClassSplitPointsFromActiveReviewGraph(
+            resolvedPointIds,
+            { force: true, preserveViewport: true }
+        );
+        await optimisticGraphMutation.completion;
         const endpoint = `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(safeJobId)}/points/${encodeURIComponent(contract.conflict.point_id)}/dual_bbox_annotation_transaction`;
+        const acceptCommittedReceipt = async (result) => {
+            let attestation = null;
+            try {
+                attestation = await validateClassSplitDualBBoxDeletionReceipt(
+                    result,
+                    {
+                        jobId: safeJobId,
+                        pointId: String(contract.conflict.point_id || "").trim(),
+                        disposition,
+                        operationId,
+                        annotationTarget,
+                        conflict: contract.conflict,
+                        expectedAnnotationRecordRevision,
+                        expectedEntityRecordRevision,
+                        entityPreconditions,
+                        expectedSourceIdentity,
+                        postRecord,
+                        point: contract.point,
+                    }
+                );
+                const reviewReceipt = validateClassSplitReviewDispositionReceipt(
+                    result?.review_disposition,
+                    {
+                        jobId: safeJobId,
+                        pointId: String(contract.conflict.point_id || "").trim(),
+                        disposition,
+                        clientActionId: reviewClientActionId,
+                        captureTrainingData,
+                    }
+                );
+                if (
+                    String(reviewReceipt?.review_object_key || "").trim()
+                        !== String(contract.conflict.pair_review_key || "").trim()
+                    || String(reviewReceipt?.pair_review_key || "").trim()
+                        !== String(contract.conflict.pair_review_key || "").trim()
+                ) {
+                    throw new Error(
+                        "The backend returned a review receipt for a different overlapping-box pair. No local box was removed."
+                    );
+                }
+                result._validated_review_disposition = reviewReceipt;
+            } catch (validationError) {
+                validationError.annotationTransactionCommitted = null;
+                throw validationError;
+            }
+            return {
+                operationId,
+                result,
+                attestation,
+                target,
+                exactTarget,
+                alreadyAbsent,
+                imageKey,
+                postRecord,
+                savedReview: {
+                    jobId: safeJobId,
+                    payload: result._validated_review_disposition,
+                },
+            };
+        };
         let lastError = null;
         let commitStateUnknown = false;
         for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -69633,82 +74686,79 @@ async function cancelRfDetrTrainingJobRequest() {
                     {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify(requestPayload),
+                        body: JSON.stringify({
+                            ...requestPayload,
+                            ...getClassSplitAnnotationSaveEnvelope(),
+                        }),
                     },
                     {
                         timeoutMessage: "The overlapping-box deletion timed out before its commit could be confirmed.",
                     }
                 );
                 if (!response.ok) {
-                    const error = new Error(
-                        parseApiError(detail, `HTTP ${response.status}`)
+                    const serverError = parseApiError(
+                        detail,
+                        `HTTP ${response.status}`
                     );
-                    error.annotationTransactionCommitted = response.status >= 500
-                        ? null
-                        : false;
+                    const resolution = await reconcileClassSplitAnnotationTransactionAfterFailure(
+                        pendingEntry,
+                        {
+                            jobId: safeJobId,
+                            generation,
+                            serverError,
+                            deterministicRejection: response.status < 500,
+                        }
+                    );
+                    if (resolution.kind === "complete") {
+                        return acceptCommittedReceipt(resolution.receipt || {});
+                    }
+                    const error = new Error(
+                        resolution.error || serverError
+                    );
+                    error.annotationResolutionChecked = true;
+                    error.annotationTransactionTerminal = resolution.kind === "terminal";
+                    error.annotationTransactionCommitted = resolution.mutationCommitted
+                        ? true
+                        : resolution.safeToRollback
+                            ? false
+                            : null;
                     throw error;
                 }
                 const result = parseJsonObjectSafe(detail, {});
-                let attestation = null;
-                try {
-                    attestation = await validateClassSplitDualBBoxDeletionReceipt(
-                        result,
-                        {
-                            jobId: safeJobId,
-                            pointId: String(contract.conflict.point_id || "").trim(),
-                            disposition,
-                            operationId,
-                            annotationTarget,
-                            conflict: contract.conflict,
-                            expectedRecordRevision,
-                            expectedSourceIdentity,
-                            postRecord,
-                            point: contract.point,
-                        }
-                    );
-                    const reviewReceipt = validateClassSplitReviewDispositionReceipt(
-                        result?.review_disposition,
-                        {
-                            jobId: safeJobId,
-                            pointId: String(contract.conflict.point_id || "").trim(),
-                            disposition,
-                            clientActionId: reviewClientActionId,
-                            captureTrainingData,
-                        }
-                    );
-                    if (
-                        String(reviewReceipt?.review_object_key || "").trim()
-                            !== String(contract.conflict.pair_review_key || "").trim()
-                        || String(reviewReceipt?.pair_review_key || "").trim()
-                            !== String(contract.conflict.pair_review_key || "").trim()
-                    ) {
-                        throw new Error(
-                            "The backend returned a review receipt for a different overlapping-box pair. No local box was removed."
-                        );
-                    }
-                    result._validated_review_disposition = reviewReceipt;
-                } catch (validationError) {
-                    validationError.annotationTransactionCommitted = null;
-                    throw validationError;
-                }
-                return {
-                    result,
-                    attestation,
-                    target,
-                    exactTarget,
-                    imageKey,
-                    postRecord,
-                    savedReview: {
-                        jobId: safeJobId,
-                        payload: result._validated_review_disposition,
-                    },
-                };
+                return acceptCommittedReceipt(result);
             } catch (error) {
+                if (!error?.annotationResolutionChecked) {
+                    const resolution = await reconcileClassSplitAnnotationTransactionAfterFailure(
+                        pendingEntry,
+                        {
+                            jobId: safeJobId,
+                            generation,
+                            serverError: String(error?.message || error),
+                            deterministicRejection: false,
+                        }
+                    );
+                    if (resolution.kind === "complete") {
+                        return acceptCommittedReceipt(resolution.receipt || {});
+                    }
+                    if (error && typeof error === "object") {
+                        error.annotationResolutionChecked = true;
+                        error.annotationTransactionTerminal = resolution.kind === "terminal";
+                        error.annotationTransactionCommitted = resolution.mutationCommitted
+                            ? true
+                            : resolution.safeToRollback
+                                ? false
+                                : null;
+                        error.message = resolution.error || error.message;
+                    }
+                }
                 if (error?.annotationTransactionCommitted !== false) {
                     commitStateUnknown = true;
                 }
                 lastError = error;
-                if (error?.annotationTransactionCommitted === false) {
+                if (
+                    error?.annotationTransactionCommitted === false
+                    || error?.annotationTransactionTerminal === true
+                ) {
                     if (commitStateUnknown && error && typeof error === "object") {
                         // A later deterministic rejection cannot prove that an
                         // earlier lost/5xx response did not commit. Never
@@ -69732,15 +74782,22 @@ async function cancelRfDetrTrainingJobRequest() {
             stopAnnotationTimers();
             syncLabelingSourceControls();
             lastError.message = `${lastError.message || lastError} The server commit state could not be confirmed; reload the dataset before retrying. No local box was removed.`;
+        } else {
+            classSplitState.pendingAnnotationTransactions.delete(operationId);
+            persistDataQualityExplorerSession();
+            await renderClassSplitPlot();
+            await restoreClassSplitGraphViewport(optimisticViewport);
         }
         throw lastError || new Error("The deletion transaction failed.");
     }
 
     function applyClassSplitDualBBoxTransactionLocally(transaction) {
-        const removal = removeClassSplitDualBBoxLocally(
-            transaction.target,
-            transaction.exactTarget
-        );
+        const removal = transaction.alreadyAbsent
+            ? null
+            : removeClassSplitDualBBoxLocally(
+                transaction.target,
+                transaction.exactTarget
+            );
         const imageKey = transaction.imageKey;
         const row = annotationSourceState.imageRowsByKey.get(imageKey);
         const sentRecord = {
@@ -69761,6 +74818,34 @@ async function cancelRfDetrTrainingJobRequest() {
             row.annotation_source_identity = String(
                 transaction.result.annotation_source_identity || ""
             ).trim();
+            row.annotation_entity_record_revision = String(
+                transaction.result.annotation_entity_record_revision || ""
+            ).trim();
+            const entityResults = Array.isArray(
+                transaction.result.annotation_entity_results
+            ) ? transaction.result.annotation_entity_results : [];
+            const resultsById = new Map(
+                entityResults.map((result) => [
+                    String(result?.annotation_entity_id || ""),
+                    result,
+                ])
+            );
+            row.annotation_entities = (
+                Array.isArray(row.annotation_entities)
+                    ? row.annotation_entities
+                    : []
+            ).map((entity) => {
+                const result = resultsById.get(
+                    String(entity?.annotation_entity_id || "")
+                );
+                return result
+                    ? {
+                        ...entity,
+                        entity_revision: result.entity_revision,
+                        deleted: result.deleted,
+                    }
+                    : entity;
+            }).filter((entity) => !entity?.deleted);
             annotationSourceState.imageRowsByKey.set(imageKey, row);
         }
         const currentRecord = buildAnnotationRecord(imageKey);
@@ -69794,8 +74879,8 @@ async function cancelRfDetrTrainingJobRequest() {
             safePointId,
             String(contract.conflict?.other_point_id || "").trim(),
         ].filter(Boolean);
-        if (classSplitMutationIsBusy({
-            ignoreReviewActionPointIds: pairPointIds,
+        if (classSplitPointMutationIsBusy(pairPointIds, {
+            ignoreActionReservation: true,
         })) {
             throw new Error(
                 "Wait for the current Data Quality Explorer mutation to finish before resolving this pair."
@@ -69866,11 +74951,10 @@ async function cancelRfDetrTrainingJobRequest() {
                 const targetMatches = targetMatchState.matches.filter(
                     (match) => match.className === targetClass
                 );
-                if (!targetMatches.length) {
-                    dismissClassSplitStaleDualBBoxPair(contract);
-                    return;
-                }
-                if (!annotationEditableGuard("Deleting overlapping annotation")) {
+                const targetAlreadyAbsent = targetMatches.length === 0;
+                if (!annotationEditableGuard("Deleting overlapping annotation", {
+                    ignoreCurrentImageHydration: true,
+                })) {
                     return;
                 }
                 if (
@@ -69884,7 +74968,23 @@ async function cancelRfDetrTrainingJobRequest() {
                 // Destructive actions alone require both frozen analysis boxes
                 // to resolve to two distinct live annotations. Review-only
                 // choices are validated against the immutable pair server-side.
-                exactPair = ensureClassSplitDualBBoxPairExactMatches(contract);
+                if (targetAlreadyAbsent) {
+                    if (deletionMode !== "server") {
+                        throw new Error(
+                            "The analyzed bbox is already absent from this local workspace. Save and rerun before resolving the stale overlap item."
+                        );
+                    }
+                    const absentTarget = {
+                        imageKey: targetMatchState.imageKey,
+                        match: null,
+                        alreadyAbsent: true,
+                    };
+                    exactPair = safeDisposition === "delete_current_box"
+                        ? { current: absentTarget, other: null }
+                        : { current: null, other: absentTarget };
+                } else {
+                    exactPair = ensureClassSplitDualBBoxPairExactMatches(contract);
+                }
                 classSplitState.relabelInFlight = true;
                 classSplitState.dualBBoxTransactionInFlight = true;
                 deletionBarrierToken = createClassSplitTrainingClientActionId();
@@ -69925,7 +75025,8 @@ async function cancelRfDetrTrainingJobRequest() {
                     contract,
                     safeDisposition,
                     exactPair,
-                    operation.jobId
+                    operation.jobId,
+                    operation.generation
                 );
                 saved = transaction.savedReview;
                 if (!classSplitDualBBoxOperationIsCurrent(operation)) {
@@ -69943,6 +75044,11 @@ async function cancelRfDetrTrainingJobRequest() {
                 }
                 try {
                     applyClassSplitDualBBoxTransactionLocally(transaction);
+                    classSplitState.pendingAnnotationTransactions.delete(
+                        transaction.operationId
+                    );
+                    persistDataQualityExplorerSession();
+                    renderClassSplitSessionPersistenceStatus();
                 } catch (error) {
                     localTransactionSyncWarning = `The deletion was committed, but the local view changed during the request: ${error.message || error}`;
                     annotationSourceState.readOnly = true;
@@ -70002,7 +75108,9 @@ async function cancelRfDetrTrainingJobRequest() {
             syncClassSplitWrongCandidateSummaryCount();
             refreshClassSplitFilteredReviewUi({ renderPlot: false });
             renderClassSplitReport();
-            renderClassSplitPlot();
+            if (!deletionDisposition) {
+                renderClassSplitPlot();
+            }
             const message = {
                 delete_current_box: `Deleted and saved the ${contract.currentTarget.class_name} box. Rerun analysis to refresh the graph.`,
                 delete_overlapping_box: `Deleted and saved the ${contract.otherTarget.class_name} box. Rerun analysis to refresh the graph.`,
@@ -70168,21 +75276,58 @@ async function cancelRfDetrTrainingJobRequest() {
         const targetClass = String(newClass || "").trim();
         if (!targetClass) {
             setSamStatus("Choose a target class for the selected objects.", { variant: "warn", duration: 3000 });
+            updateClassSplitMultiSelectionActionStatus(
+                "Choose a target class before changing this selection.",
+                "warn"
+            );
             return;
         }
         const selectedIds = Array.from(classSplitState.lassoPointIds || [])
             .filter((pointId) => classSplitState.pointsById.has(pointId));
         if (!selectedIds.length) {
             setSamStatus("Lasso-select objects in the plot before changing their class.", { variant: "warn", duration: 3000 });
+            updateClassSplitMultiSelectionActionStatus(
+                "Select at least two graph objects before changing their class.",
+                "warn"
+            );
             return;
         }
-        if (!annotationEditableGuard("Changing selected classes")) {
+        if (!annotationEditableGuard("Changing selected classes", {
+            ignoreCurrentImageHydration: true,
+        })) {
+            updateClassSplitMultiSelectionActionStatus(
+                annotationMutationBlockedMessage("Changing selected classes")
+                || "Reconnect the analyzed labeling workspace before changing this selection.",
+                "warn"
+            );
             return;
         }
         if (
-            classSplitMutationIsBusy()
+            classSplitWriteMutationIsBlocked()
         ) {
+            updateClassSplitMultiSelectionActionStatus(
+                "Wait for the current Data Quality Explorer save or mutation to finish.",
+                "busy"
+            );
             return;
+        }
+        const selectedPoints = selectedIds
+            .map((pointId) => getClassSplitPointById(pointId))
+            .filter(Boolean);
+        const entityBatchReceipt = await commitClassSplitAnnotationEntityBatchMutation(
+            selectedPoints,
+            "relabel",
+            targetClass
+        );
+        if (entityBatchReceipt) {
+            if (entityBatchReceipt._ui_stale) {
+                return entityBatchReceipt;
+            }
+            setClassSplitJobStatus(
+                `${entityBatchReceipt.saved} selected object${entityBatchReceipt.saved === 1 ? "" : "s"} reconciled and durably saved.`,
+                entityBatchReceipt.failed ? "warn" : "success"
+            );
+            return entityBatchReceipt;
         }
         const dualBBoxParticipantIds = getClassSplitDualBBoxParticipantIds();
         const blockedDualIds = selectedIds.filter(
@@ -70200,39 +75345,216 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const relabelJobId = String(classSplitState.currentJobId || "");
         const relabelGeneration = classSplitState.analysisGeneration;
+        const relabelBatchToken = ++classSplitState.multiSelectionActionToken;
         classSplitState.relabelInFlight = true;
         hideClassSplitGraphHoverPreview();
+        updateClassSplitMultiSelectionActionStatus(
+            `Changing ${relabelIds.length} selected object${relabelIds.length === 1 ? "" : "s"} to ${targetClass} ...`,
+            "busy"
+        );
         updateClassSplitMultiSelectionControls();
         refreshClassSplitControls();
         let changed = 0;
-        const failed = [];
-        const resolvedIds = [];
+        let pendingLabelCount = 0;
+        let pendingReviewCount = 0;
+        const failedById = new Map();
+        const resolvedIdSet = new Set();
+        const sameClassReceipts = new Map();
+        const uncertainConfirmIds = new Set();
         try {
+            const detailFailures = await hydrateClassSplitBoundedPointDetails(
+                relabelIds
+            );
+            if (!classSplitAsyncRequestIsCurrent(relabelGeneration, relabelJobId)) {
+                return;
+            }
+            const sameClassIds = [];
+            const changedClassIds = [];
             relabelIds.forEach((pointId) => {
                 const point = getClassSplitPointById(pointId);
-                try {
-                    if (applyClassSplitPointClassLocally(point, targetClass, {
-                        dualBBoxParticipantIds,
-                    })) {
-                        changed += 1;
+                if (detailFailures.has(pointId)) {
+                    failedById.set(pointId, String(detailFailures.get(pointId)));
+                } else if (!point) {
+                    failedById.set(
+                        pointId,
+                        "The selected object is no longer available."
+                    );
+                } else {
+                    try {
+                        const resolved = ensureClassSplitPointBboxMatch(point);
+                        const frozenClass = String(
+                            point.class_name || ""
+                        ).trim();
+                        const liveClass = String(
+                            resolved.match?.className || ""
+                        ).trim();
+                        if (
+                            frozenClass === targetClass
+                            && liveClass === targetClass
+                        ) {
+                            sameClassIds.push(pointId);
+                        } else {
+                            changedClassIds.push(pointId);
+                        }
+                    } catch (error) {
+                        failedById.set(
+                            pointId,
+                            String(error?.message || error)
+                        );
                     }
-                    resolvedIds.push(pointId);
-                } catch (error) {
-                    failed.push({ pointId, message: error.message || String(error) });
                 }
             });
-            const unresolvedIds = selectedIds.filter((pointId) => (
-                blockedDualIds.includes(pointId)
-                || failed.some((failure) => failure.pointId === pointId)
-            ));
-            const graphMutation = removeClassSplitPointsFromActiveReviewGraph(
-                resolvedIds,
-                {
-                    force: true,
-                    updateSelection: false,
-                    renderSelection: false,
+
+            // Reuse the complete single-object annotation snapshot and receipt
+            // transaction, but suppress all per-item graph/panel rendering.
+            // This keeps the captured selection stable until settlement.
+            for (const pointId of changedClassIds) {
+                if (!classSplitAsyncRequestIsCurrent(relabelGeneration, relabelJobId)) {
+                    return;
                 }
+                try {
+                    const result = await changeClassSplitPointClass(
+                        getClassSplitPointById(pointId),
+                        targetClass,
+                        { batchMode: true }
+                    );
+                    if (result?.changed) {
+                        changed += 1;
+                        resolvedIdSet.add(pointId);
+                        if (result.labelCommitStatus !== "committed") {
+                            pendingLabelCount += 1;
+                        }
+                        if (result.reviewPending) {
+                            pendingReviewCount += 1;
+                        }
+                    }
+                } catch (error) {
+                    failedById.set(pointId, String(error?.message || error));
+                }
+            }
+
+            // Choosing the existing class means a durable Confirm, never a
+            // browser-only dismissal. Workers persist only; UI commits once.
+            let confirmCursor = 0;
+            const confirmWorker = async () => {
+                while (confirmCursor < sameClassIds.length) {
+                    const pointId = sameClassIds[confirmCursor];
+                    confirmCursor += 1;
+                    try {
+                        const saved = await saveClassSplitReviewDisposition(
+                            pointId,
+                            "confirm_current",
+                            {
+                                jobId: relabelJobId,
+                                deferUi: true,
+                                deferReconciliation: true,
+                            }
+                        );
+                        if (!saved) {
+                            const error = new Error(
+                                "This review choice is already being saved."
+                            );
+                            setClassSplitReviewDispositionCommitState(
+                                error,
+                                "not_sent"
+                            );
+                            throw error;
+                        }
+                        sameClassReceipts.set(pointId, saved);
+                    } catch (error) {
+                        failedById.set(pointId, String(error?.message || error));
+                        if (
+                            classSplitReviewDispositionCommitState(error)
+                            === "unknown"
+                        ) {
+                            uncertainConfirmIds.add(pointId);
+                        } else {
+                            rememberClassSplitFailedReviewAction(
+                                relabelJobId,
+                                pointId,
+                                "confirm_current",
+                                error
+                            );
+                        }
+                    }
+                }
+            };
+            await Promise.all(Array.from(
+                {
+                    length: Math.min(
+                        CLASS_SPLIT_MULTI_SELECTION_ACTION_CONCURRENCY,
+                        sameClassIds.length
+                    ),
+                },
+                () => confirmWorker()
+            ));
+            if (!classSplitAsyncRequestIsCurrent(relabelGeneration, relabelJobId)) {
+                return;
+            }
+            sameClassIds.forEach((pointId, batchIndex) => {
+                const saved = sameClassReceipts.get(pointId);
+                if (!saved) {
+                    return;
+                }
+                applyClassSplitSavedReviewDispositionLocally(
+                    pointId,
+                    "confirm_current",
+                    saved,
+                    {
+                        batchToken: relabelBatchToken,
+                        batchIndex,
+                    }
+                );
+                resolvedIdSet.add(pointId);
+            });
+            if (uncertainConfirmIds.size) {
+                scheduleClassSplitReviewDispositionHydration(
+                    relabelJobId,
+                    Array.from(uncertainConfirmIds)
+                );
+            }
+            if (!changed && sameClassReceipts.size) {
+                setClassSplitLastReviewAction({
+                    kind: "batch",
+                    jobId: relabelJobId,
+                    analysisGeneration: relabelGeneration,
+                    disposition: "confirm_current",
+                    items: sameClassIds
+                        .filter((pointId) => sameClassReceipts.has(pointId))
+                        .map((pointId) => {
+                            const saved = sameClassReceipts.get(pointId);
+                            return {
+                                pointId,
+                                disposition: "confirm_current",
+                                revision: String(
+                                    saved?.payload?.human_review_revision || ""
+                                ),
+                                reviewedAt: saved?.payload?.human_reviewed_at
+                                    || saved?.payload?.updated_at
+                                    || "",
+                            };
+                        }),
+                });
+            } else if (changed) {
+                setClassSplitLastReviewAction(null);
+            }
+
+            const resolvedIds = selectedIds.filter(
+                (pointId) => resolvedIdSet.has(pointId)
             );
+            const unresolvedIds = selectedIds.filter((pointId) => (
+                !resolvedIdSet.has(pointId)
+            ));
+            const graphMutation = resolvedIds.length
+                ? removeClassSplitPointsFromActiveReviewGraph(
+                    resolvedIds,
+                    {
+                        force: true,
+                        updateSelection: false,
+                        renderSelection: false,
+                    }
+                )
+                : { removed: false, completion: Promise.resolve() };
             await graphMutation.completion;
             if (!classSplitAsyncRequestIsCurrent(relabelGeneration, relabelJobId)) {
                 return;
@@ -70241,32 +75563,74 @@ async function cancelRfDetrTrainingJobRequest() {
             classSplitState.selectionRevision += 1;
             classSplitState.selectedPointId = unresolvedIds[0] || "";
             classSplitState.multiSelectionSignature = "";
+            syncClassSplitWrongCandidateSummaryCount();
             renderClassSplitFilterOptions();
             refreshClassSplitFilteredReviewUi({ renderPlot: false });
             renderClassSplitReport();
+            renderClassSplitReviewedList();
+            renderClassSplitPendingReviewRecovery();
             renderClassSplitDatasetAnalysis();
             renderClassSplitBulkPanel();
             renderClassSplitInspector();
             if (!graphMutation.removed) {
                 renderClassSplitPlot();
             }
+            const failed = selectedIds
+                .filter((pointId) => failedById.has(pointId))
+                .map((pointId) => ({
+                    pointId,
+                    message: failedById.get(pointId),
+                }));
             const blockedSuffix = blockedDualIds.length
                 ? ` ${blockedDualIds.length} overlapping-box object${blockedDualIds.length === 1 ? " was" : "s were"} left unchanged; use the dedicated pair controls.`
                 : "";
+            const persistenceSuffix = [
+                pendingLabelCount
+                    ? `${pendingLabelCount} label save${pendingLabelCount === 1 ? " remains" : "s remain"} pending`
+                    : "",
+                pendingReviewCount
+                    ? `${pendingReviewCount} review receipt${pendingReviewCount === 1 ? " remains" : "s remain"} queued`
+                    : "",
+            ].filter(Boolean).join("; ");
             const failureSuffix = failed.length
                 ? ` ${failed.length} other change${failed.length === 1 ? "" : "s"} failed.`
-                : " Save labels when ready.";
+                : persistenceSuffix
+                    ? ` ${persistenceSuffix}. Use Save session state to retry.`
+                    : " Labels and review decisions saved.";
             const retrySuffix = unresolvedIds.length
                 ? ` ${unresolvedIds.length} unresolved object${unresolvedIds.length === 1 ? " remains" : "s remain"} selected.`
                 : "";
-            const variant = failed.length || blockedDualIds.length ? "warn" : "success";
-            setSamStatus(`Changed ${changed} selected object${changed === 1 ? "" : "s"} to ${targetClass}.${blockedSuffix}${failureSuffix}${retrySuffix}`, {
+            const variant = failed.length || blockedDualIds.length || persistenceSuffix
+                ? "warn"
+                : "success";
+            const alreadyTargetClass = sameClassReceipts.size;
+            const resolutionSummary = `Resolved ${resolvedIds.length} selected object${resolvedIds.length === 1 ? "" : "s"}: ${changed} changed to ${targetClass}${alreadyTargetClass ? ` and ${alreadyTargetClass} confirmed as ${targetClass}` : ""}.`;
+            setSamStatus(`${resolutionSummary}${blockedSuffix}${failureSuffix}${retrySuffix}`, {
                 variant,
                 duration: failed.length || blockedDualIds.length ? 6500 : 4200,
             });
+            if (unresolvedIds.length) {
+                const firstFailure = String(failed[0]?.message || "").trim();
+                updateClassSplitMultiSelectionActionStatus(
+                    `${resolutionSummary} ${unresolvedIds.length} unresolved object${unresolvedIds.length === 1 ? " remains" : "s remain"} selected.${firstFailure ? ` ${firstFailure}` : ""}`,
+                    "warn"
+                );
+            } else {
+                updateClassSplitMultiSelectionActionStatus(
+                    `${resolutionSummary}${failureSuffix}`,
+                    variant
+                );
+            }
             if (failed.length) {
                 console.warn("Data Quality Explorer bulk class change skipped some points", failed);
             }
+            persistDataQualityExplorerSession();
+        } catch (error) {
+            updateClassSplitMultiSelectionActionStatus(
+                `Class change failed: ${error?.message || error}`,
+                "error"
+            );
+            throw error;
         } finally {
             classSplitState.relabelInFlight = false;
             updateClassSplitMultiSelectionControls();
@@ -70358,7 +75722,11 @@ async function cancelRfDetrTrainingJobRequest() {
         return match;
     }
 
-    async function changeClassSplitPointClass(point, newClass, { jumpToSource = false } = {}) {
+    async function changeClassSplitPointClass(
+        point,
+        newClass,
+        { jumpToSource = false, batchMode = false } = {}
+    ) {
         const targetClass = String(newClass || "").trim();
         if (!targetClass) {
             throw new Error("Choose a target class.");
@@ -70367,12 +75735,21 @@ async function cancelRfDetrTrainingJobRequest() {
             throw new Error("No point selected.");
         }
         const pointId = String(point.point_id || "").trim();
-        if (classSplitMutationIsBusy({
-            ignoreReviewActionPointIds: [pointId],
+        if (!batchMode && classSplitPointMutationIsBusy([pointId], {
+            ignoreActionReservation: true,
         })) {
             throw new Error(
                 "Wait for the current Data Quality Explorer mutation to finish before changing this class."
             );
+        }
+        if (classSplitState.boundedTransport && !point._boundedDetailLoaded) {
+            point = await ensureClassSplitBoundedPointHydrated(
+                pointId,
+                { includeEvidence: false }
+            );
+            if (!point) {
+                throw new Error("The analysis changed while this object was being prepared for relabeling.");
+            }
         }
         if (classSplitPointReviewMutationBlocked(pointId)) {
             throw new Error("Wait for the current review choice to finish saving.");
@@ -70382,13 +75759,9 @@ async function cancelRfDetrTrainingJobRequest() {
                 "This object already has a saved review decision. Clear that history before changing its annotation."
             );
         }
-        if (targetClass === String(point?.class_name || "")) {
-            if (point.is_wrong_class_candidate) {
-                await markClassSplitWrongCandidateCorrect(point.point_id);
-            }
-            return;
-        }
-        if (!annotationEditableGuard("Changing class")) {
+        if (!annotationEditableGuard("Changing class", {
+            ignoreCurrentImageHydration: true,
+        })) {
             throw new Error(
                 annotationMutationBlockedMessage("Changing class")
                 || "Reconnect the analyzed annotation workspace before changing this class."
@@ -70407,7 +75780,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 "Restart the backend before changing this dataset annotation so its Review history can be saved."
             );
         }
-        if (classSplitState.relabelInFlight) {
+        if (classSplitState.relabelInFlight && !batchMode) {
             throw new Error("Wait for the current local annotation change to finish.");
         }
         const captureTrainingData = isClassSplitTrainingCaptureEnabled();
@@ -70416,6 +75789,57 @@ async function cancelRfDetrTrainingJobRequest() {
         const captureJobId = String(classSplitState.currentJobId || "").trim();
         const imageKey = resolveClassSplitPointImageKey(point);
         const resolvedBbox = ensureClassSplitPointBboxMatch(point);
+        const liveClass = String(
+            resolvedBbox.match?.className || ""
+        ).trim();
+        if (targetClass === beforeClass) {
+            if (liveClass !== targetClass) {
+                throw new Error(
+                    `The live annotation is ${liveClass || "a different class"}, while this saved analysis still records ${beforeClass}. Rerun the analysis before reconciling this divergent edit.`
+                );
+            }
+            if (point.is_wrong_class_candidate) {
+                await markClassSplitWrongCandidateCorrect(point.point_id);
+            }
+            return {
+                pointId,
+                changed: true,
+                labelCommitStatus: "committed",
+                reviewPending: false,
+            };
+        }
+        if (liveClass !== beforeClass && liveClass !== targetClass) {
+            throw new Error(
+                `The live annotation changed from ${beforeClass} to ${liveClass || "another class"} after this analysis. Rerun before assigning ${targetClass}.`
+            );
+        }
+        if (getClassSplitDualBBoxConflict(getClassSplitCandidateByPointId(pointId), point)) {
+            throw new Error(
+                "Use the dedicated overlapping-box controls before changing this paired annotation."
+            );
+        }
+        if (!batchMode && targetClass !== beforeClass && liveClass === beforeClass) {
+            const entityReceipt = await commitClassSplitAnnotationEntityMutation(
+                point,
+                "relabel",
+                targetClass
+            );
+            if (entityReceipt) {
+                if (entityReceipt._ui_stale) {
+                    return entityReceipt;
+                }
+                updateClassSplitSummaryClassCounts(beforeClass, targetClass);
+                point.class_name = targetClass;
+                const complete = String(entityReceipt.status || "") === "complete";
+                setClassSplitJobStatus(
+                    complete
+                        ? `Class changed to ${targetClass} and durably saved.`
+                        : `Class changed to ${targetClass}; its review receipt is queued for recovery.`,
+                    complete ? "success" : "warn"
+                );
+                return entityReceipt;
+            }
+        }
         const geometryEdit = buildClassSplitBboxGeometryEdit(
             point,
             resolvedBbox.match.bbox
@@ -70443,6 +75867,106 @@ async function cancelRfDetrTrainingJobRequest() {
                 "The current annotation record has no verified identity. Reload this image before changing its class."
             );
         }
+        if (
+            isAnnotationDatasetModeActive()
+            && liveClass === targetClass
+        ) {
+            if (
+                Number(
+                    classSplitState.capabilities
+                        ?.review_class_reassignment_api_version
+                ) < 3
+            ) {
+                throw new Error(
+                    "Restart the backend before reconciling this already-saved class change."
+                );
+            }
+            const annotationRow = annotationSourceState.imageRowsByKey.get(
+                imageKey
+            );
+            const sourceIdentity = String(
+                annotationRow?.annotation_source_identity || ""
+            ).trim();
+            let reconciliationBarrierHeld = !batchMode;
+            if (!batchMode) {
+                classSplitState.relabelInFlight = true;
+                refreshClassSplitControls();
+            }
+            try {
+                const saved = await saveClassSplitReviewDisposition(
+                    pointId,
+                    "reassign_class",
+                    {
+                        targetClass,
+                        annotationTarget,
+                        beforeRevision: beforeAnnotationRevision,
+                        annotationCommitRevision: beforeAnnotationRevision,
+                        annotationSourceIdentity: sourceIdentity,
+                        geometryEdit,
+                        labelCommitStatus: "already_committed",
+                        captureTrainingData: false,
+                        deferUi: batchMode,
+                        deferReconciliation: batchMode,
+                    }
+                );
+                if (!saved) {
+                    throw new Error(
+                        "This class reconciliation is already being saved."
+                    );
+                }
+                point.class_name = targetClass;
+                point.cluster_id = null;
+                point._subclass_cluster_id = "";
+                classSplitState.selectedClusterId = "";
+                clearClassSplitWrongCandidate(pointId);
+                updateClassSplitSummaryClassCounts(beforeClass, targetClass);
+                clearClassSplitDatasetAnalysis();
+                applyClassSplitSavedReviewDispositionLocally(
+                    pointId,
+                    "reassign_class",
+                    saved
+                );
+                point.human_review_before_class = beforeClass;
+                point.human_review_target_class = targetClass;
+                if (!batchMode) {
+                    setClassSplitLastReviewAction(null);
+                    removeClassSplitPointFromActiveReviewGraph(
+                        pointId,
+                        { force: true }
+                    );
+                    renderClassSplitWrongList();
+                    renderClassSplitReviewedList();
+                    scheduleClassSplitBackgroundReviewRefresh({
+                        renderDataset: true,
+                    });
+                    const message = `Class was already ${targetClass} in the saved labels; reconciled the stale graph item.`;
+                    enqueueTaskNotice(message, {
+                        key: classSplitReviewToastKey(
+                            pointId,
+                            "change-class"
+                        ),
+                        durationMs: 4200,
+                    });
+                    setClassSplitJobStatus(message, "success");
+                }
+                if (!batchMode) {
+                    persistDataQualityExplorerSession();
+                }
+                return {
+                    pointId,
+                    changed: true,
+                    labelCommitStatus: "committed",
+                    reviewPending: false,
+                    alreadyCommitted: true,
+                };
+            } finally {
+                if (reconciliationBarrierHeld) {
+                    classSplitState.relabelInFlight = false;
+                    reconciliationBarrierHeld = false;
+                    refreshClassSplitControls();
+                }
+            }
+        }
         const reviewId = getClassSplitPointReviewId(pointId);
         const reviewClientActionId = `${clientActionId}:review`;
         const toastKey = classSplitReviewToastKey(pointId, "change-class");
@@ -70469,9 +75993,11 @@ async function cancelRfDetrTrainingJobRequest() {
                 "The class was not changed because its durable review intent could not be saved locally. Free browser storage and retry."
             );
         }
-        let localBarrierHeld = true;
+        let localBarrierHeld = !batchMode;
         let localMutationApplied = false;
-        classSplitState.relabelInFlight = true;
+        if (!batchMode) {
+            classSplitState.relabelInFlight = true;
+        }
         try {
             if (jumpToSource) {
                 await jumpToClassSplitPoint(point);
@@ -70482,7 +76008,12 @@ async function cancelRfDetrTrainingJobRequest() {
                 { resolvedMatch: resolvedBbox }
             );
             if (!changed) {
-                return;
+                return {
+                    pointId,
+                    changed: false,
+                    labelCommitStatus: "not_required",
+                    reviewPending: false,
+                };
             }
             localMutationApplied = true;
 
@@ -70498,20 +76029,23 @@ async function cancelRfDetrTrainingJobRequest() {
                 : "local_workspace_pending_export";
             classSplitState.dismissedWrongIds.add(pointId);
             classSplitState.reviewedPointsById.set(pointId, point);
-            setClassSplitLastReviewAction(null);
-            classSplitState.relabelInFlight = false;
-            localBarrierHeld = false;
-            const removedFromPlot = removeClassSplitPointFromActiveReviewGraph(
-                pointId,
-                { force: true }
-            );
-            renderClassSplitWrongList();
-            enqueueTaskNotice(
-                isAnnotationDatasetModeActive()
-                    ? `Changed class to ${targetClass} · saving labels in background …`
-                    : `Changed class to ${targetClass} · press Shift+Y to export the updated labels.`,
-                { key: toastKey, durationMs: 5500 }
-            );
+            let removedFromPlot = true;
+            if (!batchMode) {
+                setClassSplitLastReviewAction(null);
+                classSplitState.relabelInFlight = false;
+                localBarrierHeld = false;
+                removedFromPlot = removeClassSplitPointFromActiveReviewGraph(
+                    pointId,
+                    { force: true }
+                );
+                renderClassSplitWrongList();
+                enqueueTaskNotice(
+                    isAnnotationDatasetModeActive()
+                        ? `Changed class to ${targetClass} · saving labels in background …`
+                        : `Changed class to ${targetClass} · press Shift+Y to export the updated labels.`,
+                    { key: toastKey, durationMs: 5500 }
+                );
+            }
 
             let saveStatus = isAnnotationDatasetModeActive()
                 ? "Save pending; use Save labels if it does not clear."
@@ -70553,7 +76087,7 @@ async function cancelRfDetrTrainingJobRequest() {
 
             if (labelCommitStatus === "committed") {
                 point.human_review_persistence = "annotation_committed_review_unsaved";
-                await drainClassSplitPendingReviewCommits();
+                await drainClassSplitPendingReviewCommits({ deferUi: batchMode });
                 if (
                     pendingReviewQueueKey
                     && !classSplitState.pendingReviewDispositionCommits.has(
@@ -70675,26 +76209,39 @@ async function cancelRfDetrTrainingJobRequest() {
                 }
             }
 
-            scheduleClassSplitBackgroundReviewRefresh({
-                renderPlot: !removedFromPlot,
-                renderDataset: true,
-            });
-            renderClassSplitReviewedList();
             const warnings = [reviewWarning, captureWarning].filter(Boolean);
             const finalMessage = `Changed class to ${targetClass} · ${saveStatus}${warnings.length ? ` ${warnings.join(" ")}` : ""}`;
-            enqueueTaskNotice(finalMessage, {
-                key: toastKey,
-                durationMs: warnings.length ? 7000 : 3500,
-            });
-            setSamStatus(finalMessage, {
-                variant: warnings.length || (
-                    isAnnotationDatasetModeActive()
-                    && labelCommitStatus !== "committed"
-                )
-                    ? "warn"
-                    : "success",
-                duration: warnings.length ? 7000 : 3500,
-            });
+            if (!batchMode) {
+                scheduleClassSplitBackgroundReviewRefresh({
+                    renderPlot: !removedFromPlot,
+                    renderDataset: true,
+                });
+                renderClassSplitReviewedList();
+                enqueueTaskNotice(finalMessage, {
+                    key: toastKey,
+                    durationMs: warnings.length ? 7000 : 3500,
+                });
+                setSamStatus(finalMessage, {
+                    variant: warnings.length || (
+                        isAnnotationDatasetModeActive()
+                        && labelCommitStatus !== "committed"
+                    )
+                        ? "warn"
+                        : "success",
+                    duration: warnings.length ? 7000 : 3500,
+                });
+            }
+            return {
+                pointId,
+                changed: true,
+                labelCommitStatus,
+                reviewPending: Boolean(
+                    pendingReviewQueueKey
+                    && classSplitState.pendingReviewDispositionCommits.has(
+                        pendingReviewQueueKey
+                    )
+                ),
+            };
         } finally {
             if (!localMutationApplied) {
                 removeClassSplitPendingReviewCommit(pendingReviewQueueKey);
@@ -71086,6 +76633,17 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitElements.clusterStatus = document.getElementById("classSplitClusterStatus");
         classSplitElements.graph = document.getElementById("classSplitGraph");
         classSplitElements.graphStatus = document.getElementById("classSplitGraphStatus");
+        classSplitElements.sessionPersistence = document.getElementById("classSplitSessionPersistence");
+        classSplitElements.sessionPersistenceTitle = document.getElementById("classSplitSessionPersistenceTitle");
+        classSplitElements.sessionPersistenceSummary = document.getElementById("classSplitSessionPersistenceSummary");
+        classSplitElements.sessionLabelsState = document.getElementById("classSplitSessionLabelsState");
+        classSplitElements.sessionReviewsState = document.getElementById("classSplitSessionReviewsState");
+        classSplitElements.sessionExportState = document.getElementById("classSplitSessionExportState");
+        classSplitElements.sessionExportProgress = document.getElementById("classSplitSessionExportProgress");
+        classSplitElements.sessionExportProgressBar = document.getElementById("classSplitSessionExportProgressBar");
+        classSplitElements.sessionExportProgressLabel = document.getElementById("classSplitSessionExportProgressLabel");
+        classSplitElements.saveSessionState = document.getElementById("classSplitSaveSessionState");
+        classSplitElements.downloadDataset = document.getElementById("classSplitDownloadDataset");
         classSplitElements.report = document.getElementById("classSplitReport");
         classSplitElements.clusterPanel = document.getElementById("classSplitClusterPanel");
         classSplitElements.clusterList = document.getElementById("classSplitClusterList");
@@ -71143,6 +76701,7 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitElements.bulkCount = document.getElementById("classSplitBulkCount");
         classSplitElements.bulkClass = document.getElementById("classSplitBulkClass");
         classSplitElements.bulkApply = document.getElementById("classSplitBulkApply");
+        classSplitElements.bulkDelete = document.getElementById("classSplitBulkDelete");
         classSplitElements.bulkClear = document.getElementById("classSplitBulkClear");
         classSplitElements.bulkConfirm = document.getElementById("classSplitBulkConfirm");
         classSplitElements.bulkSkip = document.getElementById("classSplitBulkSkip");
@@ -71158,6 +76717,33 @@ async function cancelRfDetrTrainingJobRequest() {
         });
         classSplitElements.bulkSkip?.addEventListener("click", () => {
             applyClassSplitMultiSelectionDisposition("skip");
+        });
+        classSplitElements.bulkDelete?.addEventListener("click", () => {
+            deleteClassSplitSelectedPointBboxes().catch((error) => {
+                console.error("Data Quality Explorer batch bbox deletion failed", error);
+                setClassSplitJobStatus(
+                    `Batch bbox deletion failed: ${error.message || error}`,
+                    "error"
+                );
+            });
+        });
+        classSplitElements.saveSessionState?.addEventListener("click", () => {
+            saveClassSplitSessionState().catch((error) => {
+                console.error("Data Quality Explorer session save failed", error);
+                setClassSplitJobStatus(
+                    `Session save failed: ${error.message || error}`,
+                    "error"
+                );
+            });
+        });
+        classSplitElements.downloadDataset?.addEventListener("click", () => {
+            downloadClassSplitReconciledDataset().catch((error) => {
+                console.error("Data Quality Explorer dataset download failed", error);
+                setClassSplitJobStatus(
+                    `Dataset download failed: ${error.message || error}`,
+                    "error"
+                );
+            });
         });
         classSplitElements.bulkLoadMore?.addEventListener("click", () => {
             if (classSplitMutationIsBusy()) {
@@ -71427,6 +77013,18 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (classSplitElements.adaptiveRanking) {
             classSplitElements.adaptiveRanking.addEventListener("change", () => {
+                const recoveryBlockReason =
+                    classSplitRecoveryMutationBlockReason();
+                if (recoveryBlockReason) {
+                    classSplitElements.adaptiveRanking.checked = Boolean(
+                        classSplitState.adaptiveRankingRevision
+                    );
+                    setClassSplitAdaptiveRankingStatus(
+                        recoveryBlockReason,
+                        "error"
+                    );
+                    return;
+                }
                 classSplitState.wrongQueueIds = [];
                 classSplitState.wrongQueueSignature = "";
                 if (
@@ -71486,7 +77084,15 @@ async function cancelRfDetrTrainingJobRequest() {
             });
         }
         if (classSplitElements.wrongDiscardFirst) {
-            classSplitElements.wrongDiscardFirst.addEventListener("click", () => discardFirstClassSplitWrongCandidates());
+            classSplitElements.wrongDiscardFirst.addEventListener("click", () => {
+                discardFirstClassSplitWrongCandidates().catch((error) => {
+                    console.error("Data Quality Explorer visible Skip failed", error);
+                    setClassSplitJobStatus(
+                        `Visible candidates were not skipped: ${error.message || error}`,
+                        "error"
+                    );
+                });
+            });
         }
         if (classSplitElements.qwenReviewRefresh) {
             classSplitElements.qwenReviewRefresh.addEventListener("click", () => {
@@ -71588,6 +77194,7 @@ async function cancelRfDetrTrainingJobRequest() {
             console.warn("Initial Data Quality Explorer Qwen glossary load failed", error);
         });
         refreshClassSplitControls();
+        startClassSplitSessionPersistenceMonitor();
         loadClassSplitClipBackbones().catch((error) => {
             console.warn("Data Quality Explorer backbone refresh failed", error);
         });
@@ -71659,6 +77266,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 classSplitElements.bulkApply,
                 classSplitElements.bulkConfirm,
                 classSplitElements.bulkSkip,
+                classSplitElements.bulkDelete,
                 classSplitElements.bulkClear,
             ].filter(Boolean).every((control) => control.disabled),
             disabledTileCount: classSplitElements.bulkGrid
@@ -73177,12 +78785,54 @@ async function cancelRfDetrTrainingJobRequest() {
     /*****************************************************
      * Existing SAM / CLIP calls
      *****************************************************/
-    async function samBboxPrompt(bbox) {
+    function resolveSamBboxGeometry(resultBbox, imageWidth, imageHeight) {
+        if (!Array.isArray(resultBbox) || resultBbox.length < 4) return null;
+        const [cx, cy, widthNorm, heightNorm] = resultBbox.map(Number);
+        if (![cx, cy, widthNorm, heightNorm, imageWidth, imageHeight].every(Number.isFinite)) return null;
+        if (widthNorm <= 0 || heightNorm <= 0 || imageWidth <= 0 || imageHeight <= 0) return null;
+        const width = widthNorm * imageWidth;
+        const height = heightNorm * imageHeight;
+        const x = cx * imageWidth - width / 2;
+        const y = cy * imageHeight - height / 2;
+        const tolerance = 1;
+        if (x < -tolerance || y < -tolerance || x + width > imageWidth + tolerance || y + height > imageHeight + tolerance) {
+            return null;
+        }
+        return { x, y, width, height };
+    }
+
+    function isPlausibleSamLocalRefinement(source, candidate) {
+        if (!source || !candidate) return false;
+        const values = [
+            source.x, source.y, source.width, source.height,
+            candidate.x, candidate.y, candidate.width, candidate.height,
+        ].map(Number);
+        if (!values.every(Number.isFinite) || source.width <= 0 || source.height <= 0) return false;
+        const sourceRight = source.x + source.width;
+        const sourceBottom = source.y + source.height;
+        const candidateRight = candidate.x + candidate.width;
+        const candidateBottom = candidate.y + candidate.height;
+        const overlapsSource = Math.min(sourceRight, candidateRight) > Math.max(source.x, candidate.x)
+            && Math.min(sourceBottom, candidateBottom) > Math.max(source.y, candidate.y);
+        if (!overlapsSource) return false;
+        const marginX = Math.max(16, source.width * 0.5);
+        const marginY = Math.max(16, source.height * 0.5);
+        const tolerance = 1;
+        return candidate.x >= source.x - marginX - tolerance
+            && candidate.y >= source.y - marginY - tolerance
+            && candidateRight <= sourceRight + marginX + tolerance
+            && candidateBottom <= sourceBottom + marginY + tolerance;
+    }
+
+    async function samBboxPrompt(bbox, { localRefine = false } = {}) {
         const statusToken = beginSamActionStatus("Running SAM box prompt…");
         const imageName = currentImage ? currentImage.name : null;
         const requestImageName = imageName;
         const requestImageWidth = Number(images[requestImageName]?.width || currentImage?.width || 0);
         const requestImageHeight = Number(images[requestImageName]?.height || currentImage?.height || 0);
+        const sourceGeometry = localRefine
+            ? { x: Number(bbox?.x), y: Number(bbox?.y), width: Number(bbox?.width), height: Number(bbox?.height) }
+            : null;
         const placeholderContext = bbox ? { uuid: bbox.uuid, imageName } : null;
         const jobHandle = registerSamJob({
             type: "sam-bbox",
@@ -73201,6 +78851,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 bbox_height: bbox.height,
                 uuid: bbox.uuid,
                 sam_variant: samVariant,
+                local_refine: localRefine,
             };
             let resp = await postSamEndpoint(`${API_ROOT}/sam_bbox`, bodyFields);
             if (!resp.ok) {
@@ -73258,20 +78909,21 @@ async function cancelRfDetrTrainingJobRequest() {
                 resizing: null
             };
 
-            if (result.bbox) {
-                const [cx, cy, ww, hh] = result.bbox;
-                const absW = ww * requestImageWidth;
-                const absH = hh * requestImageHeight;
-                const absX = cx * requestImageWidth - absW / 2;
-                const absY = cy * requestImageHeight - absH / 2;
-                targetBbox.x = absX;
-                targetBbox.y = absY;
-                targetBbox.width = absW;
-                targetBbox.height = absH;
+            const nextGeometry = resolveSamBboxGeometry(result.bbox, requestImageWidth, requestImageHeight);
+            if (nextGeometry) {
+                if (localRefine && !isPlausibleSamLocalRefinement(sourceGeometry, nextGeometry)) {
+                    delete pendingApiBboxes[returnedUUID];
+                    setSamStatus("Magic Tweak kept the original bbox because SAM returned a nonlocal result.", { variant: "warn", duration: 4500 });
+                    return false;
+                }
+                targetBbox.x = nextGeometry.x;
+                targetBbox.y = nextGeometry.y;
+                targetBbox.width = nextGeometry.width;
+                targetBbox.height = nextGeometry.height;
                 updateBboxAfterTransform();
-                console.debug("Updated SAM bounding box:", absX, absY, absW, absH);
+                console.debug("Updated SAM bounding box:", nextGeometry);
             } else {
-                console.warn("No 'bbox' field returned from sam_bbox. Full response:", result);
+                console.warn("Invalid 'bbox' field returned from sam_bbox. Full response:", result);
                 if (placeholderContext) {
                     removePendingBbox(placeholderContext);
                 }
@@ -73281,7 +78933,11 @@ async function cancelRfDetrTrainingJobRequest() {
             return true;
         } catch (err) {
             console.error("sam_bbox error:", err);
-            alert("sam_bbox call failed: " + err);
+            if (localRefine) {
+                setSamStatus(`Magic Tweak kept the original bbox: ${err.message || err}`, { variant: "warn", duration: 4500 });
+            } else {
+                alert("sam_bbox call failed: " + err);
+            }
             if (placeholderContext) {
                 removePendingBbox(placeholderContext);
             }
@@ -73581,7 +79237,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
-    async function samBboxAutoPrompt(bbox) {
+    async function samBboxAutoPrompt(bbox, { localRefine = false } = {}) {
         if (datasetType === "seg") {
             setSamStatus("Auto bbox prompt is disabled in polygon mode.", { variant: "warn", duration: 4000 });
             return false;
@@ -73591,6 +79247,9 @@ async function cancelRfDetrTrainingJobRequest() {
         const requestImageName = imageName;
         const requestImageWidth = Number(images[requestImageName]?.width || currentImage?.width || 0);
         const requestImageHeight = Number(images[requestImageName]?.height || currentImage?.height || 0);
+        const sourceGeometry = localRefine
+            ? { x: Number(bbox?.x), y: Number(bbox?.y), width: Number(bbox?.width), height: Number(bbox?.height) }
+            : null;
         const placeholderContext = bbox ? { uuid: bbox.uuid, imageName } : null;
         const jobHandle = registerSamJob({
             type: "sam-bbox-auto",
@@ -73612,6 +79271,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 bbox_height: bbox.height,
                 uuid: bbox.uuid,
                 sam_variant: samVariant,
+                local_refine: localRefine,
             };
             if (useFallback) {
                 bodyData.clip_crop_policy = "dilate_on_low_conf";
@@ -73670,11 +79330,17 @@ async function cancelRfDetrTrainingJobRequest() {
                 moving: false,
                 resizing: null
             };
-            const [cx, cy, wNorm, hNorm] = result.bbox;
-            const absW = wNorm * requestImageWidth;
-            const absH = hNorm * requestImageHeight;
-            const absX = cx * requestImageWidth - absW / 2;
-            const absY = cy * requestImageHeight - absH / 2;
+            const nextGeometry = resolveSamBboxGeometry(result.bbox, requestImageWidth, requestImageHeight);
+            if (!nextGeometry || (localRefine && !isPlausibleSamLocalRefinement(sourceGeometry, nextGeometry))) {
+                delete pendingApiBboxes[returnedUUID];
+                setSamStatus(
+                    localRefine
+                        ? "Magic Tweak kept the original bbox because SAM returned a nonlocal result."
+                        : "SAM auto box returned invalid geometry.",
+                    { variant: "warn", duration: 4500 },
+                );
+                return false;
+            }
             const imageBuckets = bboxes[currentImage.name] || (bboxes[currentImage.name] = {});
             const oldClass = targetBbox.class;
             const oldArr = Array.isArray(imageBuckets[oldClass]) ? imageBuckets[oldClass] : [];
@@ -73709,16 +79375,20 @@ async function cancelRfDetrTrainingJobRequest() {
                 targetBbox.class = oldClass;
                 imageBuckets[oldClass].push(targetBbox);
             }
-            targetBbox.x = absX;
-            targetBbox.y = absY;
-            targetBbox.width = absW;
-            targetBbox.height = absH;
+            targetBbox.x = nextGeometry.x;
+            targetBbox.y = nextGeometry.y;
+            targetBbox.width = nextGeometry.width;
+            targetBbox.height = nextGeometry.height;
             updateBboxAfterTransform();
             delete pendingApiBboxes[returnedUUID];
             return true;
         } catch (err) {
             console.error("sam_bbox_auto error:", err);
-            alert("sam_bbox_auto call failed: " + err);
+            if (localRefine) {
+                setSamStatus(`Magic Tweak kept the original bbox: ${err.message || err}`, { variant: "warn", duration: 4500 });
+            } else {
+                alert("sam_bbox_auto call failed: " + err);
+            }
             if (placeholderContext) {
                 removePendingBbox(placeholderContext);
             }
@@ -76111,9 +81781,9 @@ async function cancelRfDetrTrainingJobRequest() {
         try {
             let applied = false;
             if (autoMode) {
-                applied = await samBboxAutoPrompt(targetBbox);
+                applied = await samBboxAutoPrompt(targetBbox, { localRefine: true });
             } else {
-                applied = await samBboxPrompt(targetBbox);
+                applied = await samBboxPrompt(targetBbox, { localRefine: true });
             }
             if (applied && updateSelection) {
                 setBboxMarkedState();

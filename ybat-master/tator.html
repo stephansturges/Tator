@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <title>🥔 Tator Annotation Tool</title>
-    <link href="ybat.css?v=20260808a" rel="stylesheet">
+    <link href="ybat.css?v=20260817d" rel="stylesheet">
     <link href="class_split_controls.css?v=20260811b" rel="stylesheet">
 
     <!-- 1) Keep scripts in an order that ensures ybat.js is available
@@ -15,7 +15,7 @@
     <script src="plotly-2.35.2.min.js?v=20260520a"></script>
     <script src="annotation_diversity.js?v=20260530a"></script>
     <script src="class_analysis_cache_admin.js?v=20260808a"></script>
-    <script src="ybat.js?v=20260814b"></script>
+    <script src="ybat.js?v=20260818i"></script>
 </head>
 <body>
     <div id="ingestProgress" class="ingest-progress" aria-live="polite" aria-atomic="true">
@@ -551,7 +551,7 @@
 	                                            <div class="qwen-caption-settings__title">Local models</div>
 	                                            <div class="qwen-caption-settings__grid">
                                                 <div class="qwen-caption-settings__field qwen-caption-settings__field--wide">
-                                                    <label for="qwenCaptionModel">Caption model<span class="help-icon" title="Auto uses the caption-safe default for the current runtime. On MLX this is separate from the heavier general Qwen inference default because captioning can run many model calls. Pick an explicit model here to override it.">?</span></label>
+                                                    <label for="qwenCaptionModel">Caption model<span class="help-icon" title="On Apple Silicon, Auto uses the experimental Qwen3.8 27B MTPLX Turbo path for full-image annotation when its local runtime is available. This is separate from the agent/review model, and backend environment overrides still apply. Pick an explicit model here to override it.">?</span></label>
                                                     <select id="qwenCaptionModel">
                                                         <option value="active" selected>Auto caption default</option>
                                                         <option value="2B">Qwen3-VL 2B</option>
@@ -1684,6 +1684,30 @@
                             </div>
                             <div id="classSplitGraphStatus" class="class-split-graph-status" aria-live="polite"></div>
                             <div id="classSplitGraph" class="class-split-graph"></div>
+                            <section id="classSplitSessionPersistence" class="class-split-session-persistence" data-tone="idle" aria-labelledby="classSplitSessionPersistenceTitle">
+                                <div class="class-split-session-persistence__copy">
+                                    <span class="class-split-session-persistence__eyebrow">Session changes</span>
+                                    <strong id="classSplitSessionPersistenceTitle">No unsaved backend changes detected</strong>
+                                    <span id="classSplitSessionPersistenceSummary">Session state can be restored only by reopening this browser and reconnecting to this backend. It is not a dataset ZIP.</span>
+                                    <div id="classSplitSessionExportProgress" class="class-split-session-persistence__progress" hidden>
+                                        <progress id="classSplitSessionExportProgressBar" max="100" aria-label="Dataset ZIP progress"></progress>
+                                        <span id="classSplitSessionExportProgressLabel">Preparing dataset ZIP</span>
+                                    </div>
+                                    <details class="class-split-session-persistence__details">
+                                        <summary>Persistence details</summary>
+                                        <div class="class-split-session-persistence__ledger">
+                                            <span>Labels</span><strong id="classSplitSessionLabelsState">No pending changes</strong>
+                                            <span>Review decisions</span><strong id="classSplitSessionReviewsState">No pending decisions</strong>
+                                            <span>Labels ZIP</span><strong id="classSplitSessionExportState">Not prepared</strong>
+                                            <span>Browser-only view state</span><strong>Local to this browser profile; not included in the labels ZIP</strong>
+                                        </div>
+                                    </details>
+                                </div>
+                                <div class="class-split-session-persistence__actions">
+                                    <button type="button" id="classSplitSaveSessionState" class="training-button secondary" title="Flush labels and review decisions into recoverable storage on this backend. This does not download or overwrite a dataset ZIP.">Save session state</button>
+                                    <button type="button" id="classSplitDownloadDataset" class="training-button" title="Save the recoverable session, prepare one revision-safe labels-only ZIP, then stream it without holding the archive in browser memory. Source images are not included.">Download labels ZIP</button>
+                                </div>
+                            </section>
                             <div class="class-split-review">
                                 <aside id="classSplitBulkPanel" class="class-split-bulk-panel class-split-multi-selection" aria-labelledby="classSplitBulkCount" aria-busy="false" hidden>
                                     <header class="class-split-multi-selection__header">
@@ -1700,6 +1724,7 @@
                                         <button type="button" id="classSplitBulkApply" class="training-button">Change class</button>
                                         <button type="button" id="classSplitBulkConfirm" class="training-button secondary" title="Record every selected object as reviewed and correctly labeled without changing its annotation">Dismiss as correct</button>
                                         <button type="button" id="classSplitBulkSkip" class="training-button secondary" title="Record every selected object as skipped so it can remain unresolved">Skip selected</button>
+                                        <button type="button" id="classSplitBulkDelete" class="training-button danger training-button-danger" title="Delete every eligible selected bounding box from the loaded labels. Overlapping-box pairs remain selected for their dedicated controls.">Delete selected bboxes</button>
                                     </div>
                                     <p id="classSplitBulkActionStatus" class="class-split-multi-selection__action-status">Selection ready. Actions always use this captured set of objects.</p>
                                     <div id="classSplitBulkScroller" class="class-split-multi-selection__scroller">
@@ -1855,9 +1880,9 @@
                                         <span id="classSplitTrainingCaptureStatus" class="training-help" role="status" aria-live="polite"></span>
                                     </div>
                                     <div class="class-split-wrong-toolbar__discard">
-                                        <label for="classSplitWrongDiscardCount">Dismiss visible</label>
-                                        <input type="number" id="classSplitWrongDiscardCount" min="1" max="12" step="1" value="12" aria-label="Number of currently visible candidates to dismiss" />
-                                        <button type="button" id="classSplitWrongDiscardFirst" class="training-button secondary" title="Dismiss only cards currently shown in this 12-item queue. This does not change labels.">Dismiss</button>
+                                        <label for="classSplitWrongDiscardCount">Skip visible</label>
+                                        <input type="number" id="classSplitWrongDiscardCount" min="1" max="12" step="1" value="12" aria-label="Number of currently visible candidates to skip" />
+                                        <button type="button" id="classSplitWrongDiscardFirst" class="training-button secondary" title="Save a durable Skip receipt for the first visible cards. This does not change labels.">Skip</button>
                                     </div>
                                     <button type="button" id="classSplitWrongShuffle" class="training-button secondary">Shuffle vignettes</button>
                                     <button type="button" id="classSplitWrongUndoReview" class="training-button secondary" disabled>Undo last review</button>

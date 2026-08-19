@@ -8,6 +8,7 @@ import json
 import math
 import os
 import sqlite3
+import threading
 import time
 import uuid
 import zlib
@@ -15,8 +16,9 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 
-SESSION_STORE_SCHEMA = "class-analysis-session-store-v2"
+SESSION_STORE_SCHEMA = "class-analysis-session-store-v3"
 SESSION_STORE_FILENAME = "session.sqlite3"
+SESSION_STORE_VALIDATION_ABI = "immutable-analysis-v2"
 GRAPH_DEFAULT_ROWS = 50_000
 GRAPH_MAX_ROWS = 50_000
 GRAPH_MAX_BYTES = 64 * 1024 * 1024
@@ -28,6 +30,11 @@ REVIEW_HISTORY_MAX_ROWS = 500
 REVIEW_HISTORY_MAX_BYTES = 16 * 1024 * 1024
 DETAIL_MAX_BYTES = 256 * 1024
 EVIDENCE_MAX_BYTES = 2 * 1024 * 1024
+_SESSION_STORE_VALIDATION_CACHE_LOCK = threading.RLock()
+_SESSION_STORE_VALIDATION_CACHE: dict[
+    tuple[str, int, int, str, str], dict[str, Any]
+] = {}
+_SESSION_STORE_VALIDATION_CACHE_MAX = 32
 
 
 class SessionStoreError(RuntimeError):
@@ -178,6 +185,55 @@ def _detail_payload(point: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in point.items() if key not in excluded}
 
 
+def _point_identity_values(
+    point: Mapping[str, Any], point_id: str
+) -> tuple[str, int, str, str, str, str, str]:
+    entity_id = str(point.get("annotation_entity_id") or "").strip()
+    entity_revision = _integer(point.get("annotation_entity_revision"), 0)
+    record_revision = str(
+        point.get("annotation_entity_record_revision") or ""
+    ).strip()
+    source_identity = str(point.get("annotation_source_identity") or "").strip()
+    source_record_key = str(point.get("source_record_key") or "").strip()
+    identity_status = str(point.get("identity_status") or "").strip()
+    attestation = str(point.get("annotation_attestation") or "").strip()
+    if identity_status == "ready":
+        if not all(
+            (
+                entity_id,
+                entity_revision > 0,
+                record_revision,
+                source_identity,
+                source_record_key,
+                attestation,
+            )
+        ):
+            raise SessionStoreError(
+                f"class_analysis_point_identity_invalid:{point_id}",
+                status_code=409,
+            )
+    elif identity_status == "identity_conflict":
+        if not source_identity or not source_record_key:
+            raise SessionStoreError(
+                f"class_analysis_point_identity_conflict_unscoped:{point_id}",
+                status_code=409,
+            )
+    else:
+        raise SessionStoreError(
+            f"class_analysis_point_identity_status_invalid:{point_id}",
+            status_code=409,
+        )
+    return (
+        entity_id,
+        entity_revision,
+        record_revision,
+        source_identity,
+        source_record_key,
+        identity_status,
+        attestation,
+    )
+
+
 def _review_categories(
     point: Mapping[str, Any], evidence: Optional[Mapping[str, Any]]
 ) -> list[tuple[str, int, float]]:
@@ -260,7 +316,14 @@ def _schema_sql() -> str:
         reviewed INTEGER NOT NULL DEFAULT 0,
         review_object_key TEXT,
         pair_review_key TEXT,
-        display_rank INTEGER NOT NULL
+        display_rank INTEGER NOT NULL,
+        annotation_entity_id TEXT,
+        annotation_entity_revision INTEGER,
+        annotation_entity_record_revision TEXT,
+        annotation_source_identity TEXT,
+        source_record_key TEXT,
+        identity_status TEXT,
+        annotation_attestation TEXT
     );
     CREATE TABLE point_projections (
         point_id TEXT NOT NULL,
@@ -324,7 +387,7 @@ def _flush_rows(
 ) -> None:
     statements = {
         "points": "INSERT INTO points_core VALUES ("
-        + ",".join("?" for _ in range(33))
+        + ",".join("?" for _ in range(40))
         + ")",
         "projections": "INSERT OR REPLACE INTO point_projections VALUES (?,?,?,?)",
         "details": "INSERT INTO point_details VALUES (?,?)",
@@ -455,6 +518,7 @@ def build_class_analysis_session_store(
             point_id = str(point.get("point_id") or "").strip()
             if not point_id:
                 raise SessionStoreError("class_analysis_point_id_required")
+            identity_values = _point_identity_values(point, point_id)
             x1, y1, x2, y2 = _bbox(point)
             class_name = str(point.get("class_name") or "")
             class_counts[class_name] = class_counts.get(class_name, 0) + 1
@@ -505,6 +569,7 @@ def build_class_analysis_session_store(
                     str(point.get("review_object_key") or ""),
                     str(point.get("pair_review_key") or ""),
                     display_rank,
+                    *identity_values,
                 )
             )
             selected_projection = _point_projection(point)
@@ -612,6 +677,7 @@ def build_class_analysis_session_store(
         _normalize_queue_ranks(connection)
         metadata = {
             "schema": SESSION_STORE_SCHEMA,
+            "store_validation_id": uuid.uuid4().hex,
             "created_at": time.time(),
             "summary": summary_value,
             "request": request_value,
@@ -652,7 +718,13 @@ def build_class_analysis_session_store(
         connection.close()
         connection = None
         _fsync_path(partial)
+        validation = validate_class_analysis_session_store(
+            partial,
+            expected_point_count=expected_point_count,
+            expected_evidence_count=evidence_count,
+        )
         os.replace(partial, target)
+        _remember_session_store_validation(target, validation)
         _fsync_directory(target.parent)
         size_bytes = target.stat().st_size
         digest = _sha256_file(target)
@@ -681,23 +753,80 @@ def build_class_analysis_session_store(
         raise
 
 
-def _open_readonly(path: Path | str) -> sqlite3.Connection:
+def _open_readonly(
+    path: Path | str,
+    *,
+    require_validated: bool = True,
+) -> sqlite3.Connection:
     store = Path(path)
     if not store.is_file():
         raise SessionStoreError("class_analysis_session_store_not_found", status_code=404)
+    if require_validated:
+        ensure_class_analysis_session_store_validated(store)
     connection = sqlite3.connect(f"file:{store.resolve()}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA query_only=ON")
     return connection
 
 
+_POINT_IDENTITY_COLUMNS = (
+    "annotation_entity_id",
+    "annotation_entity_revision",
+    "annotation_entity_record_revision",
+    "annotation_source_identity",
+    "source_record_key",
+    "identity_status",
+    "annotation_attestation",
+)
+
+
+def _require_current_session_store_schema(connection: sqlite3.Connection) -> None:
+    row = connection.execute(
+        "SELECT value FROM session_meta WHERE key = 'schema'"
+    ).fetchone()
+    try:
+        schema = json.loads(str(row[0])) if row is not None else ""
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise SessionStoreError(
+            "class_analysis_session_store_schema_invalid", status_code=409
+        ) from exc
+    if schema != SESSION_STORE_SCHEMA:
+        raise SessionStoreError(
+            "class_analysis_session_store_schema_unsupported", status_code=409
+        )
+    available = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(points_core)")
+    }
+    if any(name not in available for name in _POINT_IDENTITY_COLUMNS):
+        raise SessionStoreError(
+            "class_analysis_session_store_identity_schema_invalid",
+            status_code=409,
+        )
+
+
+def _point_identity_select_sql(
+    connection: sqlite3.Connection, alias: str = "p"
+) -> str:
+    _require_current_session_store_schema(connection)
+    return ", ".join(
+        f"{alias}.{name} AS {name}" for name in _POINT_IDENTITY_COLUMNS
+    )
+
+
 def read_session_store_metadata(path: Path | str) -> dict[str, Any]:
     with _open_readonly(path) as connection:
+        _require_current_session_store_schema(connection)
         rows = connection.execute("SELECT key, value FROM session_meta").fetchall()
     metadata = {str(row["key"]): json.loads(str(row["value"])) for row in rows}
-    if metadata.get("schema") != SESSION_STORE_SCHEMA:
-        raise SessionStoreError("class_analysis_session_store_schema_invalid", status_code=409)
     return metadata
+
+
+def get_class_analysis_session_source_identities(
+    path: Path | str,
+) -> list[str]:
+    return list(
+        get_class_analysis_session_identity_summary(path)["source_identities"]
+    )
 
 
 def validate_class_analysis_session_store(
@@ -706,7 +835,8 @@ def validate_class_analysis_session_store(
     expected_point_count: Optional[int] = None,
     expected_evidence_count: Optional[int] = None,
 ) -> dict[str, Any]:
-    with _open_readonly(path) as connection:
+    with _open_readonly(path, require_validated=False) as connection:
+        _require_current_session_store_schema(connection)
         check = connection.execute("PRAGMA quick_check").fetchone()
         point_count = int(connection.execute("SELECT COUNT(*) FROM points_core").fetchone()[0])
         evidence_count = int(connection.execute("SELECT COUNT(*) FROM evidence").fetchone()[0])
@@ -716,10 +846,43 @@ def validate_class_analysis_session_store(
         distinct_points = int(
             connection.execute("SELECT COUNT(DISTINCT point_id) FROM points_core").fetchone()[0]
         )
+        invalid_identity_count = int(
+            connection.execute(
+                """SELECT COUNT(*) FROM points_core
+                   WHERE (identity_status = 'ready' AND (
+                              annotation_entity_id = ''
+                              OR annotation_entity_revision <= 0
+                              OR annotation_entity_record_revision = ''
+                              OR annotation_source_identity = ''
+                              OR source_record_key = ''
+                              OR annotation_attestation = ''
+                          ))
+                      OR (identity_status = 'identity_conflict' AND (
+                              annotation_source_identity = ''
+                              OR source_record_key = ''
+                          ))
+                      OR identity_status NOT IN ('ready', 'identity_conflict')"""
+            ).fetchone()[0]
+        )
+        ready_identity_count = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM points_core WHERE identity_status = 'ready'"
+            ).fetchone()[0]
+        )
+        identity_conflict_count = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM points_core "
+                "WHERE identity_status = 'identity_conflict'"
+            ).fetchone()[0]
+        )
     if not check or str(check[0]).lower() != "ok":
         raise SessionStoreError("class_analysis_session_store_integrity_failed")
     if point_count != distinct_points:
         raise SessionStoreError("class_analysis_session_point_identity_collision")
+    if invalid_identity_count:
+        raise SessionStoreError(
+            "class_analysis_session_point_identity_invalid", status_code=409
+        )
     if expected_point_count is not None and point_count != int(expected_point_count):
         raise SessionStoreError("class_analysis_session_point_count_mismatch")
     if expected_evidence_count is not None and evidence_count != int(expected_evidence_count):
@@ -731,6 +894,108 @@ def validate_class_analysis_session_store(
         "point_count": point_count,
         "evidence_count": evidence_count,
         "projection_count": projection_count,
+        "ready_identity_count": ready_identity_count,
+        "identity_conflict_count": identity_conflict_count,
+        "invalid_identity_count": invalid_identity_count,
+    }
+
+
+def _session_store_validation_key(
+    path: Path | str,
+) -> tuple[str, int, int, str, str]:
+    store = Path(path)
+    if not store.is_file():
+        raise SessionStoreError(
+            "class_analysis_session_store_not_found",
+            status_code=404,
+        )
+    stat = store.stat()
+    try:
+        connection = sqlite3.connect(
+            f"file:{store.resolve()}?mode=ro",
+            uri=True,
+        )
+        try:
+            row = connection.execute(
+                "SELECT value FROM session_meta WHERE key = 'store_validation_id'"
+            ).fetchone()
+        finally:
+            connection.close()
+        validation_id = str(json.loads(str(row[0]))) if row is not None else ""
+    except (OSError, sqlite3.Error, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise SessionStoreError(
+            "class_analysis_session_store_validation_id_unreadable",
+            status_code=409,
+        ) from exc
+    if not validation_id:
+        raise SessionStoreError(
+            "class_analysis_session_store_validation_id_missing",
+            status_code=409,
+        )
+    return (
+        str(store.resolve()),
+        int(stat.st_dev),
+        int(stat.st_ino),
+        validation_id,
+        SESSION_STORE_VALIDATION_ABI,
+    )
+
+
+def ensure_class_analysis_session_store_validated(
+    path: Path | str,
+) -> dict[str, Any]:
+    """Validate one immutable artifact once for its exact filesystem identity."""
+
+    key = _session_store_validation_key(path)
+    with _SESSION_STORE_VALIDATION_CACHE_LOCK:
+        cached = _SESSION_STORE_VALIDATION_CACHE.get(key)
+        if cached is not None:
+            return dict(cached)
+        result = validate_class_analysis_session_store(path)
+        _remember_session_store_validation(path, result)
+        return dict(result)
+
+
+def _remember_session_store_validation(
+    path: Path | str,
+    result: Mapping[str, Any],
+) -> None:
+    key = _session_store_validation_key(path)
+    with _SESSION_STORE_VALIDATION_CACHE_LOCK:
+        resolved = key[0]
+        for stale_key in tuple(_SESSION_STORE_VALIDATION_CACHE):
+            if stale_key[0] == resolved and stale_key != key:
+                _SESSION_STORE_VALIDATION_CACHE.pop(stale_key, None)
+        while len(_SESSION_STORE_VALIDATION_CACHE) >= _SESSION_STORE_VALIDATION_CACHE_MAX:
+            _SESSION_STORE_VALIDATION_CACHE.pop(
+                next(iter(_SESSION_STORE_VALIDATION_CACHE))
+            )
+        _SESSION_STORE_VALIDATION_CACHE[key] = dict(result)
+
+
+def get_class_analysis_session_identity_summary(
+    path: Path | str,
+) -> dict[str, Any]:
+    validation = ensure_class_analysis_session_store_validated(path)
+    with _open_readonly(path) as connection:
+        rows = connection.execute(
+            "SELECT annotation_source_identity, identity_status, COUNT(*) AS count "
+            "FROM points_core GROUP BY annotation_source_identity, identity_status"
+        ).fetchall()
+    source_identities = sorted(
+        {
+            str(row["annotation_source_identity"])
+            for row in rows
+            if str(row["annotation_source_identity"] or "")
+        }
+    )
+    return {
+        "schema": SESSION_STORE_SCHEMA,
+        "point_count": int(validation["point_count"]),
+        "ready_identity_count": int(validation["ready_identity_count"]),
+        "identity_conflict_count": int(validation["identity_conflict_count"]),
+        "invalid_identity_count": int(validation["invalid_identity_count"]),
+        "source_identities": source_identities,
     }
 
 
@@ -819,6 +1084,7 @@ def upsert_class_analysis_review_state(
     state = str(disposition or "").strip().lower()
     if not identifier or not state:
         raise SessionStoreError("class_analysis_review_state_invalid")
+    ensure_class_analysis_session_store_validated(path)
     connection = sqlite3.connect(str(Path(path)))
     try:
         # Receipt projection is a disposable index over the durable ledger.
@@ -882,6 +1148,7 @@ def clear_class_analysis_review_state(
     identifier = str(point_id or "").strip()
     if not identifier:
         raise SessionStoreError("class_analysis_review_state_invalid")
+    ensure_class_analysis_session_store_validated(path)
     connection = sqlite3.connect(str(Path(path)))
     try:
         connection.execute("PRAGMA busy_timeout=1000")
@@ -919,6 +1186,7 @@ def replace_class_analysis_review_state(
 ) -> int:
     """Reconcile a restored session with the authoritative receipt ledger."""
 
+    ensure_class_analysis_session_store_validated(path)
     connection = sqlite3.connect(str(Path(path)))
     try:
         connection.execute("PRAGMA busy_timeout=30000")
@@ -1110,6 +1378,7 @@ def get_class_analysis_graph_payload(
                 "> (?, ?, ?, ?)"
             )
             page_parameters.extend(cursor_values)
+        identity_select = _point_identity_select_sql(connection)
         rows = connection.execute(
             f"""SELECT p.ordinal, p.point_id, p.class_id, p.class_name,
                        CASE WHEN r.point_id IS NULL THEN p.reviewed
@@ -1121,6 +1390,7 @@ def get_class_analysis_graph_payload(
                        p.tiny_object, p.low_source_detail,
                        p.review_priority_score, p.wrong_class_suspicion,
                        p.proposed_class, p.display_rank, q.x, q.y,
+                       {identity_select},
                        {review_bucket} AS review_bucket,
                        {priority_sort} AS priority_sort
                 FROM point_projections q
@@ -1158,6 +1428,23 @@ def get_class_analysis_graph_payload(
             _optional_float(row["wrong_class_suspicion"]) for row in page_rows
         ],
         "proposed_class": [str(row["proposed_class"] or "") for row in page_rows],
+        "annotation_entity_id": [
+            str(row["annotation_entity_id"] or "") for row in page_rows
+        ],
+        "annotation_entity_revision": [
+            _integer(row["annotation_entity_revision"], 0) for row in page_rows
+        ],
+        "annotation_entity_record_revision": [
+            str(row["annotation_entity_record_revision"] or "") for row in page_rows
+        ],
+        "annotation_source_identity": [
+            str(row["annotation_source_identity"] or "") for row in page_rows
+        ],
+        "source_record_key": [str(row["source_record_key"] or "") for row in page_rows],
+        "identity_status": [str(row["identity_status"] or "") for row in page_rows],
+        "annotation_attestation": [
+            str(row["annotation_attestation"] or "") for row in page_rows
+        ],
     }
     result = {
         "schema": "class-analysis-graph-v2",
@@ -1240,11 +1527,13 @@ def get_class_analysis_review_queue_payload(
                 (queue_category,),
             ).fetchone()[0]
         )
+        identity_select = _point_identity_select_sql(connection)
         rows = connection.execute(
-            """SELECT q.rank, q.score, p.*,
+            f"""SELECT q.rank, q.score, p.*,
                       CASE WHEN r.point_id IS NULL THEN p.reviewed
                            WHEN COALESCE(r.disposition, '') = '' THEN 0 ELSE 1 END
-                           AS effective_reviewed
+                           AS effective_reviewed,
+                      {identity_select}
                FROM review_queue q
                JOIN points_core p ON p.point_id = q.point_id
                LEFT JOIN review_state r ON r.point_id = p.point_id
@@ -1279,6 +1568,19 @@ def get_class_analysis_review_queue_payload(
                 "tiny_object": bool(row["tiny_object"] or row["low_source_detail"]),
                 "review_object_key": str(row["review_object_key"] or ""),
                 "pair_review_key": str(row["pair_review_key"] or ""),
+                "annotation_entity_id": str(row["annotation_entity_id"] or ""),
+                "annotation_entity_revision": _integer(
+                    row["annotation_entity_revision"], 0
+                ),
+                "annotation_entity_record_revision": str(
+                    row["annotation_entity_record_revision"] or ""
+                ),
+                "annotation_source_identity": str(
+                    row["annotation_source_identity"] or ""
+                ),
+                "source_record_key": str(row["source_record_key"] or ""),
+                "identity_status": str(row["identity_status"] or ""),
+                "annotation_attestation": str(row["annotation_attestation"] or ""),
             }
         )
     next_cursor = None

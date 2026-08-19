@@ -3462,6 +3462,7 @@ body.annotation-focus-mode .class-scroll-indicator {
         "toolbar toolbar"
         "status status"
         "graph review"
+        "persistence persistence"
         "footer footer"
         "wrong wrong";
     gap: 12px;
@@ -3805,6 +3806,10 @@ body.annotation-focus-mode .class-scroll-indicator {
     grid-area: review;
     grid-template-columns: 1fr;
     align-content: start;
+}
+
+.class-split-panel--workspace .class-split-session-persistence {
+    grid-area: persistence;
 }
 
 .class-split-graph-footer {
@@ -5705,6 +5710,7 @@ body.annotation-focus-mode .class-scroll-indicator {
             "status"
             "graph"
             "review"
+            "persistence"
             "footer"
             "wrong";
     }
@@ -9865,4 +9871,131 @@ html.theme-dark:not(.theme-pipboy) #automationLockBanner {
     background: #312714 !important;
     border-color: #b7791f !important;
     color: #f6c967 !important;
+}
+.class-split-session-persistence {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 14px;
+    margin: 10px 0 14px;
+    padding: 11px 13px;
+    border: 1px solid rgba(71, 85, 105, 0.32);
+    border-left: 4px solid #64748b;
+    border-radius: 12px;
+    background: rgba(248, 250, 252, 0.92);
+    color: inherit;
+}
+
+.class-split-session-persistence[data-tone="saved"] {
+    border-left-color: #15803d;
+}
+
+.class-split-session-persistence[data-tone="saving"] {
+    border-left-color: #0369a1;
+}
+
+.class-split-session-persistence[data-tone="error"] {
+    border-left-color: #b91c1c;
+}
+
+.class-split-session-persistence__copy {
+    min-width: 0;
+    display: grid;
+    gap: 3px;
+}
+
+.class-split-session-persistence__eyebrow {
+    font-size: 0.72rem;
+    font-weight: 800;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    opacity: 0.68;
+}
+
+.class-split-session-persistence__copy > strong {
+    font-size: 0.98rem;
+}
+
+.class-split-session-persistence__copy > span:not(.class-split-session-persistence__eyebrow) {
+    font-size: 0.82rem;
+    line-height: 1.35;
+    opacity: 0.78;
+}
+
+.class-split-session-persistence__progress {
+    display: grid;
+    grid-template-columns: minmax(150px, 320px) auto;
+    align-items: center;
+    gap: 9px;
+    margin-top: 6px;
+}
+
+.class-split-session-persistence__progress[hidden] {
+    display: none;
+}
+
+.class-split-session-persistence__progress progress {
+    width: 100%;
+    height: 9px;
+    accent-color: #0284c7;
+}
+
+.class-split-session-persistence__progress span {
+    font-size: 0.78rem;
+    font-weight: 700;
+    opacity: 0.78;
+}
+
+.class-split-session-persistence__actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    white-space: nowrap;
+}
+
+.class-split-session-persistence__details {
+    margin-top: 3px;
+    font-size: 0.8rem;
+}
+
+.class-split-session-persistence__details summary {
+    width: max-content;
+    cursor: pointer;
+    font-weight: 700;
+}
+
+.class-split-session-persistence__ledger {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 3px 12px;
+    margin-top: 7px;
+}
+
+.class-split-session-persistence__ledger > span {
+    opacity: 0.68;
+}
+
+html.theme-dark .class-split-session-persistence {
+    border-color: rgba(148, 163, 184, 0.32);
+    background: rgba(15, 23, 42, 0.62);
+}
+
+html.theme-pipboy .class-split-session-persistence {
+    border-color: currentColor;
+    background: rgba(0, 32, 12, 0.78);
+}
+
+@media (max-width: 900px) {
+    .class-split-session-persistence {
+        grid-template-columns: 1fr;
+    }
+
+    .class-split-session-persistence__actions {
+        flex-wrap: wrap;
+        white-space: normal;
+    }
+
+    .class-split-session-persistence__progress {
+        grid-template-columns: 1fr;
+    }
 }

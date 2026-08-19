@@ -111,6 +111,7 @@ class BboxPrompt(BaseModel):
     uuid: Optional[str] = None
     sam_variant: Optional[str] = None
     image_name: Optional[str] = None
+    local_refine: bool = False
 
     @root_validator_compat(skip_on_failure=True)
     def _ensure_bbox_payload(cls, values):  # noqa: N805

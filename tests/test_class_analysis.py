@@ -11693,11 +11693,11 @@ def test_class_analysis_capabilities_expose_only_normal_recipe_controls():
     caps = api._class_analysis_capabilities()
 
     assert caps["review_disposition_api_version"] == 3
-    assert caps["review_class_reassignment_api_version"] == 2
+    assert caps["review_class_reassignment_api_version"] == 3
     assert caps["review_single_bbox_deletion_api_version"] == 2
     assert caps["review_history_delete_api_version"] == 1
     assert caps["dual_bbox_resolution_api_version"] == 1
-    assert caps["dual_bbox_annotation_transaction_api_version"] == 2
+    assert caps["dual_bbox_annotation_transaction_api_version"] == 4
     assert caps["preprocess_modes"] == ["canonical"]
     assert caps["embedding_adjustments"] == ["remove_size_bias"]
     assert caps["expert_preprocess_modes"] == ["native", "canonical"]
@@ -21194,7 +21194,34 @@ def test_dual_bbox_annotation_transaction_is_single_image_cas_and_idempotent(
         "1 0.5 0.5 0.4 0.4",
     ]
     after_lines = ["1 0.5 0.5 0.4 0.4"]
+    from services.annotation_entities import migrate_legacy_annotation_record
+    from services.annotation_entity_store import AnnotationEntityStore
+
+    source_identity = api._annotation_image_source_identity(
+        source_mode="linked",
+        source_id="ds",
+        split="train",
+        image_relpath=Path("frame.jpg"),
+        image_path=image_path,
+        yolo_layout="flat",
+    )
+    source_record_key = "train:frame.jpg"
+    entity_record = migrate_legacy_annotation_record(
+        source_identity=source_identity,
+        source_lines=before_lines,
+        current_lines=before_lines,
+    )
+    current_entity, other_entity = entity_record["entities"]
+    entity_store = AnnotationEntityStore(
+        tmp_path / "annotation-entities.sqlite3"
+    )
+    entity_store.put_record(
+        source_identity,
+        source_record_key,
+        entity_record,
+    )
     state = {"lines": list(before_lines), "save_payloads": []}
+    identity_conflicts = []
     concurrent_started = __import__("threading").Event()
     concurrent_finished = __import__("threading").Event()
     concurrent_outcome = {}
@@ -21210,6 +21237,20 @@ def test_dual_bbox_annotation_transaction_is_single_image_cas_and_idempotent(
         "other_bbox_xyxy": [30, 30, 70, 70],
         "split": "train",
         "image_relpath": "frame.jpg",
+        "current_entity": {
+            "annotation_entity_id": current_entity["annotation_entity_id"],
+            "entity_revision": current_entity["entity_revision"],
+            "record_revision": entity_record["record_revision"],
+            "annotation_source_identity": source_identity,
+            "source_record_key": source_record_key,
+        },
+        "other_entity": {
+            "annotation_entity_id": other_entity["annotation_entity_id"],
+            "entity_revision": other_entity["entity_revision"],
+            "record_revision": entity_record["record_revision"],
+            "annotation_source_identity": source_identity,
+            "source_record_key": source_record_key,
+        },
     }
     current_review_key = "cro_" + ("1" * 64)
     other_review_key = "cro_" + ("3" * 64)
@@ -21227,6 +21268,11 @@ def test_dual_bbox_annotation_transaction_is_single_image_cas_and_idempotent(
         "class_name": "Bike",
         "bbox_xyxy": [30, 30, 70, 70],
         "image_sha256": api._class_analysis_file_sha256(image_path),
+        "annotation_entity_id": current_entity["annotation_entity_id"],
+        "annotation_entity_revision": current_entity["entity_revision"],
+        "annotation_entity_record_revision": entity_record["record_revision"],
+        "annotation_source_identity": source_identity,
+        "source_record_key": source_record_key,
         "dual_bbox_conflict": conflict,
     }
     job = api.ClassAnalysisJob(
@@ -21273,6 +21319,32 @@ def test_dual_bbox_annotation_transaction_is_single_image_cas_and_idempotent(
     monkeypatch.setattr(api, "_resolve_annotation_image_path", lambda *_args, **_kwargs: image_path)
     monkeypatch.setattr(api, "_annotation_effective_label_lines", lambda *_args, **_kwargs: list(state["lines"]))
 
+    original_mark_conflict = entity_store.mark_conflict
+
+    def record_conflict(source_identity, image_key, detail):
+        identity_conflicts.append(
+            (source_identity, image_key, detail)
+        )
+        original_mark_conflict(source_identity, image_key, detail)
+
+    entity_store.mark_conflict = record_conflict
+
+    monkeypatch.setattr(
+        api,
+        "_class_analysis_annotation_entity_store",
+        lambda: entity_store,
+    )
+    monkeypatch.setattr(
+        api,
+        "get_class_analysis_session_identity_summary",
+        lambda _path: {
+            "source_identities": [source_identity],
+            "identity_conflict_count": 0,
+            "invalid_identity_count": 0,
+            "schema": "class-analysis-session-v1",
+        },
+    )
+
     def save_one(_dataset_id, payload):
         nonlocal concurrent_thread
         state["save_payloads"].append(payload)
@@ -21311,14 +21383,6 @@ def test_dual_bbox_annotation_transaction_is_single_image_cas_and_idempotent(
         return {"status": "saved"}
 
     monkeypatch.setattr(api, "save_dataset_annotation_snapshot", save_one)
-    source_identity = api._annotation_image_source_identity(
-        source_mode="linked",
-        source_id="ds",
-        split="train",
-        image_relpath=Path("frame.jpg"),
-        image_path=image_path,
-        yolo_layout="flat",
-    )
     request = {
         "operation_id": "dual_bbox:test-operation",
         "session_id": "editor",
@@ -21331,7 +21395,20 @@ def test_dual_bbox_annotation_transaction_is_single_image_cas_and_idempotent(
             "image_relpath": "frame.jpg",
         },
         "dual_bbox_conflict": conflict,
-        "expected_record_revision": api._annotation_image_label_revision(before_lines),
+        "expected_annotation_record_revision": (
+            api._annotation_image_label_revision(before_lines)
+        ),
+        "expected_entity_record_revision": entity_record["record_revision"],
+        "entity_preconditions": {
+            "current": {
+                "annotation_entity_id": current_entity["annotation_entity_id"],
+                "entity_revision": current_entity["entity_revision"],
+            },
+            "other": {
+                "annotation_entity_id": other_entity["annotation_entity_id"],
+                "entity_revision": other_entity["entity_revision"],
+            },
+        },
         "expected_source_identity": source_identity,
         "record": {
             "split": "train",
@@ -21378,17 +21455,68 @@ def test_dual_bbox_annotation_transaction_is_single_image_cas_and_idempotent(
                 "bike",
                 {
                     **request,
-                    "expected_record_revision": "alr1_" + ("0" * 64),
+                    "expected_annotation_record_revision": (
+                        "alr1_" + ("0" * 64)
+                    ),
                 },
             )
         assert stale_exc.value.detail == "dual_bbox_annotation_revision_stale"
         assert state["save_payloads"] == []
-        committed = api.commit_class_analysis_dual_bbox_annotation_transaction(
-            "ca_txn", "bike", request
+        state["lines"] = list(after_lines)
+        with pytest.raises(api.HTTPException) as unproven_absence_exc:
+            api.commit_class_analysis_dual_bbox_annotation_transaction(
+                "ca_txn", "bike", request
+            )
+        assert unproven_absence_exc.value.detail["code"] == (
+            "annotation_entity_changed_rerun_required"
         )
+        assert unproven_absence_exc.value.detail["status"] == "rerun_required"
+        assert unproven_absence_exc.value.detail["rerun_required"] is True
+        assert identity_conflicts == [
+            (
+                source_identity,
+                "train:frame.jpg",
+                "dual_bbox_already_absent_without_exact_receipt",
+            )
+        ]
+        state["lines"] = list(before_lines)
+        atomic_entity_commit = entity_store.put_record_and_advance_operation
+        lost_entity_response = {"raised": False}
+
+        def commit_entity_then_lose_response(**kwargs):
+            result = atomic_entity_commit(**kwargs)
+            if not lost_entity_response["raised"]:
+                lost_entity_response["raised"] = True
+                raise RuntimeError("simulated response loss after atomic entity commit")
+            return result
+
+        entity_store.put_record_and_advance_operation = (
+            commit_entity_then_lose_response
+        )
+        with pytest.raises(api.HTTPException) as interrupted_exc:
+            api.commit_class_analysis_dual_bbox_annotation_transaction(
+                "ca_txn", "bike", request
+            )
+        assert interrupted_exc.value.status_code == 503
+        interrupted_operation = entity_store.get_operation(
+            request["operation_id"]
+        )
+        assert interrupted_operation["state"] == "entity_committed"
         assert concurrent_thread is not None
         concurrent_thread.join(timeout=2.0)
         assert not concurrent_thread.is_alive()
+        recovered = api.recover_class_analysis_annotation_session(
+            "ca_txn",
+            {
+                "mode": "retry_transactions",
+                "operation_ids": [request["operation_id"]],
+                "annotation_save": {"session_id": "editor"},
+            },
+        )
+        assert recovered["status"] == "ready"
+        assert recovered["checkpoint_ready"] is True
+        assert len(recovered["results"]) == 1
+        committed = recovered["results"][0]
         replayed = api.commit_class_analysis_dual_bbox_annotation_transaction(
             "ca_txn", "bike", request
         )
@@ -21412,10 +21540,13 @@ def test_dual_bbox_annotation_transaction_is_single_image_cas_and_idempotent(
     finally:
         api.CLASS_ANALYSIS_JOBS.pop(job.job_id, None)
 
-    assert committed["status"] == "committed"
+    assert committed["status"] == "complete"
+    assert committed["transaction_kind"] == "dual_bbox_delete_v1"
+    assert committed["commit_status"] == "already_committed"
     assert committed["review_disposition"]["disposition"] == "delete_current_box"
     assert committed["review_disposition"]["client_action_id"] == request["operation_id"]
-    assert replayed["status"] == "already_committed"
+    assert replayed["status"] == "complete"
+    assert replayed["commit_status"] == "already_committed"
     assert replayed["review_disposition"]["idempotent_replay"] is True
     assert committed["review_disposition"]["training_capture"]["status"] == "recorded"
     assert (
@@ -21440,10 +21571,23 @@ def test_dual_bbox_annotation_transaction_is_single_image_cas_and_idempotent(
         "annotation_commit_attestation"
     ] == stored_attestation
     assert concurrent_outcome["status"] == "rejected"
-    assert concurrent_outcome["detail"]["code"] == "review_disposition_changed"
+    assert concurrent_outcome["detail"]["code"] == (
+        "dual_bbox_annotation_transaction_in_progress"
+    )
     assert len(state["save_payloads"]) == 1
     assert state["lines"] == after_lines
     assert verified["committed_revision"] == api._annotation_image_label_revision(after_lines)
+    assert (
+        committed["annotation_entity_record_revision"]
+        != entity_record["record_revision"]
+    )
+    assert [
+        result["outcome"]
+        for result in committed["annotation_entity_results"]
+    ] == ["deleted", "retained"]
+    assert entity_store.get_operation(request["operation_id"])["state"] == (
+        "complete"
+    )
 
 
 def test_dual_bbox_annotation_transaction_route_is_wired():
@@ -21573,6 +21717,29 @@ def test_dual_bbox_annotation_transaction_commits_transient_overlay(
     )
     manifest = api.get_transient_annotation_manifest(session_id)
     row = manifest["images"][0]
+    source_record_key = "train:frame.jpg"
+    from services.annotation_entities import migrate_legacy_annotation_record
+    from services.annotation_entity_store import AnnotationEntityStore
+
+    entity_store = AnnotationEntityStore(
+        tmp_path / "transient-annotation-entities.sqlite3"
+    )
+    monkeypatch.setattr(
+        api,
+        "_class_analysis_annotation_entity_store",
+        lambda: entity_store,
+    )
+    entity_record = migrate_legacy_annotation_record(
+        source_identity=row["annotation_source_identity"],
+        source_lines=before_lines,
+        current_lines=before_lines,
+    )
+    entity_store.put_record(
+        row["annotation_source_identity"],
+        source_record_key,
+        entity_record,
+    )
+    current_entity, other_entity = entity_record["entities"]
     conflict = {
         "enabled": True,
         "point_id": "bike",
@@ -21584,6 +21751,20 @@ def test_dual_bbox_annotation_transaction_commits_transient_overlay(
         "other_bbox_xyxy": [30, 30, 70, 70],
         "split": "train",
         "image_relpath": "frame.jpg",
+        "current_entity": {
+            "annotation_entity_id": current_entity["annotation_entity_id"],
+            "entity_revision": current_entity["entity_revision"],
+            "record_revision": entity_record["record_revision"],
+            "annotation_source_identity": row["annotation_source_identity"],
+            "source_record_key": source_record_key,
+        },
+        "other_entity": {
+            "annotation_entity_id": other_entity["annotation_entity_id"],
+            "entity_revision": other_entity["entity_revision"],
+            "record_revision": entity_record["record_revision"],
+            "annotation_source_identity": row["annotation_source_identity"],
+            "source_record_key": source_record_key,
+        },
     }
     point = {
         "point_id": "bike",
@@ -21595,6 +21776,11 @@ def test_dual_bbox_annotation_transaction_commits_transient_overlay(
         "class_name": "Bike",
         "bbox_xyxy": [30, 30, 70, 70],
         "image_sha256": api._class_analysis_file_sha256(image_path),
+        "annotation_entity_id": current_entity["annotation_entity_id"],
+        "annotation_entity_revision": current_entity["entity_revision"],
+        "annotation_entity_record_revision": entity_record["record_revision"],
+        "annotation_source_identity": row["annotation_source_identity"],
+        "source_record_key": source_record_key,
         "dual_bbox_conflict": conflict,
     }
     job = api.ClassAnalysisJob(
@@ -21633,7 +21819,20 @@ def test_dual_bbox_annotation_transaction_commits_transient_overlay(
             "image_relpath": "frame.jpg",
         },
         "dual_bbox_conflict": conflict,
-        "expected_record_revision": row["annotation_record_revision"],
+        "expected_annotation_record_revision": (
+            row["annotation_record_revision"]
+        ),
+        "expected_entity_record_revision": entity_record["record_revision"],
+        "entity_preconditions": {
+            "current": {
+                "annotation_entity_id": current_entity["annotation_entity_id"],
+                "entity_revision": current_entity["entity_revision"],
+            },
+            "other": {
+                "annotation_entity_id": other_entity["annotation_entity_id"],
+                "entity_revision": other_entity["entity_revision"],
+            },
+        },
         "expected_source_identity": row["annotation_source_identity"],
         "record": {
             "split": "train",
@@ -21660,11 +21859,39 @@ def test_dual_bbox_annotation_transaction_commits_transient_overlay(
         api.CLASS_ANALYSIS_JOBS.pop(job.job_id, None)
         api.delete_transient_dataset(session_id)
 
-    assert committed["status"] == "committed"
+    assert committed["status"] == "complete"
+    assert committed["commit_status"] == "committed"
     assert committed["session_revision"] > manifest["session_revision"]
     assert persisted["overlay_labels"]["train:frame.jpg"] == after_lines
     assert verified["committed_revision"] == (
         api._annotation_image_label_revision(after_lines)
+    )
+
+
+def test_annotation_export_requires_ready_class_analysis_checkpoint(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        api,
+        "_class_analysis_annotation_recovery_snapshot",
+        lambda job_id: {
+            "job_id": job_id,
+            "status": "recovery_required",
+            "checkpoint_ready": False,
+            "operation_count": 1,
+            "identity_conflict_count": 0,
+            "reason_codes": [],
+        },
+    )
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api._annotation_export_require_class_analysis_checkpoint(
+            {"class_analysis_job_id": "ca_pending"}
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == (
+        "class_analysis_checkpoint_not_ready"
     )
 
 
@@ -23755,3 +23982,98 @@ def test_qwen_review_preflight_falls_back_only_for_implicit_default(monkeypatch)
     assert "qwen_review_model_incompatible:owner/partial" in str(
         exc_info.value.detail
     )
+
+
+def test_annotation_export_checkpoint_is_bound_to_the_exact_source(
+    monkeypatch, tmp_path
+):
+    from services.annotation_entity_store import AnnotationEntityStore
+
+    store = AnnotationEntityStore(tmp_path / "entities.sqlite3")
+    job = types.SimpleNamespace(
+        summary={"source_mode": "linked", "source_id": "dataset-a"}
+    )
+    recovery = {"checkpoint_ready": True, "status": "ready"}
+    monkeypatch.setattr(api, "_class_analysis_annotation_entity_store", lambda: store)
+    monkeypatch.setattr(api, "_get_class_analysis_job", lambda _job_id: job)
+    monkeypatch.setattr(
+        api,
+        "_class_analysis_annotation_recovery_snapshot",
+        lambda _job_id: dict(recovery),
+    )
+
+    api._annotation_export_require_class_analysis_checkpoint(
+        {"class_analysis_job_id": "job-a"},
+        source_mode="linked",
+        source_id="dataset-a",
+    )
+    assert store.get_source_job_binding("linked", "dataset-a")["job_id"] == "job-a"
+
+    recovery.update({"checkpoint_ready": False, "status": "recovery_required"})
+    with pytest.raises(api.HTTPException) as omitted:
+        api._annotation_export_require_class_analysis_checkpoint(
+            {},
+            source_mode="linked",
+            source_id="dataset-a",
+        )
+    assert omitted.value.status_code == 409
+    assert omitted.value.detail["code"] == "class_analysis_checkpoint_not_ready"
+
+    with pytest.raises(api.HTTPException) as mismatch:
+        api._annotation_export_require_class_analysis_checkpoint(
+            {"class_analysis_job_id": "job-other"},
+            source_mode="linked",
+            source_id="dataset-a",
+        )
+    assert mismatch.value.status_code == 409
+    assert mismatch.value.detail["code"] == "class_analysis_export_source_job_mismatch"
+
+
+def test_recovery_snapshot_keeps_terminal_journal_conflicts_after_diagnostic_clear(
+    monkeypatch, tmp_path
+):
+    from services.annotation_entity_store import AnnotationEntityStore
+
+    store = AnnotationEntityStore(tmp_path / "entities.sqlite3")
+    request = {"client_action_id": "annotation:terminal", "records": []}
+    store.begin_operation(
+        operation_id="annotation:terminal",
+        request_hash=store.request_hash(request),
+        request=request,
+        job_id="job-terminal",
+        source_identity="source-a",
+        response={"annotation_snapshot": {"status": "saved"}, "committed": True},
+    )
+    store.advance_operation("annotation:terminal", "annotation_committed")
+    store.advance_operation("annotation:terminal", "entity_committed")
+    store.mark_operation_conflict(
+        operation_id="annotation:terminal",
+        source_identity="source-a",
+        image_key="train:image.jpg",
+        detail={"code": "review_conflict", "rerun_required": True},
+    )
+    store.put_record("source-a", "train:image.jpg", {"record_revision": "new"})
+    monkeypatch.setattr(api, "_class_analysis_annotation_entity_store", lambda: store)
+    monkeypatch.setattr(
+        api,
+        "_get_class_analysis_job",
+        lambda _job_id: types.SimpleNamespace(job_id="job-terminal", summary={}),
+    )
+    monkeypatch.setattr(
+        api,
+        "get_class_analysis_session_identity_summary",
+        lambda _path: {
+            "identity_conflict_count": 0,
+            "invalid_identity_count": 0,
+            "source_identities": [],
+            "schema": "test",
+        },
+    )
+
+    snapshot = api._class_analysis_annotation_recovery_snapshot("job-terminal")
+
+    assert snapshot["status"] == "rerun_required"
+    assert snapshot["checkpoint_ready"] is False
+    assert snapshot["operations"] == []
+    assert snapshot["terminal_operations"][0]["mutation_committed"] is True
+    assert "annotation_transaction_terminal_conflict" in snapshot["reason_codes"]

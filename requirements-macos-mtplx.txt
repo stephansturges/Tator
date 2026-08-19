@@ -1,0 +1,4 @@
+# Isolated native MTPLX runtime for the PocketAiHub Qwen3.8 checkpoint.
+# Do not install this into .venv-macos: MTPLX pins a newer MLX release than
+# Tator's validated SAM3, C-RADIO, and mlx-vlm environment.
+mtplx==2.7.1

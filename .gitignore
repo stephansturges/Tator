@@ -163,7 +163,9 @@ celerybeat.pid
 !.env.*.example
 .venv
 .venv-macos/
+.venv-mtplx/
 .venv-qwen36-swir/
+/uv.lock
 env/
 venv/
 ENV/
@@ -276,6 +278,7 @@ sahi/
 
 # Root-level scratch artifacts (do not track)
 /*.txt
+!/requirements-macos-mtplx.txt
 !/requirements-qwen36-swir.txt
 !requirements.txt
 !requirements-dev.txt

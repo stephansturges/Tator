@@ -21,6 +21,10 @@ QWEN_PLATFORM_ALIASES = {
 QWEN_AEON_QWEN36_27B_MLX_MODEL = (
     "AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-MLX-FP4"
 )
+QWEN_POCKETAi_QWEN38_27B_MTPLX_MODEL = (
+    "PocketAiHub/Qwen3.8-27B-Abliterated-MTPLX-Optimized-Speed"
+)
+QWEN_QWEN35_27B_MLX_BASELINE_MODEL = "mlx-community/Qwen3.5-27B-4bit"
 MIRIL_DRONE_VLM2_MLX_MODEL = "MirilAI/Miril-DroneVLM-2B-2-MLX-4bit"
 MIRIL_DRONE_VLM2_MLX_NOTE = (
     "Miril Drone VLM2 is a Gemma 4 E2B-derived aerial vision-language model "
@@ -28,11 +32,11 @@ MIRIL_DRONE_VLM2_MLX_NOTE = (
     "for local MLX vignette review, but Tator's Qwen adapter-training backend does "
     "not train this architecture."
 )
-# General Apple Silicon Qwen inference should use the largest validated local
-# vision-capable path by default. Captioning keeps a separate compact default
-# below because one caption action can trigger many model calls.
+# General agent/review inference stays on the largest validated agent-capable
+# vision path. Full-image annotation uses the separately measured MTPLX path:
+# it is inference-only, but substantially faster for this bounded workflow.
 QWEN_MLX_DEFAULT_MODEL = QWEN_AEON_QWEN36_27B_MLX_MODEL
-QWEN_MLX_CAPTION_DEFAULT_MODEL = "mlx-community/Qwen3-VL-4B-Instruct-4bit"
+QWEN_MLX_CAPTION_DEFAULT_MODEL = QWEN_POCKETAi_QWEN38_27B_MTPLX_MODEL
 QWEN_AEON_QWEN36_27B_MLX_NOTE = (
     "Inference-only AEON Qwen3.6 27B multimodal MLX FP4 checkpoint. "
     "mlx-vlm 0.6.x exposes the matching Qwen3.5 vision tower as qwen3_5, while "
@@ -137,6 +141,12 @@ def _external_mlx_entry(
     model_line: Optional[str] = None,
     dataset_context: Optional[str] = None,
     load_strict: bool = True,
+    inference_backend: Optional[str] = None,
+    runtime_profile: Optional[str] = None,
+    runtime_package: Optional[str] = None,
+    runtime_credit_label: Optional[str] = None,
+    runtime_credit_url: Optional[str] = None,
+    experimental: bool = False,
 ) -> Dict[str, Any]:
     entry = {
         "id": model_id,
@@ -153,6 +163,7 @@ def _external_mlx_entry(
         "model_family": model_family,
         "model_line": model_line or model_family,
         "load_strict": bool(load_strict),
+        "experimental": bool(experimental),
     }
     if dataset_context:
         entry["dataset_context"] = dataset_context
@@ -160,6 +171,16 @@ def _external_mlx_entry(
         entry["compatibility_note"] = compatibility_note
     if training_note:
         entry["training_note"] = training_note
+    if inference_backend:
+        entry["inference_backend"] = inference_backend
+    if runtime_profile:
+        entry["runtime_profile"] = runtime_profile
+    if runtime_package:
+        entry["runtime_package"] = runtime_package
+    if runtime_credit_label:
+        entry["runtime_credit_label"] = runtime_credit_label
+    if runtime_credit_url:
+        entry["runtime_credit_url"] = runtime_credit_url
     return entry
 
 
@@ -192,6 +213,54 @@ def qwen_mlx_model_options() -> List[Dict[str, Any]]:
             entries.append(_model_entry("30B", variant, quant, moe=True))
     entries.extend(
         [
+            _external_mlx_entry(
+                QWEN_POCKETAi_QWEN38_27B_MTPLX_MODEL,
+                label="MLX Qwen3.8 27B Abliterated MTPLX Turbo",
+                size="27B",
+                variant="Abliterated MTPLX Optimized Speed",
+                quantization="mixed 4/8-bit",
+                source="PocketAiHub",
+                abliterated=True,
+                vision_inference_supported=True,
+                training_supported=False,
+                compatibility_note=(
+                    "Experimental inference-only checkpoint using native MTPLX 2.7.1 "
+                    "speculative decoding in an isolated MLX runtime. Abliteration suppresses "
+                    "refusals and can increase incorrect or unpredictable responses."
+                ),
+                training_note="Adapter training is not supported for the MTPLX runtime.",
+                model_family="qwen3_5",
+                model_line="Qwen3.8",
+                dataset_context=(
+                    "Fast, high-capacity multimodal review for aerial annotation. Treat every "
+                    "answer as advisory because this is an experimental abliterated checkpoint."
+                ),
+                load_strict=False,
+                inference_backend="mtplx",
+                runtime_profile="turbo",
+                runtime_package="mtplx==2.7.1",
+                runtime_credit_label="Powered by MTPLX",
+                runtime_credit_url="https://github.com/youssofal/MTPLX",
+                experimental=True,
+            ),
+            _external_mlx_entry(
+                QWEN_QWEN35_27B_MLX_BASELINE_MODEL,
+                label="MLX Qwen3.5 27B 4-bit",
+                size="27B",
+                variant="Instruct",
+                quantization="4bit",
+                source="mlx-community",
+                vision_inference_supported=True,
+                training_supported=False,
+                compatibility_note=(
+                    "Inference-only same-size Qwen3.5 baseline for comparison with the "
+                    "Qwen3.6 and Qwen3.8 27B paths."
+                ),
+                training_note="Adapter training has not been validated for this checkpoint.",
+                model_family="qwen3_5",
+                model_line="Qwen3.5",
+                dataset_context="General 27B multimodal baseline for annotation review.",
+            ),
             _external_mlx_entry(
                 MIRIL_DRONE_VLM2_MLX_MODEL,
                 label="Miril Drone VLM2 (MLX 4-bit)",
@@ -368,16 +437,18 @@ def qwen_mlx_model_options() -> List[Dict[str, Any]]:
     preferred = {
         MIRIL_DRONE_VLM2_MLX_MODEL: 0,
         QWEN_AEON_QWEN36_27B_MLX_MODEL: 1,
-        "mlx-community/Qwen3-VL-4B-Instruct-4bit": 2,
-        "mlx-community/Qwen3-VL-2B-Instruct-4bit": 3,
-        "mlx-community/Qwen3-VL-8B-Instruct-4bit": 4,
-        "mlx-community/Qwen3-VL-4B-Thinking-4bit": 5,
-        "mlx-community/Qwen3-VL-8B-Thinking-4bit": 6,
-        "EZCon/Huihui-Qwen3-VL-4B-Instruct-abliterated-4bit-mlx": 7,
-        "EZCon/Huihui-Qwen3-VL-2B-Instruct-abliterated-4bit-mlx": 8,
-        "alexgusevski/Huihui-Qwen3-VL-8B-Instruct-abliterated-q4-mlx": 9,
-        "nightmedia/Huihui-Qwen3-VL-32B-Thinking-abliterated-qx65-hi-mlx": 10,
-        QWEN_VANCH007_QWEN36_35B_MLX_MODEL: 11,
+        QWEN_POCKETAi_QWEN38_27B_MTPLX_MODEL: 2,
+        QWEN_QWEN35_27B_MLX_BASELINE_MODEL: 3,
+        "mlx-community/Qwen3-VL-4B-Instruct-4bit": 4,
+        "mlx-community/Qwen3-VL-2B-Instruct-4bit": 5,
+        "mlx-community/Qwen3-VL-8B-Instruct-4bit": 6,
+        "mlx-community/Qwen3-VL-4B-Thinking-4bit": 7,
+        "mlx-community/Qwen3-VL-8B-Thinking-4bit": 8,
+        "EZCon/Huihui-Qwen3-VL-4B-Instruct-abliterated-4bit-mlx": 9,
+        "EZCon/Huihui-Qwen3-VL-2B-Instruct-abliterated-4bit-mlx": 10,
+        "alexgusevski/Huihui-Qwen3-VL-8B-Instruct-abliterated-q4-mlx": 11,
+        "nightmedia/Huihui-Qwen3-VL-32B-Thinking-abliterated-qx65-hi-mlx": 12,
+        QWEN_VANCH007_QWEN36_35B_MLX_MODEL: 13,
     }
     entries.sort(
         key=lambda entry: (
@@ -475,6 +546,10 @@ def qwen_mlx_metadata_for_model(model_id: str) -> Dict[str, Any]:
     }
 
 
+def qwen_mlx_uses_mtplx(model_id: Optional[str]) -> bool:
+    return str(model_id or "").strip() == QWEN_POCKETAi_QWEN38_27B_MTPLX_MODEL
+
+
 __all__ = [
     "MIRIL_DRONE_VLM2_MLX_MODEL",
     "MIRIL_DRONE_VLM2_MLX_NOTE",
@@ -482,6 +557,8 @@ __all__ = [
     "QWEN_MLX_DEFAULT_MODEL",
     "QWEN_MLX_MODEL_IDS",
     "QWEN_MLX_MODEL_OPTIONS",
+    "QWEN_POCKETAi_QWEN38_27B_MTPLX_MODEL",
+    "QWEN_QWEN35_27B_MLX_BASELINE_MODEL",
     "QWEN_MLX_VISION_MODEL_IDS",
     "QWEN_MLX_VISION_MODEL_OPTIONS",
     "QWEN_PLATFORM_ALIASES",
@@ -495,6 +572,7 @@ __all__ = [
     "qwen_known_incompatible_mlx_detail",
     "qwen_mlx_metadata_for_model",
     "qwen_mlx_model_options",
+    "qwen_mlx_uses_mtplx",
     "resolve_mlx_model_id",
     "select_qwen_platform",
 ]

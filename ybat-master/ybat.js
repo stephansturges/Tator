@@ -4258,6 +4258,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
     const CLASS_SPLIT_MULTI_SELECTION_ACTION_CONCURRENCY = 3;
     const CLASS_SPLIT_ANNOTATION_BATCH_PAGE_SIZE = 500;
     const CLASS_SPLIT_ANNOTATION_BATCH_STALL_LIMIT = 3;
+    const CLASS_SPLIT_GRAPH_MUTATION_SETTLE_TIMEOUT_MS = 1500;
     const CLASS_SPLIT_PENDING_REVIEW_COMMIT_LIMIT = 2048;
     const CLASS_SPLIT_REVIEW_REQUEST_TIMEOUT_MS = 12000;
     const classSplitContextPreviewCache = new Map();
@@ -60329,6 +60330,29 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
+    function boundClassSplitGraphMutationCompletion(completion, fallbackValue = false) {
+        let timeoutId = null;
+        const deadline = new Promise((resolve) => {
+            timeoutId = window.setTimeout(() => {
+                console.warn(
+                    "Data Quality Explorer graph update exceeded its UI settlement deadline; releasing controls while Plotly finishes."
+                );
+                resolve(fallbackValue);
+            }, CLASS_SPLIT_GRAPH_MUTATION_SETTLE_TIMEOUT_MS);
+        });
+        const settled = Promise.resolve(completion).then(
+            (value) => {
+                if (timeoutId !== null) window.clearTimeout(timeoutId);
+                return value;
+            },
+            (error) => {
+                if (timeoutId !== null) window.clearTimeout(timeoutId);
+                throw error;
+            }
+        );
+        return Promise.race([settled, deadline]);
+    }
+
     function removeClassSplitPointsFromActiveReviewGraph(
         pointIds,
         {
@@ -60480,7 +60504,10 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             return removed;
         });
-        return { removed, completion };
+        return {
+            removed,
+            completion: boundClassSplitGraphMutationCompletion(completion, removed),
+        };
     }
 
     function removeClassSplitPointFromActiveReviewGraph(pointId, { force = false } = {}) {
@@ -73358,11 +73385,21 @@ function getClassSplitSingleBboxDeletionUiState(
         });
         const successfulPointIds = new Set();
         const failedPointIds = new Set();
+        const failureMessages = new Map();
         resultItems.forEach((item) => {
             const target = item?.state === "complete" ? successfulPointIds : failedPointIds;
+            const failureMessage = item?.state === "complete"
+                ? ""
+                : parseApiError(
+                    JSON.stringify({ detail: item?.error?.detail || item?.error || "" }),
+                    "The authoritative annotation batch rejected this object."
+                );
             (item?.payload?.actions || []).forEach((entry) => {
                 const pointId = String(entry?.point_id || "").trim();
-                if (pointId) target.add(pointId);
+                if (pointId) {
+                    target.add(pointId);
+                    if (failureMessage) failureMessages.set(pointId, failureMessage);
+                }
             });
         });
         if (["complete", "partial", "cancelled", "conflict"].includes(String(batch?.state || ""))) {
@@ -73374,6 +73411,7 @@ function getClassSplitSingleBboxDeletionUiState(
             receipt: mergeClassSplitAnnotationBatchReceipts(receipts),
             successfulPointIds,
             failedPointIds,
+            failureMessages,
         };
     }
 
@@ -73615,6 +73653,7 @@ function getClassSplitSingleBboxDeletionUiState(
         let receipt = mergeClassSplitAnnotationBatchReceipts([]);
         let successfulContextIds = new Set();
         let failedContextIds = new Set();
+        let failedContextMessages = new Map();
         if (contexts.length) {
             const batchResult = await runClassSplitAnnotationBatchRequest({
                 jobId: requestJobId,
@@ -73627,6 +73666,7 @@ function getClassSplitSingleBboxDeletionUiState(
             receipt = batchResult.receipt;
             successfulContextIds = batchResult.successfulPointIds;
             failedContextIds = batchResult.failedPointIds;
+            failedContextMessages = batchResult.failureMessages;
             if (!classSplitAsyncRequestIsCurrent(requestGeneration, requestJobId)) {
                 return {
                     status: String(batchResult.batch?.state || "complete"),
@@ -73914,7 +73954,8 @@ function getClassSplitSingleBboxDeletionUiState(
             failedContextIds.forEach((pointId) => {
                 operation.failures.set(
                     pointId,
-                    "The authoritative annotation batch rejected this object."
+                    failedContextMessages.get(pointId)
+                    || "The authoritative annotation batch rejected this object."
                 );
             });
             failedUnchanged.forEach((message, pointId) => {
@@ -73942,6 +73983,7 @@ function getClassSplitSingleBboxDeletionUiState(
         if (failedCount) {
             const firstFailure = [
                 ...preparationFailures.values(),
+                ...failedContextMessages.values(),
                 ...failedUnchanged.values(),
             ].map((value) => String(value || "").trim()).find(Boolean) || "";
             renderClassSplitBulkPanel();

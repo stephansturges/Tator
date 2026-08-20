@@ -906,10 +906,16 @@ def test_dual_bbox_cards_use_human_controlled_annotation_actions():
     assert "current.match.bbox === other.match.bbox" in js
     assert "function commitClassSplitDualBBoxDeletionTransaction" in js
     assert "function resolveClassSplitDualBBox" in js
-    assert "function dismissClassSplitStaleDualBBoxPair" in js
     assert "function markClassSplitDualBBoxResolved" in js
-    assert 'enqueueTaskNotice("BBox not found."' in js
-    assert "expected_record_revision: expectedRecordRevision" in js
+    assert '["confirm_current", "skip"]' in js
+    assert "function classSplitReviewDispositionIsTerminal" in js
+    assert "function classSplitReviewActionOperationIsCurrent" in js
+    assert "reviewActionPendingOwners: new Map()" in js
+    assert "expected_annotation_record_revision:" in js
+    assert "expectedAnnotationRecordRevision" in js
+    assert "expected_entity_record_revision:" in js
+    assert "expectedEntityRecordRevision" in js
+    assert "entity_preconditions: entityPreconditions" in js
     assert "expected_source_identity: expectedSourceIdentity" in js
     assert "annotation_commit_attestation" in js
     assert "Save this image first." in js
@@ -953,8 +959,12 @@ def test_dual_bbox_cards_use_human_controlled_annotation_actions():
     assert "window.confirm" not in resolver
     assert "from this open workspace?" not in resolver
     assert "flushAnnotationSnapshot" not in resolver
-    assert resolver.index("findClassSplitExactGeometryMatches(target)") < resolver.index(
-        'annotationEditableGuard("Deleting overlapping annotation")'
+    edit_guard = resolver.index(
+        'annotationEditableGuard("Deleting overlapping annotation", {'
+    )
+    assert resolver.index("findClassSplitExactGeometryMatches(target)") < edit_guard
+    assert edit_guard < resolver.index(
+        "classSplitState.dualBBoxTransactionInFlight = true;"
     )
     assert resolver.index("commitClassSplitDualBBoxDeletionTransaction") < resolver.index(
         "applyClassSplitDualBBoxTransactionLocally"
@@ -1005,58 +1015,270 @@ def test_data_quality_vignette_actions_acknowledge_before_background_persistence
     assert "position: fixed;" in css[css.index(".task-queue {"):css.index(".task-queue.visible")]
 
 
-def test_graph_review_dismissal_and_sparse_pair_contract_are_immediate():
+def test_graph_review_sparse_pair_resolution_uses_durable_batch_coordinator():
     js = _js()
+    coordinator = _extract_js_function(js, "markClassSplitDualBBoxResolved")
+    restore = "async " + _extract_js_function(
+        js,
+        "restoreClassSplitReviewDisposition",
+    )
+    restore_owned = "async " + _extract_js_function(
+        js,
+        "restoreClassSplitReviewDispositionOwned",
+    )
+    undo_begin = _extract_js_function(js, "beginClassSplitUndoOperation")
+    undo_current = _extract_js_function(js, "classSplitUndoOperationIsCurrent")
+    undo_release = _extract_js_function(js, "releaseClassSplitUndoOperation")
+    undo_refresh = _extract_js_function(js, "refreshClassSplitUndoOperationControls")
+    point_busy = _extract_js_function(js, "classSplitPointMutationIsBusy")
+    point_in_flight = _extract_js_function(
+        js,
+        "classSplitPointReviewActionInFlight",
+    )
+    mutation_busy = _extract_js_function(js, "classSplitMutationIsBusy")
+    graph_remove = _extract_js_function(
+        js,
+        "removeClassSplitPointsFromActiveReviewGraph",
+    )
+    graph_enqueue = _extract_js_function(js, "enqueueClassSplitGraphMutation")
+    graph_context_capture = _extract_js_function(
+        js,
+        "captureClassSplitGraphMutationContext",
+    )
+    graph_context_current = _extract_js_function(
+        js,
+        "classSplitGraphMutationContextIsCurrent",
+    )
+    graph_settlement_matches = _extract_js_function(
+        js,
+        "classSplitGraphSettlementStateMatches",
+    )
+    graph_identity_current = _extract_js_function(
+        js,
+        "classSplitGraphMutationIdentityIsCurrent",
+    )
+    graph_mutation_result = _extract_js_function(
+        js,
+        "classSplitGraphMutationResult",
+    )
+    graph_settlement_capture = _extract_js_function(
+        js,
+        "captureClassSplitGraphSettlementState",
+    )
+    assert "runClassSplitAcknowledgedAction" not in coordinator
+    assert "dualBBoxResolutionRetryActions" in coordinator
+    assert coordinator.count("saveClassSplitReviewDisposition(") == 1
+    assert coordinator.index("captureClassSplitGraphSettlementState(") < coordinator.index(
+        "await saveClassSplitReviewDisposition("
+    )
+    assert coordinator.index("await graphMutation.completion;") < coordinator.index(
+        "settleClassSplitDualBBoxResolutionUi(operation);"
+    )
+    assert "beginClassSplitUndoOperation(" in restore
+    assert restore.index("beginClassSplitUndoOperation(") < restore.index(
+        "await restoreClassSplitReviewDispositionOwned("
+    )
+    assert "releaseClassSplitUndoOperation(undoOperation)" in restore
+    assert 'outcome: "busy"' in restore
+    assert 'pairAction?.kind === "dual_bbox_resolution"' in restore_owned
+    assert restore_owned.count("saveClassSplitReviewDisposition(") == 1
+    assert "ignoreUndoOperationToken: undoOperation.token" in restore_owned
+    assert "clearPrecondition" in restore_owned
+    assert "expected_revision" in restore_owned
+    assert "undoIdempotencyId" in restore_owned
+    assert "restoredIds.forEach" in restore_owned
+    assert restore_owned.count("applyClassSplitReviewClearLocally(") == 1
+    assert restore_owned.index("await renderClassSplitPlot();") < restore_owned.index(
+        "await restoreClassSplitGraphViewport(viewport);"
+    )
+    assert "retryAction.anchorPointId" in coordinator
+    assert "retryAction.captureTrainingData" in coordinator
+    assert "retryAction.annotationTarget" in coordinator
+    assert "requireClassSplitDualBBoxResolutionRecovery" in coordinator
+    assert "classSplitMutationIsBusy({" in point_busy
+    assert "dualBBoxResolutionOperation" in mutation_busy
+    assert "undoOperationBusy" in mutation_busy
+    assert "enqueueClassSplitGraphMutation" in graph_remove
+
     script = "\n".join(
         [
             "const assert = require('assert').strict;",
+            "const CLASS_SPLIT_REVIEW_OBJECT_KEY_PATTERN = /^(?:cro|crp)_[0-9a-f]{64}$/;",
+            "const CLASS_SPLIT_REVIEW_REVISION_PATTERN = /^rdr1_[0-9a-f]{32}$/;",
+            "const CLASS_SPLIT_REVIEW_DISPOSITION_RECEIPT_SCHEMA = 'class-analysis-review-disposition-receipt-v3';",
+            "const pairKey = 'crp_' + '1'.repeat(64);",
+            "const points = new Map([",
+            "  ['p', {point_id: 'p', class_name: 'LightVehicle', bbox_xyxy: [1, 2, 11, 22], split: 'train', image_relpath: 'image.jpg', frontend_image_key: 'train:image.jpg'}],",
+            "  ['q', {point_id: 'q', class_name: 'Bike', bbox_xyxy: [2, 3, 12, 23], split: 'train', image_relpath: 'image.jpg', frontend_image_key: 'train:image.jpg'}],",
+            "]);",
+            "const conflicts = {",
+            "  p: {enabled: true, review_mode: 'dual_bbox_annotation_resolution', point_id: 'p', current_class: 'LightVehicle', other_point_id: 'q', other_class_name: 'Bike', target_bbox_xyxy: [1, 2, 11, 22], other_bbox_xyxy: [2, 3, 12, 23], split: 'train', image_relpath: 'image.jpg', pair_review_key: pairKey, current_review_object_key: 'cro_' + '2'.repeat(64), other_review_object_key: 'cro_' + '3'.repeat(64)},",
+            "  q: {enabled: true, review_mode: 'dual_bbox_annotation_resolution', point_id: 'q', current_class: 'Bike', other_point_id: 'p', other_class_name: 'LightVehicle', target_bbox_xyxy: [2, 3, 12, 23], other_bbox_xyxy: [1, 2, 11, 22], split: 'train', image_relpath: 'image.jpg', pair_review_key: pairKey, current_review_object_key: 'cro_' + '3'.repeat(64), other_review_object_key: 'cro_' + '2'.repeat(64)},",
+            "};",
+            "points.get('p').dual_bbox_conflict = conflicts.p; points.get('q').dual_bbox_conflict = conflicts.q;",
+            "function getClassSplitPointById(pointId) { return points.get(pointId) || null; }",
+            "function getClassSplitCandidateByPointId(pointId) { return {point_id: pointId}; }",
+            "function getClassSplitDualBBoxConflict(candidate, point) { return conflicts[point?.point_id] || null; }",
+            "function getClassSplitAnnotationTarget(point) { return point ? {point_id: point.point_id, bbox_xyxy: [...point.bbox_xyxy]} : null; }",
             _extract_js_function(js, "classSplitDualBBoxCoordinates"),
             _extract_js_function(js, "classSplitDualBBoxCoordinatesMatch"),
-            "assert.equal(classSplitDualBBoxCoordinatesMatch([921, 918, 946, 958], [921, 917.99952, 946.00032, 957.99984]), true);",
-            "assert.equal(classSplitDualBBoxCoordinatesMatch([921, 918, 946, 958], [921, 917.98, 946, 958]), false);",
-            "const point = {point_id: 'p', class_name: 'LightVehicle', bbox_xyxy: [1, 2, 11, 22], split: 'train', image_relpath: 'image.jpg', frontend_image_key: 'train:image.jpg'};",
-            "const rawConflict = {enabled: true, review_mode: 'dual_bbox_annotation_resolution', other_point_id: 'q', other_class_name: 'Bike', other_bbox_xyxy: [2, 3, 12, 23], split: 'train', image_relpath: 'image.jpg', pair_review_key: 'crp_' + '1'.repeat(64), current_review_object_key: 'cro_' + '2'.repeat(64), other_review_object_key: 'cro_' + '3'.repeat(64)};",
-            "function getClassSplitPointById(pointId) { return pointId === 'p' ? point : null; }",
-            "function getClassSplitCandidateByPointId() { return {}; }",
-            "function getClassSplitDualBBoxConflict() { return rawConflict; }",
             _extract_js_function(js, "getClassSplitDualBBoxContract"),
-            "const contract = getClassSplitDualBBoxContract('p');",
-            "assert.ok(contract);",
-            "assert.equal(contract.conflict.point_id, 'p');",
-            "assert.equal(contract.conflict.current_class, 'LightVehicle');",
-            "assert.deepEqual(contract.conflict.target_bbox_xyxy, point.bbox_xyxy);",
-            "assert.equal(contract.conflict.pair_review_key, rawConflict.pair_review_key);",
-            "const classSplitState = {dismissedWrongIds: new Set(), result: {points: [{point_id: 'p'}, {point_id: 'q'}, {point_id: 'keep'}]}};",
-            "const classSplitElements = {filterClass: null};",
-            "const removed = []; const notices = []; let persisted = 0;",
-            "function removeClassSplitPointFromActiveReviewGraph(pointId, options) { removed.push([pointId, options.force]); }",
-            "function syncClassSplitWrongCandidateSummaryCount() {}",
-            "function renderClassSplitWrongList() {}",
-            "function persistDataQualityExplorerSession() { persisted += 1; return true; }",
-            "function enqueueTaskNotice(message) { notices.push(message); }",
+            "const classSplitState = {currentJobId: 'job-1', analysisGeneration: 4, reviewActionPendingPointIds: new Set(), reviewActionPendingOwners: new Map(), dualBBoxResolutionOperation: null, dualBBoxResolutionOperationToken: 0, dualBBoxResolutionRetryActions: new Map(), undoOperation: null, undoOperationToken: 0, dismissedWrongIds: new Set(), reviewedPointsById: new Map(), lassoPointIds: new Set(['p', 'q']), selectedPointId: 'p', selectedTraceIndex: 0, selectedPointIndex: 0, selectionRevision: 0, multiSelectionSignature: '', boundedTransport: false, result: {points: [...points.values()], wrong_class_candidates: [...points.values()]}, pointsById: points, projectionCoordinates: {}};",
+            "Object.assign(classSplitState, {startupOperation: null, sessionPersistenceOperation: null, multiSelectionActionInFlight: false, annotationBatchOperation: null, graphRecoveryRequired: null, adaptiveRankingOperation: null, relabelInFlight: false, annotationTransactionDrainPromise: null, pendingAnnotationTransactions: new Map(), reviewCommitDrainPromise: null, reviewDispositionReconciliationPointIds: new Set(), reviewDispositionBackgroundReconciliationPointIds: new Set(), pendingReviewDispositionCommits: new Map(), reviewDispositionHydrationTimer: null, reviewDispositionHydrationTargets: new Set(), reviewDispositionHydrationInFlight: new Map(), multiSelectionGraphCommitCount: 0, plotRenderToken: 1});",
+            "const annotationSourceState = {saveInFlight: false, dirtyRecordsByKey: new Map()};",
+            "let actionIdCounter = 0; function createClassSplitTrainingClientActionId() { return 'rda1_' + String(++actionIdCounter).padStart(32, '0'); }",
+            "let trainingCaptureEnabled = false; function isClassSplitTrainingCaptureEnabled() { return trainingCaptureEnabled; }",
             "function classSplitReviewToastKey() { return 'toast'; }",
-            "function setClassSplitJobStatus() {}",
-            "function scheduleClassSplitBackgroundReviewRefresh() {}",
-            _extract_js_function(js, "dismissClassSplitStaleDualBBoxPair"),
-            _extract_js_function(js, "markClassSplitDualBBoxResolved"),
-            _extract_js_function(js, "getClassSplitFilteredPoints"),
-            "dismissClassSplitStaleDualBBoxPair(contract);",
-            "assert.deepEqual([...classSplitState.dismissedWrongIds].sort(), ['p', 'q']);",
-            "assert.deepEqual(removed, [['p', true], ['q', true]]);",
-            "assert.deepEqual(notices, ['BBox not found.']);",
-            "assert.equal(persisted, 1);",
-            "assert.deepEqual(getClassSplitFilteredPoints().map((item) => item.point_id), ['keep']);",
-            "classSplitState.dismissedWrongIds.clear(); removed.length = 0; notices.length = 0;",
-            "markClassSplitDualBBoxResolved('p');",
-            "assert.deepEqual([...classSplitState.dismissedWrongIds].sort(), ['p', 'q']);",
-            "assert.deepEqual(removed, [['p', true], ['q', true]]);",
-            "assert.deepEqual(notices, ['Marked resolved.']);",
-            "assert.equal(persisted, 2);",
-            "assert.deepEqual(getClassSplitFilteredPoints().map((item) => item.point_id), ['keep']);",
+            "function classSplitAsyncRequestIsCurrent(generation, jobId) { return generation === classSplitState.analysisGeneration && jobId === classSplitState.currentJobId; }",
+            "let externalBusy = false; function classSplitRecoveryMutationBlockReason() { return externalBusy ? 'external mutation' : ''; }",
+            "function classSplitReviewDispositionInFlightForJob() { return false; } function classSplitReviewHistoryDeleteOperation() { return null; } function classSplitPendingReviewCommitCountForJob() { return 0; }",
+            "function classSplitPointReviewDispositionInFlight() { return false; } function classSplitPendingReviewMutationState() { return 'not_committed'; }",
+            point_in_flight,
+            mutation_busy,
+            point_busy,
+            "function classSplitReviewDispositionCommitState(error, fallback = 'not_sent') { return error?.commitState || fallback; }",
+            "let settlements = 0; let undoControlRefreshes = 0; function refreshClassSplitControls() { undoControlRefreshes += 1; } function renderClassSplitReviewedList() {} function updateClassSplitMultiSelectionControls() {} function renderClassSplitPendingReviewRecovery() {} function renderClassSplitWrongList() {} function renderClassSplitInspector() {} function syncClassSplitWrongCandidateSummaryCount() {} function renderClassSplitFilterOptions() {} function refreshClassSplitFilteredReviewUi() {} function renderClassSplitReport() {} function renderClassSplitBulkPanel() {} function persistDataQualityExplorerSession() { settlements += 1; } function setSamStatus() {} function hideClassSplitGraphHoverPreview() {} function stopClassSplitPlotFlash() {} function syncClassSplitGraphStatusAfterExternalRestyle() {} function updateClassSplitGraphStatus() {} function getClassSplitGraphViewModel() { return {}; }",
+            "const notices = []; const statuses = []; function enqueueTaskNotice(message) { notices.push(message); } function setClassSplitJobStatus(message, tone) { statuses.push({message, tone}); }",
+            "const hydrated = []; function scheduleClassSplitReviewDispositionHydration(jobId, pointIds) { hydrated.push({jobId, pointIds: [...pointIds]}); }",
+            "let backgroundRefreshes = 0; function scheduleClassSplitBackgroundReviewRefresh() { backgroundRefreshes += 1; }",
+            "const saves = []; let lastAction = null; let saveMode = 'success'; let saveResolve = null; let clearMode = 'success'; let clearResolve = null; let graphShouldFail = false; let revisionCounter = 0; const committedRequests = new Map();",
+            "function makeReceipt(idempotent = false) { revisionCounter += 1; return {jobId: 'job-1', payload: {human_review_revision: 'rdr1_' + String(revisionCounter).padStart(32, '0'), human_reviewed_at: '2026-08-20T10:00:00Z', review_object_key: pairKey, client_action_id: saves.at(-1)?.options?.clientActionId || '', idempotent_replay: idempotent, dual_bbox_pair_resolution: {pair_review_key: pairKey}}}; }",
+            "async function saveClassSplitReviewDisposition(pointId, disposition, options = {}) { if (disposition === 'clear' && clearMode === 'capability_error') throw new Error('capability failed before transport'); const call = {pointId, disposition, options: {...options}}; saves.push(call); if (disposition === 'clear') { if (clearMode === 'deferred') return await new Promise((resolve) => { clearResolve = resolve; }); return {jobId: 'job-1', payload: {status: 'recorded', disposition: 'clear'}}; } if (saveMode === 'deferred') return await new Promise((resolve) => { saveResolve = resolve; }); const actionId = options.clientActionId; const identity = JSON.stringify({pointId, disposition, captureTrainingData: options.captureTrainingData, annotationTarget: options.annotationTarget || null}); const committed = committedRequests.get(actionId); if (committed) { assert.equal(identity, committed.identity); return {...committed.receipt, payload: {...committed.receipt.payload, idempotent_replay: true}}; } const receipt = makeReceipt(false); if (saveMode === 'unknown') { committedRequests.set(actionId, {identity, receipt}); const error = new Error('connection lost'); error.commitState = 'unknown'; throw error; } committedRequests.set(actionId, {identity, receipt}); return receipt; }",
+            "function clearClassSplitFailedReviewAction() {}",
+            "function setClassSplitLastReviewAction(action) { lastAction = action; } function getClassSplitLastReviewAction() { return lastAction; }",
+            "function snapshotClassSplitReviewHistory(reviewed) { return reviewed.filter(Boolean).map((point) => ({pointId: point.point_id, disposition: point.human_review_disposition || '', revision: point.human_review_revision || '', reviewedAt: point.human_reviewed_at ? Date.parse(point.human_reviewed_at) / 1000 : 0, origin: point.human_review_origin || '', persistence: point.human_review_persistence || '', beforeClass: '', targetClass: ''})); }",
+            "function classSplitReviewHistoryEntryMatchesSnapshot(point, snapshot) { return Boolean(point && snapshot && (snapshot.revision ? point.human_review_revision === snapshot.revision : (point.human_review_disposition || '') === snapshot.disposition)); }",
+            "function classSplitReviewDispositionClearPrecondition() { return null; }",
+            "let undoGraphShouldFail = false; let viewportCaptures = 0; let viewportRestores = 0; function captureClassSplitGraphViewport() { viewportCaptures += 1; return {xaxis: [1, 2], yaxis: [3, 4]}; } async function renderClassSplitPlot() { if (undoGraphShouldFail) throw new Error('undo render failed'); } async function restoreClassSplitGraphViewport() { viewportRestores += 1; } function getClassSplitProjectionChoice() { return 'umap'; } function removeClassSplitPointsFromLastReviewAction() { lastAction = null; }",
+            "const graphTrace = {x: [1, 2], y: [3, 4], customdata: ['p', 'q'], text: ['p', 'q'], selectedpoints: [0, 1], marker: {size: [6, 7], color: ['a', 'b'], line: {color: ['c', 'd'], width: [1, 2]}}}; const classSplitElements = {graph: {data: [graphTrace], layout: {uirevision: 'fixed'}}, displayMode: {value: 'wrong_only'}};",
+            "const plotlyUpdates = []; const window = {setTimeout, clearTimeout, Plotly: {async restyle(graph, update, traceIndexes) { if (graphShouldFail) throw new Error('restyle failed'); plotlyUpdates.push({update, traceIndexes}); const trace = graph.data[traceIndexes[0]]; Object.entries(update).forEach(([key, values]) => { const value = values[0]; if (key === 'marker.size') trace.marker.size = value; else if (key === 'marker.color') trace.marker.color = value; else if (key === 'marker.line.color') trace.marker.line.color = value; else if (key === 'marker.line.width') trace.marker.line.width = value; else trace[key] = value; }); }}};",
+            "const CLASS_SPLIT_GRAPH_MUTATION_NOTICE_MS = 100000; const CLASS_SPLIT_GRAPH_MUTATION_STALL_MS = 100000; let classSplitGraphMutationSequence = 0; let classSplitGraphMutationQueue = Promise.resolve();",
+            graph_context_capture,
+            graph_context_current,
+            graph_settlement_matches,
+            graph_identity_current,
+            graph_mutation_result,
+            graph_settlement_capture,
+            "function replaceClassSplitGraphAfterMutationStall() { return Promise.resolve(false); }",
+            graph_enqueue,
+            graph_remove,
+            _extract_js_function(js, "classSplitPointIdSetsEqual"),
+            _extract_js_function(js, "classSplitDualBBoxResolutionOperationIsCurrent"),
+            _extract_js_function(js, "classSplitDualBBoxResolutionIdentityIsCurrent"),
+            _extract_js_function(js, "classSplitDualBBoxResolutionOutcomeFromError"),
+            _extract_js_function(js, "requireClassSplitDualBBoxResolutionRecovery"),
+            _extract_js_function(js, "releaseClassSplitDualBBoxResolutionOperation"),
+            _extract_js_function(js, "classSplitExistingDualBBoxResolutionReceipt"),
+            _extract_js_function(js, "settleClassSplitDualBBoxResolutionUi"),
+            _extract_js_function(js, "applyClassSplitDualBBoxReviewLocally"),
+            _extract_js_function(js, "applyClassSplitReviewClearLocally"),
+            undo_begin,
+            undo_current,
+            undo_release,
+            undo_refresh,
+            restore_owned,
+            restore,
+            coordinator.replace("function markClassSplitDualBBoxResolved", "async function markClassSplitDualBBoxResolved", 1),
+            "function resetReviewState() { for (const point of points.values()) { delete point.human_review_disposition; delete point.human_reviewed_at; delete point.human_review_revision; delete point.human_review_origin; delete point.human_review_persistence; } classSplitState.dismissedWrongIds.clear(); classSplitState.reviewedPointsById.clear(); classSplitState.lassoPointIds = new Set(['p', 'q']); classSplitState.selectedPointId = 'p'; classSplitState.graphRecoveryRequired = null; Object.assign(graphTrace, {x: [1, 2], y: [3, 4], customdata: ['p', 'q'], text: ['p', 'q'], selectedpoints: [0, 1]}); Object.assign(graphTrace.marker, {size: [6, 7], color: ['a', 'b']}); Object.assign(graphTrace.marker.line, {color: ['c', 'd'], width: [1, 2]}); lastAction = null; }",
+            "(async () => {",
+            "  saveMode = 'deferred';",
+            "  const firstPromise = markClassSplitDualBBoxResolved(null, 'p', 'q');",
+            "  assert.ok(classSplitState.dualBBoxResolutionOperation);",
+            "  assert.deepEqual([...classSplitState.reviewActionPendingPointIds].sort(), ['p', 'q']);",
+            "  const busy = await markClassSplitDualBBoxResolved(null, 'p', 'q');",
+            "  assert.equal(busy.outcome, 'rejected');",
+            "  assert.equal(saves.length, 1);",
+            "  saveResolve(makeReceipt());",
+            "  const first = await firstPromise;",
+            "  assert.equal(first.outcome, 'committed');",
+            "  assert.equal(points.get('p').human_review_disposition, 'resolved_no_change');",
+            "  assert.equal(points.get('q').human_review_disposition, 'resolved_no_change');",
+            "  assert.deepEqual([...classSplitState.reviewedPointsById.keys()], ['p']);",
+            "  assert.deepEqual(graphTrace.customdata, []);",
+            "  assert.deepEqual(graphTrace.x, []);",
+            "  assert.equal(plotlyUpdates.length, 1);",
+            "  assert.equal(settlements, 1);",
+            "  assert.equal(lastAction.kind, 'dual_bbox_resolution');",
+            "  assert.deepEqual(lastAction.pointIds, ['p', 'q']);",
+            "  assert.equal(classSplitState.dualBBoxResolutionOperation, null);",
+            "  assert.deepEqual([...classSplitState.reviewActionPendingPointIds], []);",
+            "  assert.deepEqual([...classSplitState.lassoPointIds], []);",
+            "  resetReviewState(); externalBusy = true; const savesBeforeBusy = saves.length; const blocked = await markClassSplitDualBBoxResolved(null, 'q', 'p'); assert.equal(blocked.outcome, 'rejected'); assert.equal(saves.length, savesBeforeBusy); externalBusy = false;",
+            "  const savesBeforeMismatch = saves.length; const mismatch = await markClassSplitDualBBoxResolved(null, 'p', 'missing'); assert.equal(mismatch.outcome, 'rejected'); assert.equal(saves.length, savesBeforeMismatch);",
+            "  resetReviewState(); trainingCaptureEnabled = true; const beforeUnknown = saves.length; saveMode = 'unknown';",
+            "  const unknown = await markClassSplitDualBBoxResolved(null, 'p', 'q');",
+            "  assert.equal(unknown.outcome, 'commit_unknown');",
+            "  assert.equal(unknown.settlementOutcome, 'recovery_required');",
+            "  assert.equal(hydrated.length, 1);",
+            "  const unknownActionId = saves.at(-1).options.clientActionId;",
+            "  assert.equal(saves.at(-1).pointId, 'p');",
+            "  assert.equal(saves.at(-1).options.captureTrainingData, true);",
+            "  assert.equal(classSplitState.dualBBoxResolutionRetryActions.size, 1);",
+            "  trainingCaptureEnabled = false; saveMode = 'replay';",
+            "  const retried = await markClassSplitDualBBoxResolved(null, 'q', 'p');",
+            "  assert.equal(retried.outcome, 'idempotent_committed');",
+            "  assert.equal(saves.at(-1).options.clientActionId, unknownActionId);",
+            "  assert.equal(saves.at(-1).pointId, 'p');",
+            "  assert.equal(saves.at(-1).options.captureTrainingData, true);",
+            "  assert.equal(saves.at(-1).options.annotationTarget.point_id, 'p');",
+            "  assert.equal(saves.length, beforeUnknown + 2);",
+            "  assert.equal(classSplitState.dualBBoxResolutionRetryActions.size, 0);",
+            "  resetReviewState(); trainingCaptureEnabled = false; saveMode = 'deferred'; const plotlyBeforeStale = plotlyUpdates.length;",
+            "  const stalePromise = markClassSplitDualBBoxResolved(null, 'p', 'q');",
+            "  classSplitState.analysisGeneration = 5; saveResolve(makeReceipt());",
+            "  const stale = await stalePromise;",
+            "  assert.equal(stale.outcome, 'stale_ui');",
+            "  assert.equal(points.get('p').human_review_disposition, undefined);",
+            "  assert.equal(points.get('q').human_review_disposition, undefined);",
+            "  assert.equal(plotlyUpdates.length, plotlyBeforeStale);",
+            "  classSplitState.analysisGeneration = 4; resetReviewState(); saveMode = 'success'; graphShouldFail = true; const savesBeforeViewFailure = saves.length;",
+            "  const viewFailure = await markClassSplitDualBBoxResolved(null, 'p', 'q');",
+            "  assert.equal(viewFailure.outcome, 'view_failed');",
+            "  assert.equal(viewFailure.settlementOutcome, 'recovery_required');",
+            "  assert.equal(saves.length, savesBeforeViewFailure + 1);",
+            "  assert.equal(backgroundRefreshes, 1);",
+            "  assert.equal(settlements, 3);",
+            "  assert.equal(classSplitState.dualBBoxResolutionOperation, null);",
+            "  const savesBeforeViewRetry = saves.length; graphShouldFail = false; const viewRetry = await markClassSplitDualBBoxResolved(null, 'q', 'p');",
+            "  assert.equal(viewRetry.outcome, 'idempotent_committed');",
+            "  assert.equal(saves.length, savesBeforeViewRetry);",
+            "  assert.equal(settlements, 4);",
+            "  const pairAction = lastAction; const savesBeforeUndo = saves.length; const viewportCapturesBeforeUndo = viewportCaptures; const viewportRestoresBeforeUndo = viewportRestores; clearMode = 'capability_error';",
+            "  await assert.rejects(() => restoreClassSplitReviewDisposition(pairAction.anchorPointId, {pairAction}), /capability failed before transport/);",
+            "  assert.equal(saves.length, savesBeforeUndo); assert.equal(classSplitState.undoOperation, null);",
+            "  clearMode = 'deferred'; const controlsBeforeUndo = undoControlRefreshes;",
+            "  const staleUndoPromise = restoreClassSplitReviewDisposition(pairAction.anchorPointId, {pairAction});",
+            "  assert.ok(classSplitState.undoOperation); assert.equal(classSplitMutationIsBusy(), true); assert.ok(undoControlRefreshes > controlsBeforeUndo);",
+            "  const racedUndo = await restoreClassSplitReviewDisposition(pairAction.anchorPointId, {pairAction}); assert.equal(racedUndo.outcome, 'busy'); assert.equal(racedUndo.settlementOutcome, 'not_started'); assert.equal(saves.length, savesBeforeUndo + 1);",
+            "  points.get('q').human_review_revision = 'rdr1_' + '9'.repeat(32);",
+            "  clearResolve({jobId: 'job-1', payload: {status: 'recorded', disposition: 'clear'}});",
+            "  const staleUndo = await staleUndoPromise;",
+            "  assert.equal(classSplitState.undoOperation, null);",
+            "  assert.equal(staleUndo.outcome, 'stale_ui'); assert.equal(staleUndo.settlementOutcome, 'recovery_required'); assert.equal(staleUndo.recoveryCause, 'stale_ui');",
+            "  assert.equal(points.get('p').human_review_disposition, 'resolved_no_change'); assert.equal(points.get('q').human_review_disposition, 'resolved_no_change');",
+            "  assert.equal(pairAction.undoCommitted, true); assert.equal(pairAction.undoSettlementOutcome, 'recovery_required');",
+            "  points.get('q').human_review_revision = pairAction.revision; clearMode = 'success'; undoGraphShouldFail = true;",
+            "  const undoViewFailure = await restoreClassSplitReviewDisposition(pairAction.anchorPointId, {pairAction});",
+            "  assert.equal(undoViewFailure.outcome, 'view_failed');",
+            "  assert.equal(undoViewFailure.settlementOutcome, 'recovery_required'); assert.equal(undoViewFailure.recoveryCause, 'view_failed');",
+            "  assert.equal(pairAction.undoCommitted, true);",
+            "  assert.equal(saves.length, savesBeforeUndo + 1);",
+            "  assert.equal(saves.at(-1).disposition, 'clear');",
+            "  assert.equal(saves.at(-1).options.clearPrecondition.expected_revision, pairAction.revision);",
+            "  assert.equal(points.get('p').human_review_disposition, undefined);",
+            "  assert.equal(points.get('q').human_review_disposition, undefined);",
+            "  const savesAfterCommittedUndo = saves.length; undoGraphShouldFail = false;",
+            "  const undoRecovered = await restoreClassSplitReviewDisposition(pairAction.anchorPointId, {pairAction});",
+            "  assert.equal(undoRecovered.outcome, 'committed');",
+            "  assert.equal(undoRecovered.settlementOutcome, 'complete'); assert.equal(pairAction.undoSettlementOutcome, 'complete'); assert.equal(pairAction.undoRecoveryCause, null);",
+            "  assert.equal(saves.length, savesAfterCommittedUndo);",
+            "  assert.equal(viewportCaptures - viewportCapturesBeforeUndo, 2);",
+            "  assert.equal(viewportRestores - viewportRestoresBeforeUndo, 1);",
+            "  assert.equal(lastAction, null);",
+            "})().catch((error) => { console.error(error); process.exit(1); });",
         ]
     )
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
-
 
 def test_class_split_projection_setting_diffs_compare_live_controls_to_run_metadata():
     js = _js()
@@ -1138,12 +1360,16 @@ def test_data_quality_acknowledged_actions_reserve_mirrors_and_dual_pair():
             "  currentJobId: 'job-1',",
             "  analysisGeneration: 7,",
             "  reviewActionPendingPointIds: new Set(),",
+            "  reviewActionPendingOwners: new Map(),",
+            "  reviewActionOperationToken: 0,",
             "  selectedPointId: 'pair-b',",
             "};",
             "function classSplitAsyncRequestIsCurrent(generation, jobId) {",
             "  return generation === 7 && jobId === 'job-1';",
             "}",
             "function classSplitMutationIsBusy() { return false; }",
+            "function classSplitPointMutationIsBusy() { return false; }",
+            "function getClassSplitPointById() { return null; }",
             "let historyDeleteActive = false;",
             "function classSplitReviewHistoryDeleteOperation() { return historyDeleteActive ? {} : null; }",
             "let recoveryRenders = 0;",
@@ -1157,16 +1383,19 @@ def test_data_quality_acknowledged_actions_reserve_mirrors_and_dual_pair():
             "function refreshClassSplitControls() { controlRefreshes += 1; }",
             "function updateClassSplitMultiSelectionControls() {}",
             "function enqueueTaskNotice() {}",
+            "function setClassSplitJobStatus() {}",
             "function setSamStatus() {}",
             acknowledged,
             "(async () => {",
             "  const first = new FakeButton('pair-a', 'pair-b');",
             "  const mirror = new FakeButton('pair-b', 'pair-a');",
             "  const calls = [];",
-            "  runClassSplitAcknowledgedAction(first, () => { calls.push('first'); });",
+            "  let firstOperation = null;",
+            "  runClassSplitAcknowledgedAction(first, (operation) => { firstOperation = operation; calls.push('first'); });",
             "  assert.equal(first.disabled, true);",
             "  assert.equal(first.classList.contains('is-acknowledged'), true);",
             "  assert.deepEqual([...classSplitState.reviewActionPendingPointIds].sort(), ['pair-a', 'pair-b']);",
+            "  assert.equal(classSplitState.reviewActionPendingOwners.get('pair-a'), 1);",
             "  assert.equal(scheduled.length, 0);",
             "  assert.deepEqual(calls, []);",
             "  runClassSplitAcknowledgedAction(mirror, () => { calls.push('mirror-raced'); });",
@@ -1175,12 +1404,10 @@ def test_data_quality_acknowledged_actions_reserve_mirrors_and_dual_pair():
             "  assert.equal(recoveryRenders, 0);",
             "  assert.equal(inspectorRenders, 0);",
             "  await new Promise((resolve) => setImmediate(resolve));",
-            "  assert.equal(scheduled.length, 1);",
-            "  assert.equal(scheduled[0].delay, 280);",
-            "  scheduled.shift().callback();",
-            "  await new Promise((resolve) => setImmediate(resolve));",
             "  assert.deepEqual(calls, ['first']);",
+            "  assert.equal(firstOperation.token, 1);",
             "  assert.deepEqual([...classSplitState.reviewActionPendingPointIds], []);",
+            "  assert.equal(classSplitState.reviewActionPendingOwners.size, 0);",
             "  assert.equal(recoveryRenders, 1);",
             "  assert.equal(inspectorRenders, 1);",
             "  assert.equal(reviewedListRenders, 2);",
@@ -1188,13 +1415,21 @@ def test_data_quality_acknowledged_actions_reserve_mirrors_and_dual_pair():
             "  assert.equal(first.disabled, false);",
             "  runClassSplitAcknowledgedAction(mirror, () => { calls.push('mirror-after'); });",
             "  await new Promise((resolve) => setImmediate(resolve));",
-            "  assert.equal(scheduled.length, 1);",
-            "  scheduled.shift().callback();",
-            "  await new Promise((resolve) => setImmediate(resolve));",
             "  assert.deepEqual(calls, ['first', 'mirror-after']);",
             "  assert.deepEqual([...classSplitState.reviewActionPendingPointIds], []);",
             "  assert.equal(reviewedListRenders, 4);",
             "  assert.equal(controlRefreshes, 4);",
+            "  let releaseOwnedAction;",
+            "  runClassSplitAcknowledgedAction(first, () => new Promise((resolve) => { releaseOwnedAction = resolve; }));",
+            "  await new Promise((resolve) => setImmediate(resolve));",
+            "  const staleToken = classSplitState.reviewActionPendingOwners.get('pair-a');",
+            "  classSplitState.reviewActionPendingOwners.set('pair-a', staleToken + 1);",
+            "  classSplitState.reviewActionPendingOwners.set('pair-b', staleToken + 1);",
+            "  releaseOwnedAction();",
+            "  await new Promise((resolve) => setImmediate(resolve));",
+            "  assert.equal(classSplitState.reviewActionPendingOwners.get('pair-a'), staleToken + 1);",
+            "  assert.equal(classSplitState.reviewActionPendingPointIds.has('pair-a'), true);",
+            "  classSplitState.reviewActionPendingOwners.clear(); classSplitState.reviewActionPendingPointIds.clear();",
             "  historyDeleteActive = true;",
             "  runClassSplitAcknowledgedAction(first, () => { calls.push('during-delete'); });",
             "  assert.equal(scheduled.length, 0);",
@@ -3697,15 +3932,23 @@ def test_graph_review_removes_only_the_reviewed_point_from_the_live_trace():
     restore_viewport = "async " + _extract_js_function(
         js, "restoreClassSplitGraphViewport"
     )
+    enqueue_mutation = _extract_js_function(
+        js, "enqueueClassSplitGraphMutation"
+    )
+    mutation_result = _extract_js_function(js, "classSplitGraphMutationResult")
+    mutation_identity = _extract_js_function(
+        js, "classSplitGraphMutationIdentityIsCurrent"
+    )
     remove_points = _extract_js_function(
         js, "removeClassSplitPointsFromActiveReviewGraph"
-    )
-    remove_point = _extract_js_function(
-        js, "removeClassSplitPointFromActiveReviewGraph"
     )
     script = "\n".join(
         [
             "const assert = require('assert').strict;",
+            "const CLASS_SPLIT_GRAPH_MUTATION_NOTICE_MS = 500;",
+            "const CLASS_SPLIT_GRAPH_MUTATION_STALL_MS = 10000;",
+            "let classSplitGraphMutationQueue = Promise.resolve();",
+            "let classSplitGraphMutationSequence = 0;",
             "const updates = [];",
             "const graph = { data: [{",
             "  x: [1, 2, 3], y: [4, 5, 6],",
@@ -3714,7 +3957,7 @@ def test_graph_review_removes_only_the_reviewed_point_from_the_live_trace():
             "  marker: {size: [8, 10, 8], color: ['a', 'r', 'b'], line: {color: ['x', 'y', 'z'], width: [1, 2, 1]}},",
             "}]};",
             "const classSplitElements = {graph, displayMode: {value: 'wrong_only'}};",
-            "const classSplitState = {selectedPointId: 'remove-me', lassoPointIds: new Set(['remove-me']), selectionRevision: 0, multiSelectionSignature: '', multiSelectionGraphCommitCount: 0};",
+            "const classSplitState = {currentJobId: '', analysisGeneration: 0, graphRecoveryRequired: null, selectedPointId: 'remove-me', lassoPointIds: new Set(['remove-me']), selectionRevision: 0, multiSelectionSignature: '', multiSelectionGraphCommitCount: 0};",
             "let inspectorRenders = 0; let bulkRenders = 0; let flashStops = 0;",
             "function hideClassSplitGraphHoverPreview() {}",
             "function stopClassSplitPlotFlash() { flashStops += 1; }",
@@ -3723,16 +3966,111 @@ def test_graph_review_removes_only_the_reviewed_point_from_the_live_trace():
                 "function renderClassSplitPlot() {}",
                 "function captureClassSplitGraphMutationContext() { return {}; }",
                 "function classSplitGraphMutationContextIsCurrent() { return true; }",
-                "const window = {Plotly: {restyle(_graph, update, traces) { updates.push({update, traces}); return Promise.resolve(); }}};",
+                "function getClassSplitProjectionChoice() { return 'umap'; }",
+                "function updateClassSplitGraphStatus() {}",
+                "function getClassSplitGraphViewModel() { return {}; }",
+                "let recoveryCalls = 0;",
+                "async function replaceClassSplitGraphAfterMutationStall() { recoveryCalls += 1; if (!window.Plotly) throw new Error('replacement failed'); return false; }",
+                "const window = {",
+                "  setTimeout() { return 1; }, clearTimeout() {},",
+                "  Plotly: {restyle(_graph, update, traces) { updates.push({update, traces}); return Promise.resolve(); }},",
+                "};",
                 capture_viewport,
                 restore_viewport,
+                enqueue_mutation,
+                mutation_result,
+                mutation_identity,
                 remove_points,
-            remove_point,
-            "assert.equal(removeClassSplitPointFromActiveReviewGraph('remove-me'), true);",
-            "assert.equal(classSplitState.selectedPointId, '');",
-            "assert.equal(inspectorRenders, 1); assert.equal(bulkRenders, 1); assert.equal(flashStops, 1);",
-            "assert.deepEqual(updates[0].update.customdata[0], ['keep-a', 'keep-b']);",
-            "assert.deepEqual(updates[0].update.selectedpoints[0], [1]);",
+            "(async () => {",
+            "  const result = removeClassSplitPointsFromActiveReviewGraph(['remove-me']);",
+            "  assert.equal(result.removed, true);",
+            "  assert.equal(classSplitState.selectedPointId, '');",
+            "  assert.equal(inspectorRenders, 1); assert.equal(bulkRenders, 1); assert.equal(flashStops, 1);",
+            "  const settlement = await result.completion;",
+            "  assert.equal(settlement.status, 'applied'); assert.equal(settlement.reconciled, true);",
+            "  assert.deepEqual(updates[0].update.customdata[0], ['keep-a', 'keep-b']);",
+            "  assert.deepEqual(updates[0].update.selectedpoints[0], [1]);",
+            "  assert.equal(recoveryCalls, 0);",
+            "  classSplitElements.graph = {data: [{x: [7], y: [8], customdata: ['remove-two'], text: ['two'], marker: {}}]};",
+            "  classSplitState.selectedPointId = 'remove-two'; classSplitState.lassoPointIds = new Set(['remove-two']);",
+            "  window.Plotly = null;",
+            "  const failed = removeClassSplitPointsFromActiveReviewGraph(['remove-two']);",
+            "  await assert.rejects(failed.completion, (error) => error.classSplitGraphMutationResult?.status === 'failed');",
+            "  assert.equal(recoveryCalls, 1);",
+            "  assert.equal(classSplitState.graphRecoveryRequired.reason, 'replacement failed');",
+            "})().catch((error) => { console.error(error); process.exit(1); });",
+        ]
+    )
+    subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
+
+
+def test_graph_replacement_timeout_detaches_the_hung_plot_and_releases_recovery():
+    replacement = "async " + _extract_js_function(
+        _js(), "replaceClassSplitGraphAfterMutationStall"
+    )
+    script = "\n".join(
+        [
+            "const assert = require('assert').strict;",
+            "const CLASS_SPLIT_GRAPH_MUTATION_STALL_MS = 10;",
+            "function makeNode(name) {",
+            "  return {name, data: [{}], layout: {}, children: [], innerHTML: '',",
+            "    cloneNode() { return makeNode(`${name}-clone`); },",
+            "    replaceWith(next) { if (classSplitElements.graph === this) classSplitElements.graph = next; },",
+            "    querySelector() { return null; }};",
+            "}",
+            "const stale = makeNode('stale');",
+            "const classSplitElements = {graph: stale};",
+            "const classSplitState = {currentJobId: 'job', analysisGeneration: 4, plotRenderToken: 2, graphRecoveryRequired: null};",
+            "function getClassSplitProjectionChoice() { return 'umap'; }",
+            "function getClassSplitGraphViewModel() { return {points: [{}]}; }",
+            "function classSplitGraphHasLivePlot() { return false; }",
+            "async function restoreClassSplitGraphViewport() {}",
+            "function syncClassSplitGraphStatusAfterExternalRestyle() {}",
+            "function renderClassSplitPlot() { return new Promise(() => {}); }",
+            "const window = {setTimeout(callback) { Promise.resolve().then(callback); return 1; }, clearTimeout() {}, location: {reload() {}}};",
+            replacement,
+            "(async () => {",
+            "  const result = await replaceClassSplitGraphAfterMutationStall(stale, null, 'test stall');",
+            "  assert.equal(result, false);",
+            "  assert.equal(classSplitState.graphRecoveryRequired.jobId, 'job');",
+            "  assert.notEqual(classSplitElements.graph, stale);",
+            "})().catch((error) => { console.error(error); process.exit(1); });",
+        ]
+    )
+    subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
+
+
+def test_annotation_batch_recovery_ownership_and_backoff_contract():
+    js = _js()
+    setter = _extract_js_function(js, "setClassSplitAnnotationBatchRecovery")
+    updater = _extract_js_function(js, "updateClassSplitAnnotationBatchRecovery")
+    clearer = _extract_js_function(js, "clearClassSplitAnnotationBatchRecovery")
+    delay = _extract_js_function(js, "classSplitAnnotationBatchRetryDelayMs")
+    progress = _extract_js_function(js, "formatClassSplitAnnotationBatchProgress")
+    script = "\n".join(
+        [
+            "const assert = require('assert').strict;",
+            "const values = new Map();",
+            "const localStorage = {getItem(key) { return values.get(key) || null; }, setItem(key, value) { values.set(key, value); }, removeItem(key) { values.delete(key); }};",
+            "const classSplitState = {annotationBatchOperation: null};",
+            "function parseJsonObjectSafe(value, fallback) { try { return JSON.parse(value); } catch (_) { return fallback; } }",
+            setter,
+            updater,
+            clearer,
+            delay,
+            progress,
+            "setClassSplitAnnotationBatchRecovery({batchId: 'batch-a', jobId: 'job-a', phase: 'creating'});",
+            "assert.equal(updateClassSplitAnnotationBatchRecovery('batch-b', 'job-a', {phase: 'wrong'}), false);",
+            "clearClassSplitAnnotationBatchRecovery('batch-a', 'job-b');",
+            "assert.equal(classSplitState.annotationBatchOperation.batchId, 'batch-a');",
+            "assert.ok(localStorage.getItem('tator.classSplit.annotationBatch.v1'));",
+            "assert.equal(updateClassSplitAnnotationBatchRecovery('batch-a', 'job-a', {phase: 'running'}), true);",
+            "assert.equal(classSplitState.annotationBatchOperation.phase, 'running');",
+            "clearClassSplitAnnotationBatchRecovery('batch-a', 'job-a');",
+            "assert.equal(classSplitState.annotationBatchOperation, null);",
+            "assert.equal(localStorage.getItem('tator.classSplit.annotationBatch.v1'), null);",
+            "assert.deepEqual([1, 2, 3].map(classSplitAnnotationBatchRetryDelayMs), [250, 750, 1500]);",
+            "assert.match(formatClassSplitAnnotationBatchProgress({declared_count: 5, settled_count: 5, succeeded_count: 2, conflict_count: 1, failed_count: 1, cancelled_count: 1}), /1 cancelled$/);",
         ]
     )
     subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
@@ -6755,7 +7093,9 @@ def test_data_quality_explorer_multi_selection_vignette_session_contract():
     assert "selectedIds.length > 1" in panel
     assert "classSplitState.lassoPointIds.delete(safePointId)" in remove
     assert "renderClassSplitPlot();" in remove
-    assert "const selectedIds = getClassSplitMultiSelectionIds();" in disposition
+    assert "const suppliedPointIds = Array.isArray(options.pointIds);" in disposition
+    assert "(suppliedPointIds ? options.pointIds : getClassSplitMultiSelectionIds())" in disposition
+    assert "selectedIds.length < (suppliedPointIds ? 1 : 2)" in disposition
     assert "saveClassSplitReviewDisposition(" in disposition
     assert "classSplitMutationIsBusy()" in disposition
     assert "deferUi: true" in disposition
@@ -6767,9 +7107,6 @@ def test_data_quality_explorer_multi_selection_vignette_session_contract():
     assert "ignoreReviewActionPointIds" in mutation_busy
     assert "renderedPointIds" in js
     assert "classSplitGraphMutationContextIsCurrent(mutationContext)" in graph_remove
-    assert "keepIndexByOriginalIndex" in graph_remove
-    assert "keepIndices.indexOf(index)" not in graph_remove
-    assert "syncAfterExternalRestyle" in graph_remove
     assert "classSplitAsyncRequestIsCurrent(requestGeneration, jobId)" in save_disposition
     bulk_html = html[
         html.index('id="classSplitBulkPanel"'):
@@ -8030,20 +8367,51 @@ def test_class_split_result_reload_keeps_terminal_reviews_out_of_active_graph():
     add_reviewed = "classSplitState.dismissedWrongIds.add(pointId);"
 
     assert apply_result.count(initialize_hidden) == 1
-    assert apply_result.count(add_reviewed) == 2
+    assert apply_result.count(add_reviewed) >= 2
+    assert "classSplitReviewDispositionIsTerminal(" in apply_result
+    terminal_helper = _extract_js_function(
+        js,
+        "classSplitReviewDispositionIsTerminal",
+    )
+    assert "CLASS_SPLIT_REVIEW_DISPOSITIONS.includes" in terminal_helper
+    assert '"resolved_no_change"' in js[
+        js.index("const CLASS_SPLIT_REVIEW_DISPOSITIONS"):
+        js.index("const CLASS_SPLIT_REVIEW_DISPOSITION_RECEIPT_SCHEMA")
+    ]
     assert apply_result.index(initialize_hidden) < apply_result.index(
         "(Array.isArray(result.points) ? result.points : []).forEach"
     )
-    assert apply_result.index(add_reviewed) > apply_result.index(
-        '"keep_both_boxes"'
+    terminal_check = apply_result.index(
+        "if (classSplitReviewDispositionIsTerminal("
     )
-    assert apply_result.index(add_reviewed) > apply_result.index(
-        '"unresolved"'
-    )
+    assert apply_result.index(add_reviewed, terminal_check) > terminal_check
     assert "const reviewedPairKeys = new Set(" in apply_result
     assert "point?.human_review_pair_key" in apply_result
     assert "point?.dual_bbox_conflict?.pair_review_key" in apply_result
     assert "classSplitState.dismissedWrongIds.add(pointId);" in apply_result
+
+    script = "\n".join(
+        [
+            "const assert = require('assert').strict;",
+            "const pairKey = 'crp_' + '7'.repeat(64);",
+            "const CLASS_SPLIT_REVIEW_DISPOSITIONS = ['resolved_no_change'];",
+            "const classSplitElements = {vignetteCategory: null, showAllRough: null, displayMode: {value: 'all'}, filterClass: {value: ''}};",
+            "const classSplitState = {currentJobId: '', analysisGeneration: 1, clusterSearchRequestId: 0, disclosureState: new Set(), vignetteFilterJobId: '', capabilities: {}, lastRequest: {}, pendingRestoreSelectedPointId: '', selectionRevision: 0, pendingReviewDispositionCommits: new Map(), pendingPreviousReviewState: null};",
+            "function clearClassSplitRefinementPreviewCache() {} function clearClassSplitContextPreviewCache() {} function stopClassSplitClusterPoll() {} function advanceClassSplitAnalysisGeneration() { classSplitState.analysisGeneration += 1; } function resetClassSplitTrainingCapture() {} function normalizeClassSplitProjectionChoice(value) { return value || 'umap'; } function classSplitRefinementNeedsRoughFallback() { return false; } function syncClassSplitSetupControlsFromResult() {} function inferClassSplitResultSelectedProjection() { return 'umap'; } function setClassSplitProjectionChoice(value) { classSplitState.projectionChoice = value; } function invalidateClassSplitPointImageLookup() {} function classSplitPendingReviewMutationState() { return 'not_committed'; } function applyClassSplitCommittedPendingReview() {} function rebuildClassSplitCandidateIndexes() {} function clearClassSplitDatasetAnalysis() {} function stopClassSplitPlotFlash() {} function renderClassSplitResult() {} function scheduleClassSplitPendingReviewCommitDrain() {} function enqueueTaskNotice() {} let persisted = 0; function persistDataQualityExplorerSession() { persisted += 1; }",
+            terminal_helper,
+            apply_result,
+            "function payload(reviewed) { const p = {point_id: 'p', dual_bbox_conflict: {pair_review_key: pairKey}}; const q = {point_id: 'q', dual_bbox_conflict: {pair_review_key: pairKey}}; return {points: [p, q], wrong_class_candidates: [p, q], projection_options: {selected: 'umap'}, review_history_points: reviewed ? [{point_id: 'p', human_review_disposition: 'resolved_no_change', human_review_pair_key: pairKey}] : []}; }",
+            "applyClassSplitResultPayload(payload(true), 'job-1');",
+            "assert.deepEqual([...classSplitState.dismissedWrongIds].sort(), ['p', 'q']);",
+            "assert.deepEqual([...classSplitState.reviewedPointsById.keys()], ['p']);",
+            "assert.equal(classSplitState.pointsById.get('p').human_review_pair_key, pairKey);",
+            "applyClassSplitResultPayload(payload(false), 'job-1');",
+            "assert.deepEqual([...classSplitState.dismissedWrongIds], []);",
+            "assert.deepEqual([...classSplitState.reviewedPointsById.keys()], []);",
+            "assert.equal(persisted, 2);",
+        ]
+    )
+    subprocess.run(["node", "-e", script], cwd=REPO_ROOT, check=True)
 
 
 def test_selected_class_refinement_snapshot_includes_full_anchor_context():

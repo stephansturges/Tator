@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from contextlib import nullcontext
 import hashlib
 from types import SimpleNamespace
 
@@ -168,14 +169,37 @@ def _install_transaction_harness(monkeypatch, tmp_path, image_lines):
         }
 
     job = SimpleNamespace(job_id=JOB_ID, summary={"labelmap": list(LABELMAP)})
+
+    def targeted_snapshot(source_kind, source_id, requested_records):
+        assert source_kind == "transient"
+        assert source_id == SOURCE_ID
+        refreshed = _refresh_manifest_entity_revisions(manifest, store)
+        requested_keys = {
+            api._class_analysis_annotation_image_key(dict(record))
+            for record in requested_records
+            if isinstance(record, dict)
+        }
+        return {
+            "labelmap": list(refreshed["labelmap"]),
+            "session_revision": int(refreshed["session_revision"]),
+            "rows_by_key": {
+                f"{row['split']}:{row['image_relpath']}": deepcopy(row)
+                for row in refreshed["images"]
+                if f"{row['split']}:{row['image_relpath']}" in requested_keys
+            },
+        }
+
     monkeypatch.setattr(api, "_class_analysis_annotation_entity_store", lambda: store)
     monkeypatch.setattr(api, "_get_class_analysis_job", lambda job_id: job)
     monkeypatch.setattr(
         api,
+        "_class_analysis_annotation_transaction_snapshot",
+        targeted_snapshot,
+    )
+    monkeypatch.setattr(
+        api,
         "_class_analysis_annotation_transaction_manifest",
-        lambda source_kind, source_id: _refresh_manifest_entity_revisions(
-            manifest, store
-        ),
+        lambda *_args, **_kwargs: pytest.fail("transaction scanned the full manifest"),
     )
     monkeypatch.setattr(api, "_class_analysis_annotation_transaction_save", save_snapshot)
     monkeypatch.setattr(
@@ -208,6 +232,83 @@ def _install_transaction_harness(monkeypatch, tmp_path, image_lines):
         review_calls=review_calls,
         state=state,
     )
+
+
+@pytest.mark.parametrize("source_kind", ["transient", "dataset"])
+def test_annotation_transaction_snapshot_captures_one_locked_live_row_per_image(
+    monkeypatch, source_kind
+) -> None:
+    calls = []
+
+    def record(_source_kind, _source_id, split, image_relpath):
+        calls.append((split, image_relpath))
+        return {
+            "split": split,
+            "image_relpath": image_relpath,
+            "label_lines": ["0 0.5 0.5 0.2 0.3"],
+        }
+
+    monkeypatch.setattr(
+        api, "_class_analysis_annotation_transaction_record", record
+    )
+    if source_kind == "transient":
+        monkeypatch.setattr(
+            api,
+            "_resolve_transient_session",
+            lambda _source_id: {"classes": ["One", "Two"], "_state_revision": 17},
+        )
+    else:
+        entry = {"classes": ["One", "Two"]}
+        monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _source_id: entry)
+        monkeypatch.setattr(
+            api, "_dataset_annotation_mutation_lock", lambda _entry: nullcontext()
+        )
+        monkeypatch.setattr(
+            api,
+            "_annotation_load_or_create_meta",
+            lambda _entry: (None, {"annotation_revision": 17}),
+        )
+
+    snapshot = api._class_analysis_annotation_transaction_snapshot(
+        source_kind,
+        "source",
+        [
+            {"split": "train", "image_relpath": "one.jpg"},
+            {"split": "train", "image_relpath": "one.jpg"},
+            {"split": "val", "image_relpath": "two.jpg"},
+        ],
+    )
+
+    assert snapshot["labelmap"] == ["One", "Two"]
+    assert snapshot["session_revision"] == 17
+    assert set(snapshot["rows_by_key"]) == {"train:one.jpg", "val:two.jpg"}
+    assert calls == [("train", "one.jpg"), ("val", "two.jpg")]
+
+
+def test_annotation_transaction_conflict_detail_isolates_exact_points() -> None:
+    detail = api._class_analysis_annotation_transaction_conflict_detail(
+        [
+            {"image_key": "train:one.jpg"},
+            {"image_key": "train:two.jpg"},
+        ],
+        ["conflict", "before"],
+        [
+            {
+                "point_id": "point-one",
+                "split": "train",
+                "image_relpath": "one.jpg",
+            },
+            {
+                "point_id": "point-two",
+                "split": "train",
+                "image_relpath": "two.jpg",
+            },
+        ],
+    )
+
+    assert detail["code"] == "annotation_transaction_snapshot_state_conflict"
+    assert detail["image_keys"] == ["train:one.jpg"]
+    assert detail["point_ids"] == ["point-one"]
 
 
 def test_transaction_commits_once_and_replays_with_refreshed_transport_credentials(
@@ -281,9 +382,119 @@ def test_resumable_batch_processes_bounded_manifest(monkeypatch, tmp_path) -> No
 
     assert completed["state"] == "complete"
     assert completed["completed_count"] == 2
+    assert completed["settled_count"] == 2
+    assert completed["succeeded_count"] == 2
+    assert completed["conflict_count"] == 0
     assert [item["state"] for item in results["items"]] == ["complete", "complete"]
     assert len(harness.save_calls) == 1
     assert len(harness.review_calls) == 2
+
+
+def test_batch_isolates_one_structured_conflict_and_commits_the_other_record(
+    monkeypatch, tmp_path
+) -> None:
+    harness = _install_transaction_harness(
+        monkeypatch,
+        tmp_path,
+        {
+            "one.jpg": ["0 0.5 0.5 0.2 0.3"],
+            "two.jpg": ["1 0.4 0.4 0.1 0.2"],
+        },
+    )
+    items = [
+        {
+            "sequence": index,
+            "point_id": str(record["actions"][0]["point_id"]),
+            "payload": deepcopy(record),
+        }
+        for index, record in enumerate(harness.payload["records"])
+    ]
+    manifest_hash = harness.store.request_hash(items)
+    api.create_class_analysis_annotation_batch(
+        JOB_ID,
+        {
+            "batch_id": "batch-conflict",
+            "annotation_source": {"kind": "transient", "id": SOURCE_ID},
+            "action": "delete",
+            "declared_count": len(items),
+            "manifest_hash": manifest_hash,
+        },
+    )
+    api.append_class_analysis_annotation_batch_items(
+        JOB_ID, "batch-conflict", {"items": items}
+    )
+    api.start_class_analysis_annotation_batch(JOB_ID, "batch-conflict")
+    original_commit = api.commit_class_analysis_annotation_transaction
+    blocked = {"raised": False}
+
+    def conflict_once(job_id, payload):
+        if not blocked["raised"]:
+            blocked["raised"] = True
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "annotation_entity_sidecar_out_of_sync",
+                    "message": "The first row changed.",
+                    "image_keys": ["train:one.jpg"],
+                    "point_ids": ["point-0-0"],
+                },
+            )
+        return original_commit(job_id, payload)
+
+    monkeypatch.setattr(
+        api,
+        "commit_class_analysis_annotation_transaction",
+        conflict_once,
+    )
+    first = api.process_class_analysis_annotation_batch(
+        JOB_ID,
+        "batch-conflict",
+        {"annotation_save": deepcopy(harness.payload["annotation_save"])},
+    )
+    final = api.process_class_analysis_annotation_batch(
+        JOB_ID,
+        "batch-conflict",
+        {"annotation_save": deepcopy(harness.payload["annotation_save"])},
+    )
+    results = api.get_class_analysis_annotation_batch_results(
+        JOB_ID, "batch-conflict", -1, 500
+    )
+
+    assert first["conflict_count"] == 1
+    assert first["succeeded_count"] == 0
+    assert final["state"] == "partial"
+    assert final["settled_count"] == 2
+    assert final["succeeded_count"] == 1
+    assert final["conflict_count"] == 1
+    assert [item["state"] for item in results["items"]] == [
+        "conflict",
+        "complete",
+    ]
+    assert results["items"][0]["error"]["image_keys"] == ["train:one.jpg"]
+    assert len(harness.save_calls) == 1
+
+
+def test_relabel_never_falls_back_to_the_frozen_analysis_labelmap(
+    monkeypatch, tmp_path
+) -> None:
+    harness = _install_transaction_harness(
+        monkeypatch,
+        tmp_path,
+        {"one.jpg": ["0 0.5 0.5 0.2 0.3"]},
+    )
+    harness.manifest["labelmap"] = []
+    payload = deepcopy(harness.payload)
+    payload["client_action_id"] = "operation-missing-source-labelmap"
+    payload["records"][0]["actions"][0].update(
+        {"action": "relabel", "target_class_id": 1}
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        api.commit_class_analysis_annotation_transaction(JOB_ID, payload)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "annotation_source_labelmap_unavailable"
+    assert harness.save_calls == []
 
 
 def test_recovery_resumes_only_unsaved_records_with_a_fresh_lock(monkeypatch, tmp_path) -> None:

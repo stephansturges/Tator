@@ -542,7 +542,11 @@ def build_class_analysis_session_store(
                         or point.get("image_relpath")
                         or ""
                     ),
-                    str(point.get("class_id") or ""),
+                    (
+                        ""
+                        if point.get("class_id") is None
+                        else str(point.get("class_id"))
+                    ),
                     class_name,
                     x1,
                     y1,
@@ -1069,6 +1073,23 @@ def _bump_review_state_version(connection: sqlite3.Connection) -> int:
     return version
 
 
+def _session_analysis_job_id(connection: sqlite3.Connection) -> str:
+    row = connection.execute(
+        "SELECT value FROM session_meta WHERE key = 'summary'"
+    ).fetchone()
+    if row is None:
+        return ""
+    try:
+        summary = json.loads(str(row[0]))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return ""
+    return (
+        str(summary.get("analysis_job_id") or "").strip()
+        if isinstance(summary, Mapping)
+        else ""
+    )
+
+
 def upsert_class_analysis_review_state(
     path: Path | str,
     *,
@@ -1097,21 +1118,22 @@ def upsert_class_analysis_review_state(
             if isinstance(payload, Mapping)
             else ""
         ).strip()
-        identifiers = {
-            str(row[0])
-            for row in connection.execute(
-                """SELECT point_id FROM points_core
-                   WHERE ((? <> '' AND (review_object_key = ? OR pair_review_key = ?))
-                          OR (? = '' AND point_id = ?))""",
-                (
-                    review_object_key,
-                    review_object_key,
-                    review_object_key,
-                    review_object_key,
-                    identifier,
-                ),
-            )
-        }
+        if review_object_key.startswith("crp_"):
+            identifiers = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT point_id FROM points_core WHERE pair_review_key = ?",
+                    (review_object_key,),
+                )
+            }
+        else:
+            identifiers = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT point_id FROM points_core WHERE point_id = ?",
+                    (identifier,),
+                )
+            }
         if not identifiers:
             connection.rollback()
             return _review_state_version(connection)
@@ -1155,15 +1177,22 @@ def clear_class_analysis_review_state(
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("BEGIN IMMEDIATE")
         review_key = str(review_object_key or "").strip()
-        identifiers = {
-            str(row[0])
-            for row in connection.execute(
-                """SELECT point_id FROM points_core
-                   WHERE ((? <> '' AND (review_object_key = ? OR pair_review_key = ?))
-                          OR (? = '' AND point_id = ?))""",
-                (review_key, review_key, review_key, review_key, identifier),
-            )
-        }
+        if review_key.startswith("crp_"):
+            identifiers = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT point_id FROM points_core WHERE pair_review_key = ?",
+                    (review_key,),
+                )
+            }
+        else:
+            identifiers = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT point_id FROM points_core WHERE point_id = ?",
+                    (identifier,),
+                )
+            }
         if not identifiers:
             connection.rollback()
             return _review_state_version(connection)
@@ -1208,11 +1237,24 @@ def replace_class_analysis_review_state(
         # review state. Deleting absent rows preserves points_core.reviewed as
         # the fallback; explicit clear receipts are projected as blank rows.
         connection.execute("DELETE FROM review_state")
+        session_job_id = _session_analysis_job_id(connection)
         rows = []
         for entry in entries:
             point_id = str(entry.get("point_id") or "").strip()
-            review_key = str(entry.get("review_object_key") or "").strip()
             disposition = str(entry.get("disposition") or "").strip().lower()
+            review_key = str(entry.get("review_object_key") or "").strip()
+            if disposition == "reassign_class":
+                # A reassign receipt is keyed by a job-scoped crj_* identity,
+                # but points_core retains the immutable source cro_* identity.
+                # The caller has already restricted these receipts to their
+                # originating analysis job.
+                review_key = str(
+                    entry.get("source_review_object_key") or ""
+                ).strip()
+                if not review_key:
+                    raise SessionStoreError(
+                        "class_analysis_review_state_invalid"
+                    )
             if (not point_id and not review_key) or not disposition:
                 continue
             rows.append(
@@ -1223,28 +1265,60 @@ def replace_class_analysis_review_state(
                     str(entry.get("updated_at") or ""),
                     _json_text(dict(entry)),
                     review_key,
+                    str(entry.get("analysis_job_id") or "").strip(),
                 )
             )
         if rows:
-            for point_id, disposition, revision, reviewed_at, payload, review_key in rows:
-                connection.execute(
+            for (
+                point_id,
+                disposition,
+                revision,
+                reviewed_at,
+                payload,
+                review_key,
+                entry_job_id,
+            ) in rows:
+                if review_key.startswith("crp_"):
+                    target_rows = connection.execute(
+                        "SELECT point_id FROM points_core WHERE pair_review_key = ?",
+                        (review_key,),
+                    ).fetchall()
+                elif point_id and entry_job_id and entry_job_id == session_job_id:
+                    target_rows = connection.execute(
+                        "SELECT point_id FROM points_core WHERE point_id = ?",
+                        (point_id,),
+                    ).fetchall()
+                elif review_key:
+                    target_rows = connection.execute(
+                        "SELECT point_id FROM points_core WHERE review_object_key = ?",
+                        (review_key,),
+                    ).fetchall()
+                    if disposition and len(target_rows) != 1:
+                        # Legacy geometry keys can collide for exact duplicate
+                        # annotations. Never let one positive receipt suppress
+                        # several distinct entities in a different analysis.
+                        continue
+                elif point_id:
+                    target_rows = connection.execute(
+                        "SELECT point_id FROM points_core WHERE point_id = ?",
+                        (point_id,),
+                    ).fetchall()
+                else:
+                    target_rows = []
+                connection.executemany(
                     """INSERT OR REPLACE INTO review_state
                        (point_id, disposition, revision, reviewed_at, payload)
-                       SELECT p.point_id, ?, ?, ?, ?
-                       FROM points_core p
-                       WHERE ((? <> '' AND (p.review_object_key = ? OR p.pair_review_key = ?))
-                              OR (? = '' AND p.point_id = ?))""",
-                    (
-                        disposition,
-                        revision,
-                        reviewed_at,
-                        payload,
-                        review_key,
-                        review_key,
-                        review_key,
-                        review_key,
-                        point_id,
-                    ),
+                       VALUES (?, ?, ?, ?, ?)""",
+                    [
+                        (
+                            str(target[0]),
+                            disposition,
+                            revision,
+                            reviewed_at,
+                            payload,
+                        )
+                        for target in target_rows
+                    ],
                 )
         current_digest = review_state_digest()
         version = (
@@ -1410,7 +1484,10 @@ def get_class_analysis_graph_payload(
         "point_id": [str(row["point_id"]) for row in page_rows],
         "x": [float(row["x"]) for row in page_rows],
         "y": [float(row["y"]) for row in page_rows],
-        "class_id": [str(row["class_id"] or "") for row in page_rows],
+        "class_id": [
+            "" if row["class_id"] is None else str(row["class_id"])
+            for row in page_rows
+        ],
         "class_name": [str(row["class_name"] or "") for row in page_rows],
         "reviewed": [bool(row["effective_reviewed"]) for row in page_rows],
         "quality_review_candidate": [bool(row["quality_review_candidate"]) for row in page_rows],
@@ -1558,7 +1635,9 @@ def get_class_analysis_review_queue_payload(
                 "split": str(row["split"] or ""),
                 "image_relpath": str(row["image_relpath"] or ""),
                 "frontend_image_key": str(row["frontend_image_key"] or ""),
-                "class_id": str(row["class_id"] or ""),
+                "class_id": (
+                    "" if row["class_id"] is None else str(row["class_id"])
+                ),
                 "class_name": str(row["class_name"] or ""),
                 "bbox_xyxy": bbox,
                 "width": _optional_float(row["width"]),

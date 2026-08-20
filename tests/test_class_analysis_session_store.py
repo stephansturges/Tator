@@ -10,6 +10,7 @@ import services.class_analysis_session_store as session_store_module
 from services.class_analysis_session_store import (
     SessionStoreError,
     build_class_analysis_session_store,
+    clear_class_analysis_review_state,
     get_class_analysis_graph_payload,
     get_class_analysis_point_detail_payload,
     get_class_analysis_point_evidence_payload,
@@ -176,6 +177,51 @@ def test_graph_is_bounded_filtered_and_projection_explicit(tmp_path: Path) -> No
     assert filtered["columns"]["point_id"] == ["point-0", "point-2"]
     with pytest.raises(SessionStoreError, match="projection_mode_unavailable"):
         get_class_analysis_graph_payload(path, projection_mode="tsne")
+
+
+def test_pair_review_receipt_projects_and_clears_both_points(
+    tmp_path: Path,
+) -> None:
+    path = _store(tmp_path)
+    pair_key = "crp_" + "1" * 64
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE points_core SET review_object_key = ?, pair_review_key = ? "
+            "WHERE point_id = 'point-0'",
+            ("cro_" + "2" * 64, pair_key),
+        )
+        connection.execute(
+            "UPDATE points_core SET review_object_key = ?, pair_review_key = ? "
+            "WHERE point_id = 'point-1'",
+            ("cro_" + "3" * 64, pair_key),
+        )
+    upsert_class_analysis_review_state(
+        path,
+        point_id="point-0",
+        disposition="resolved_no_change",
+        revision="rdr1_" + "4" * 32,
+        reviewed_at="2026-08-20T10:00:00Z",
+        payload={"review_object_key": pair_key},
+    )
+    with sqlite3.connect(path) as connection:
+        projected = connection.execute(
+            "SELECT point_id, disposition FROM review_state ORDER BY point_id"
+        ).fetchall()
+    assert projected == [
+        ("point-0", "resolved_no_change"),
+        ("point-1", "resolved_no_change"),
+    ]
+
+    clear_class_analysis_review_state(
+        path,
+        point_id="point-0",
+        review_object_key=pair_key,
+    )
+    with sqlite3.connect(path) as connection:
+        cleared = connection.execute(
+            "SELECT point_id, disposition FROM review_state ORDER BY point_id"
+        ).fetchall()
+    assert cleared == [("point-0", ""), ("point-1", "")]
 
 
 def test_review_queue_uses_stable_cursor_pages(tmp_path: Path) -> None:

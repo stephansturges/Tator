@@ -15,7 +15,7 @@
     <script src="plotly-2.35.2.min.js?v=20260520a"></script>
     <script src="annotation_diversity.js?v=20260530a"></script>
     <script src="class_analysis_cache_admin.js?v=20260808a"></script>
-    <script src="ybat.js?v=20260820m"></script>
+    <script src="ybat.js?v=20260821d"></script>
 </head>
 <body>
     <div id="ingestProgress" class="ingest-progress" aria-live="polite" aria-atomic="true">
@@ -1680,7 +1680,16 @@
                                     <label class="class-split-toolbar__field" for="classSplitDragMode"><span>Drag</span><select id="classSplitDragMode" title="Draw a freehand or rectangular multi-selection, or pan the map."><option value="lasso" selected>Freehand select</option><option value="select">Rectangle select</option><option value="pan">Move map</option></select></label>
                                     <label class="class-split-toggle class-split-toolbar__cap" for="classSplitLimitPlotPoints"><input type="checkbox" id="classSplitLimitPlotPoints" checked /><span><strong>Limit map to 50,000 points</strong><small>Recommended. Uncheck to explicitly load every matching point in high-memory mode.</small></span></label>
                                 </div>
-                                <fieldset class="class-split-toolbar__group class-split-toolbar__overlap"><legend>Overlap pair</legend><label class="class-split-toolbar__field" for="classSplitOverlapPairMode"><span>Show</span><select id="classSplitOverlapPairMode" title="Focus on one selected pair of overlapping classes, or hide that pair."><option value="any">Any overlap pair</option><option value="include">Only selected pair</option><option value="exclude">Hide selected pair</option></select></label><label class="class-split-toolbar__field" for="classSplitOverlapClassA"><span>First class</span><select id="classSplitOverlapClassA"></select></label><label class="class-split-toolbar__field" for="classSplitOverlapClassB"><span>Second class</span><select id="classSplitOverlapClassB"></select></label></fieldset>
+                                <fieldset class="class-split-toolbar__group class-split-toolbar__overlap">
+                                    <legend>Overlap pair</legend>
+                                    <label class="class-split-toolbar__field" for="classSplitOverlapPairMode"><span>Show</span><select id="classSplitOverlapPairMode" title="Focus on one selected pair of overlapping classes, or hide that pair."><option value="any">Any overlap pair</option><option value="include">Only selected pair</option><option value="exclude">Hide selected pair</option></select></label>
+                                    <label class="class-split-toolbar__field" for="classSplitOverlapClassA"><span>First class</span><select id="classSplitOverlapClassA"></select></label>
+                                    <label class="class-split-toolbar__field" for="classSplitOverlapClassB"><span>Second class</span><select id="classSplitOverlapClassB"></select></label>
+                                    <div class="class-split-overlap-cleanup">
+                                        <button type="button" id="classSplitSameClassCleanup" class="training-button secondary" disabled>Remove same-class duplicates</button>
+                                        <small id="classSplitSameClassCleanupStatus" role="status" aria-live="polite">Runs only on near-identical boxes with the same class.</small>
+                                    </div>
+                                </fieldset>
                             </div>
                             <div id="classSplitGraphStatus" class="class-split-graph-status" aria-live="polite"></div>
                             <div id="classSplitGraph" class="class-split-graph"></div>

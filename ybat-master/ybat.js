@@ -3846,6 +3846,8 @@ const AUTOMATION_LOCKED_TABS = new Set([
         overlapPairMode: null,
         overlapClassA: null,
         overlapClassB: null,
+        sameClassCleanup: null,
+        sameClassCleanupStatus: null,
         dragMode: null,
         clusterSource: null,
         clusterSensitivity: null,
@@ -4204,6 +4206,14 @@ const AUTOMATION_LOCKED_TABS = new Set([
         multiSelectionActionToken: 0,
         multiSelectionPanelRenderCount: 0,
         multiSelectionGraphCommitCount: 0,
+        sameClassDuplicatePlan: null,
+        sameClassDuplicatePlanJobId: "",
+        sameClassDuplicatePlanGeneration: -1,
+        sameClassDuplicatePlanLoad: null,
+        sameClassDuplicatePlanLoadToken: 0,
+        sameClassDuplicatePlanAbortController: null,
+        sameClassDuplicatePlanError: "",
+        sameClassDuplicateCleanupOperation: null,
         adaptiveRankingOperation: null,
         adaptiveRankingRowsById: new Map(),
         adaptiveRankingOrderById: new Map(),
@@ -4567,6 +4577,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
                 && classSplitState.sessionPersistenceOperation.blocksMutations !== false
             )
             || classSplitState.multiSelectionActionInFlight
+            || Boolean(classSplitState.sameClassDuplicateCleanupOperation)
             || Boolean(classSplitState.dualBBoxResolutionOperation)
             || Boolean(classSplitState.annotationBatchOperation)
             || Boolean(classSplitState.graphRecoveryRequired)
@@ -56704,6 +56715,15 @@ async function cancelRfDetrTrainingJobRequest() {
         return `${API_ROOT}${thumbPath}`;
     }
 
+    function getClassSplitDualBBoxThumbnailUrl(point) {
+        const pointId = String(point?.point_id || "").trim();
+        const jobId = String(classSplitState.currentJobId || "").trim();
+        if (!pointId || !jobId) {
+            return getClassSplitThumbnailUrl(point);
+        }
+        return `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/thumbnail/${encodeURIComponent(pointId)}?context=pair`;
+    }
+
     function getClassSplitWideContextUrl(point) {
         const pointId = String(point?.point_id || "").trim();
         const requestJobId = String(classSplitState.currentJobId || "").trim();
@@ -61452,6 +61472,242 @@ function captureClassSplitGraphSettlementState(pointIds) {
                 control.disabled = !classSplitState.result || !overlapModeActive;
             }
         });
+        const plan = getClassSplitSameClassDuplicateCleanupPlan();
+        const cleanupButton = classSplitElements.sameClassCleanup;
+        if (cleanupButton) {
+            const mutationBusy = classSplitState.active || classSplitWriteMutationIsBlocked();
+            cleanupButton.textContent = plan.loading
+                ? "Scanning same-class overlaps..."
+                : plan.loaded && plan.deleteCount
+                    ? `Remove same-class duplicates (${plan.deleteCount})`
+                    : plan.loaded
+                        ? "No same-class duplicates found"
+                        : "Find and remove same-class duplicates";
+            cleanupButton.disabled = Boolean(
+                !classSplitState.result
+                || plan.loading
+                || (plan.loaded && !plan.deleteCount)
+                || mutationBusy
+                || Number(classSplitState.capabilities?.annotation_entity_batch_api_version || 0) < 1
+            );
+            cleanupButton.title = cleanupButton.disabled
+                ? (
+                    !classSplitState.result
+                        ? "Run or restore an analysis first."
+                        : plan.loading
+                            ? "Scanning the full analysis for safe same-class duplicate groups."
+                            : plan.error
+                                ? plan.error
+                        : plan.loaded && !plan.deleteCount
+                            ? "No eligible near-identical same-class duplicate groups are present."
+                            : mutationBusy
+                                ? "Wait for the current Data Quality Explorer mutation to finish."
+                                : Number(classSplitState.capabilities?.annotation_entity_batch_api_version || 0) < 1
+                                    ? "Restart the backend to load authoritative batch annotation edits."
+                                    : "Inspect the full saved analysis, keep a deterministic non-duplicate annotation set in each safe same-class group, and ask before deleting anything."
+                )
+                : `Keep a deterministic non-duplicate annotation set across ${plan.groupCount} duplicate group${plan.groupCount === 1 ? "" : "s"} and durably delete ${plan.deleteCount} redundant box${plan.deleteCount === 1 ? "" : "es"}.`;
+        }
+        if (classSplitElements.sameClassCleanupStatus) {
+            const protectedCopy = plan.protectedGroupCount
+                ? ` ${plan.protectedGroupCount} mixed or previously reviewed group${plan.protectedGroupCount === 1 ? " is" : "s are"} left for manual review.`
+                : "";
+            classSplitElements.sameClassCleanupStatus.textContent = plan.loading
+                ? "Scanning the full saved analysis for near-identical same-class boxes..."
+                : plan.error
+                    ? plan.error
+                : plan.deleteCount
+                ? `${plan.groupCount} safe same-class duplicate group${plan.groupCount === 1 ? "" : "s"}; ${plan.deleteCount} redundant box${plan.deleteCount === 1 ? "" : "es"} can be removed.${protectedCopy}`
+                : plan.loaded
+                    ? `No safe same-class duplicate cleanup is pending.${protectedCopy}`
+                    : "Scans all analyzed objects, not only the points currently drawn. Different-class and previously reviewed overlaps stay manual.";
+        }
+    }
+
+    function getClassSplitSameClassDuplicateCleanupPlan() {
+        const jobId = String(classSplitState.currentJobId || "").trim();
+        const generation = Number(classSplitState.analysisGeneration || 0);
+        const current = (
+            classSplitState.sameClassDuplicatePlanJobId === jobId
+            && classSplitState.sameClassDuplicatePlanGeneration === generation
+        ) ? classSplitState.sameClassDuplicatePlan : null;
+        if (current) {
+            return { ...current, loaded: true, loading: false, error: "" };
+        }
+        const loading = Boolean(
+            classSplitState.sameClassDuplicatePlanLoad
+            && classSplitState.sameClassDuplicatePlanJobId === jobId
+            && classSplitState.sameClassDuplicatePlanGeneration === generation
+        );
+        return {
+            pointIds: [],
+            deleteCount: 0,
+            groupCount: 0,
+            protectedGroupCount: 0,
+            loaded: false,
+            loading,
+            error: loading ? "" : String(classSplitState.sameClassDuplicatePlanError || ""),
+        };
+    }
+
+    async function loadClassSplitSameClassDuplicateCleanupPlan({ force = false } = {}) {
+        const jobId = String(classSplitState.currentJobId || "").trim();
+        const generation = Number(classSplitState.analysisGeneration || 0);
+        if (!jobId || !classSplitState.result) {
+            return getClassSplitSameClassDuplicateCleanupPlan();
+        }
+        if (!force) {
+            const cached = getClassSplitSameClassDuplicateCleanupPlan();
+            if (cached.loaded) return cached;
+            if (
+                classSplitState.sameClassDuplicatePlanLoad
+                && classSplitState.sameClassDuplicatePlanJobId === jobId
+                && classSplitState.sameClassDuplicatePlanGeneration === generation
+            ) {
+                return classSplitState.sameClassDuplicatePlanLoad;
+            }
+        }
+        classSplitState.sameClassDuplicatePlanAbortController?.abort();
+        const loadToken = ++classSplitState.sameClassDuplicatePlanLoadToken;
+        const abortController = new AbortController();
+        classSplitState.sameClassDuplicatePlanAbortController = abortController;
+        classSplitState.sameClassDuplicatePlanJobId = jobId;
+        classSplitState.sameClassDuplicatePlanGeneration = generation;
+        classSplitState.sameClassDuplicatePlan = null;
+        classSplitState.sameClassDuplicatePlanError = "";
+        classSplitState.sameClassDuplicatePlanLoad = { pending: true };
+        const load = (async () => {
+            const timeoutId = window.setTimeout(() => abortController.abort(), 120000);
+            refreshClassSplitOverlapControls();
+            try {
+                const response = await fetch(
+                    `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/same-class-duplicate-plan`,
+                    { signal: abortController.signal }
+                );
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(String(payload?.detail || `HTTP ${response.status}`));
+                }
+                if (!classSplitAsyncRequestIsCurrent(generation, jobId)) {
+                    return getClassSplitSameClassDuplicateCleanupPlan();
+                }
+                const pointIds = Array.from(new Set(
+                    (Array.isArray(payload?.deletion_point_ids) ? payload.deletion_point_ids : [])
+                        .map((pointId) => String(pointId || "").trim())
+                        .filter(Boolean)
+                ));
+                classSplitState.sameClassDuplicatePlan = Object.freeze({
+                    pointIds: Object.freeze(pointIds),
+                    deleteCount: pointIds.length,
+                    groupCount: Number(payload?.group_count || 0),
+                    protectedGroupCount: Number(payload?.protected_group_count || 0),
+                });
+                return getClassSplitSameClassDuplicateCleanupPlan();
+            } catch (error) {
+                if (
+                    classSplitState.sameClassDuplicatePlanLoadToken === loadToken
+                    && classSplitAsyncRequestIsCurrent(generation, jobId)
+                ) {
+                    const reason = error?.name === "AbortError"
+                        ? "the scan timed out; retry when the backend is responsive"
+                        : (error?.message || error);
+                    classSplitState.sameClassDuplicatePlanError = `Could not inspect same-class duplicates: ${reason}`;
+                }
+                return getClassSplitSameClassDuplicateCleanupPlan();
+            } finally {
+                window.clearTimeout(timeoutId);
+                if (
+                    classSplitState.sameClassDuplicatePlanLoadToken === loadToken
+                    && classSplitState.sameClassDuplicatePlanJobId === jobId
+                    && classSplitState.sameClassDuplicatePlanGeneration === generation
+                ) {
+                    classSplitState.sameClassDuplicatePlanLoad = null;
+                    classSplitState.sameClassDuplicatePlanAbortController = null;
+                    refreshClassSplitOverlapControls();
+                }
+            }
+        })();
+        classSplitState.sameClassDuplicatePlanLoad = load;
+        return load;
+    }
+
+    async function cleanupClassSplitSameClassDuplicates() {
+        if (classSplitWriteMutationIsBlocked()) {
+            setSamStatus("Wait for the current Data Quality Explorer mutation to finish.", {
+                variant: "warn",
+                duration: 3500,
+            });
+            return;
+        }
+        if (!annotationEditableGuard("Removing same-class duplicate bboxes", {
+            ignoreCurrentImageHydration: true,
+        })) {
+            return;
+        }
+        const operation = Object.freeze({
+            token: ++classSplitState.multiSelectionActionToken,
+            jobId: String(classSplitState.currentJobId || "").trim(),
+            analysisGeneration: classSplitState.analysisGeneration,
+        });
+        classSplitState.sameClassDuplicateCleanupOperation = operation;
+        refreshClassSplitControls();
+        try {
+            const plan = await loadClassSplitSameClassDuplicateCleanupPlan({ force: true });
+            if (
+                classSplitState.sameClassDuplicateCleanupOperation !== operation
+                || !classSplitAsyncRequestIsCurrent(
+                    operation.analysisGeneration,
+                    operation.jobId
+                )
+            ) {
+                return;
+            }
+            if (!plan.deleteCount) {
+                refreshClassSplitOverlapControls();
+                return;
+            }
+            const confirmed = window.confirm(
+                `Remove ${plan.deleteCount} redundant same-class bounding box${plan.deleteCount === 1 ? "" : "es"} from ${plan.groupCount} near-identical duplicate group${plan.groupCount === 1 ? "" : "s"}?\n\n`
+                + "A deterministic non-duplicate annotation set is kept in each group. Different-class overlaps and previously reviewed groups are never changed. The deletions are durably saved and cannot be restored with Data Quality Explorer Undo."
+            );
+            if (!confirmed) {
+                return;
+            }
+            if (classSplitElements.sameClassCleanupStatus) {
+                classSplitElements.sameClassCleanupStatus.textContent = `Saving ${plan.deleteCount} same-class duplicate deletion${plan.deleteCount === 1 ? "" : "s"}; the graph updates once after settlement.`;
+            }
+            // Transfer ownership without yielding: the batch coordinator
+            // installs its operation synchronously before its first await.
+            classSplitState.sameClassDuplicateCleanupOperation = null;
+            const receipt = await commitClassSplitAnnotationEntityBatchMutation(
+                plan.pointIds.map((pointId) => ({ point_id: pointId })),
+                "delete"
+            );
+            if (!receipt || receipt._ui_stale) {
+                return;
+            }
+            const message = receipt.failed
+                ? `${receipt.saved} duplicate box${receipt.saved === 1 ? "" : "es"} removed; ${receipt.failed} could not be removed and remain available for review.`
+                : `${receipt.saved} redundant same-class box${receipt.saved === 1 ? "" : "es"} removed and durably saved.`;
+            setClassSplitJobStatus(message, receipt.failed ? "warn" : "success");
+            setSamStatus(message, {
+                variant: receipt.failed ? "warn" : "success",
+                duration: receipt.failed ? 7000 : 4200,
+            });
+            classSplitState.sameClassDuplicatePlan = null;
+            classSplitState.sameClassDuplicatePlanError = "";
+            void loadClassSplitSameClassDuplicateCleanupPlan({ force: true });
+        } catch (error) {
+            const message = `Same-class duplicate cleanup failed: ${error?.message || error}`;
+            setClassSplitJobStatus(message, "error");
+            setSamStatus(message, { variant: "error", duration: 7000 });
+        } finally {
+            if (classSplitState.sameClassDuplicateCleanupOperation === operation) {
+                classSplitState.sameClassDuplicateCleanupOperation = null;
+            }
+            refreshClassSplitOverlapControls();
+            refreshClassSplitControls();
+        }
     }
 
     function classSplitPointMatchesOverlapPairFilter(point) {
@@ -66021,7 +66277,11 @@ function getClassSplitSingleBboxDeletionUiState(
                 `<button type="button" class="training-button secondary" data-action="qwen-review" data-point-id="${escapeHtml(pointId)}"${qwenBusy ? " disabled" : ""}>${qwenBusy ? "VLM reviewing ..." : "Review overlapping boxes with VLM"}</button>`,
                 `</div>`,
             ].join("");
-            const thumbUrl = point ? getClassSplitThumbnailUrl(point) : "";
+            const thumbUrl = point
+                ? (dualConflict
+                    ? getClassSplitDualBBoxThumbnailUrl(point)
+                    : getClassSplitThumbnailUrl(point))
+                : "";
             const hasIntrinsicCurrentSupport = refinement.intrinsic_current_support != null;
             const hasIntrinsicAlternativeSupport = refinement.intrinsic_alternative_support != null;
             const currentSupportRaw = hasIntrinsicCurrentSupport
@@ -66965,7 +67225,6 @@ function getClassSplitSingleBboxDeletionUiState(
             inspector.innerHTML = `<div class="training-help">Select a point to inspect its crop.</div>`;
             return;
         }
-        const thumbUrl = getClassSplitThumbnailUrl(point);
         const boundedDetailPending = Boolean(
             classSplitState.boundedTransport && !point._boundedDetailLoaded
         );
@@ -66990,6 +67249,9 @@ function getClassSplitSingleBboxDeletionUiState(
             || dualConflict?.other_point_id
             || ""
         ).trim();
+        const thumbUrl = dualConflict
+            ? getClassSplitDualBBoxThumbnailUrl(point)
+            : getClassSplitThumbnailUrl(point);
         const classOptions = (Array.isArray(loadedClassList) ? loadedClassList : [])
             .map((className) => String(className || "").trim())
             .filter(Boolean)
@@ -67066,9 +67328,12 @@ function getClassSplitSingleBboxDeletionUiState(
             ].join("");
         inspector.innerHTML = [
             `<div class="class-split-inspector__crop-shell">`,
-            `<img class="class-split-inspector__crop" src="${escapeHtml(thumbUrl)}" alt="Object context crop" data-crop-preview data-context-point-id="${escapeHtml(point.point_id || "")}" />`,
+            `<img class="class-split-inspector__crop" src="${escapeHtml(thumbUrl)}" alt="${escapeHtml(dualContract ? "Context showing both overlapping bounding boxes" : "Object context crop")}" data-crop-preview data-context-point-id="${escapeHtml(point.point_id || "")}" />`,
             `<div class="class-split-inspector__crop-status" data-crop-status hidden>Crop preview unavailable.</div>`,
             `</div>`,
+            dualContract
+                ? `<div class="class-split-dual-bbox-legend" aria-label="Overlapping box legend"><span><i data-box="current"></i>Selected: ${escapeHtml(currentClass || "current")}</span><span><i data-box="other"></i>Overlapping: ${escapeHtml(dualOtherClass)}</span></div>`
+                : "",
             `<div class="class-split-inspector__meta">`,
             `<strong>${escapeHtml(currentClass || "")}</strong><br>`,
             boundedDetailPending
@@ -78920,6 +79185,8 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         classSplitElements.overlapPairMode = document.getElementById("classSplitOverlapPairMode");
         classSplitElements.overlapClassA = document.getElementById("classSplitOverlapClassA");
         classSplitElements.overlapClassB = document.getElementById("classSplitOverlapClassB");
+        classSplitElements.sameClassCleanup = document.getElementById("classSplitSameClassCleanup");
+        classSplitElements.sameClassCleanupStatus = document.getElementById("classSplitSameClassCleanupStatus");
         classSplitElements.dragMode = document.getElementById("classSplitDragMode");
         classSplitElements.clusterSource = document.getElementById("classSplitClusterSource");
         classSplitElements.clusterSensitivity = document.getElementById("classSplitClusterSensitivity");
@@ -79230,6 +79497,11 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             }
             control.addEventListener("change", () => {
                 refreshClassSplitFilteredReviewUi();
+            });
+        });
+        classSplitElements.sameClassCleanup?.addEventListener("click", () => {
+            cleanupClassSplitSameClassDuplicates().catch((error) => {
+                console.error("Same-class duplicate cleanup failed", error);
             });
         });
         if (classSplitElements.dragMode) {

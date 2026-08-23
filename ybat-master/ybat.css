@@ -4864,6 +4864,33 @@ body.annotation-focus-mode .class-scroll-indicator {
     width: 100%;
 }
 
+.class-split-dual-bbox-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    margin: -2px 0 8px;
+    color: var(--dqe-muted, #475569);
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.class-split-dual-bbox-legend span {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.class-split-dual-bbox-legend i {
+    width: 14px;
+    height: 4px;
+    border-radius: 999px;
+    background: #ff7a18;
+}
+
+.class-split-dual-bbox-legend i[data-box="other"] {
+    background: #06b6d4;
+}
+
 .class-split-dual-bbox-action--recommended {
     outline: 3px solid #38bdf8;
     outline-offset: 2px;

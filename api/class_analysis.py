@@ -75,6 +75,7 @@ def build_class_analysis_router(
     get_session_review_history_fn: Optional[Callable[..., Any]] = None,
     get_session_point_detail_fn: Optional[Callable[[str, str], Any]] = None,
     get_session_point_evidence_fn: Optional[Callable[[str, str], Any]] = None,
+    get_same_class_duplicate_plan_fn: Optional[Callable[[str], Any]] = None,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -223,6 +224,14 @@ def build_class_analysis_router(
         if context is None or not str(context).strip():
             return get_thumbnail_fn(job_id, point_id)
         return get_thumbnail_fn(job_id, point_id, context)
+
+    if get_same_class_duplicate_plan_fn is not None:
+
+        @router.get(
+            "/class_analysis/jobs/{job_id}/same-class-duplicate-plan"
+        )
+        def get_class_analysis_same_class_duplicate_plan(job_id: str):
+            return get_same_class_duplicate_plan_fn(job_id)
 
     if get_refinement_preview_fn is not None:
 

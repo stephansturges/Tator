@@ -572,6 +572,7 @@ from services.class_analysis_session_store import (
     get_class_analysis_qwen_context,
     get_class_analysis_review_history_payload,
     get_class_analysis_review_queue_payload,
+    get_class_analysis_same_class_overlap_candidates,
     get_class_analysis_session_identity_summary,
     get_class_analysis_session_source_identities,
     ensure_class_analysis_session_store_validated,
@@ -79179,6 +79180,235 @@ def get_class_analysis_result(job_id: str) -> Dict[str, Any]:
     raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="result_not_found")
 
 
+def _class_analysis_same_class_overlap_rows(
+    job: ClassAnalysisJob,
+) -> List[Dict[str, Any]]:
+    session_store_path = _class_analysis_session_store_path(job.job_id)
+    if session_store_path.is_file():
+        return get_class_analysis_same_class_overlap_candidates(session_store_path)
+
+    def eligible(point: Any) -> bool:
+        return isinstance(point, Mapping) and bool(
+            point.get("close_overlap_matches")
+        )
+
+    if isinstance(job.result, Mapping):
+        return [
+            dict(point)
+            for point in (job.result.get("points") or [])
+            if eligible(point)
+        ]
+
+    result_path = _safe_job_result_json_path(job.result_path, CLASS_ANALYSIS_ROOT)
+    if result_path is None:
+        return []
+    shell = _class_analysis_load_job_result_payload(
+        job,
+        result_path,
+        materialize_points=False,
+        validate_points_store=False,
+    )
+    descriptor = shell.get("points_storage")
+    if not isinstance(descriptor, Mapping):
+        return [
+            dict(point)
+            for point in (shell.get("points") or [])
+            if eligible(point)
+        ]
+
+    store_path, connection, store_identity = (
+        _class_analysis_open_validated_points_store(result_path, descriptor)
+    )
+    candidates: List[Dict[str, Any]] = []
+    row_count = 0
+    try:
+        columns = {
+            str(column[1])
+            for column in connection.execute("PRAGMA table_info(points)")
+        }
+        has_review_columns = {
+            "review_object_key",
+            "pair_review_key",
+        }.issubset(columns)
+        select_columns = (
+            "ordinal, point_id, payload, review_object_key, pair_review_key"
+            if has_review_columns
+            else "ordinal, point_id, payload"
+        )
+        for stored_row in connection.execute(
+            f"SELECT {select_columns} FROM points ORDER BY ordinal"
+        ):
+            _ordinal, stored_point_id, raw_payload = stored_row[:3]
+            row_count += 1
+            try:
+                point = json.loads(raw_payload)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=HTTP_409_CONFLICT,
+                    detail="class_analysis_points_artifact_changed",
+                ) from exc
+            if (
+                not isinstance(point, dict)
+                or str(point.get("point_id") or "") != str(stored_point_id)
+            ):
+                raise HTTPException(
+                    status_code=HTTP_409_CONFLICT,
+                    detail="class_analysis_points_artifact_changed",
+                )
+            if has_review_columns:
+                review_object_key = str(stored_row[3] or "").strip()
+                pair_review_key = str(stored_row[4] or "").strip()
+                if review_object_key:
+                    point["review_object_key"] = review_object_key
+                if pair_review_key:
+                    conflict = (
+                        dict(point.get("dual_bbox_conflict"))
+                        if isinstance(point.get("dual_bbox_conflict"), Mapping)
+                        else {}
+                    )
+                    conflict["pair_review_key"] = pair_review_key
+                    point["dual_bbox_conflict"] = conflict
+            if eligible(point):
+                candidates.append(point)
+    except sqlite3.DatabaseError as exc:
+        raise HTTPException(
+            status_code=HTTP_409_CONFLICT,
+            detail="class_analysis_points_artifact_changed",
+        ) from exc
+    finally:
+        connection.close()
+    if row_count != int(descriptor.get("row_count") or 0):
+        raise HTTPException(
+            status_code=HTTP_409_CONFLICT,
+            detail="class_analysis_points_artifact_changed",
+        )
+    _class_analysis_assert_points_store_identity(store_path, store_identity)
+    return candidates
+
+
+def get_class_analysis_same_class_duplicate_plan(job_id: str) -> Dict[str, Any]:
+    """Plan conservative duplicate deletion over the full persisted analysis."""
+
+    job = _get_class_analysis_job(job_id)
+    if job.status not in {"completed", "cancelled"}:
+        raise HTTPException(
+            status_code=HTTP_428_PRECONDITION_REQUIRED,
+            detail="job_not_finished",
+        )
+    rows = _class_analysis_same_class_overlap_rows(job)
+    rows_by_id = {
+        str(row.get("point_id") or "").strip(): row
+        for row in rows
+        if str(row.get("point_id") or "").strip()
+    }
+    adjacency: Dict[str, Set[str]] = defaultdict(set)
+    protected_ids: Set[str] = set()
+    review_shard_cache: Dict[str, Any] = {}
+
+    for point_id, row in rows_by_id.items():
+        conflict = row.get("dual_bbox_conflict")
+        if (
+            bool(row.get("reviewed"))
+            or bool(str(row.get("durable_review_disposition") or "").strip())
+            or bool(str(row.get("pair_review_key") or "").strip())
+            or bool(row.get("is_dual_bbox_conflict"))
+            or isinstance(conflict, Mapping)
+            or _class_analysis_row_has_review_disposition(
+                row,
+                job.job_id,
+                review_shard_cache,
+            )
+            or str(row.get("identity_status") or "").strip() != "ready"
+            or not str(row.get("annotation_entity_id") or "").strip()
+            or int(row.get("annotation_entity_revision") or 0) <= 0
+        ):
+            protected_ids.add(point_id)
+        current_class = str(row.get("class_name") or "").strip()
+        current_split = _annotation_normalise_split(row.get("split"))
+        current_image = str(row.get("image_relpath") or "").strip()
+        for match in row.get("close_overlap_matches") or []:
+            if not isinstance(match, Mapping):
+                continue
+            other_id = str(match.get("point_id") or "").strip()
+            other = rows_by_id.get(other_id)
+            if (
+                not other
+                or other_id == point_id
+                or str(match.get("class_name") or "").strip() != current_class
+                or str(other.get("class_name") or "").strip() != current_class
+                or _annotation_normalise_split(other.get("split")) != current_split
+                or str(other.get("image_relpath") or "").strip() != current_image
+                or float(match.get("iou") or 0.0) < 0.9
+                or float(match.get("corner_similarity") or 0.0) < 0.9
+            ):
+                continue
+            adjacency[point_id].add(other_id)
+            adjacency[other_id].add(point_id)
+
+    deletion_ids: List[str] = []
+    groups: List[Dict[str, Any]] = []
+    protected_group_count = 0
+    visited: Set[str] = set()
+    for start_id in sorted(adjacency):
+        if start_id in visited:
+            continue
+        component: List[str] = []
+        pending = [start_id]
+        visited.add(start_id)
+        while pending:
+            point_id = pending.pop()
+            component.append(point_id)
+            for other_id in adjacency.get(point_id, set()):
+                if other_id not in visited:
+                    visited.add(other_id)
+                    pending.append(other_id)
+        if len(component) < 2:
+            continue
+        if any(point_id in protected_ids for point_id in component):
+            protected_group_count += 1
+            continue
+        ordered = sorted(
+            component,
+            key=lambda point_id: (
+                str(rows_by_id[point_id].get("annotation_entity_id") or ""),
+                str(rows_by_id[point_id].get("review_object_key") or ""),
+                point_id,
+            ),
+        )
+        survivors: List[str] = []
+        redundant: List[str] = []
+        for point_id in ordered:
+            if any(
+                survivor_id in adjacency.get(point_id, set())
+                for survivor_id in survivors
+            ):
+                redundant.append(point_id)
+            else:
+                survivors.append(point_id)
+        if not redundant:
+            continue
+        deletion_ids.extend(redundant)
+        groups.append(
+            {
+                "survivor_point_ids": survivors,
+                "deletion_point_ids": redundant,
+            }
+        )
+
+    return {
+        "schema": "class_analysis_same_class_duplicate_plan_v1",
+        "analysis_job_id": job.job_id,
+        "iou_threshold": 0.9,
+        "corner_similarity_threshold": 0.9,
+        "candidate_count": len(rows_by_id),
+        "group_count": len(groups),
+        "protected_group_count": protected_group_count,
+        "delete_count": len(deletion_ids),
+        "deletion_point_ids": deletion_ids,
+        "groups": groups,
+    }
+
+
 def _class_analysis_stream_stored_points(
     result_path: Path,
     descriptor: Mapping[str, Any],
@@ -80546,7 +80776,7 @@ def get_class_analysis_thumbnail(
 ):
     job = _get_class_analysis_job(job_id)
     context_mode = str(context or "").strip().lower()
-    if context_mode not in {"", "wide"}:
+    if context_mode not in {"", "wide", "pair"}:
         raise HTTPException(
             status_code=HTTP_400_BAD_REQUEST,
             detail="thumbnail_context_invalid",
@@ -80587,6 +80817,8 @@ def get_class_analysis_thumbnail(
     thumb_filename = (
         f"{point_clean}.wide.jpg"
         if context_mode == "wide"
+        else f"{point_clean}.pair.jpg"
+        if context_mode == "pair"
         else f"{point_clean}.jpg"
     )
     thumb_path = _safe_existing_regular_file_within_root_impl(
@@ -80614,6 +80846,16 @@ def get_class_analysis_thumbnail(
                         detail="thumbnail_not_found",
                     )
                 try:
+                    pair_conflict = (
+                        point.get("dual_bbox_conflict")
+                        if context_mode == "pair"
+                        else None
+                    )
+                    if context_mode == "pair" and not (
+                        isinstance(pair_conflict, Mapping)
+                        and _class_analysis_point_is_dual_bbox_resolution_task(point)
+                    ):
+                        raise ValueError("thumbnail_pair_conflict_missing")
                     source = _class_analysis_source_locator(job.request)
                     split = _annotation_normalise_split(point.get("split"))
                     rel = _annotation_normalise_image_relpath(point.get("image_relpath"))
@@ -80636,9 +80878,23 @@ def get_class_analysis_thumbnail(
                         image = loaded.convert("RGB")
                     try:
                         bbox = point.get("bbox_xyxy") or [0, 0, 1, 1]
-                        if context_mode == "wide":
+                        other_bbox = (
+                            list(pair_conflict.get("other_bbox_xyxy") or [])[:4]
+                            if isinstance(pair_conflict, Mapping)
+                            else []
+                        )
+                        if context_mode in {"wide", "pair"}:
                             try:
-                                x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
+                                current_box = [float(v) for v in bbox[:4]]
+                                paired_box = (
+                                    [float(v) for v in other_bbox]
+                                    if context_mode == "pair"
+                                    else current_box
+                                )
+                                x1 = min(current_box[0], paired_box[0])
+                                y1 = min(current_box[1], paired_box[1])
+                                x2 = max(current_box[2], paired_box[2])
+                                y2 = max(current_box[3], paired_box[3])
                             except Exception as exc:
                                 raise ValueError("thumbnail_bbox_invalid") from exc
                             box_width = max(1.0, x2 - x1)
@@ -80678,23 +80934,34 @@ def get_class_analysis_thumbnail(
                                 ),
                             )
                         thumb = image.crop(crop_bounds)
-                        target_size = (900, 900) if context_mode == "wide" else (256, 256)
+                        target_size = (900, 900) if context_mode in {"wide", "pair"} else (256, 256)
                         thumb.thumbnail(target_size, Image.Resampling.LANCZOS)
                         try:
-                            if context_mode == "wide":
+                            if context_mode in {"wide", "pair"}:
                                 scale_x = thumb.width / max(1.0, float(crop_bounds[2] - crop_bounds[0]))
                                 scale_y = thumb.height / max(1.0, float(crop_bounds[3] - crop_bounds[1]))
                                 overlay = ImageDraw.Draw(thumb)
+                                line_width = max(2, int(round(max(thumb.size) / 300.0)))
+
+                                def thumbnail_box(value: Sequence[Any]) -> List[float]:
+                                    return [
+                                        (float(value[0]) - crop_bounds[0]) * scale_x,
+                                        (float(value[1]) - crop_bounds[1]) * scale_y,
+                                        (float(value[2]) - crop_bounds[0]) * scale_x,
+                                        (float(value[3]) - crop_bounds[1]) * scale_y,
+                                    ]
+
                                 overlay.rectangle(
-                                    [
-                                        (float(bbox[0]) - crop_bounds[0]) * scale_x,
-                                        (float(bbox[1]) - crop_bounds[1]) * scale_y,
-                                        (float(bbox[2]) - crop_bounds[0]) * scale_x,
-                                        (float(bbox[3]) - crop_bounds[1]) * scale_y,
-                                    ],
+                                    thumbnail_box(bbox),
                                     outline=(255, 122, 24),
-                                    width=max(2, int(round(max(thumb.size) / 300.0))),
+                                    width=line_width * (3 if context_mode == "pair" else 1),
                                 )
+                                if context_mode == "pair":
+                                    overlay.rectangle(
+                                        thumbnail_box(other_bbox),
+                                        outline=(6, 182, 212),
+                                        width=line_width,
+                                    )
                             _class_analysis_write_jpeg(
                                 thumb_dir / thumb_filename,
                                 thumb_dir,
@@ -121094,6 +121361,7 @@ def commit_class_analysis_annotation_transaction(
             source_identities: set[str] = set()
             seen_image_keys: set[str] = set()
             seen_point_ids: set[str] = set()
+            review_shard_cache: Dict[str, Any] = {}
             try:
                 for requested in records:
                     if not isinstance(requested, dict):
@@ -121191,6 +121459,35 @@ def commit_class_analysis_annotation_transaction(
                             )
                         seen_point_ids.add(point_id)
                         _, point = _class_analysis_review_point_for_mutation(job_id, point_id)
+                        if (
+                            bool(point.get("reviewed"))
+                            or bool(
+                                str(
+                                    point.get("human_review_disposition")
+                                    or point.get("review_disposition")
+                                    or ""
+                                ).strip()
+                            )
+                            or _class_analysis_row_has_review_disposition(
+                                point,
+                                job_id,
+                                review_shard_cache,
+                            )
+                        ):
+                            raise HTTPException(
+                                status_code=HTTP_409_CONFLICT,
+                                detail={
+                                    "code": "review_disposition_changed",
+                                    "point_id": point_id,
+                                    "review_object_key": str(
+                                        point.get("review_object_key") or ""
+                                    ),
+                                    "message": (
+                                        "Restore the saved review decision before "
+                                        "editing this annotation."
+                                    ),
+                                },
+                            )
                         if str(point.get("pair_review_key") or "").strip():
                             raise HTTPException(
                                 status_code=HTTP_409_CONFLICT,
@@ -122398,6 +122695,9 @@ app.include_router(
         reset_review_ranking_fn=reset_class_analysis_review_ranking,
         get_projection_fn=get_class_analysis_projection,
         get_thumbnail_fn=get_class_analysis_thumbnail,
+        get_same_class_duplicate_plan_fn=(
+            get_class_analysis_same_class_duplicate_plan
+        ),
         get_refinement_preview_fn=get_class_analysis_refinement_preview,
         commit_dual_bbox_annotation_transaction_fn=(
             commit_class_analysis_dual_bbox_annotation_transaction

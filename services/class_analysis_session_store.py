@@ -825,6 +825,73 @@ def read_session_store_metadata(path: Path | str) -> dict[str, Any]:
     return metadata
 
 
+def get_class_analysis_same_class_overlap_candidates(
+    path: Path | str,
+) -> list[dict[str, Any]]:
+    """Return only overlap-candidate rows needed for a global cleanup plan."""
+
+    candidates: list[dict[str, Any]] = []
+    with _open_readonly(path) as connection:
+        _require_current_session_store_schema(connection)
+        rows = connection.execute(
+            """
+            SELECT p.point_id,
+                   p.split,
+                   p.image_relpath,
+                   p.class_name,
+                   p.reviewed,
+                   p.review_object_key,
+                   p.pair_review_key,
+                   p.annotation_entity_id,
+                   p.annotation_entity_revision,
+                   p.identity_status,
+                   p.is_dual_bbox_conflict,
+                   d.payload AS detail_payload,
+                   r.disposition AS durable_disposition
+              FROM points_core AS p
+              JOIN point_details AS d ON d.point_id = p.point_id
+         LEFT JOIN review_state AS r ON r.point_id = p.point_id
+             WHERE p.is_close_overlap_candidate = 1
+          ORDER BY p.ordinal
+            """
+        ).fetchall()
+        for row in rows:
+            try:
+                detail = json.loads(str(row["detail_payload"]))
+            except (TypeError, ValueError) as exc:
+                raise SessionStoreError(
+                    "class_analysis_session_store_point_detail_invalid",
+                    status_code=409,
+                ) from exc
+            if not isinstance(detail, dict):
+                raise SessionStoreError(
+                    "class_analysis_session_store_point_detail_invalid",
+                    status_code=409,
+                )
+            detail.update(
+                {
+                    "point_id": str(row["point_id"] or ""),
+                    "split": str(row["split"] or "train"),
+                    "image_relpath": str(row["image_relpath"] or ""),
+                    "class_name": str(row["class_name"] or ""),
+                    "reviewed": bool(row["reviewed"]),
+                    "review_object_key": str(row["review_object_key"] or ""),
+                    "pair_review_key": str(row["pair_review_key"] or ""),
+                    "annotation_entity_id": str(row["annotation_entity_id"] or ""),
+                    "annotation_entity_revision": _integer(
+                        row["annotation_entity_revision"], 0
+                    ),
+                    "identity_status": str(row["identity_status"] or ""),
+                    "is_dual_bbox_conflict": bool(row["is_dual_bbox_conflict"]),
+                    "durable_review_disposition": str(
+                        row["durable_disposition"] or ""
+                    ),
+                }
+            )
+            candidates.append(detail)
+    return candidates
+
+
 def get_class_analysis_session_source_identities(
     path: Path | str,
 ) -> list[str]:

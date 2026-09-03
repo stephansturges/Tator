@@ -57009,8 +57009,6 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             const xs = Array.isArray(trace.x) ? trace.x : [];
             const ys = Array.isArray(trace.y) ? trace.y : [];
-            const selected = new Set(Array.isArray(trace.selectedpoints) ? trace.selectedpoints : []);
-            const hasSelection = selected.size > 0;
             const marker = trace.marker || {};
             const line = marker.line || {};
             for (let index = 0; index < Math.min(xs.length, ys.length); index += 1) {
@@ -57025,10 +57023,6 @@ async function cancelRfDetrTrainingJobRequest() {
                     continue;
                 }
                 let opacity = Number(classSplitRasterValueAt(marker.opacity, index, 1));
-                if (hasSelection) {
-                    const selectionMarker = selected.has(index) ? trace.selected?.marker : trace.unselected?.marker;
-                    opacity *= Number(classSplitRasterValueAt(selectionMarker?.opacity, index, 1));
-                }
                 if (!Number.isFinite(opacity) || opacity <= 0) continue;
                 context.globalAlpha = Math.max(0, Math.min(1, opacity));
                 context.beginPath();
@@ -61736,6 +61730,17 @@ function captureClassSplitGraphSettlementState(pointIds) {
         traces.forEach((trace) => {
             trace.showlegend = false;
             trace.hoverinfo = "none";
+            const steadyOpacity = Array.isArray(trace.marker?.opacity)
+                ? 1
+                : Number(trace.marker?.opacity) || 1;
+            trace.selected = {
+                ...(trace.selected || {}),
+                marker: { ...(trace.selected?.marker || {}), opacity: steadyOpacity },
+            };
+            trace.unselected = {
+                ...(trace.unselected || {}),
+                marker: { ...(trace.unselected?.marker || {}), opacity: steadyOpacity },
+            };
         });
         const flashTrace = buildClassSplitFlashTrace();
         if (flashTrace) {

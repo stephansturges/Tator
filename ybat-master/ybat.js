@@ -56374,10 +56374,13 @@ async function cancelRfDetrTrainingJobRequest() {
         );
     }
 
-    function sampleClassSplitGraphPoints(points) {
+    function sampleClassSplitGraphPoints(
+        points,
+        { cap: requestedCap = CLASS_SPLIT_MAX_PLOT_POINTS, forceCap = false } = {}
+    ) {
         const source = Array.isArray(points) ? points : [];
-        const cap = CLASS_SPLIT_MAX_PLOT_POINTS;
-        if (!classSplitElements.limitPlotPoints?.checked) {
+        const cap = Math.max(1, Math.floor(Number(requestedCap) || CLASS_SPLIT_MAX_PLOT_POINTS));
+        if (!forceCap && !classSplitElements.limitPlotPoints?.checked) {
             return { points: source, capped: false, requestedCount: source.length, cap };
         }
         if (source.length <= cap) {
@@ -56610,6 +56613,559 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function getClassSplitPointColor(point) {
         return getClassSplitClassColorTokens(point.class_name || "").stroke || "#2563eb";
+    }
+
+    const CLASS_SPLIT_GRAPH_RENDERER_STORAGE_KEY = "tator.dqe.graph-renderer";
+    const CLASS_SPLIT_COMPATIBILITY_POINT_CAP = 10000;
+    const CLASS_SPLIT_RASTER_SETTLE_MS = 200;
+    const CLASS_SPLIT_RASTER_MAX_BUFFER_PIXELS = 8000000;
+    let classSplitWebGlProbeResult = null;
+    let classSplitGraphWindowSnapshot = null;
+    const classSplitRasterBoundGraphs = new WeakSet();
+    const classSplitRasterOverlayState = {
+        graphEl: null,
+        canvas: null,
+        generation: 0,
+        frame: null,
+        settleTimer: null,
+        paintedRanges: null,
+        pendingRanges: null,
+    };
+
+    function classSplitBrowserSupportsWebGl() {
+        if (classSplitWebGlProbeResult !== null) {
+            return classSplitWebGlProbeResult;
+        }
+        try {
+            const canvas = document.createElement("canvas");
+            const context = canvas.getContext("webgl2") || canvas.getContext("webgl");
+            classSplitWebGlProbeResult = Boolean(
+                context
+                && (typeof context.isContextLost !== "function" || !context.isContextLost())
+            );
+        } catch (error) {
+            classSplitWebGlProbeResult = false;
+        }
+        return classSplitWebGlProbeResult;
+    }
+
+    function getClassSplitGraphRendererPreference() {
+        const select = document.getElementById("classSplitGraphRenderer");
+        const value = String(select?.value || "auto").trim().toLowerCase();
+        return ["auto", "webgl", "raster", "svg"].includes(value) ? value : "auto";
+    }
+
+    function getClassSplitGraphRenderPlan() {
+        const preference = getClassSplitGraphRendererPreference();
+        if (preference === "svg") {
+            return { preference, traceType: "scatter", rasterMarkers: false };
+        }
+        if (preference === "raster") {
+            if (classSplitBrowserSupportsWebGl()) {
+                return { preference, traceType: "scattergl", rasterMarkers: true };
+            }
+            return { preference, traceType: "scatter", rasterMarkers: false };
+        }
+        if (preference === "auto" && !classSplitBrowserSupportsWebGl()) {
+            return { preference, traceType: "scatter", rasterMarkers: false };
+        }
+        return { preference, traceType: "scattergl", rasterMarkers: false };
+    }
+
+    function getClassSplitGraphTraceType() {
+        return getClassSplitGraphRenderPlan().traceType;
+    }
+
+    function setClassSplitGraphRendererPreference(value, { render = true } = {}) {
+        const preference = ["auto", "webgl", "raster", "svg"].includes(String(value || ""))
+            ? String(value)
+            : "auto";
+        const select = document.getElementById("classSplitGraphRenderer");
+        if (select) {
+            select.value = preference;
+        }
+        try {
+            window.localStorage?.setItem(
+                CLASS_SPLIT_GRAPH_RENDERER_STORAGE_KEY,
+                preference,
+            );
+        } catch (error) {
+            console.debug("Could not persist the graph renderer preference", error);
+        }
+        if (render && classSplitState.result) {
+            renderClassSplitPlot();
+        }
+    }
+
+    function initializeClassSplitGraphRendererControl() {
+        const select = document.getElementById("classSplitGraphRenderer");
+        if (!select || select.dataset.bound === "true") {
+            return;
+        }
+        let saved = "auto";
+        try {
+            saved = String(
+                window.localStorage?.getItem(CLASS_SPLIT_GRAPH_RENDERER_STORAGE_KEY)
+                || "auto"
+            );
+        } catch (error) {
+            console.debug("Could not restore the graph renderer preference", error);
+        }
+        select.dataset.bound = "true";
+        select.value = ["auto", "webgl", "raster", "svg"].includes(saved) ? saved : "auto";
+        select.addEventListener("change", () => {
+            setClassSplitGraphRendererPreference(select.value);
+        });
+        const windowSelect = document.getElementById("classSplitGraphWindow");
+        if (windowSelect && windowSelect.dataset.bound !== "true") {
+            windowSelect.dataset.bound = "true";
+            windowSelect.addEventListener("change", () => {
+                if (classSplitState.result) {
+                    renderClassSplitPlot();
+                }
+            });
+        }
+    }
+
+    function classSplitGraphPointPriorityScore(point) {
+        const values = [
+            point?.review_priority_score,
+            point?.wrong_class_suspicion,
+            point?.outlier_score,
+        ].map(Number).filter(Number.isFinite);
+        return values.length ? Math.max(...values) : 0;
+    }
+
+    function getClassSplitGraphWindowSignature() {
+        return JSON.stringify({
+            jobId: String(classSplitState.currentJobId || ""),
+            generation: Number(classSplitState.analysisGeneration) || 0,
+            filterClass: String(classSplitElements.filterClass?.value || ""),
+            displayMode: String(classSplitElements.displayMode?.value || "all"),
+            sizeFilter: String(classSplitElements.sizeFilter?.value || "all"),
+            overlapMode: String(document.getElementById("classSplitOverlapPairMode")?.value || "any"),
+            overlapClassA: String(document.getElementById("classSplitOverlapClassA")?.value || ""),
+            overlapClassB: String(document.getElementById("classSplitOverlapClassB")?.value || ""),
+        });
+    }
+
+    function ensureClassSplitGraphWindowSnapshot(points) {
+        const source = Array.isArray(points) ? points : [];
+        const signature = getClassSplitGraphWindowSignature();
+        if (!classSplitGraphWindowSnapshot || classSplitGraphWindowSnapshot.signature !== signature) {
+            const orderedIds = source
+                .slice()
+                .sort((left, right) => (
+                    classSplitGraphPointPriorityScore(right)
+                    - classSplitGraphPointPriorityScore(left)
+                    || String(left?.point_id || "").localeCompare(String(right?.point_id || ""))
+                ))
+                .map((point) => String(point?.point_id || ""))
+                .filter(Boolean);
+            classSplitGraphWindowSnapshot = {
+                signature,
+                orderedIds,
+                windowCount: Math.max(1, Math.ceil(orderedIds.length / CLASS_SPLIT_MAX_PLOT_POINTS)),
+            };
+        }
+        return classSplitGraphWindowSnapshot;
+    }
+
+    function updateClassSplitGraphWindowControl(snapshot, enabled) {
+        const field = document.getElementById("classSplitGraphWindowField");
+        const select = document.getElementById("classSplitGraphWindow");
+        const note = document.getElementById("classSplitGraphWindowNote");
+        if (!field || !select) {
+            return "overview";
+        }
+        field.hidden = !enabled;
+        if (!enabled || !snapshot) {
+            select.value = "overview";
+            return "overview";
+        }
+        const optionKey = `${snapshot.signature}:${snapshot.windowCount}`;
+        if (select.dataset.optionKey !== optionKey) {
+            select.replaceChildren();
+            const overview = document.createElement("option");
+            overview.value = "overview";
+            overview.textContent = "Priority overview";
+            select.appendChild(overview);
+            for (let index = 0; index < snapshot.windowCount; index += 1) {
+                const option = document.createElement("option");
+                option.value = String(index);
+                option.textContent = `Window ${index + 1} of ${snapshot.windowCount}`;
+                select.appendChild(option);
+            }
+            select.dataset.optionKey = optionKey;
+            select.value = "overview";
+        }
+        const requested = String(select.value || "overview");
+        const windowIndex = Number(requested);
+        const valid = requested === "overview"
+            || (Number.isInteger(windowIndex) && windowIndex >= 0 && windowIndex < snapshot.windowCount);
+        if (!valid) {
+            select.value = "overview";
+        }
+        if (note) {
+            note.textContent = select.value === "overview"
+                ? "Representative overview. Choose numbered windows for exhaustive resident coverage."
+                : "Stable resident slice. Selection tools affect only this displayed window.";
+        }
+        return String(select.value || "overview");
+    }
+
+    function selectClassSplitGraphResidentWindow(points) {
+        const source = Array.isArray(points) ? points : [];
+        const enabled = Boolean(
+            classSplitElements.limitPlotPoints?.checked
+            && source.length > CLASS_SPLIT_MAX_PLOT_POINTS
+        );
+        const snapshot = enabled ? ensureClassSplitGraphWindowSnapshot(source) : null;
+        const selectedWindow = updateClassSplitGraphWindowControl(snapshot, enabled);
+        if (!enabled || selectedWindow === "overview") {
+            const sampled = sampleClassSplitGraphPoints(source);
+            return {
+                ...sampled,
+                windowed: enabled,
+                windowMode: enabled ? "overview" : "all",
+                windowIndex: -1,
+                windowCount: snapshot?.windowCount || 1,
+                windowHomeCount: sampled.points.length,
+                windowPinCount: 0,
+            };
+        }
+        const windowIndex = Number(selectedWindow);
+        const start = windowIndex * CLASS_SPLIT_MAX_PLOT_POINTS;
+        const homeIds = snapshot.orderedIds.slice(start, start + CLASS_SPLIT_MAX_PLOT_POINTS);
+        const pointById = new Map(source.map((point) => [String(point?.point_id || ""), point]));
+        const homePoints = homeIds.map((pointId) => pointById.get(pointId)).filter(Boolean);
+        const homeSet = new Set(homeIds);
+        const pinned = source.filter((point) => (
+            classSplitPointMustStayPlotted(point)
+            && !homeSet.has(String(point?.point_id || ""))
+        ));
+        return {
+            points: [...homePoints, ...pinned],
+            capped: true,
+            requestedCount: source.length,
+            cap: CLASS_SPLIT_MAX_PLOT_POINTS,
+            windowed: true,
+            windowMode: "window",
+            windowIndex,
+            windowCount: snapshot.windowCount,
+            windowHomeCount: homePoints.length,
+            windowPinCount: pinned.length,
+        };
+    }
+
+    function removeClassSplitRasterOverlay() {
+        classSplitRasterOverlayState.generation += 1;
+        if (classSplitRasterOverlayState.frame !== null) {
+            window.cancelAnimationFrame(classSplitRasterOverlayState.frame);
+        }
+        if (classSplitRasterOverlayState.settleTimer !== null) {
+            window.clearTimeout(classSplitRasterOverlayState.settleTimer);
+        }
+        classSplitRasterOverlayState.canvas?.remove();
+        classSplitRasterOverlayState.graphEl = null;
+        classSplitRasterOverlayState.canvas = null;
+        classSplitRasterOverlayState.frame = null;
+        classSplitRasterOverlayState.settleTimer = null;
+        classSplitRasterOverlayState.paintedRanges = null;
+        classSplitRasterOverlayState.pendingRanges = null;
+    }
+
+    function getClassSplitRasterAxisRange(graphEl, axisName, update = {}, fallback = null) {
+        const direct = update[`${axisName}.range`];
+        if (Array.isArray(direct) && direct.length === 2 && direct.every(Number.isFinite)) {
+            return direct.map(Number);
+        }
+        const low = Number(update[`${axisName}.range[0]`]);
+        const high = Number(update[`${axisName}.range[1]`]);
+        if (Number.isFinite(low) && Number.isFinite(high)) {
+            return [low, high];
+        }
+        const layoutRange = graphEl?.layout?.[axisName]?.range;
+        if (Array.isArray(layoutRange) && layoutRange.length === 2) {
+            const normalized = layoutRange.map(Number);
+            if (normalized.every(Number.isFinite)) {
+                return normalized;
+            }
+        }
+        return Array.isArray(fallback) ? [...fallback] : null;
+    }
+
+    function getClassSplitRasterRanges(graphEl, update = {}, fallback = null) {
+        const fallbackRanges = fallback || {};
+        const x = getClassSplitRasterAxisRange(graphEl, "xaxis", update, fallbackRanges.x);
+        const y = getClassSplitRasterAxisRange(graphEl, "yaxis", update, fallbackRanges.y);
+        if (!x || !y || x[0] === x[1] || y[0] === y[1]) {
+            return null;
+        }
+        return { x, y };
+    }
+
+    function getClassSplitRasterPlotGeometry(graphEl) {
+        const container = graphEl?.querySelector?.(".svg-container");
+        const dragRect = graphEl?.querySelector?.(".nsewdrag");
+        if (!container || !dragRect) {
+            return null;
+        }
+        const containerBox = container.getBoundingClientRect();
+        const plotBox = dragRect.getBoundingClientRect();
+        const width = Math.max(1, plotBox.width);
+        const height = Math.max(1, plotBox.height);
+        if (!Number.isFinite(width) || !Number.isFinite(height)) {
+            return null;
+        }
+        return {
+            container,
+            left: plotBox.left - containerBox.left,
+            top: plotBox.top - containerBox.top,
+            width,
+            height,
+        };
+    }
+
+    function ensureClassSplitRasterCanvas(graphEl) {
+        if (
+            classSplitRasterOverlayState.graphEl !== graphEl
+            || !classSplitRasterOverlayState.canvas?.isConnected
+        ) {
+            removeClassSplitRasterOverlay();
+            const geometry = getClassSplitRasterPlotGeometry(graphEl);
+            if (!geometry) {
+                return null;
+            }
+            const canvas = document.createElement("canvas");
+            canvas.className = "class-split-raster-overlay";
+            canvas.dataset.classSplitRasterOverlay = "true";
+            canvas.setAttribute("aria-hidden", "true");
+            Object.assign(canvas.style, {
+                position: "absolute",
+                pointerEvents: "none",
+                transformOrigin: "0 0",
+                zIndex: "1",
+            });
+            const topSvg = Array.from(geometry.container.children)
+                .reverse()
+                .find((child) => child.matches?.("svg.main-svg"));
+            geometry.container.insertBefore(canvas, topSvg || null);
+            classSplitRasterOverlayState.graphEl = graphEl;
+            classSplitRasterOverlayState.canvas = canvas;
+        }
+        return classSplitRasterOverlayState.canvas;
+    }
+
+    function classSplitRasterValueAt(value, index, fallback) {
+        if (Array.isArray(value)) {
+            return value[index] ?? fallback;
+        }
+        return value ?? fallback;
+    }
+
+    function paintClassSplitRasterOverlay(graphEl, requestedRanges = null) {
+        if (
+            graphEl !== classSplitElements.graph
+            || !getClassSplitGraphRenderPlan().rasterMarkers
+            || !Array.isArray(graphEl?.data)
+        ) {
+            removeClassSplitRasterOverlay();
+            return false;
+        }
+        const canvas = ensureClassSplitRasterCanvas(graphEl);
+        const geometry = getClassSplitRasterPlotGeometry(graphEl);
+        const ranges = requestedRanges
+            || getClassSplitRasterRanges(graphEl, {}, classSplitRasterOverlayState.pendingRanges);
+        if (!canvas || !geometry || !ranges) {
+            return false;
+        }
+        const maxScale = Math.sqrt(
+            CLASS_SPLIT_RASTER_MAX_BUFFER_PIXELS / Math.max(1, geometry.width * geometry.height)
+        );
+        const scale = Math.max(1, Math.min(Number(window.devicePixelRatio) || 1, maxScale));
+        const bufferWidth = Math.max(1, Math.round(geometry.width * scale));
+        const bufferHeight = Math.max(1, Math.round(geometry.height * scale));
+        if (canvas.width !== bufferWidth) canvas.width = bufferWidth;
+        if (canvas.height !== bufferHeight) canvas.height = bufferHeight;
+        Object.assign(canvas.style, {
+            left: `${geometry.left}px`,
+            top: `${geometry.top}px`,
+            width: `${geometry.width}px`,
+            height: `${geometry.height}px`,
+            transform: "none",
+        });
+        const context = canvas.getContext("2d", { alpha: true });
+        if (!context) {
+            return false;
+        }
+        context.setTransform(scale, 0, 0, scale, 0, 0);
+        context.clearRect(0, 0, geometry.width, geometry.height);
+        const xSpan = ranges.x[1] - ranges.x[0];
+        const ySpan = ranges.y[1] - ranges.y[0];
+        graphEl.data.forEach((trace) => {
+            if (trace?.visible === false || !String(trace?.mode || "").includes("markers")) {
+                return;
+            }
+            const xs = Array.isArray(trace.x) ? trace.x : [];
+            const ys = Array.isArray(trace.y) ? trace.y : [];
+            const selected = new Set(Array.isArray(trace.selectedpoints) ? trace.selectedpoints : []);
+            const hasSelection = selected.size > 0;
+            const marker = trace.marker || {};
+            const line = marker.line || {};
+            for (let index = 0; index < Math.min(xs.length, ys.length); index += 1) {
+                const x = Number(xs[index]);
+                const y = Number(ys[index]);
+                if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+                const px = ((x - ranges.x[0]) / xSpan) * geometry.width;
+                const py = geometry.height - ((y - ranges.y[0]) / ySpan) * geometry.height;
+                const diameter = Math.max(1, Number(classSplitRasterValueAt(marker.size, index, 7)) || 7);
+                const radius = diameter / 2;
+                if (px < -radius || px > geometry.width + radius || py < -radius || py > geometry.height + radius) {
+                    continue;
+                }
+                let opacity = Number(classSplitRasterValueAt(marker.opacity, index, 1));
+                if (hasSelection) {
+                    const selectionMarker = selected.has(index) ? trace.selected?.marker : trace.unselected?.marker;
+                    opacity *= Number(classSplitRasterValueAt(selectionMarker?.opacity, index, 1));
+                }
+                if (!Number.isFinite(opacity) || opacity <= 0) continue;
+                context.globalAlpha = Math.max(0, Math.min(1, opacity));
+                context.beginPath();
+                context.arc(px, py, radius, 0, Math.PI * 2);
+                context.fillStyle = String(classSplitRasterValueAt(marker.color, index, "#2563eb"));
+                context.fill();
+                const lineWidth = Math.max(0, Number(classSplitRasterValueAt(line.width, index, 0)) || 0);
+                if (lineWidth > 0) {
+                    context.lineWidth = lineWidth;
+                    context.strokeStyle = String(classSplitRasterValueAt(line.color, index, "transparent"));
+                    context.stroke();
+                }
+            }
+        });
+        context.globalAlpha = 1;
+        classSplitRasterOverlayState.paintedRanges = {
+            x: [...ranges.x],
+            y: [...ranges.y],
+        };
+        classSplitRasterOverlayState.pendingRanges = classSplitRasterOverlayState.paintedRanges;
+        return true;
+    }
+
+    function scheduleClassSplitRasterRepaint(graphEl, ranges = null) {
+        if (classSplitRasterOverlayState.settleTimer !== null) {
+            window.clearTimeout(classSplitRasterOverlayState.settleTimer);
+        }
+        const generation = ++classSplitRasterOverlayState.generation;
+        classSplitRasterOverlayState.pendingRanges = ranges || classSplitRasterOverlayState.pendingRanges;
+        classSplitRasterOverlayState.settleTimer = window.setTimeout(() => {
+            if (generation !== classSplitRasterOverlayState.generation) return;
+            classSplitRasterOverlayState.settleTimer = null;
+            paintClassSplitRasterOverlay(graphEl, classSplitRasterOverlayState.pendingRanges);
+        }, CLASS_SPLIT_RASTER_SETTLE_MS);
+    }
+
+    function transformClassSplitRasterOverlay(graphEl, update = {}) {
+        if (
+            classSplitRasterOverlayState.graphEl !== graphEl
+            || !classSplitRasterOverlayState.canvas?.isConnected
+        ) {
+            return;
+        }
+        const painted = classSplitRasterOverlayState.paintedRanges;
+        const next = getClassSplitRasterRanges(
+            graphEl,
+            update,
+            classSplitRasterOverlayState.pendingRanges || painted
+        );
+        const geometry = getClassSplitRasterPlotGeometry(graphEl);
+        if (!painted || !next || !geometry) {
+            scheduleClassSplitRasterRepaint(graphEl, next);
+            return;
+        }
+        const oldXSpan = painted.x[1] - painted.x[0];
+        const newXSpan = next.x[1] - next.x[0];
+        const oldYSpan = painted.y[1] - painted.y[0];
+        const newYSpan = next.y[1] - next.y[0];
+        const scaleX = oldXSpan / newXSpan;
+        const scaleY = oldYSpan / newYSpan;
+        const translateX = ((painted.x[0] - next.x[0]) / newXSpan) * geometry.width;
+        const translateY = ((next.y[1] - painted.y[1]) / newYSpan) * geometry.height;
+        classSplitRasterOverlayState.canvas.style.transform = (
+            `translate(${translateX}px, ${translateY}px) scale(${scaleX}, ${scaleY})`
+        );
+        classSplitRasterOverlayState.pendingRanges = next;
+        scheduleClassSplitRasterRepaint(graphEl, next);
+    }
+
+    function bindClassSplitRasterViewportEvents(graphEl) {
+        if (!graphEl || classSplitRasterBoundGraphs.has(graphEl)) {
+            return;
+        }
+        classSplitRasterBoundGraphs.add(graphEl);
+        graphEl.on("plotly_relayouting", (update) => {
+            if (getClassSplitGraphRenderPlan().rasterMarkers) {
+                transformClassSplitRasterOverlay(graphEl, update || {});
+            }
+        });
+        graphEl.on("plotly_relayout", (update) => {
+            if (getClassSplitGraphRenderPlan().rasterMarkers) {
+                transformClassSplitRasterOverlay(graphEl, update || {});
+            }
+        });
+    }
+
+    function refreshClassSplitGraphRasterOverlay(graphEl = classSplitElements.graph) {
+        if (!graphEl || !getClassSplitGraphRenderPlan().rasterMarkers) {
+            removeClassSplitRasterOverlay();
+            return;
+        }
+        if (classSplitRasterOverlayState.frame !== null) {
+            window.cancelAnimationFrame(classSplitRasterOverlayState.frame);
+        }
+        const generation = ++classSplitRasterOverlayState.generation;
+        classSplitRasterOverlayState.frame = window.requestAnimationFrame(() => {
+            if (generation !== classSplitRasterOverlayState.generation) return;
+            classSplitRasterOverlayState.frame = null;
+            paintClassSplitRasterOverlay(graphEl);
+        });
+        bindClassSplitRasterViewportEvents(graphEl);
+    }
+
+    function bindClassSplitWebGlLossFallback(graphEl) {
+        if (!graphEl || getClassSplitGraphTraceType() !== "scattergl") {
+            return;
+        }
+        graphEl.querySelectorAll("canvas").forEach((canvas) => {
+            if (canvas.dataset.classSplitRasterOverlay === "true") {
+                return;
+            }
+            if (canvas.dataset.classSplitWebGlLossBound === "true") {
+                return;
+            }
+            canvas.dataset.classSplitWebGlLossBound = "true";
+            canvas.addEventListener("webglcontextlost", (event) => {
+                event.preventDefault();
+                classSplitWebGlProbeResult = false;
+                setClassSplitJobStatus(
+                    "The browser lost WebGL rendering. Switched to the 10,000-point compatibility renderer; the analysis was not recomputed.",
+                    "warn",
+                );
+                window.setTimeout(() => {
+                    setClassSplitGraphRendererPreference("svg");
+                }, 0);
+            }, { once: true });
+        });
+    }
+
+    if (document.readyState === "loading") {
+        document.addEventListener(
+            "DOMContentLoaded",
+            initializeClassSplitGraphRendererControl,
+            { once: true },
+        );
+    } else {
+        initializeClassSplitGraphRendererControl();
     }
 
     function getClassSplitPlotTheme() {
@@ -58033,7 +58589,7 @@ async function cancelRfDetrTrainingJobRequest() {
             markerLineWidths.push(markerLine.width);
         });
         return {
-            type: "scattergl",
+            type: getClassSplitGraphTraceType(),
             mode: "markers",
             name,
             legendgroup: options.legendgroup || name,
@@ -60435,6 +60991,7 @@ async function cancelRfDetrTrainingJobRequest() {
         ));
         view.classNames = getClassSplitVisibleClassNames(view.points);
         updateClassSplitGraphStatus(view);
+        refreshClassSplitGraphRasterOverlay(graphEl);
     }
 
     async function restoreClassSplitGraphViewport(
@@ -60459,6 +61016,7 @@ async function cancelRfDetrTrainingJobRequest() {
         if (Object.keys(update).length) {
             await window.Plotly.relayout(graphEl, update);
         }
+        refreshClassSplitGraphRasterOverlay(graphEl);
     }
 
     async function replaceClassSplitGraphAfterMutationStall(
@@ -60973,6 +61531,7 @@ function captureClassSplitGraphSettlementState(pointIds) {
         if (!graphEl) {
             return;
         }
+        removeClassSplitRasterOverlay();
         if (purge) {
             try {
                 if (window.Plotly && typeof window.Plotly.purge === "function" && Array.isArray(graphEl.data)) {
@@ -60991,8 +61550,19 @@ function captureClassSplitGraphSettlementState(pointIds) {
         const allPoints = Array.isArray(classSplitState.result?.points) ? classSplitState.result.points : [];
         const filteredPoints = getClassSplitFilteredPoints();
         const requestedPoints = getClassSplitGraphPoints();
-        const plotSample = sampleClassSplitGraphPoints(requestedPoints);
-        const points = plotSample.points;
+        const plotSample = selectClassSplitGraphResidentWindow(requestedPoints);
+        const renderPlan = getClassSplitGraphRenderPlan();
+        const rendererType = renderPlan.traceType;
+        let points = plotSample.points;
+        let compatibilityCapped = false;
+        if (rendererType === "scatter" && points.length > CLASS_SPLIT_COMPATIBILITY_POINT_CAP) {
+            const compatibilitySample = sampleClassSplitGraphPoints(points, {
+                cap: CLASS_SPLIT_COMPATIBILITY_POINT_CAP,
+                forceCap: true,
+            });
+            points = compatibilitySample.points;
+            compatibilityCapped = compatibilitySample.capped;
+        }
         const classNames = getClassSplitVisibleClassNames(points);
         const projectionChoice = getClassSplitProjectionChoice();
         const displayMode = String(classSplitElements.displayMode?.value || "all");
@@ -61002,8 +61572,20 @@ function captureClassSplitGraphSettlementState(pointIds) {
             filteredPoints,
             requestedPoints,
             points,
-            plotCapped: plotSample.capped,
-            plotCap: plotSample.cap,
+            plotCapped: plotSample.capped || compatibilityCapped,
+            plotCap: compatibilityCapped
+                ? CLASS_SPLIT_COMPATIBILITY_POINT_CAP
+                : plotSample.cap,
+            rendererType,
+            rendererPreference: renderPlan.preference,
+            rasterMarkers: renderPlan.rasterMarkers,
+            windowed: plotSample.windowed,
+            windowMode: plotSample.windowMode,
+            windowIndex: plotSample.windowIndex,
+            windowCount: plotSample.windowCount,
+            windowHomeCount: plotSample.windowHomeCount,
+            windowPinCount: plotSample.windowPinCount,
+            compatibilityCapped,
             classNames,
             projectionChoice,
             displayMode,
@@ -61022,7 +61604,18 @@ function captureClassSplitGraphSettlementState(pointIds) {
             return;
         }
         const parts = [];
-        if (view.plotCapped) {
+        if (view.windowed && view.windowMode === "window") {
+            parts.push(`Window ${view.windowIndex + 1} of ${view.windowCount}`);
+            parts.push(`${view.windowHomeCount} resident objects in this stable slice`);
+            if (view.windowPinCount) {
+                parts.push(`${view.windowPinCount} selected object${view.windowPinCount === 1 ? "" : "s"} pinned from other slices`);
+            }
+            parts.push("selection tools affect this slice only");
+        } else if (view.windowed) {
+            parts.push(`${view.points.length}/${view.requestedPoints.length} resident objects plotted`);
+            parts.push("priority and class-stratified overview");
+            parts.push(`choose one of ${view.windowCount} numbered windows for exhaustive resident coverage`);
+        } else if (view.plotCapped) {
             parts.push(`${view.points.length}/${view.requestedPoints.length} objects plotted`);
             parts.push(`plot thinned at ${view.plotCap} to keep the browser responsive`);
         } else {
@@ -61035,6 +61628,17 @@ function captureClassSplitGraphSettlementState(pointIds) {
         }
         parts.push(`${view.classNames.length} class${view.classNames.length === 1 ? "" : "es"}`);
         parts.push(classSplitProjectionChoiceLabel(view.projectionChoice));
+        if (view.rasterMarkers) {
+            parts.push("Canvas markers with WebGL interaction");
+        } else if (view.rendererType === "scatter") {
+            parts.push("SVG compatibility renderer");
+        }
+        if (view.compatibilityCapped) {
+            parts.push("SVG view priority-sampled to 10,000 points");
+        }
+        if (!classSplitElements.limitPlotPoints?.checked && view.requestedPoints.length > CLASS_SPLIT_MAX_PLOT_POINTS) {
+            parts.push("full resident graph enabled; large redraws may pause slower browsers");
+        }
         if (view.filterClass) {
             parts.push(`filter: ${view.filterClass}`);
         }
@@ -61166,6 +61770,7 @@ function captureClassSplitGraphSettlementState(pointIds) {
                 classSplitElements.filterClass?.value || "all",
                 classSplitElements.displayMode?.value || "all",
                 getClassSplitProjectionChoice(),
+                view.windowMode === "window" ? `window-${view.windowIndex}` : view.windowMode,
             ].join(":"),
             selectionrevision: classSplitState.selectionRevision,
         };
@@ -61184,6 +61789,8 @@ function captureClassSplitGraphSettlementState(pointIds) {
                 return false;
             }
             classSplitState.lastPlotViewKey = layout.uirevision;
+            bindClassSplitWebGlLossFallback(graphEl);
+            refreshClassSplitGraphRasterOverlay(graphEl);
             updateClassSplitGraphStatus(view);
             if (typeof graphEl.removeAllListeners === "function") {
                 [
@@ -68500,6 +69107,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             await window.Plotly.restyle(graphEl, update, [saved.traceIndex]);
         }
         await restoreClassSplitGraphViewport(snapshot.graphViewport, graphEl);
+        refreshClassSplitGraphRasterOverlay(graphEl);
         return true;
     }
 

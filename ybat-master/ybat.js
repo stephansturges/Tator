@@ -1065,19 +1065,20 @@
                 return false;
             }
             const existing = readDataQualityExplorerSession();
-            const explorerInitialized = Boolean(classSplitState?.initialized);
+            const explorerInitialized = Boolean(classSplitState?.sessionRecoveryHydrated);
+            const sessionAttached = explorerInitialized && Boolean(classSplitState?.currentJobId);
             window.sessionStorage.setItem(DATA_QUALITY_SESSION_KEY, JSON.stringify({
                 activeTab: TOP_TAB_KEYS.has(activeTab) ? activeTab : TAB_LABELING,
-                jobId: explorerInitialized
+                jobId: sessionAttached
                     ? String(classSplitState?.currentJobId || "")
                     : String(existing.jobId || ""),
-                snapshotId: explorerInitialized
+                snapshotId: sessionAttached
                     ? String(classSplitState?.snapshotId || "")
                     : String(existing.snapshotId || ""),
-                snapshotSignature: explorerInitialized
+                snapshotSignature: sessionAttached
                     ? String(classSplitState?.snapshotSignature || "")
                     : String(existing.snapshotSignature || ""),
-                selectedPointId: explorerInitialized
+                selectedPointId: sessionAttached
                     ? String(classSplitState?.selectedPointId || "")
                     : String(existing.selectedPointId || ""),
                 pendingTrainingClassCommits: explorerInitialized
@@ -1151,93 +1152,132 @@
         }
     }
 
-    async function restoreDataQualityExplorerSession() {
+    function setClassSplitSessionRestoreStatus(message) {
+        if (classSplitElements.sessionRestoreStatus) {
+            classSplitElements.sessionRestoreStatus.textContent = message;
+        }
+    }
+
+    function requestDataQualityExplorerSessionRestore(options = {}) {
+        if (classSplitState.sessionRestorePromise) {
+            return classSplitState.sessionRestorePromise;
+        }
+        const pending = Promise.resolve()
+            .then(() => restoreDataQualityExplorerSession(options))
+            .catch((error) => {
+                console.warn("Could not restore the Data Quality Explorer session", error);
+                setClassSplitSessionRestoreStatus(
+                    `Could not restore the saved session: ${error.message || error}. Try again.`
+                );
+            })
+            .finally(() => {
+                if (classSplitState.sessionRestorePromise === pending) {
+                    classSplitState.sessionRestorePromise = null;
+                    refreshClassSplitControls();
+                }
+            });
+        classSplitState.sessionRestorePromise = pending;
+        refreshClassSplitControls();
+        return pending;
+    }
+
+    async function restoreDataQualityExplorerSession({ forceRestore = false } = {}) {
+        const generation = classSplitState.analysisGeneration;
+        const apiRoot = API_ROOT;
+        const canAttach = () => !classSplitState.currentJobId
+            && !classSplitState.result
+            && !classSplitState.active
+            && !classSplitState.startupOperation
+            && classSplitState.analysisGeneration === generation
+            && API_ROOT === apiRoot;
+        if (!canAttach()) return;
         const saved = readDataQualityExplorerSession();
-        classSplitState.snapshotId = String(saved.snapshotId || "");
-        classSplitState.snapshotSignature = String(saved.snapshotSignature || "");
-        restoreClassSplitPendingTrainingCommits(saved.pendingTrainingClassCommits);
-        restoreClassSplitPendingReviewCommits(
-            saved.pendingReviewDispositionCommits,
-            String(saved.jobId || "").trim()
-        );
-        restoreClassSplitPendingAnnotationTransactions(
-            saved.pendingAnnotationTransactions,
-            String(saved.jobId || "").trim()
-        );
-        restoreClassSplitFailedReviewActions(
-            saved.failedReviewDispositionActions,
-            String(saved.jobId || "").trim()
-        );
-        classSplitState.qwenReviewTraceEnabled = Boolean(saved.qwenReviewTraceEnabled);
-        classSplitState.qwenKeepLoaded = typeof saved.qwenKeepLoaded === "boolean"
-            ? saved.qwenKeepLoaded
-            : true;
-        const savedRecipePreset = String(saved.recipePreset || "precise").trim().toLowerCase();
-        const recipePreset = (
-            classSplitElements.recipePreset
-            && Array.from(classSplitElements.recipePreset.options || []).some(
-                (option) => option.value === savedRecipePreset
+        if (!classSplitState.sessionRecoveryHydrated) {
+            classSplitState.snapshotId = String(saved.snapshotId || "");
+            classSplitState.snapshotSignature = String(saved.snapshotSignature || "");
+            restoreClassSplitPendingTrainingCommits(saved.pendingTrainingClassCommits);
+            restoreClassSplitPendingReviewCommits(
+                saved.pendingReviewDispositionCommits,
+                String(saved.jobId || "").trim()
+            );
+            restoreClassSplitPendingAnnotationTransactions(
+                saved.pendingAnnotationTransactions,
+                String(saved.jobId || "").trim()
+            );
+            restoreClassSplitFailedReviewActions(
+                saved.failedReviewDispositionActions,
+                String(saved.jobId || "").trim()
+            );
+            classSplitState.qwenReviewTraceEnabled = Boolean(saved.qwenReviewTraceEnabled);
+            classSplitState.qwenKeepLoaded = typeof saved.qwenKeepLoaded === "boolean"
+                ? saved.qwenKeepLoaded
+                : true;
+            const savedRecipePreset = String(saved.recipePreset || "precise").trim().toLowerCase();
+            const recipePreset = (
+                classSplitElements.recipePreset
+                && Array.from(classSplitElements.recipePreset.options || []).some(
+                    (option) => option.value === savedRecipePreset
+                )
             )
-        )
-            ? savedRecipePreset
-            : "precise";
-        if (classSplitElements.recipePreset) {
-            classSplitElements.recipePreset.value = recipePreset;
-        }
-        classSplitState.refinementTouched = false;
-        applyEmbeddingRecipePresetToClassSplit(recipePreset);
-        if (recipePreset === "custom") {
-            restoreClassSplitSessionRecipeValues(saved.recipeValues);
-        }
-        classSplitState.refinementTouched = Boolean(saved.refinementTouched);
-        classSplitState.refinementPreference = resolveClassSplitRefinementPreferenceForPreset(
-            recipePreset,
-            {
-                touched: classSplitState.refinementTouched,
-                preference: (
-                    typeof saved.refineOutliers === "boolean"
-                        ? saved.refineOutliers
-                        : false
-                ),
+                ? savedRecipePreset
+                : "precise";
+            if (classSplitElements.recipePreset) {
+                classSplitElements.recipePreset.value = recipePreset;
             }
-        );
-        classSplitState.vignetteCategory = CLASS_SPLIT_REFINEMENT_FILTER_CATEGORIES.includes(
-            String(saved.vignetteCategory || "")
-        )
-            ? String(saved.vignetteCategory)
-            : "review_queue";
-        classSplitState.showAllRough = typeof saved.showAllRough === "boolean"
-            ? saved.showAllRough
-            : true;
-        classSplitState.vignetteSort = CLASS_SPLIT_VIGNETTE_SORT_MODES.includes(
-            String(saved.vignetteSort || "")
-        )
-            ? String(saved.vignetteSort)
-            : "priority";
-        classSplitState.vignetteFilterJobId = String(
-            saved.vignetteFilterJobId || saved.jobId || ""
-        );
-        classSplitState.qwenTraceFollowBottom = true;
-        if (classSplitElements.qwenReviewTraceToggle) {
-            classSplitElements.qwenReviewTraceToggle.checked = classSplitState.qwenReviewTraceEnabled;
+            classSplitState.refinementTouched = false;
+            applyEmbeddingRecipePresetToClassSplit(recipePreset);
+            if (recipePreset === "custom") {
+                restoreClassSplitSessionRecipeValues(saved.recipeValues);
+            }
+            classSplitState.refinementTouched = Boolean(saved.refinementTouched);
+            classSplitState.refinementPreference = resolveClassSplitRefinementPreferenceForPreset(
+                recipePreset,
+                {
+                    touched: classSplitState.refinementTouched,
+                    preference: (
+                        typeof saved.refineOutliers === "boolean"
+                            ? saved.refineOutliers
+                            : false
+                    ),
+                }
+            );
+            classSplitState.vignetteCategory = CLASS_SPLIT_REFINEMENT_FILTER_CATEGORIES.includes(
+                String(saved.vignetteCategory || "")
+            )
+                ? String(saved.vignetteCategory)
+                : "review_queue";
+            classSplitState.showAllRough = typeof saved.showAllRough === "boolean"
+                ? saved.showAllRough
+                : true;
+            classSplitState.vignetteSort = CLASS_SPLIT_VIGNETTE_SORT_MODES.includes(
+                String(saved.vignetteSort || "")
+            )
+                ? String(saved.vignetteSort)
+                : "priority";
+            classSplitState.vignetteFilterJobId = String(
+                saved.vignetteFilterJobId || saved.jobId || ""
+            );
+            classSplitState.qwenTraceFollowBottom = true;
+            if (classSplitElements.qwenReviewTraceToggle) {
+                classSplitElements.qwenReviewTraceToggle.checked = classSplitState.qwenReviewTraceEnabled;
+            }
+            if (classSplitElements.qwenKeepLoaded) {
+                classSplitElements.qwenKeepLoaded.checked = classSplitState.qwenKeepLoaded;
+            }
+            if (classSplitElements.vignetteCategory) {
+                classSplitElements.vignetteCategory.value = classSplitState.vignetteCategory;
+            }
+            if (classSplitElements.showAllRough) {
+                classSplitElements.showAllRough.checked = classSplitState.showAllRough;
+            }
+            if (classSplitElements.vignetteSort) {
+                classSplitElements.vignetteSort.value = classSplitState.vignetteSort;
+            }
+            refreshClassSplitRefinementControl();
+            renderClassSplitQwenReviewTraceToast();
+            classSplitState.sessionRecoveryHydrated = true;
         }
-        if (classSplitElements.qwenKeepLoaded) {
-            classSplitElements.qwenKeepLoaded.checked = classSplitState.qwenKeepLoaded;
-        }
-        if (classSplitElements.vignetteCategory) {
-            classSplitElements.vignetteCategory.value = classSplitState.vignetteCategory;
-        }
-        if (classSplitElements.showAllRough) {
-            classSplitElements.showAllRough.checked = classSplitState.showAllRough;
-        }
-        if (classSplitElements.vignetteSort) {
-            classSplitElements.vignetteSort.value = classSplitState.vignetteSort;
-        }
-        refreshClassSplitRefinementControl();
-        renderClassSplitQwenReviewTraceToast();
-        if (classSplitState.currentJobId) {
-            return;
-        }
+        setClassSplitSessionRestoreStatus("Looking for the saved session ...");
         const savedJobId = String(saved.jobId || "").trim();
         if (savedJobId) {
             try {
@@ -1245,6 +1285,7 @@
                     `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(savedJobId)}`,
                     "previous analysis status"
                 );
+                if (!canAttach()) return;
                 const state = String(status?.status || "").trim().toLowerCase();
                 if (!["completed", "failed", "cancelled"].includes(state)) {
                     classSplitState.currentJobId = savedJobId;
@@ -1265,6 +1306,7 @@
                 }
             }
         }
+        if (!canAttach()) return;
         let manifest = null;
         try {
             const latestPayload = await fetchClassSplitBoundedJson(
@@ -1276,19 +1318,31 @@
             if (Number(error?.httpStatus) !== 404) {
                 console.warn("Could not inspect the latest Data Quality Explorer session", error);
             }
+            if (canAttach()) {
+                setClassSplitSessionRestoreStatus(Number(error?.httpStatus) === 404
+                    ? "No saved analysis session is available on this server."
+                    : `Could not reach the saved session: ${error.message || error}. Try again.`);
+            }
             return;
         }
+        if (!canAttach()) return;
         const jobId = String(manifest?.job_id || "").trim();
         if (
             !jobId
             || !manifest?.artifacts?.session_store?.file
-            || String(saved.dismissedRestoreJobId || "") === jobId
         ) {
+            setClassSplitSessionRestoreStatus("No restorable analysis session is available on this server.");
             return;
         }
         const objectCount = Number(manifest?.source?.object_count || 0);
         const recipe = String(manifest?.recipe?.label || "saved analysis");
-        const accepted = window.confirm(
+        setClassSplitSessionRestoreStatus(
+            `Saved session available: ${recipe}`
+            + `${objectCount > 0 ? ` • ${objectCount.toLocaleString()} objects` : ""}`
+            + ". Use Restore saved session to reconnect."
+        );
+        if (!forceRestore && String(saved.dismissedRestoreJobId || "") === jobId) return;
+        const accepted = forceRestore || window.confirm(
             `Restore the latest Data Quality Explorer session?\n\n${recipe}`
             + `${objectCount > 0 ? ` • ${objectCount.toLocaleString()} objects` : ""}`
             + "\n\nThe graph and review queue restore first, then the exact labeling workspace reconnects so See instance and manual cleanup remain available."
@@ -1296,13 +1350,21 @@
         if (!accepted) {
             try {
                 window.sessionStorage?.setItem(DATA_QUALITY_SESSION_KEY, JSON.stringify({
-                    ...saved,
+                    ...readDataQualityExplorerSession(),
                     dismissedRestoreJobId: jobId,
                 }));
             } catch (error) {
                 console.warn("Could not remember the declined analysis restore", error);
             }
             return;
+        }
+        try {
+            window.sessionStorage?.setItem(DATA_QUALITY_SESSION_KEY, JSON.stringify({
+                ...readDataQualityExplorerSession(),
+                dismissedRestoreJobId: "",
+            }));
+        } catch (error) {
+            console.warn("Could not clear the declined analysis restore", error);
         }
         // Preserve a matching resume descriptor so this tab can reacquire its
         // own exact annotation lease after reload. openDatasetInAnnotationMode
@@ -1373,10 +1435,24 @@
         } catch (error) {
             classSplitState.active = false;
             classSplitState.currentJobId = "";
+            // Applying a payload can fail after assigning result. Discard
+            // only the partial view so retry remains available; keep the
+            // durable recovery queues and annotation resume descriptor.
+            advanceClassSplitAnalysisGeneration();
+            classSplitState.result = null;
+            classSplitState.pointsById.clear();
+            classSplitState.reviewedPointsById.clear();
+            classSplitState.lassoPointIds.clear();
+            classSplitState.selectedPointId = "";
+            classSplitState.sessionManifest = null;
+            classSplitState.restoredSession = false;
+            classSplitState.restoredSourceCompatible = false;
+            hideClassSplitResultUiUntilReady();
             classSplitElements.progress?.classList.remove(
                 "class-split-progress--restore-active"
             );
             setClassSplitJobStatus(`Restore failed: ${error.message || error}`, "error");
+            setClassSplitSessionRestoreStatus(`Restore failed: ${error.message || error}. Try again.`);
             refreshClassSplitControls();
         }
     }
@@ -3789,6 +3865,9 @@ const AUTOMATION_LOCKED_TABS = new Set([
     };
     const classSplitElements = {
         datasetStatus: null,
+        sessionRestore: null,
+        sessionRestoreButton: null,
+        sessionRestoreStatus: null,
         jobStatus: null,
         scopeSelected: null,
         scopeAll: null,
@@ -4154,6 +4233,8 @@ const AUTOMATION_LOCKED_TABS = new Set([
         capabilities: null,
         clipBackbones: [],
         currentJobId: "",
+        sessionRestorePromise: null,
+        sessionRecoveryHydrated: false,
         sessionManifest: null,
         boundedTransport: false,
         boundedInitialProjectionMode: "",
@@ -4641,6 +4722,151 @@ const AUTOMATION_LOCKED_TABS = new Set([
         return String(classSplitElements.dragMode?.value || "lasso");
     }
 
+    const classSplitGraphGestureState = {
+        graphEl: null,
+        pointerId: null,
+        mode: "",
+        token: 0,
+        terminal: true,
+        recoveryToken: 0,
+        recovering: false,
+    };
+
+    function releaseClassSplitGraphPointerState(event = null) {
+        classSplitGraphPointerState.pointerCaptured = false;
+        const graphEl = classSplitElements.graph;
+        const target = event?.target instanceof Element ? event.target : null;
+        classSplitGraphPointerState.inGraph = Boolean(
+            graphEl
+            && target
+            && (target === graphEl || graphEl.contains(target))
+        );
+    }
+
+    function beginClassSplitGraphGesture(graphEl, event) {
+        classSplitGraphGestureState.graphEl = graphEl;
+        classSplitGraphGestureState.pointerId = event?.pointerId ?? null;
+        classSplitGraphGestureState.mode = getClassSplitGraphDragMode();
+        classSplitGraphGestureState.token += 1;
+        classSplitGraphGestureState.terminal = false;
+    }
+
+    function settleClassSplitGraphGesture(graphEl = classSplitElements.graph) {
+        if (classSplitGraphGestureState.graphEl !== graphEl) {
+            return;
+        }
+        classSplitGraphGestureState.pointerId = null;
+        classSplitGraphGestureState.terminal = true;
+    }
+
+    async function resetClassSplitGraphDragLayer(
+        graphEl = classSplitElements.graph,
+        requestedMode = getClassSplitGraphDragMode()
+    ) {
+        const safeMode = CLASS_SPLIT_GRAPH_DRAG_MODES.includes(String(requestedMode || ""))
+            ? String(requestedMode)
+            : "lasso";
+        if (
+            !graphEl
+            || graphEl !== classSplitElements.graph
+            || !classSplitGraphHasLivePlot(graphEl)
+            || typeof window.Plotly?.relayout !== "function"
+        ) {
+            releaseClassSplitGraphPointerState();
+            return false;
+        }
+        classSplitGraphGestureState.token += 1;
+        classSplitGraphGestureState.terminal = true;
+        classSplitGraphGestureState.pointerId = null;
+        classSplitGraphGestureState.recovering = true;
+        const recoveryToken = ++classSplitGraphGestureState.recoveryToken;
+        releaseClassSplitGraphPointerState();
+        const currentMode = String(graphEl.layout?.dragmode || "");
+        const transientMode = safeMode === "pan" ? "lasso" : "pan";
+        let transientModeApplied = false;
+        try {
+            // Never disable dragmode during recovery. If a second relayout is
+            // interrupted, a valid transient mode must remain usable rather
+            // than leaving the graph unable to select, zoom, or pan.
+            if (currentMode === safeMode) {
+                await window.Plotly.relayout(graphEl, { dragmode: transientMode });
+                transientModeApplied = true;
+            }
+            if (
+                recoveryToken !== classSplitGraphGestureState.recoveryToken
+                || graphEl !== classSplitElements.graph
+            ) {
+                return false;
+            }
+            await window.Plotly.relayout(graphEl, { dragmode: safeMode });
+            return Boolean(
+                recoveryToken === classSplitGraphGestureState.recoveryToken
+                && graphEl === classSplitElements.graph
+            );
+        } catch (error) {
+            if (
+                recoveryToken === classSplitGraphGestureState.recoveryToken
+                && graphEl === classSplitElements.graph
+                && classSplitGraphHasLivePlot(graphEl)
+            ) {
+                try {
+                    await window.Plotly.relayout(graphEl, { dragmode: safeMode });
+                    return true;
+                } catch (restoreError) {
+                    if (transientModeApplied && classSplitElements.dragMode) {
+                        classSplitElements.dragMode.value = transientMode;
+                        classSplitGraphGestureState.mode = transientMode;
+                        if (transientMode !== "pan") {
+                            classSplitGraphPanRestoreMode = transientMode;
+                        }
+                    }
+                    console.warn(
+                        "Data Quality Explorer drag-mode restoration failed",
+                        restoreError
+                    );
+                }
+            }
+            throw error;
+        } finally {
+            if (recoveryToken === classSplitGraphGestureState.recoveryToken) {
+                classSplitGraphGestureState.recovering = false;
+            }
+        }
+    }
+
+    function finishClassSplitGraphPointerGesture(event, { interrupted = false } = {}) {
+        const activePointerId = classSplitGraphGestureState.pointerId;
+        if (
+            event?.pointerId !== undefined
+            && activePointerId !== null
+            && event.pointerId !== activePointerId
+        ) {
+            return;
+        }
+        const graphEl = classSplitGraphGestureState.graphEl;
+        const hadActivePointer = activePointerId !== null;
+        releaseClassSplitGraphPointerState(event);
+        classSplitGraphGestureState.pointerId = null;
+        if (
+            !interrupted
+            || !hadActivePointer
+            || !graphEl
+            || classSplitGraphGestureState.terminal
+            || !["lasso", "select"].includes(classSplitGraphGestureState.mode)
+        ) {
+            return;
+        }
+        // A normal pointerup only releases physical pointer ownership. Plotly
+        // may still be computing a large box/lasso result, so only an explicit
+        // interruption is allowed to rebuild the drag layer.
+        resetClassSplitGraphDragLayer(
+            graphEl,
+            getClassSplitGraphDragMode()
+        ).catch((error) => {
+            console.warn("Data Quality Explorer interrupted-gesture recovery failed", error);
+        });
+    }
+
     function setClassSplitGraphDragMode(mode, { updateLayout = true } = {}) {
         const safeMode = String(mode || "").trim();
         if (!CLASS_SPLIT_GRAPH_DRAG_MODES.includes(safeMode)) {
@@ -4649,6 +4875,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         if (!classSplitElements.dragMode) {
             return false;
         }
+        cancelClassSplitRasterSelection();
         if (safeMode !== "pan") {
             classSplitGraphPanRestoreMode = safeMode;
         }
@@ -4656,13 +4883,28 @@ const AUTOMATION_LOCKED_TABS = new Set([
             classSplitElements.dragMode.value = safeMode;
         }
         if (updateLayout && classSplitGraphHasLivePlot() && window.Plotly?.relayout) {
-            Promise.resolve().then(() => window.Plotly.relayout(classSplitElements.graph, {
-                dragmode: safeMode,
-            })).catch((error) => {
+            const graphEl = classSplitElements.graph;
+            resetClassSplitGraphDragLayer(graphEl, safeMode).catch((error) => {
                 console.warn("Data Quality Explorer drag-mode update failed", error);
             });
         }
         return true;
+    }
+
+    function syncClassSplitGraphDragModeFromPlot(
+        update,
+        graphEl = classSplitElements.graph
+    ) {
+        const plotMode = String(update?.dragmode || "").trim();
+        if (
+            graphEl !== classSplitElements.graph
+            || classSplitGraphGestureState.recovering
+            || !CLASS_SPLIT_GRAPH_DRAG_MODES.includes(plotMode)
+        ) {
+            return false;
+        }
+        settleClassSplitGraphGesture(graphEl);
+        return setClassSplitGraphDragMode(plotMode, { updateLayout: false });
     }
 
     function toggleClassSplitGraphPanMode() {
@@ -4685,27 +4927,29 @@ const AUTOMATION_LOCKED_TABS = new Set([
         graphEl.addEventListener("pointerleave", () => {
             classSplitGraphPointerState.inGraph = false;
         });
-        graphEl.addEventListener("pointerdown", () => {
+        graphEl.addEventListener("pointerdown", (event) => {
             classSplitGraphPointerState.inGraph = true;
             classSplitGraphPointerState.pointerCaptured = true;
+            beginClassSplitGraphGesture(graphEl, event);
+        });
+        graphEl.addEventListener("lostpointercapture", (event) => {
+            finishClassSplitGraphPointerGesture(event, { interrupted: true });
         });
         if (!classSplitPointerCaptureListenersBound) {
             classSplitPointerCaptureListenersBound = true;
-            const releasePointerCapture = (event) => {
-                if (!classSplitGraphPointerState.pointerCaptured) {
-                    return;
+            window.addEventListener("pointerup", (event) => {
+                finishClassSplitGraphPointerGesture(event);
+            });
+            window.addEventListener("pointercancel", (event) => {
+                finishClassSplitGraphPointerGesture(event, { interrupted: true });
+            });
+            window.addEventListener("blur", () => {
+                finishClassSplitGraphPointerGesture(null, { interrupted: true });
+            });
+            document.addEventListener("visibilitychange", () => {
+                if (document.hidden) {
+                    finishClassSplitGraphPointerGesture(null, { interrupted: true });
                 }
-                classSplitGraphPointerState.pointerCaptured = false;
-                const target = event?.target instanceof Element ? event.target : null;
-                classSplitGraphPointerState.inGraph = Boolean(
-                    graphEl
-                    && target
-                    && (target === graphEl || graphEl.contains(target))
-                );
-            };
-            window.addEventListener("pointerup", releasePointerCapture);
-            window.addEventListener("pointercancel", () => {
-                classSplitGraphPointerState.pointerCaptured = false;
             });
         }
     }
@@ -52855,6 +53099,14 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function refreshClassSplitControls({ preferCurrentClass = false } = {}) {
+        if (classSplitElements.sessionRestore) {
+            classSplitElements.sessionRestore.hidden = Boolean(classSplitState.currentJobId || classSplitState.result);
+        }
+        if (classSplitElements.sessionRestoreButton) {
+            classSplitElements.sessionRestoreButton.disabled = Boolean(
+                classSplitState.sessionRestorePromise || classSplitState.active || classSplitState.startupOperation
+            );
+        }
         const stats = getClassSplitActiveWorkspaceStats();
         const available = stats.imageCount > 0 && stats.classCount > 0 && stats.objectCount > 0;
         populateClassSplitClasses({ preserveSelection: !preferCurrentClass });
@@ -52930,6 +53182,7 @@ async function cancelRfDetrTrainingJobRequest() {
         );
         const canRun = available
             && !classSplitState.active
+            && !classSplitState.sessionRestorePromise
             && !classSplitRunMutationBusy
             && (scope !== "selected_class" || (classSelected && selectedClassCount > 0));
         if (classSplitElements.dinov3Pooling) {
@@ -53026,7 +53279,8 @@ async function cancelRfDetrTrainingJobRequest() {
         );
         setButtonDisabled(
             classSplitElements.rerunButton,
-            classSplitState.active || classSplitRunMutationBusy || !classSplitState.lastRequest
+            classSplitState.active || classSplitState.sessionRestorePromise
+            || classSplitRunMutationBusy || !classSplitState.lastRequest
         );
         refreshClassSplitClusterControls();
         refreshClassSplitDatasetAnalysisControls();
@@ -53401,6 +53655,10 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function startClassSplitAnalysis({ reuseLast = false } = {}) {
+        if (classSplitState.sessionRestorePromise) {
+            setClassSplitJobStatus("Wait for the saved session to finish reconnecting before starting another analysis.", "warn");
+            return;
+        }
         if (
             classSplitState.active
             || classSplitMutationIsBusy({
@@ -56859,6 +57117,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function removeClassSplitRasterOverlay() {
+        cancelClassSplitRasterSelection();
         classSplitRasterOverlayState.generation += 1;
         if (classSplitRasterOverlayState.frame !== null) {
             window.cancelAnimationFrame(classSplitRasterOverlayState.frame);
@@ -56962,6 +57221,225 @@ async function cancelRfDetrTrainingJobRequest() {
             return value[index] ?? fallback;
         }
         return value ?? fallback;
+    }
+
+    let classSplitRasterSelection = null;
+
+    function cancelClassSplitRasterSelection(event = null) {
+        const gesture = classSplitRasterSelection;
+        if (!gesture) return;
+        classSplitRasterSelection = null;
+        gesture.listeners.abort();
+        gesture.outline.remove();
+        settleClassSplitGraphGesture(gesture.graphEl);
+        const inGraph = classSplitGraphPointerState.inGraph;
+        releaseClassSplitGraphPointerState(event);
+        if (!event) {
+            classSplitGraphPointerState.inGraph = inGraph
+                && gesture.graphEl === classSplitElements.graph && gesture.graphEl.isConnected;
+        }
+        if (gesture.target.hasPointerCapture?.(gesture.pointerId)) {
+            gesture.target.releasePointerCapture(gesture.pointerId);
+        }
+    }
+
+    function classSplitRasterPolygonContains(vertices, x, y) {
+        let inside = false;
+        for (let i = 0, j = vertices.length - 1; i < vertices.length; j = i++) {
+            const [xi, yi] = vertices[i];
+            const [xj, yj] = vertices[j];
+            if (
+                (yi > y) !== (yj > y)
+                && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi
+            ) {
+                inside = !inside;
+            }
+        }
+        return inside;
+    }
+
+    function beginClassSplitRasterSelection(graphEl, event) {
+        const mode = String(graphEl.layout?.dragmode || getClassSplitGraphDragMode());
+        const target = event.target;
+        if (
+            graphEl !== classSplitElements.graph
+            || !getClassSplitGraphRenderPlan().rasterMarkers
+            || !["lasso", "select"].includes(mode)
+            || event.button !== 0 || !event.isPrimary
+            || !target?.matches?.(".nsewdrag")
+        ) return;
+        // The Canvas display must not depend on scattergl's selection buffers.
+        // Cancel the compatibility mousedown before Plotly starts that path.
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (classSplitMutationIsBusy()) return;
+        cancelClassSplitRasterSelection();
+        const geometry = getClassSplitRasterPlotGeometry(graphEl);
+        const ranges = getClassSplitRasterRanges(graphEl);
+        if (!geometry || !ranges) return;
+        const bounds = target.getBoundingClientRect();
+        const position = (pointer) => [
+            Math.max(0, Math.min(geometry.width, pointer.clientX - bounds.left)),
+            Math.max(0, Math.min(geometry.height, pointer.clientY - bounds.top)),
+        ];
+        const start = position(event);
+        const outline = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        outline.classList.add("class-split-raster-selection");
+        outline.setAttribute("aria-hidden", "true");
+        Object.assign(outline.style, {
+            position: "absolute", pointerEvents: "none", zIndex: "2",
+            left: `${geometry.left}px`, top: `${geometry.top}px`,
+            width: `${geometry.width}px`, height: `${geometry.height}px`,
+        });
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("fill", "rgba(59, 130, 246, 0.12)");
+        path.setAttribute("stroke", "#3b82f6");
+        path.setAttribute("stroke-width", "1.5");
+        path.setAttribute("stroke-dasharray", "5 3");
+        outline.appendChild(path);
+        geometry.container.appendChild(outline);
+        const gesture = {
+            graphEl, target, pointerId: event.pointerId, outline,
+            listeners: new AbortController(),
+            renderToken: classSplitState.plotRenderToken,
+            generation: classSplitState.analysisGeneration,
+            jobId: classSplitState.currentJobId,
+            data: graphEl.data,
+            traces: (graphEl.data || []).map((trace) => ({
+                trace, x: trace.x, y: trace.y, ids: trace.customdata,
+                length: trace.x?.length, visible: trace.visible,
+            })),
+        };
+        classSplitRasterSelection = gesture;
+        beginClassSplitGraphGesture(graphEl, event);
+        classSplitGraphPointerState.pointerCaptured = true;
+        hideClassSplitGraphHoverPreview();
+        const options = { capture: true, signal: gesture.listeners.signal };
+        let vertices = [start];
+        let moved = false;
+        const move = (pointer) => {
+            if (pointer.pointerId !== gesture.pointerId) return;
+            pointer.preventDefault();
+            pointer.stopImmediatePropagation();
+            const next = position(pointer);
+            moved ||= Math.hypot(next[0] - start[0], next[1] - start[1]) >= 4;
+            if (!moved) return;
+            if (mode === "select") {
+                vertices = [start, [next[0], start[1]], next, [start[0], next[1]]];
+            } else {
+                const last = vertices[vertices.length - 1];
+                if (Math.hypot(next[0] - last[0], next[1] - last[1]) >= 2) vertices.push(next);
+            }
+            path.setAttribute("d", `M${vertices.map((point) => point.join(",")).join("L")}Z`);
+        };
+        const finish = (pointer) => {
+            if (pointer.pointerId !== gesture.pointerId) return;
+            move(pointer);
+            const liveBounds = target.getBoundingClientRect();
+            const currentRanges = getClassSplitRasterRanges(graphEl);
+            const current = classSplitRasterSelection === gesture
+                && graphEl === classSplitElements.graph && graphEl.isConnected
+                && gesture.renderToken === classSplitState.plotRenderToken
+                && gesture.generation === classSplitState.analysisGeneration
+                && gesture.jobId === classSplitState.currentJobId
+                && gesture.data === graphEl.data
+                && gesture.traces.length === graphEl.data.length
+                && gesture.traces.every((snapshot, index) => {
+                    const trace = graphEl.data[index];
+                    return snapshot.trace === trace && snapshot.x === trace.x
+                        && snapshot.y === trace.y && snapshot.ids === trace.customdata
+                        && snapshot.length === trace.x?.length && snapshot.visible === trace.visible;
+                })
+                && mode === String(graphEl.layout?.dragmode)
+                && JSON.stringify(ranges) === JSON.stringify(currentRanges)
+                && ["left", "top", "width", "height"].every((key) => Math.abs(bounds[key] - liveBounds[key]) < 1)
+                && !classSplitMutationIsBusy();
+            cancelClassSplitRasterSelection(pointer);
+            if (!current) return;
+            const end = position(pointer);
+            const minX = Math.min(...vertices.map((point) => point[0]));
+            const maxX = Math.max(...vertices.map((point) => point[0]));
+            const minY = Math.min(...vertices.map((point) => point[1]));
+            const maxY = Math.max(...vertices.map((point) => point[1]));
+            const hits = new Set();
+            let nearestId = "";
+            let nearestDistance = Infinity;
+            for (const trace of gesture.data || []) {
+                if (trace.visible === false || trace.visible === "legendonly" || !String(trace.mode || "").includes("markers")) continue;
+                const xs = trace.x || [];
+                const ys = trace.y || [];
+                for (let index = 0; index < Math.min(xs.length, ys.length); index += 1) {
+                    const id = String(trace.customdata?.[index] || "");
+                    if (!classSplitState.pointsById.has(id)) continue;
+                    const x = ((Number(xs[index]) - ranges.x[0]) / (ranges.x[1] - ranges.x[0])) * geometry.width;
+                    const y = geometry.height - ((Number(ys[index]) - ranges.y[0]) / (ranges.y[1] - ranges.y[0])) * geometry.height;
+                    if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || x > geometry.width || y < 0 || y > geometry.height) continue;
+                    if (!moved) {
+                        const distance = Math.hypot(x - end[0], y - end[1]);
+                        const radius = Number(classSplitRasterValueAt(trace.marker?.size, index, 8)) / 2;
+                        if (distance <= Math.max(8, radius + 4) && distance < nearestDistance) {
+                            nearestId = id;
+                            nearestDistance = distance;
+                        }
+                    } else if (x >= minX && x <= maxX && y >= minY && y <= maxY
+                        && (mode === "select" || classSplitRasterPolygonContains(vertices, x, y))) {
+                        hits.add(id);
+                    }
+                }
+            }
+            if (!moved) {
+                if (nearestId) selectClassSplitPoint(nearestId, { jump: false, replaceBulkSelection: true });
+                return;
+            }
+            if (!hits.size) return;
+            const ids = event.shiftKey || event.altKey
+                ? new Set(classSplitState.lassoPointIds || []) : new Set();
+            hits.forEach((id) => event.altKey ? ids.delete(id) : ids.add(id));
+            if (ids.size) {
+                rememberClassSplitSelectionFromPlot({ points: Array.from(ids, (customdata) => ({ customdata })) });
+            } else {
+                clearClassSplitBulkSelection({ render: true });
+            }
+        };
+        window.addEventListener("pointermove", move, options);
+        window.addEventListener("pointerup", finish, options);
+        const cancelPointer = (pointer) => {
+            if (pointer.pointerId === gesture.pointerId) cancelClassSplitRasterSelection(pointer);
+        };
+        window.addEventListener("pointercancel", cancelPointer, options);
+        target.addEventListener("lostpointercapture", cancelPointer, options);
+        window.addEventListener("blur", cancelClassSplitRasterSelection, options);
+        window.addEventListener("resize", cancelClassSplitRasterSelection, options);
+        document.addEventListener("visibilitychange", () => {
+            if (document.hidden) cancelClassSplitRasterSelection();
+        }, options);
+        window.addEventListener("keydown", (key) => {
+            if (key.key === "Escape") cancelClassSplitRasterSelection();
+        }, options);
+        target.setPointerCapture?.(event.pointerId);
+    }
+
+    function bindClassSplitRasterSelection(graphEl) {
+        if (!graphEl.__classSplitRasterSelectionBound) {
+            graphEl.__classSplitRasterSelectionBound = true;
+            graphEl.addEventListener("pointerdown", (event) => {
+                beginClassSplitRasterSelection(graphEl, event);
+            }, { capture: true });
+            const suppressPlotlySelectionEvent = (event) => {
+                if (getClassSplitGraphRenderPlan().rasterMarkers
+                    && ["lasso", "select"].includes(String(graphEl.layout?.dragmode))
+                    && event.target?.matches?.(".nsewdrag")) {
+                    event.preventDefault();
+                    event.stopImmediatePropagation();
+                }
+            };
+            graphEl.addEventListener("click", suppressPlotlySelectionEvent, { capture: true });
+            // Plotly's touchstart is independent of compatibility mousedown;
+            // suppress it even when a mutation lock rejects a Canvas gesture.
+            graphEl.addEventListener("touchstart", suppressPlotlySelectionEvent, { capture: true, passive: false });
+        }
+        const dragRect = graphEl.querySelector(".nsewdrag");
+        if (dragRect) dragRect.style.touchAction = getClassSplitGraphRenderPlan().rasterMarkers ? "none" : "";
     }
 
     function paintClassSplitRasterOverlay(graphEl, requestedRanges = null) {
@@ -57097,12 +57575,21 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         classSplitRasterBoundGraphs.add(graphEl);
+        graphEl.on("plotly_restyle", () => {
+            if (classSplitRasterSelection?.graphEl === graphEl) cancelClassSplitRasterSelection();
+        });
         graphEl.on("plotly_relayouting", (update) => {
+            if (graphEl !== classSplitElements.graph) return;
+            cancelClassSplitRasterSelection();
             if (getClassSplitGraphRenderPlan().rasterMarkers) {
                 transformClassSplitRasterOverlay(graphEl, update || {});
             }
         });
         graphEl.on("plotly_relayout", (update) => {
+            if (graphEl !== classSplitElements.graph) return;
+            cancelClassSplitRasterSelection();
+            syncClassSplitGraphDragModeFromPlot(update, graphEl);
+            bindClassSplitRasterSelection(graphEl);
             if (getClassSplitGraphRenderPlan().rasterMarkers) {
                 transformClassSplitRasterOverlay(graphEl, update || {});
             }
@@ -60860,6 +61347,10 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function rememberClassSplitSelectionFromPlot(event) {
+        const plotPoints = Array.isArray(event?.points) ? event.points : [];
+        if (plotPoints.length) {
+            settleClassSplitGraphGesture(classSplitElements.graph);
+        }
         if (classSplitMutationIsBusy()) {
             updateClassSplitMultiSelectionActionStatus(
                 "The current Data Quality Explorer mutation owns this selection until it finishes.",
@@ -60867,7 +61358,6 @@ async function cancelRfDetrTrainingJobRequest() {
             );
             return;
         }
-        const plotPoints = Array.isArray(event?.points) ? event.points : [];
         // scattergl emits an empty preview event when a box/lasso drag begins.
         // Clearing here rerenders mid-gesture and races the populated final event;
         // an intentional clear arrives separately through plotly_deselect.
@@ -61527,6 +62017,7 @@ function captureClassSplitGraphSettlementState(pointIds) {
         }
         removeClassSplitRasterOverlay();
         if (purge) {
+            classSplitRasterBoundGraphs.delete(graphEl);
             try {
                 if (window.Plotly && typeof window.Plotly.purge === "function" && Array.isArray(graphEl.data)) {
                     window.Plotly.purge(graphEl);
@@ -61623,7 +62114,7 @@ function captureClassSplitGraphSettlementState(pointIds) {
         parts.push(`${view.classNames.length} class${view.classNames.length === 1 ? "" : "es"}`);
         parts.push(classSplitProjectionChoiceLabel(view.projectionChoice));
         if (view.rasterMarkers) {
-            parts.push("Canvas markers with WebGL interaction");
+            parts.push("Canvas compatibility");
         } else if (view.rendererType === "scatter") {
             parts.push("SVG compatibility renderer");
         }
@@ -61655,6 +62146,7 @@ function captureClassSplitGraphSettlementState(pointIds) {
     }
 
     function renderClassSplitPlot() {
+        cancelClassSplitRasterSelection();
         const graphEl = classSplitElements.graph;
         hideClassSplitGraphHoverPreview();
         if (!graphEl) {
@@ -61794,6 +62286,8 @@ function captureClassSplitGraphSettlementState(pointIds) {
                 return false;
             }
             classSplitState.lastPlotViewKey = layout.uirevision;
+            bindClassSplitRasterSelection(graphEl);
+            bindClassSplitRasterViewportEvents(graphEl);
             bindClassSplitWebGlLossFallback(graphEl);
             refreshClassSplitGraphRasterOverlay(graphEl);
             updateClassSplitGraphStatus(view);
@@ -61807,6 +62301,7 @@ function captureClassSplitGraphSettlementState(pointIds) {
                 ].forEach((eventName) => graphEl.removeAllListeners(eventName));
             }
             graphEl.on("plotly_click", (event) => {
+                settleClassSplitGraphGesture(graphEl);
                 const point = event?.points?.[0];
                 const pointId = String(point?.customdata || "");
                 if (pointId) {
@@ -61830,6 +62325,10 @@ function captureClassSplitGraphSettlementState(pointIds) {
             graphEl.on("plotly_unhover", hideClassSplitGraphHoverPreview);
             graphEl.on("plotly_selected", rememberClassSplitSelectionFromPlot);
             graphEl.on("plotly_deselect", () => {
+                settleClassSplitGraphGesture(graphEl);
+                if (classSplitGraphGestureState.recovering) {
+                    return;
+                }
                 clearClassSplitBulkSelection({ render: true });
             });
             return true;
@@ -68156,6 +68655,8 @@ function getClassSplitSingleBboxDeletionUiState(
         }
         try {
             if (window.Plotly && typeof window.Plotly.purge === "function" && Array.isArray(graphEl.data)) {
+                cancelClassSplitRasterSelection();
+                classSplitRasterBoundGraphs.delete(graphEl);
                 window.Plotly.purge(graphEl);
             }
         } catch (error) {
@@ -79670,6 +80171,12 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         }
         classSplitState.initialized = true;
         classSplitElements.datasetStatus = document.getElementById("classSplitDatasetStatus");
+        classSplitElements.sessionRestore = document.getElementById("classSplitSessionRestore");
+        classSplitElements.sessionRestoreButton = document.getElementById("classSplitSessionRestoreButton");
+        classSplitElements.sessionRestoreStatus = document.getElementById("classSplitSessionRestoreStatus");
+        classSplitElements.sessionRestoreButton?.addEventListener("click", () => {
+            void requestDataQualityExplorerSessionRestore({ forceRestore: true });
+        });
         classSplitElements.cacheStatus = document.getElementById("classAnalysisCacheStatus");
         classSplitElements.cacheRefresh = document.getElementById("classAnalysisCacheRefresh");
         classSplitElements.cacheClear = document.getElementById("classAnalysisCacheClear");
@@ -80386,9 +80893,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         loadClassSplitCapabilities().catch((error) => {
             console.warn("Data Quality Explorer capabilities refresh failed", error);
         });
-        restoreDataQualityExplorerSession().catch((error) => {
-            console.warn("Data Quality Explorer session restore failed", error);
-        });
+        void requestDataQualityExplorerSessionRestore();
         installTatorTestHooks();
     }
 

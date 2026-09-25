@@ -15,7 +15,7 @@
     <script src="plotly-2.35.2.min.js?v=20260520a"></script>
     <script src="annotation_diversity.js?v=20260530a"></script>
     <script src="class_analysis_cache_admin.js?v=20260808a"></script>
-    <script src="ybat.js?v=20260903c"></script>
+    <script src="ybat.js?v=20260925c"></script>
 </head>
 <body>
     <div id="ingestProgress" class="ingest-progress" aria-live="polite" aria-atomic="true">
@@ -1433,6 +1433,10 @@
                         <div>
                             <h2>Data Quality Explorer</h2>
                             <div id="classSplitDatasetStatus" class="training-help">Open a dataset in Label Images to run analysis.</div>
+                            <div id="classSplitSessionRestore">
+                                <button type="button" id="classSplitSessionRestoreButton" class="training-button secondary">Restore saved session</button>
+                                <div id="classSplitSessionRestoreStatus" class="training-help" role="status" aria-live="polite"></div>
+                            </div>
                             <details class="class-analysis-cache-card" aria-label="Data Quality Explorer cache">
                                 <summary>
                                     <strong>Cache</strong>
@@ -1678,7 +1682,7 @@
                                     <label class="class-split-toolbar__field" for="classSplitDisplayMode"><span>Objects</span><select id="classSplitDisplayMode" title="Choose which analyzed objects are visible. Hidden points remain in the analysis and review queue."><option value="all">All analyzed objects</option><option value="wrong_only">Suggested review queue</option><option value="rough_only">All similarity-based flags</option><option value="overlap_only">Objects with overlapping boxes</option><option value="review_only">Anything marked for review</option></select></label>
                                     <label class="class-split-toolbar__field" for="classSplitSizeFilter"><span>Size</span><select id="classSplitSizeFilter" title="Tiny / low-detail uses the source-pixel threshold configured above. Relative smallness is separate evidence."><option value="all">All sizes</option><option value="low_detail_only">Tiny / low-detail only</option><option value="exclude_low_detail">Exclude tiny / low-detail</option><option value="relative_small">Relatively small only</option></select></label>
                                     <label class="class-split-toolbar__field" for="classSplitDragMode"><span>Drag</span><select id="classSplitDragMode" title="Draw a freehand or rectangular multi-selection, or pan the map."><option value="lasso" selected>Freehand select</option><option value="select">Rectangle select</option><option value="pan">Move map</option></select></label>
-                                    <label class="class-split-toolbar__field" for="classSplitGraphRenderer"><span>Renderer</span><select id="classSplitGraphRenderer" title="Use Canvas compatibility if WebGL points are interactive but invisible. Renderer changes never recompute the analysis."><option value="auto" selected>Auto</option><option value="webgl">Fast (WebGL)</option><option value="raster">Compatibility (Canvas)</option><option value="svg">Basic compatibility (SVG, 10k max)</option></select></label>
+                                    <label class="class-split-toolbar__field" for="classSplitGraphRenderer"><span>Renderer</span><select id="classSplitGraphRenderer" title="Use Canvas compatibility if WebGL points or selection do not work. Renderer changes never recompute the analysis."><option value="auto" selected>Auto</option><option value="webgl">Fast (WebGL)</option><option value="raster">Compatibility (Canvas)</option><option value="svg">Basic compatibility (SVG, 10k max)</option></select></label>
                                     <label class="class-split-toolbar__field" id="classSplitGraphWindowField" for="classSplitGraphWindow" hidden><span>Map slice</span><select id="classSplitGraphWindow" title="The priority overview is representative. Numbered windows provide deterministic, exhaustive coverage of points currently resident in this result."><option value="overview">Priority overview</option></select><small id="classSplitGraphWindowNote">Selection tools affect only the displayed slice.</small></label>
                                     <label class="class-split-toggle class-split-toolbar__cap" for="classSplitLimitPlotPoints"><input type="checkbox" id="classSplitLimitPlotPoints" checked /><span><strong>Limit map to 50,000 points</strong><small>Recommended. Uncheck to explicitly load every matching point in high-memory mode.</small></span></label>
                                 </div>

@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 from typing import Any, Callable, Optional
 
-from fastapi import APIRouter, Body, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Body, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 
 
@@ -504,6 +504,14 @@ def build_class_analysis_router(
             job_id: str,
             projection_mode: Optional[str] = None,
             class_name: Optional[str] = None,
+            class_names: Optional[list[str]] = Query(
+                default=None,
+                description=(
+                    "Filter saved plot points by class; repeat this parameter for "
+                    "multiple classes. Filtering preserves saved coordinates and "
+                    "applies before the page limit. Omit both class filters for all classes."
+                ),
+            ),
             objects: str = "all",
             object_size: str = "all",
             reviewed: str = "any",
@@ -519,6 +527,7 @@ def build_class_analysis_router(
                 reviewed=reviewed,
                 limit=limit,
                 cursor=cursor,
+                **({"class_names": class_names} if class_names is not None else {}),
             )
 
     if get_session_review_queue_fn is not None:

@@ -1081,6 +1081,14 @@
                 selectedPointId: sessionAttached
                     ? String(classSplitState?.selectedPointId || "")
                     : String(existing.selectedPointId || ""),
+                analysisScope: explorerInitialized ? getClassSplitScope() : existing.analysisScope,
+                analysisClassName: explorerInitialized
+                    ? String(classSplitElements.classSelect?.value || classSplitState.pendingSetupClassName || "")
+                    : existing.analysisClassName,
+                analysisClassNames: explorerInitialized ? classSplitState.analysisClassNames : existing.analysisClassNames,
+                graphClassFilter: sessionAttached && classSplitState.result
+                    ? { jobId: classSplitState.currentJobId, classes: getClassSplitGraphClassNames() }
+                    : existing.graphClassFilter,
                 pendingTrainingClassCommits: explorerInitialized
                     ? serializeClassSplitPendingTrainingCommits()
                     : (
@@ -1193,6 +1201,15 @@
         if (!canAttach()) return;
         const saved = readDataQualityExplorerSession();
         if (!classSplitState.sessionRecoveryHydrated) {
+            classSplitState.analysisClassNames = normalizeClassSplitClassNames(saved.analysisClassNames);
+            classSplitState.pendingSetupClassName = String(saved.analysisClassName || "");
+            classSplitState.pendingGraphClassFilter = saved.graphClassFilter || null;
+            const savedScopeControl = {
+                selected_class: classSplitElements.scopeSelected,
+                selected_classes: classSplitElements.scopeSubset,
+                all_classes: classSplitElements.scopeAll,
+            }[saved.analysisScope];
+            if (savedScopeControl) savedScopeControl.checked = true;
             classSplitState.snapshotId = String(saved.snapshotId || "");
             classSplitState.snapshotSignature = String(saved.snapshotSignature || "");
             restoreClassSplitPendingTrainingCommits(saved.pendingTrainingClassCommits);
@@ -3870,6 +3887,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         sessionRestoreStatus: null,
         jobStatus: null,
         scopeSelected: null,
+        scopeSubset: null,
         scopeAll: null,
         recipePreset: null,
         qualityMemoryPolicy: null,
@@ -4235,10 +4253,15 @@ const AUTOMATION_LOCKED_TABS = new Set([
         currentJobId: "",
         sessionRestorePromise: null,
         sessionRecoveryHydrated: false,
+        analysisClassNames: [],
+        pendingSetupClassName: "",
+        graphClassNames: [],
+        pendingGraphClassFilter: null,
         sessionManifest: null,
         boundedTransport: false,
         boundedInitialProjectionMode: "",
         boundedGraphQueryKey: "",
+        boundedGraphClassFilterKey: "null",
         boundedGraphLoad: null,
         boundedGraphLoadToken: 0,
         boundedAllPointsLoaded: false,
@@ -49174,7 +49197,108 @@ async function cancelRfDetrTrainingJobRequest() {
 	    }
 
     function getClassSplitScope() {
+        if (classSplitElements.scopeSubset?.checked) return "selected_classes";
         return classSplitElements.scopeAll?.checked ? "all_classes" : "selected_class";
+    }
+
+    function normalizeClassSplitClassNames(names) {
+        return Array.from(new Set((Array.isArray(names) ? names : [])
+            .filter((name) => typeof name === "string" && name.trim())
+            .map((name) => name.trim()))).sort();
+    }
+
+    function classSplitGraphUsesSubset() {
+        return classSplitElements.filterClass?.selectedOptions?.[0]?.dataset.mode === "subset";
+    }
+
+    function getClassSplitGraphClassNames() {
+        if (classSplitGraphUsesSubset()) return normalizeClassSplitClassNames(classSplitState.graphClassNames);
+        const name = String(classSplitElements.filterClass?.value || "").trim();
+        return name ? [name] : null;
+    }
+
+    function classSplitPointMatchesClassFilter(point) {
+        const names = getClassSplitGraphClassNames();
+        return names === null || names.includes(String(point?.class_name || ""));
+    }
+
+    function classSplitGraphClassFilterKey() {
+        return JSON.stringify(getClassSplitGraphClassNames());
+    }
+
+    function classSplitGraphClassFilterLabel() {
+        const names = getClassSplitGraphClassNames();
+        return names === null ? "" : names.length ? names.join(", ") : "No classes selected";
+    }
+
+    function syncClassSplitClassChecklist(id, names, selectedNames, counts, disabled = false) {
+        const root = document.getElementById(id);
+        if (!root) return;
+        const available = normalizeClassSplitClassNames([...names, ...selectedNames]);
+        const signature = JSON.stringify(available.map((name) => [name, counts?.get(name) || 0]));
+        if (root.dataset.signature !== signature) {
+            root.replaceChildren(...available.map((name) => {
+                const label = document.createElement("label");
+                const input = document.createElement("input");
+                input.type = "checkbox";
+                input.value = name;
+                label.append(input, document.createTextNode(`${name} (${counts?.get(name) || 0})`));
+                return label;
+            }));
+            root.dataset.signature = signature;
+        }
+        const selected = new Set(selectedNames);
+        root.querySelectorAll("input").forEach((input) => {
+            input.checked = selected.has(input.value);
+            input.disabled = disabled;
+        });
+    }
+
+    function refreshClassSplitClassPickers(stats = getClassSplitActiveWorkspaceStats()) {
+        const subsetField = document.getElementById("classSplitSubsetField");
+        const graphField = document.getElementById("classSplitGraphSubsetField");
+        const busy = classSplitState.active || classSplitMutationIsBusy() || Boolean(classSplitState.sessionRestorePromise);
+        if (subsetField) subsetField.hidden = getClassSplitScope() !== "selected_classes";
+        syncClassSplitClassChecklist("classSplitSubsetList", getClassSplitLabelmapEntries(), classSplitState.analysisClassNames, stats.counts, busy);
+        const selected = classSplitState.analysisClassNames;
+        const count = selected.reduce((sum, name) => sum + Number(stats.counts.get(name) || 0), 0);
+        const status = document.getElementById("classSplitSubsetStatus");
+        if (status) status.textContent = selected.length
+            ? `${selected.length} classes selected • ${count.toLocaleString()} objects in the open workspace`
+            : "Choose at least one class.";
+        if (status && classSplitState.capabilities && !classSplitState.capabilities.analysis_scopes?.includes("selected_classes")) {
+            status.textContent += " Restart the updated Tator backend to analyze selected classes.";
+        }
+        const subset = classSplitGraphUsesSubset();
+        const graphRetry = document.getElementById("classSplitGraphSubsetRetry");
+        if (graphField) graphField.hidden = !subset && graphRetry?.hidden !== false;
+        const graphCounts = new Map(Object.entries(classSplitState.result?.summary?.class_counts || {}));
+        syncClassSplitClassChecklist("classSplitGraphSubsetList", Array.from(graphCounts.keys()), classSplitState.graphClassNames, graphCounts, busy);
+        ["classSplitGraphSubsetList", "classSplitGraphSubsetAll", "classSplitGraphSubsetNone"].forEach((id) => {
+            const element = document.getElementById(id);
+            if (element) element.hidden = !subset;
+        });
+        const graphStatus = document.getElementById("classSplitGraphSubsetStatus");
+        if (graphStatus && !classSplitState.boundedGraphLoad && graphRetry?.hidden !== false) {
+            graphStatus.textContent = `${classSplitState.graphClassNames.length} classes selected`;
+        }
+        ["classSplitSubsetAll", "classSplitSubsetNone", "classSplitGraphSubsetAll", "classSplitGraphSubsetNone"].forEach((id) => {
+            const button = document.getElementById(id);
+            if (button) button.disabled = busy;
+        });
+    }
+
+    function setClassSplitGraphClassNames(names) {
+        const select = classSplitElements.filterClass;
+        if (!select) return;
+        if (names === null) {
+            select.value = "";
+        } else if (names.length === 1 && Array.from(select.options).some((option) => option.value === names[0] && !option.dataset.mode)) {
+            select.value = names[0];
+        } else {
+            classSplitState.graphClassNames = normalizeClassSplitClassNames(names);
+            select.value = Array.from(select.options).find((option) => option.dataset.mode === "subset")?.value || "";
+        }
     }
 
     function getClassSplitImageKeys() {
@@ -49237,7 +49361,8 @@ async function cancelRfDetrTrainingJobRequest() {
         return String(names[classIdx] || getClassNameById(classIdx) || "").trim();
     }
 
-    function classSplitLineMatchesScope(line, scope, className, labelmap = null) {
+    function classSplitLineMatchesScope(line, scope, className, labelmap = null, classNames = []) {
+        if (scope === "selected_classes") return classNames.includes(getClassSplitLineClassName(line, labelmap));
         if (String(scope || "") !== "selected_class") {
             return true;
         }
@@ -51417,8 +51542,8 @@ async function cancelRfDetrTrainingJobRequest() {
         const scope = String(request.analysis_scope || "selected_class");
         const className = String(request.class_name || "").trim();
         const includeRefinementContext = (
-            scope === "selected_class"
-            && Boolean(request.refine_outliers)
+            scope === "selected_classes"
+            || (scope === "selected_class" && Boolean(request.refine_outliers))
         );
         const rows = [];
         const usedNames = new Set();
@@ -51456,7 +51581,7 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             const allLabelLines = getClassSplitActiveLabelLines(imageKey);
             const queryLabelLines = allLabelLines
-                .filter((line) => classSplitLineMatchesScope(line, scope, className, labelmap));
+                .filter((line) => classSplitLineMatchesScope(line, scope, className, labelmap, request.class_names || []));
             const labelLines = includeRefinementContext
                 ? allLabelLines
                 : queryLabelLines;
@@ -51984,9 +52109,10 @@ async function cancelRfDetrTrainingJobRequest() {
             option.textContent = count > 0 ? `${className} (${count})` : className;
             selectEl.appendChild(option);
         });
-        const desired = previous || currentClass || (classesAvailable.length ? classesAvailable[0] : "");
+        const desired = classSplitState.pendingSetupClassName || previous || currentClass || (classesAvailable.length ? classesAvailable[0] : "");
         if (desired && classesAvailable.includes(desired)) {
             selectEl.value = desired;
+            classSplitState.pendingSetupClassName = "";
         }
         selectEl.disabled = !classesAvailable.length || getClassSplitScope() !== "selected_class";
     }
@@ -52553,8 +52679,8 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function classSplitProjectionNeedsClassFilter(choice = getClassSplitProjectionChoice()) {
         return normalizeClassSplitProjectionChoice(choice) === "within_filter_pca"
-            && getClassSplitResultScope() === "all_classes"
-            && !String(classSplitElements.filterClass?.value || "").trim();
+            && getClassSplitResultScope() !== "selected_class"
+            && (getClassSplitGraphClassNames()?.length !== 1);
     }
 
     function getClassSplitPointProjection(point, axisIndex) {
@@ -52583,7 +52709,7 @@ async function cancelRfDetrTrainingJobRequest() {
     function getClassSplitProjectionUnavailableMessage() {
         const choice = getClassSplitProjectionChoice();
         if (classSplitProjectionNeedsClassFilter(choice)) {
-            return "Choose a class filter to use Within-filter PCA. Each class has its own local PCA axes, so all classes cannot be overlaid in that mode.";
+            return "Choose exactly one class to use Within-filter PCA. Each class has its own local axes. Use another map layout to compare several classes.";
         }
         if (choice === "umap" && String(classSplitState.result?.summary?.projection || "") !== "umap") {
             return "UMAP coordinates are only available after rerunning Data Quality Explorer with UMAP selected.";
@@ -52610,8 +52736,9 @@ async function cancelRfDetrTrainingJobRequest() {
         const scope = getClassSplitScope();
         const unavailable = choice === "umap" && !classSplitUmapAvailable()
             ? "UMAP is not installed in this backend. Install umap-learn or choose a PCA layout for the next run."
-            : choice === "within_filter_pca" && scope === "all_classes"
-                ? "Within-filter PCA requires a single-class scope. Choose Selected class or another layout for the next run."
+            : choice === "within_filter_pca" && scope !== "selected_class"
+                && (scope !== "selected_classes" || classSplitState.analysisClassNames.length !== 1)
+                ? "Within-filter PCA has separate axes for each class. Choose one class or another layout to compare classes."
                 : "";
         const guidance = {
             umap: classSplitUmapAvailable()
@@ -52624,7 +52751,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }[choice] || "Projection changes only the visible graph coordinates; wrong-class scoring stays in original embeddings.";
         const suffix = scope === "selected_class"
             ? " For subclass work: run Selected class + UMAP, then verify islands by crop previews before relabeling."
-            : " For likely-wrong-class review: use All classes + Class-balanced PCA, then filter likely wrong objects.";
+            : " For likely-wrong-class review: compare Selected classes or All classes, then filter likely wrong objects.";
         const title = unavailable || `${guidance}${suffix}`;
         if (classSplitElements.projection) {
             classSplitElements.projection.title = title;
@@ -53123,6 +53250,7 @@ async function cancelRfDetrTrainingJobRequest() {
         const classSplitEncoderType = String(classSplitElements.encoderType?.value || "dinov3").trim().toLowerCase();
         const projectionChoice = getClassSplitRequestedProjectionChoice();
         const mutationBusy = classSplitMutationIsBusy();
+        refreshClassSplitClassPickers(stats);
         const writeMutationBlocked = Boolean(
             mutationBusy || classSplitRecoveryMutationBlockReason()
         );
@@ -53146,6 +53274,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         [
             classSplitElements.scopeSelected,
+            classSplitElements.scopeSubset,
             classSplitElements.scopeAll,
             classSplitElements.recipePreset,
             classSplitElements.encoderType,
@@ -53184,6 +53313,11 @@ async function cancelRfDetrTrainingJobRequest() {
             && !classSplitState.active
             && !classSplitState.sessionRestorePromise
             && !classSplitRunMutationBusy
+            && (scope !== "selected_classes" || (
+                classSplitState.analysisClassNames.length > 0
+                && classSplitState.analysisClassNames.every((name) => stats.counts.has(name))
+                && classSplitState.analysisClassNames.some((name) => stats.counts.get(name) > 0)
+            ))
             && (scope !== "selected_class" || (classSelected && selectedClassCount > 0));
         if (classSplitElements.dinov3Pooling) {
             classSplitElements.dinov3Pooling.disabled = !available || classSplitState.active || mutationBusy || classSplitEncoderType !== "dinov3";
@@ -53309,6 +53443,16 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const scope = getClassSplitScope();
         const className = String(classSplitElements.classSelect?.value || currentClass || "").trim();
+        const classNames = normalizeClassSplitClassNames(classSplitState.analysisClassNames);
+        if (scope === "selected_classes" && !classSplitState.capabilities?.analysis_scopes?.includes("selected_classes")) {
+            throw new Error("Restart the updated Tator backend to analyze selected classes.");
+        }
+        if (scope === "selected_classes" && (!classNames.length || classNames.some((name) => !stats.counts.has(name)))) {
+            throw new Error("Choose one or more classes from the open dataset.");
+        }
+        if (scope === "selected_classes" && !classNames.some((name) => stats.counts.get(name) > 0)) {
+            throw new Error("The selected classes have no objects in the open dataset.");
+        }
         if (scope === "selected_class" && !className) {
             throw new Error("Choose a class to analyze.");
         }
@@ -53377,10 +53521,13 @@ async function cancelRfDetrTrainingJobRequest() {
         );
         const scopedRecordCount = scope === "selected_class"
             ? Number(stats.counts.get(className) || 0)
-            : stats.objectCount;
+            : scope === "selected_classes"
+                ? classNames.reduce((sum, name) => sum + Number(stats.counts.get(name) || 0), 0)
+                : stats.objectCount;
         const request = {
             analysis_scope: scope,
             class_name: scope === "selected_class" ? className : "",
+            ...(scope === "selected_classes" ? { class_names: classNames } : {}),
             encoder_type: encoderType,
             encoder_model: String(classSplitElements.backbone?.value || "").trim(),
             projection: projectionParts.projection,
@@ -53565,6 +53712,18 @@ async function cancelRfDetrTrainingJobRequest() {
         return {
             currentJobId: classSplitState.currentJobId,
             result: classSplitState.result,
+            boundedTransport: classSplitState.boundedTransport,
+            sessionManifest: classSplitState.sessionManifest,
+            restoredSession: classSplitState.restoredSession,
+            restoredSourceCompatible: classSplitState.restoredSourceCompatible,
+            boundedAllPointsLoaded: classSplitState.boundedAllPointsLoaded,
+            boundedInitialProjectionMode: classSplitState.boundedInitialProjectionMode,
+            boundedGraphQueryKey: classSplitState.boundedGraphQueryKey,
+            boundedGraphClassFilterKey: classSplitState.boundedGraphClassFilterKey,
+            boundedReviewQueueNextCursor: classSplitState.boundedReviewQueueNextCursor,
+            boundedReviewQueueTotal: classSplitState.boundedReviewQueueTotal,
+            boundedReviewQueuePointIds: new Set(classSplitState.boundedReviewQueuePointIds),
+            graphClassFilter: getClassSplitGraphClassNames(),
             pointsById: new Map(classSplitState.pointsById || []),
             projectionCoordinates: { ...(classSplitState.projectionCoordinates || {}) },
             selectedPointId: classSplitState.selectedPointId,
@@ -53601,6 +53760,21 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitState.active = false;
         classSplitState.currentJobId = snapshot.currentJobId;
         classSplitState.result = snapshot.result;
+        classSplitState.boundedTransport = Boolean(snapshot.boundedTransport);
+        classSplitState.sessionManifest = snapshot.sessionManifest || null;
+        classSplitState.restoredSession = Boolean(snapshot.restoredSession);
+        classSplitState.restoredSourceCompatible = Boolean(snapshot.restoredSourceCompatible);
+        classSplitState.boundedAllPointsLoaded = Boolean(snapshot.boundedAllPointsLoaded);
+        classSplitState.boundedInitialProjectionMode = snapshot.boundedInitialProjectionMode || "";
+        classSplitState.boundedGraphQueryKey = snapshot.boundedGraphQueryKey || "";
+        classSplitState.boundedGraphClassFilterKey = snapshot.boundedGraphClassFilterKey || "null";
+        classSplitState.boundedReviewQueueNextCursor = snapshot.boundedReviewQueueNextCursor || "";
+        classSplitState.boundedReviewQueueTotal = snapshot.boundedReviewQueueTotal || 0;
+        classSplitState.boundedReviewQueuePointIds = new Set(snapshot.boundedReviewQueuePointIds || []);
+        classSplitState.boundedReviewQueueLoadToken += 1;
+        classSplitState.boundedReviewQueueLoading = false;
+        classSplitState.boundedPointHydrationLoads = new Map();
+        classSplitState.pendingGraphClassFilter = { jobId: snapshot.currentJobId, classes: snapshot.graphClassFilter ?? null };
         classSplitState.pointsById = new Map(snapshot.pointsById || []);
         classSplitState.projectionCoordinates = { ...(snapshot.projectionCoordinates || {}) };
         classSplitState.projectionCoordinateLoads = new Map();
@@ -54217,13 +54391,21 @@ async function cancelRfDetrTrainingJobRequest() {
                 || classSplitState.lastRequest?.class_name
                 || ""
             ).trim();
+            classSplitState.pendingSetupClassName = className;
             if (
                 className
                 && classSplitElements.classSelect
                 && Array.from(classSplitElements.classSelect.options || []).some((option) => option.value === className)
             ) {
                 classSplitElements.classSelect.value = className;
+                classSplitState.pendingSetupClassName = "";
             }
+        }
+        if (scope === "selected_classes") {
+            if (classSplitElements.scopeSubset) classSplitElements.scopeSubset.checked = true;
+            classSplitState.analysisClassNames = normalizeClassSplitClassNames(
+                summary.selected_classes || request.class_names
+            );
         }
         if (projection === "umap") {
             const projectionNeighbors = Number(
@@ -54574,6 +54756,49 @@ async function cancelRfDetrTrainingJobRequest() {
         renderClassSplitInspector();
     }
 
+    async function refreshClassSplitGraphClassFilter() {
+        refreshClassSplitDatasetAnalysisControls();
+        if (classSplitMutationIsBusy()) {
+            const retry = document.getElementById("classSplitGraphSubsetRetry");
+            const status = document.getElementById("classSplitGraphSubsetStatus");
+            if (retry) retry.hidden = false;
+            if (status) status.textContent = "Finish the current review action, then retry loading these classes. The saved class filter has not finished loading.";
+            refreshClassSplitClassPickers();
+            return;
+        }
+        classSplitState.selectedClusterId = "";
+        classSplitState.wrongQueueIds = [];
+        classSplitState.wrongQueueSignature = "";
+        cancelClassSplitRasterSelection();
+        const retry = document.getElementById("classSplitGraphSubsetRetry");
+        const status = document.getElementById("classSplitGraphSubsetStatus");
+        if (retry) retry.hidden = true;
+        refreshClassSplitClassPickers();
+        persistDataQualityExplorerSession();
+        refreshClassSplitFilteredReviewUi();
+        if (!classSplitState.boundedTransport) return;
+        const key = classSplitGraphClassFilterKey();
+        const generation = classSplitState.analysisGeneration;
+        const jobId = classSplitState.currentJobId;
+        if (status) status.textContent = "Loading the selected classes ...";
+        try {
+            const graph = await fetchClassSplitBoundedGraph(getClassSplitProjectionChoice());
+            if (!graph) return;
+            if (classSplitMutationIsBusy()) throw new Error("Finish the current review action, then retry loading these classes.");
+            applyClassSplitBoundedGraphReplacement(graph);
+            refreshClassSplitFilteredReviewUi();
+            if (status) status.textContent = `${Number(graph.total_matching || 0).toLocaleString()} matching objects`;
+        } catch (error) {
+            if (error?.name === "AbortError" || key !== classSplitGraphClassFilterKey()
+                || !classSplitAsyncRequestIsCurrent(generation, jobId)) return;
+            const message = `Could not load the selected classes: ${error.message || error}`;
+            if (status) status.textContent = message;
+            if (retry) retry.hidden = false;
+            refreshClassSplitClassPickers();
+            setClassSplitJobStatus(message, "warn");
+        }
+    }
+
     async function fetchClassSplitBoundedGraph(
         projectionMode,
         { allPoints = !classSplitElements.limitPlotPoints?.checked } = {}
@@ -54582,6 +54807,8 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!jobId) return null;
         const generation = classSplitState.analysisGeneration;
         const normalizedProjection = normalizeClassSplitProjectionChoice(projectionMode);
+        const classNames = getClassSplitGraphClassNames();
+        const classFilterKey = JSON.stringify(classNames);
         const loadToken = ++classSplitState.boundedGraphLoadToken;
         classSplitState.boundedGraphLoad?.controller?.abort();
         const controller = new AbortController();
@@ -54592,12 +54819,24 @@ async function cancelRfDetrTrainingJobRequest() {
         let loaded = 0;
         let total = 0;
         try {
+            if (classNames?.length === 0) {
+                return { projection_mode: normalizedProjection, columns: { point_id: [] }, returned: 0, total_matching: 0, truncated: false, next_cursor: null, _classFilterKey: classFilterKey };
+            }
+            const supportsClassSets = Number(classSplitState.capabilities?.graph_class_filter_api_version || 0) >= 2;
+            if (classNames !== null && (classNames.length > 1 || classNames[0] === "__all__") && !supportsClassSets) {
+                throw new Error("Restart the updated Tator backend to load multiple classes from saved sessions.");
+            }
             do {
                 const parameters = new URLSearchParams({
                     projection_mode: normalizedProjection,
                     reviewed: "unreviewed",
                     limit: "50000",
                 });
+                if (classNames?.length === 1 && !supportsClassSets) {
+                    parameters.set("class_name", classNames[0]);
+                } else if (classNames !== null) {
+                    classNames.forEach((name) => parameters.append("class_names", name));
+                }
                 if (cursor) parameters.set("cursor", cursor);
                 const page = await fetchClassSplitBoundedJson(
                     `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/graph?${parameters}`,
@@ -54607,6 +54846,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 if (
                     loadToken !== classSplitState.boundedGraphLoadToken
                     || !classSplitAsyncRequestIsCurrent(generation, jobId)
+                    || classFilterKey !== classSplitGraphClassFilterKey()
                 ) return null;
                 if (mergedGraph === null) {
                     mergedGraph = page;
@@ -54651,6 +54891,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 mergedGraph.truncated = false;
                 mergedGraph.next_cursor = null;
             }
+            if (mergedGraph) mergedGraph._classFilterKey = classFilterKey;
             return mergedGraph;
         } finally {
             if (classSplitState.boundedGraphLoad?.token === loadToken) {
@@ -54669,7 +54910,11 @@ async function cancelRfDetrTrainingJobRequest() {
             instanceof Set
             ? classSplitState.boundedReviewQueuePointIds
             : new Set();
-        const points = classSplitBoundedGraphPoints(graph).map((point, index) => {
+        // A review may finish while the graph request is in flight. Remove its
+        // dismissed rows before assigning indices into the new coordinate array.
+        const points = classSplitBoundedGraphPoints(graph).filter(
+            (point) => !classSplitState.dismissedWrongIds.has(String(point.point_id || ""))
+        ).map((point, index) => {
             const previous = previousById.get(String(point.point_id || ""));
             const projection = point.projection;
             if (previous) Object.assign(point, previous);
@@ -54677,8 +54922,8 @@ async function cancelRfDetrTrainingJobRequest() {
             delete point._notPlottable;
             point._projectionIndex = index;
             return point;
-        }).filter((point) => !classSplitState.dismissedWrongIds.has(String(point.point_id || "")));
-        if (graph.next_cursor) {
+        });
+        if (graph.next_cursor || getClassSplitGraphClassNames() !== null) {
             const graphPointIds = new Set(
                 points.map((point) => String(point?.point_id || ""))
             );
@@ -54730,22 +54975,16 @@ async function cancelRfDetrTrainingJobRequest() {
             graph_truncated: graphTruncated,
         };
         classSplitState.boundedAllPointsLoaded = !graphTruncated;
+        classSplitState.boundedGraphClassFilterKey = graph._classFilterKey ?? classSplitGraphClassFilterKey();
+        clearClassSplitDatasetAnalysis({ render: true });
         const projectionMode = normalizeClassSplitProjectionChoice(
             graph.projection_mode || getClassSplitProjectionChoice()
         );
-        Object.entries(classSplitState.projectionCoordinates || {}).forEach(
-            ([mode, coordinates]) => {
-                if (
-                    mode !== projectionMode
-                    && (
-                        !Array.isArray(coordinates)
-                        || coordinates.length !== points.length
-                    )
-                ) {
-                    delete classSplitState.projectionCoordinates[mode];
-                }
+        Object.keys(classSplitState.projectionCoordinates || {}).forEach((mode) => {
+            if (mode !== projectionMode) {
+                delete classSplitState.projectionCoordinates[mode];
             }
-        );
+        });
         classSplitState.projectionCoordinates[projectionMode] = points.map(
             (point) => (
                 point?._notPlottable || !Array.isArray(point?.projection)
@@ -54753,7 +54992,7 @@ async function cancelRfDetrTrainingJobRequest() {
                     : point.projection
             )
         );
-        classSplitState.boundedGraphQueryKey = `${projectionMode}:all:${points.length}`;
+        classSplitState.boundedGraphQueryKey = `${projectionMode}:${classSplitGraphClassFilterKey()}:${points.length}`;
         rebuildClassSplitCandidateIndexes();
         renderClassSplitWrongList();
         renderClassSplitInspector();
@@ -54762,6 +55001,10 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function handleClassSplitPlotPointLimitChange() {
+        if (classSplitState.boundedTransport && classSplitState.boundedGraphClassFilterKey !== classSplitGraphClassFilterKey()) {
+            await refreshClassSplitGraphClassFilter();
+            return;
+        }
         if (classSplitElements.limitPlotPoints?.checked) {
             classSplitState.boundedGraphLoad?.controller?.abort();
             classSplitState.boundedGraphLoadToken += 1;
@@ -55066,6 +55309,7 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitState.active = false;
         classSplitState.sessionManifest = options.manifest || null;
         classSplitState.boundedTransport = options.boundedTransport === true;
+        classSplitState.boundedGraphClassFilterKey = "null";
         classSplitState.restoredSession = options.restoredSession === true;
         classSplitState.restoredSourceCompatible = options.restoredSourceCompatible === true;
         if (!classSplitState.boundedTransport) {
@@ -55128,7 +55372,10 @@ async function cancelRfDetrTrainingJobRequest() {
         if (inlineCoordinates && typeof inlineCoordinates === "object") {
             classSplitState.projectionCoordinates = { ...inlineCoordinates };
             delete result.projection_options.coordinates;
-            result.projection_options.coordinates_available = Object.keys(classSplitState.projectionCoordinates);
+            result.projection_options.coordinates_available = Array.from(new Set([
+                ...(result.projection_options.coordinates_available || []),
+                ...Object.keys(classSplitState.projectionCoordinates),
+            ]));
         }
         setClassSplitProjectionChoice(
             inferClassSplitResultSelectedProjection(result)
@@ -55274,6 +55521,9 @@ async function cancelRfDetrTrainingJobRequest() {
                 restoredSession: options.restoredSession === true,
                 manifest,
             });
+            if (getClassSplitGraphClassNames() !== null) {
+                await refreshClassSplitGraphClassFilter();
+            }
             if (options.deferEvidencePoll !== true) {
                 startClassSplitEvidencePoll(jobId, manifest);
             }
@@ -56595,11 +56845,12 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             return true;
         });
-        const filter = String(classSplitElements.filterClass?.value || "").trim();
-        if (!filter) {
+        const names = getClassSplitGraphClassNames();
+        if (names === null) {
             return sizeFiltered;
         }
-        return sizeFiltered.filter((point) => String(point.class_name || "") === filter);
+        const selected = new Set(names);
+        return sizeFiltered.filter((point) => selected.has(String(point.class_name || "")));
     }
 
     function getClassSplitGraphPoints() {
@@ -56800,8 +57051,7 @@ async function cancelRfDetrTrainingJobRequest() {
         ) {
             return false;
         }
-        const filter = String(classSplitElements.filterClass?.value || "").trim();
-        if (filter && String(point.class_name || "") !== filter) {
+        if (!classSplitPointMatchesClassFilter(point)) {
             return false;
         }
         const displayMode = String(classSplitElements.displayMode?.value || "all");
@@ -56998,7 +57248,7 @@ async function cancelRfDetrTrainingJobRequest() {
         return JSON.stringify({
             jobId: String(classSplitState.currentJobId || ""),
             generation: Number(classSplitState.analysisGeneration) || 0,
-            filterClass: String(classSplitElements.filterClass?.value || ""),
+            filterClass: classSplitGraphClassFilterKey(),
             displayMode: String(classSplitElements.displayMode?.value || "all"),
             sizeFilter: String(classSplitElements.sizeFilter?.value || "all"),
             overlapMode: String(document.getElementById("classSplitOverlapPairMode")?.value || "any"),
@@ -58335,7 +58585,8 @@ async function cancelRfDetrTrainingJobRequest() {
                 || ""
             ).trim();
         }
-        return String(classSplitElements.filterClass?.value || "").trim();
+        const names = getClassSplitGraphClassNames();
+        return names?.length === 1 ? names[0] : "";
     }
 
     function classSplitHasSelectedClassResult() {
@@ -61063,8 +61314,16 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function refreshClassSplitDatasetAnalysisControls() {
-        const hasAllClassResult = classSplitHasAllClassResult();
+        const hasAllClassResult = classSplitHasCompleteDatasetAnalysisPoints();
         setButtonDisabled(classSplitElements.datasetAnalysisRun, classSplitState.active || !hasAllClassResult);
+    }
+
+    function classSplitHasCompleteDatasetAnalysisPoints() {
+        return classSplitHasAllClassResult()
+            && getClassSplitGraphClassNames() === null
+            && classSplitState.boundedGraphClassFilterKey === "null"
+            && (!classSplitState.boundedTransport || classSplitState.boundedAllPointsLoaded)
+            && !classSplitState.boundedGraphLoad;
     }
 
     function applyClassSplitDatasetAnalysisToPoints(analysis) {
@@ -61294,7 +61553,9 @@ async function cancelRfDetrTrainingJobRequest() {
             if (!hasResult) {
                 classSplitElements.datasetAnalysisStatus.textContent = "Run Data Quality Explorer with Scope = All classes first.";
             } else if (!hasAllClassResult) {
-                classSplitElements.datasetAnalysisStatus.textContent = "This result is selected-class only. Switch Scope to All classes and rerun Data Quality Explorer.";
+                classSplitElements.datasetAnalysisStatus.textContent = "This result covers selected classes only. Switch Scope to All classes and rerun Data Quality Explorer.";
+            } else if (!classSplitHasCompleteDatasetAnalysisPoints()) {
+                classSplitElements.datasetAnalysisStatus.textContent = "Show All classes and uncheck Limit map to 50,000 points before scoring the whole dataset.";
             } else if (!items.length) {
                 classSplitElements.datasetAnalysisStatus.textContent = `Ready for ${points.length} objects.`;
             } else {
@@ -61329,8 +61590,8 @@ async function cancelRfDetrTrainingJobRequest() {
     function runClassSplitDatasetAnalysis() {
         const api = getAnnotationDiversityApi();
         const points = Array.isArray(classSplitState.result?.points) ? classSplitState.result.points : [];
-        if (!classSplitHasAllClassResult()) {
-            setClassSplitJobStatus("Run Data Quality Explorer with Scope = All classes before Dataset Analysis.", "warn");
+        if (!classSplitHasCompleteDatasetAnalysisPoints()) {
+            setClassSplitJobStatus("Dataset Analysis needs an all-class analysis with every class and point loaded in the map.", "warn");
             renderClassSplitDatasetAnalysis();
             return;
         }
@@ -62051,7 +62312,7 @@ function captureClassSplitGraphSettlementState(pointIds) {
         const classNames = getClassSplitVisibleClassNames(points);
         const projectionChoice = getClassSplitProjectionChoice();
         const displayMode = String(classSplitElements.displayMode?.value || "all");
-        const filterClass = String(classSplitElements.filterClass?.value || "").trim();
+        const filterClass = classSplitGraphClassFilterLabel();
         return {
             allPoints,
             filteredPoints,
@@ -62264,7 +62525,7 @@ function captureClassSplitGraphSettlementState(pointIds) {
             uirevision: [
                 "class-split",
                 classSplitState.currentJobId || "live",
-                classSplitElements.filterClass?.value || "all",
+                classSplitGraphClassFilterKey(),
                 classSplitElements.displayMode?.value || "all",
                 getClassSplitProjectionChoice(),
                 view.windowMode === "window" ? `window-${view.windowIndex}` : view.windowMode,
@@ -62347,10 +62608,10 @@ function captureClassSplitGraphSettlementState(pointIds) {
         const classCounts = summary.class_counts || {};
         const classCount = Object.keys(classCounts).filter((className) => Number(classCounts[className]) > 0).length;
         const scope = String(summary.analysis_scope || "");
-        if (scope !== "all_classes") {
+        if (!["all_classes", "selected_classes"].includes(scope)) {
             return {
                 enabled: false,
-                text: "Wrong-class suspicion is expected to stay at 0 in selected-class runs. Run all classes to compare each object against neighboring classes.",
+                text: "Wrong-class suspicion is expected to stay at 0 in one-class runs. Analyze multiple classes to compare each object against neighboring classes.",
             };
         }
         if (classCount < 2) {
@@ -62371,8 +62632,8 @@ function captureClassSplitGraphSettlementState(pointIds) {
 
     function formatClassSplitClusterReport(result = classSplitState.result, summary = result?.summary || {}) {
         const scope = String(summary.analysis_scope || classSplitState.lastRequest?.analysis_scope || getClassSplitResultScope());
-        if (scope === "all_classes") {
-            return "Subclass clustering disabled in all-class view";
+        if (scope !== "selected_class") {
+            return "Subclass clustering requires a one-class analysis";
         }
         const clusters = Array.isArray(classSplitState.clusterSearchResult?.clusters)
             ? classSplitState.clusterSearchResult.clusters
@@ -62528,22 +62789,33 @@ function captureClassSplitGraphSettlementState(pointIds) {
         }
         const result = classSplitState.result || {};
         const classCounts = result.summary?.class_counts || {};
-        const previous = filterEl.value;
+        const previous = getClassSplitGraphClassNames();
         filterEl.innerHTML = "";
         const allOption = document.createElement("option");
         allOption.value = "";
         allOption.textContent = "All classes";
         filterEl.appendChild(allOption);
+        const subsetOption = document.createElement("option");
+        let subsetValue = "__selected_classes__";
+        while (Object.hasOwn(classCounts, subsetValue)) subsetValue += "_";
+        subsetOption.value = subsetValue;
+        subsetOption.dataset.mode = "subset";
+        subsetOption.textContent = "Choose classes…";
+        filterEl.appendChild(subsetOption);
         Object.keys(classCounts).sort().forEach((className) => {
             const option = document.createElement("option");
             option.value = className;
             option.textContent = `${className} (${classCounts[className]})`;
             filterEl.appendChild(option);
         });
-        const values = Array.from(filterEl.options).map((option) => option.value);
-        if (values.includes(previous)) {
-            filterEl.value = previous;
+        const pending = classSplitState.pendingGraphClassFilter;
+        if (pending?.jobId === classSplitState.currentJobId && (pending.classes === null || Array.isArray(pending.classes))) {
+            setClassSplitGraphClassNames(pending.classes);
+            classSplitState.pendingGraphClassFilter = null;
+        } else {
+            setClassSplitGraphClassNames(previous);
         }
+        refreshClassSplitClassPickers();
         updateClassSplitBulkClassOptions();
         renderClassSplitOverlapPairOptions();
         refreshClassSplitOverlapControls();
@@ -63423,11 +63695,10 @@ function captureClassSplitGraphSettlementState(pointIds) {
             );
             candidates = candidates.filter((candidate) => allowedIds.has(String(candidate?.point_id || "")));
         }
-        const activeFilter = String(classSplitElements.filterClass?.value || "").trim();
         const filtered = candidates.filter((item) => {
             const pointId = String(item?.point_id || "");
             const point = getClassSplitPointById(pointId);
-            if (activeFilter && String(point?.class_name || item?.class_name || "") !== activeFilter) {
+            if (!classSplitPointMatchesClassFilter(point || item)) {
                 return false;
             }
             const sizeFilter = String(classSplitElements.sizeFilter?.value || "all").trim();
@@ -63580,7 +63851,7 @@ function captureClassSplitGraphSettlementState(pointIds) {
     }
 
     function getClassSplitWrongQueueSignature() {
-        const activeFilter = String(classSplitElements.filterClass?.value || "").trim();
+        const activeFilter = classSplitGraphClassFilterKey();
         return [
             classSplitState.currentJobId || "live",
             activeFilter || "all",
@@ -68753,9 +69024,9 @@ function getClassSplitSingleBboxDeletionUiState(
             });
         }
         let filterChanged = false;
-        const activeFilter = String(classSplitElements.filterClass?.value || "").trim();
-        if (focusPlot && activeFilter && String(point?.class_name || "") !== activeFilter) {
+        if (focusPlot && !classSplitPointMatchesClassFilter(point)) {
             classSplitElements.filterClass.value = "";
+            if (classSplitState.boundedTransport) void refreshClassSplitGraphClassFilter();
             filterChanged = true;
         }
         if (
@@ -80188,6 +80459,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         void refreshClassAnalysisCacheStatus();
         classSplitElements.jobStatus = document.getElementById("classSplitJobStatus");
         classSplitElements.scopeSelected = document.getElementById("classSplitScopeSelected");
+        classSplitElements.scopeSubset = document.getElementById("classSplitScopeSubset");
         classSplitElements.scopeAll = document.getElementById("classSplitScopeAll");
         classSplitElements.recipePreset = document.getElementById("classSplitRecipePreset");
         classSplitElements.qualityMemoryPolicy = document.getElementById("classSplitQualityMemoryPolicy");
@@ -80458,6 +80730,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         const handleClassSplitScopeChange = () => {
             applyClassSplitProjectionDefaultForScope({ force: true });
             refreshClassSplitControls();
+            persistDataQualityExplorerSession();
         };
         if (classSplitElements.scopeSelected) {
             classSplitElements.scopeSelected.addEventListener("change", handleClassSplitScopeChange);
@@ -80465,6 +80738,34 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         if (classSplitElements.scopeAll) {
             classSplitElements.scopeAll.addEventListener("change", handleClassSplitScopeChange);
         }
+        classSplitElements.scopeSubset?.addEventListener("change", handleClassSplitScopeChange);
+        const bindClassPicker = (prefix, stateKey, availableNames, changed) => {
+            document.getElementById(`${prefix}List`)?.addEventListener("change", (event) => {
+                if (!(event.target instanceof HTMLInputElement) || classSplitMutationIsBusy()) return;
+                const selected = new Set(classSplitState[stateKey]);
+                if (event.target.checked) selected.add(event.target.value);
+                else selected.delete(event.target.value);
+                classSplitState[stateKey] = normalizeClassSplitClassNames(Array.from(selected));
+                changed();
+            });
+            [["All", availableNames], ["None", () => []]].forEach(([suffix, values]) => {
+                document.getElementById(`${prefix}${suffix}`)?.addEventListener("click", () => {
+                    if (classSplitMutationIsBusy()) return;
+                    classSplitState[stateKey] = normalizeClassSplitClassNames(values());
+                    changed();
+                });
+            });
+        };
+        bindClassPicker("classSplitSubset", "analysisClassNames", getClassSplitLabelmapEntries, () => {
+            refreshClassSplitControls();
+            persistDataQualityExplorerSession();
+        });
+        bindClassPicker("classSplitGraphSubset", "graphClassNames", () => Object.keys(classSplitState.result?.summary?.class_counts || {}), () => {
+            void refreshClassSplitGraphClassFilter();
+        });
+        document.getElementById("classSplitGraphSubsetRetry")?.addEventListener("click", () => {
+            void refreshClassSplitGraphClassFilter();
+        });
         if (classSplitElements.recipePreset) {
             classSplitElements.recipePreset.addEventListener("change", () => {
                 const selectedPreset = String(
@@ -80567,7 +80868,8 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             );
             refreshClassSplitGraphProjectionAvailability();
             renderClassSplitReport();
-            renderClassSplitPlot();
+            if (classSplitState.boundedTransport) void refreshClassSplitGraphClassFilter();
+            else renderClassSplitPlot();
         });
         [
             classSplitElements.projectionNeighborK,
@@ -80586,12 +80888,8 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         });
         if (classSplitElements.filterClass) {
             const handleFilterClassChange = () => {
-                classSplitState.selectedClusterId = "";
-                classSplitState.wrongQueueIds = [];
-                classSplitState.wrongQueueSignature = "";
-                refreshClassSplitFilteredReviewUi();
+                void refreshClassSplitGraphClassFilter();
             };
-            classSplitElements.filterClass.addEventListener("input", handleFilterClassChange);
             classSplitElements.filterClass.addEventListener("change", handleFilterClassChange);
         }
         if (classSplitElements.displayMode) {
@@ -89340,7 +89638,10 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             ?? resolved.feature_dimensions?.total
             ?? resolved.dimension;
         const dimension = Number.isFinite(Number(resolvedDimension)) ? Number(resolvedDimension) : current.dimension;
-        const scope = byId("classSplitScopeAll")?.checked ? "All classes" : `One class${selectedText("classSplitClassSelect") ? `: ${selectedText("classSplitClassSelect")}` : ""}`;
+        const chosenClasses = Array.from(byId("classSplitSubsetList")?.querySelectorAll("input:checked") || []).map((input) => input.value);
+        const scope = byId("classSplitScopeAll")?.checked ? "All classes"
+            : byId("classSplitScopeSubset")?.checked ? `Selected classes: ${chosenClasses.join(", ") || "none chosen"}`
+            : `One class${selectedText("classSplitClassSelect") ? `: ${selectedText("classSplitClassSelect")}` : ""}`;
         const featureDetail = mode === "multi_backbone_fusion"
             ? `${current.compactWeight}% normalized DINOv3 + SAM3 shape + SALAD retrieval branch; ${current.cradioWeight}% normalized C-RADIO branch.`
             : mode === "compact_fusion"

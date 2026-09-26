@@ -1070,18 +1070,37 @@ def get_class_analysis_session_identity_summary(
     }
 
 
+def _graph_class_names(
+    class_name: Optional[str], class_names: Optional[list[str]],
+) -> Optional[list[str]]:
+    if class_names is None:
+        return [str(class_name)] if class_name and class_name != "__all__" else None
+    if not isinstance(class_names, list) or any(
+        not isinstance(name, str) or not name.strip() for name in class_names
+    ):
+        raise SessionStoreError("class_analysis_graph_class_filter_invalid")
+    if class_name and class_name != "__all__":
+        raise SessionStoreError("class_analysis_graph_class_filter_ambiguous")
+    return sorted(set(class_names))
+
+
 def _graph_predicates(
     *,
     class_name: Optional[str],
     objects: str,
     object_size: str,
     reviewed: str,
+    class_names: Optional[list[str]] = None,
 ) -> tuple[list[str], list[Any]]:
     clauses: list[str] = []
     values: list[Any] = []
-    if class_name and class_name != "__all__":
-        clauses.append("p.class_name = ?")
-        values.append(str(class_name))
+    names = _graph_class_names(class_name, class_names)
+    if names is not None:
+        if names:
+            clauses.append(f"p.class_name IN ({','.join('?' for _ in names)})")
+            values.extend(names)
+        else:
+            clauses.append("0")
     object_mode = str(objects or "all")
     object_clauses = {
         "all": None,
@@ -1407,12 +1426,13 @@ def _graph_cursor_query_key(
     object_size: str,
     reviewed: str,
     review_state_version: int,
+    class_names: Optional[list[str]] = None,
 ) -> str:
     return hashlib.sha256(
         _json_bytes(
             [
                 mode,
-                str(class_name or ""),
+                _graph_class_names(class_name, class_names),
                 str(objects or "all"),
                 str(object_size or "all"),
                 str(reviewed or "any"),
@@ -1462,6 +1482,7 @@ def get_class_analysis_graph_payload(
     *,
     projection_mode: Optional[str] = None,
     class_name: Optional[str] = None,
+    class_names: Optional[list[str]] = None,
     objects: str = "all",
     object_size: str = "all",
     reviewed: str = "any",
@@ -1478,6 +1499,7 @@ def get_class_analysis_graph_payload(
         raise SessionStoreError("class_analysis_projection_mode_unavailable", status_code=409)
     clauses, values = _graph_predicates(
         class_name=class_name,
+        class_names=class_names,
         objects=objects,
         object_size=object_size,
         reviewed=reviewed,
@@ -1489,6 +1511,7 @@ def get_class_analysis_graph_payload(
         query_key = _graph_cursor_query_key(
             mode=mode,
             class_name=class_name,
+            class_names=class_names,
             objects=objects,
             object_size=object_size,
             reviewed=reviewed,

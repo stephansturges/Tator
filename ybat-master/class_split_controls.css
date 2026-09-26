@@ -492,3 +492,23 @@ html.theme-pipboy .class-split-workspace {
     .class-split-weight-complement { padding-bottom: 0; }
     .class-split-toolbar__field, .class-split-toolbar__field select, .class-split-toolbar__cap { width: 100%; max-width: none; }
 }
+/* Class membership is explicit; checkbox selection needs no modifier keys. */
+.class-split-class-picker {
+  border: 1px solid var(--border-color, #cbd5e1);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 12px 0;
+  min-width: 0;
+}
+.class-split-class-picker[hidden] { display: none; }
+.class-split-class-picker__actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.class-split-class-picker__list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 6px 12px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.class-split-class-picker__list label { display: flex; align-items: center; gap: 8px; overflow-wrap: anywhere; }
+.class-split-class-picker__list input { flex: 0 0 auto; }
+.class-split-class-picker [hidden] { display: none; }

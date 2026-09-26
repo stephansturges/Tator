@@ -3009,7 +3009,7 @@ class FrequentOverlapPrior:
         self.fit_screening_scope = str(
             self.fit_screening_scope or ""
         ).strip().lower()
-        if self.fit_screening_scope not in {"selected_class", "all_classes"}:
+        if self.fit_screening_scope not in {"selected_class", "selected_classes", "all_classes"}:
             raise ValueError("frequent_overlap_prior_screening_scope_invalid")
         if type(self.fit_screening_exhaustive) is not bool:
             raise ValueError(
@@ -4093,7 +4093,7 @@ def build_frequent_overlap_prior(
         if str(point_id).strip()
     )
     screening_scope = str(fit_screening_scope or "").strip().lower()
-    if screening_scope not in {"selected_class", "all_classes"}:
+    if screening_scope not in {"selected_class", "selected_classes", "all_classes"}:
         raise ValueError("frequent_overlap_prior_screening_scope_invalid")
     screened_point_id_digest_builder = hashlib.sha256()
     screened_point_id_digest_builder.update(

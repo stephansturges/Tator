@@ -41794,6 +41794,35 @@ def patch_transient_annotation_meta(session_id: str, payload: Dict[str, Any]):
     }
 
 
+def _class_analysis_scope_classes(
+    payload: Mapping[str, Any], labelmap: Optional[List[str]] = None,
+) -> Tuple[str, List[str]]:
+    """Resolve query membership without widening an invalid subset to all."""
+    scope = str(payload.get("analysis_scope") or "selected_class").strip().lower()
+    if scope not in {"selected_class", "selected_classes", "all_classes"}:
+        raise HTTPException(status_code=400, detail="class_analysis_scope_invalid")
+    names: List[str] = []
+    if scope == "selected_classes":
+        raw = payload.get("class_names")
+        if not isinstance(raw, list) or not raw or any(
+            not isinstance(name, str) or not name.strip() for name in raw
+        ):
+            raise HTTPException(status_code=400, detail="class_names_required")
+        names = sorted({name.strip() for name in raw})
+    elif scope == "selected_class":
+        name = str(payload.get("class_name") or "").strip()
+        names = [name] if name else []
+    if labelmap is not None and scope != "all_classes":
+        if not names:
+            raise HTTPException(status_code=400, detail="class_name_required")
+        unknown = sorted(set(names) - set(labelmap))
+        if unknown:
+            raise HTTPException(status_code=400, detail={
+                "code": "class_analysis_classes_unknown", "class_names": unknown,
+            })
+    return scope, names
+
+
 def _class_analysis_authoritative_record_count(
     payload: Mapping[str, Any],
 ) -> Tuple[int, str]:
@@ -41803,17 +41832,14 @@ def _class_analysis_authoritative_record_count(
         manifest = source.get("manifest") if isinstance(source, Mapping) else None
         images = manifest.get("images") if isinstance(manifest, Mapping) else None
         if isinstance(images, list):
-            selected_scope = str(
-                payload.get("analysis_scope")
-                or payload.get("scope")
-                or "all_classes"
-            ).strip().lower() == "selected_class"
-            selected_class_id: Optional[int] = -1 if selected_scope else None
-            if selected_scope:
-                class_name = str(payload.get("class_name") or "").strip()
-                labelmap = [str(value) for value in (source.get("labelmap") or [])]
-                if class_name in labelmap:
-                    selected_class_id = labelmap.index(class_name)
+            scope, names = _class_analysis_scope_classes({
+                **payload,
+                "analysis_scope": payload.get("analysis_scope") or payload.get("scope") or "all_classes",
+            })
+            labelmap = [str(value) for value in (source.get("labelmap") or [])]
+            selected_ids = None if scope == "all_classes" else {
+                index for index, name in enumerate(labelmap) if name in names
+            }
             count = 0
             for image in images:
                 if not isinstance(image, Mapping):
@@ -41822,7 +41848,7 @@ def _class_analysis_authoritative_record_count(
                     parts = str(raw_line or "").strip().split()
                     if not parts or re.fullmatch(r"[0-9]+", parts[0]) is None:
                         continue
-                    if selected_class_id is not None and int(parts[0]) != selected_class_id:
+                    if selected_ids is not None and int(parts[0]) not in selected_ids:
                         continue
                     count += 1
             sample_cap = _coerce_int(payload.get("sample_cap"), 0, minimum=0)
@@ -42363,6 +42389,8 @@ def _class_analysis_capabilities() -> Dict[str, Any]:
     )
     return {
         "encoders": ["dinov3", "clip", "cradio"],
+        "analysis_scopes": ["selected_class", "selected_classes", "all_classes"],
+        "graph_class_filter_api_version": 2,
         "review_disposition_api_version": 3,
         "review_class_reassignment_api_version": 3,
         "review_single_bbox_deletion_api_version": 2,
@@ -60728,6 +60756,10 @@ def _class_analysis_stream_encode_records_locked(
         head.get("encoder_model") or head.get("clip_model") or ""
     ).strip()
     encoder_label = _class_analysis_encoder_display_name(encoder_type, encoder_model)
+    scope_label = {
+        "all_classes": "All classes",
+        "selected_classes": "Selected classes",
+    }.get(str(payload.get("analysis_scope") or ""), "Selected class")
     runtime_identity = _class_analysis_encoder_runtime_metadata(head)
     crop_mode = str(payload.get("crop_mode") or "padded_square").strip().lower()
     padding_ratio = _coerce_float(
@@ -61254,7 +61286,7 @@ def _class_analysis_stream_encode_records_locked(
                             job,
                             progress=progress,
                             message=(
-                                f"{'All classes' if payload.get('analysis_scope') == 'all_classes' else 'Selected class'} "
+                                f"{scope_label} "
                                 f"· {total} objects · streamed {completed}/{total} "
                                 f"with {encoder_label} · {cache_hits} cached"
                                 f"{' • ' + speed if speed else ''}."
@@ -61272,7 +61304,7 @@ def _class_analysis_stream_encode_records_locked(
                 job,
                 progress=progress_end,
                 message=(
-                    f"{'All classes' if payload.get('analysis_scope') == 'all_classes' else 'Selected class'} "
+                    f"{scope_label} "
                     f"· {total} objects · streamed {completed}/{total} "
                     f"with {encoder_label} · {cache_hits} cached"
                     f"{' • ' + speed if speed else ''}."
@@ -61358,12 +61390,9 @@ def _class_analysis_collect_records(
     source = _class_analysis_source(payload)
     manifest = _class_analysis_initialize_annotation_manifest_entities(source["manifest"])
     labelmap = [str(x) for x in source.get("labelmap") or []]
-    scope = str(payload.get("analysis_scope") or "selected_class").strip().lower()
-    if scope not in {"selected_class", "all_classes"}:
-        scope = "selected_class"
-    selected_class = str(payload.get("class_name") or "").strip()
-    if scope == "selected_class" and not selected_class:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="class_name_required")
+    scope, selected_classes = _class_analysis_scope_classes(payload, labelmap)
+    selected_class_set = set(selected_classes)
+    selected_class = selected_classes[0] if scope == "selected_class" else ""
     retain_spatial_context = bool(payload.get("refine_outliers"))
     crop_mode = str(payload.get("crop_mode") or "padded_square").strip().lower()
     padding_ratio = _coerce_float(payload.get("padding_ratio"), 0.08, minimum=0.0, maximum=1.0)
@@ -61576,7 +61605,7 @@ def _class_analysis_collect_records(
                 # annotation because only selected objects become query
                 # records.  All-class jobs reuse the query records themselves
                 # as spatial context below, avoiding a second 258k-dict list.
-                if scope == "selected_class" and retain_spatial_context:
+                if scope != "all_classes" and retain_spatial_context:
                     prepared_spatial_context_records.append(
                         {
                             "point_id": point_id,
@@ -61620,7 +61649,7 @@ def _class_analysis_collect_records(
                             **capture_metadata,
                         }
                     )
-                if scope == "selected_class" and class_name != selected_class:
+                if scope != "all_classes" and class_name not in selected_class_set:
                     continue
                 candidate_count += 1
                 primary_crop_mode, primary_padding_ratio, _primary_view = _embedding_view_specs(
@@ -61868,6 +61897,7 @@ def _class_analysis_collect_records(
         "dataset_label": manifest.get("dataset_label"),
         "analysis_scope": scope,
         "selected_class": selected_class if scope == "selected_class" else "",
+        "selected_classes": selected_classes if scope == "selected_classes" else [],
         "labelmap": labelmap,
         "image_count": len(rows),
         "total_candidate_objects": total_candidate_objects,
@@ -67301,7 +67331,7 @@ def _class_analysis_compact_refinement_rail_legacy(
             != CLASS_ANALYSIS_FREQUENT_OVERLAP_FIT_REGISTRY_CONTRACT
             or raw_prior.get("triage_contract")
             != CLASS_ANALYSIS_FREQUENT_OVERLAP_TRIAGE_CONTRACT
-            or prior_screening_scope not in {"selected_class", "all_classes"}
+            or prior_screening_scope not in {"selected_class", "selected_classes", "all_classes"}
             or type(prior_screening_exhaustive) is not bool
             or prior_screening_adjustment_eligible
             is not expected_prior_screening_eligible
@@ -68295,25 +68325,9 @@ def _class_analysis_apply_refinement_failure(
         )
     config = _class_analysis_refinement_config(request)
     scope = str((result.get("summary") or {}).get("analysis_scope") or "")
-    if prepared_context is not None:
-        # Evidence workers receive immutable Stage-1 candidates in bounded
-        # batches. Re-running selected-class sampling per batch silently drops
-        # candidates and makes results depend on batch boundaries.
-        rough = [
-            dict(candidate)
-            for candidate in (result.get("wrong_class_candidates") or [])
-            if isinstance(candidate, Mapping)
-        ]
-        within = [
-            dict(candidate)
-            for candidate in (result.get("within_class_outlier_candidates") or [])
-            if isinstance(candidate, Mapping)
-        ]
-    else:
-        rough, within = _class_analysis_refinement_rough_candidates(
-            result, scope=scope, config=config
-        )
-    rough_ready_at = time.time()
+    rough, within = _class_analysis_refinement_rough_candidates(
+        result, scope=scope, config=config
+    )
     points_by_id = {
         str(point.get("point_id") or ""): point
         for point in (result.get("points") or [])
@@ -69143,7 +69157,7 @@ def _class_analysis_job_state_artifact_binding(
             analysis_scope = str(
                 summary.get("analysis_scope") or ""
             ).strip()
-            if analysis_scope == "all_classes":
+            if analysis_scope in {"all_classes", "selected_classes"}:
                 raw_rough_rows = result.get("wrong_class_candidates") or []
                 if not isinstance(raw_rough_rows, list):
                     raise ValueError(
@@ -70575,7 +70589,7 @@ def _class_analysis_refine_result_impl(
                 if str(record.get("point_id") or "").strip()
             },
             fit_screening_scope=(
-                scope if scope in {"selected_class", "all_classes"}
+                scope if scope in {"selected_class", "selected_classes", "all_classes"}
                 else "all_classes"
             ),
             fit_screening_exhaustive=not bool(
@@ -72165,7 +72179,7 @@ def _class_analysis_prepare_evidence_context(
         or (job.request or {}).get("analysis_scope")
         or "all_classes"
     )
-    if analysis_scope not in {"selected_class", "all_classes"}:
+    if analysis_scope not in {"selected_class", "selected_classes", "all_classes"}:
         analysis_scope = "all_classes"
     baseline_memory = _class_analysis_memory_snapshot()
     query_records_by_id = {
@@ -72506,7 +72520,7 @@ def _class_analysis_run_evidence_batch(
         if isinstance(prepared_context, Mapping)
         else ""
     ) or str((job.request or {}).get("analysis_scope") or "all_classes")
-    if analysis_scope not in {"selected_class", "all_classes"}:
+    if analysis_scope not in {"selected_class", "selected_classes", "all_classes"}:
         analysis_scope = "all_classes"
     batch_result: Dict[str, Any] = {
         "summary": {"analysis_scope": analysis_scope},
@@ -74114,7 +74128,7 @@ def _class_analysis_build_result(
             top_other_ratio = float(top_count / total_neighbors)
         suspicion_score = max(0.0, top_other_ratio - same_ratio)
         is_suspicious = bool(
-            scope == "all_classes" and top_other_ratio >= 0.65 and same_ratio <= 0.35
+            scope in {"all_classes", "selected_classes"} and top_other_ratio >= 0.65 and same_ratio <= 0.35
         )
         point_id = str(record.get("point_id") or "")
         close_overlap_matches = close_overlap_matches_by_point.get(point_id, [])
@@ -75941,6 +75955,13 @@ def _normalize_class_analysis_request(payload: Dict[str, Any]) -> Dict[str, Any]
         or CLASS_ANALYSIS_REFINEMENT_SCHEMA
     ).strip()
     request_payload.setdefault("analysis_scope", "selected_class")
+    scope, selected_classes = _class_analysis_scope_classes(request_payload)
+    request_payload["analysis_scope"] = scope
+    if scope == "selected_classes":
+        request_payload["class_names"] = selected_classes
+        request_payload["class_name"] = ""
+    else:
+        request_payload.pop("class_names", None)
     explicit_quality_recipe = (
         request_payload.get("quality_recipe")
         or request_payload.get("recipe_preset")
@@ -76359,6 +76380,8 @@ def _normalize_class_analysis_request(payload: Dict[str, Any]) -> Dict[str, Any]
 
 def _class_analysis_run_fingerprint(request_payload: Mapping[str, Any]) -> str:
     source = _class_analysis_source(dict(request_payload))
+    if request_payload.get("analysis_scope") == "selected_classes":
+        _class_analysis_scope_classes(request_payload, list(source.get("labelmap") or []))
     manifest = source.get("manifest") if isinstance(source.get("manifest"), dict) else {}
     row_signatures: List[Dict[str, Any]] = []
     dataset_root = Path(source["dataset_root"])

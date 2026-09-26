@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <title>🥔 Tator Annotation Tool</title>
     <link href="ybat.css?v=20260817d" rel="stylesheet">
-    <link href="class_split_controls.css?v=20260811b" rel="stylesheet">
+    <link href="class_split_controls.css?v=20260925d" rel="stylesheet">
 
     <!-- 1) Keep scripts in an order that ensures ybat.js is available
          before we call listenImageCrop().
@@ -15,7 +15,7 @@
     <script src="plotly-2.35.2.min.js?v=20260520a"></script>
     <script src="annotation_diversity.js?v=20260530a"></script>
     <script src="class_analysis_cache_admin.js?v=20260808a"></script>
-    <script src="ybat.js?v=20260925c"></script>
+    <script src="ybat.js?v=20260926a"></script>
 </head>
 <body>
     <div id="ingestProgress" class="ingest-progress" aria-live="polite" aria-atomic="true">
@@ -1495,12 +1495,19 @@
                   <section class="class-split-step" aria-labelledby="classSplitStepScopeTitle">
                     <span class="class-split-step__number" aria-hidden="true">1</span>
                     <div class="class-split-step__body">
-                      <div class="class-split-step__header"><h4 id="classSplitStepScopeTitle">Choose what to inspect</h4><p>Review one class closely or compare every class in the open dataset.</p></div>
+                      <div class="class-split-step__header"><h4 id="classSplitStepScopeTitle">Choose what to inspect</h4><p>Review one class, compare a chosen group, or inspect every class in the open dataset.</p></div>
                       <div class="class-split-choice-grid class-split-choice-grid--scope">
                         <label class="class-split-choice"><input type="radio" name="classSplitScope" id="classSplitScopeSelected" value="selected_class" /><span><strong>One class</strong><small>Best for subtle label errors within a class.</small></span></label>
+                        <label class="class-split-choice"><input type="radio" name="classSplitScope" id="classSplitScopeSubset" value="selected_classes" /><span><strong>Selected classes</strong><small>Compare the classes you choose.</small></span></label>
                         <label class="class-split-choice"><input type="radio" name="classSplitScope" id="classSplitScopeAll" value="all_classes" checked /><span><strong>All classes</strong><small>Best for cross-class confusion and broad structure.</small></span></label>
                         <label class="class-split-field" id="classSplitClassField" for="classSplitClassSelect"><span>Class to inspect</span><select id="classSplitClassSelect"></select></label>
                       </div>
+                      <fieldset id="classSplitSubsetField" class="class-split-class-picker" hidden>
+                        <legend>Classes to analyze</legend>
+                        <div class="class-split-class-picker__actions"><button type="button" id="classSplitSubsetAll" class="training-button secondary">Select all</button><button type="button" id="classSplitSubsetNone" class="training-button secondary">Clear</button></div>
+                        <div id="classSplitSubsetList" class="class-split-class-picker__list"></div>
+                        <div id="classSplitSubsetStatus" class="training-help" role="status">Choose at least one class.</div>
+                      </fieldset>
                     </div>
                   </section>
 
@@ -1678,7 +1685,7 @@
                             <div class="class-split-toolbar">
                                 <div class="class-split-toolbar__group class-split-toolbar__group--primary">
                                     <label class="class-split-toolbar__field" for="classSplitGraphProjection"><span>Map layout</span><select id="classSplitGraphProjection" class="class-split-toolbar__projection" title="Choose among layouts already calculated for this result. Changing this view never changes high-dimensional review ranking."><option value="class_balanced_pca">Balanced class overview</option><option value="global_pca">Overall visual similarity</option><option value="between_class_pca">Emphasize class differences</option><option value="within_filter_pca">Detail within selected class</option><option value="umap" selected>Local similarity groups (UMAP)</option></select><small id="classSplitProjectionAvailability">Available layouts are determined by this analysis run.</small></label>
-                                    <label class="class-split-toolbar__field" for="classSplitFilterClass"><span>Class</span><select id="classSplitFilterClass"></select></label>
+                                    <label class="class-split-toolbar__field" for="classSplitFilterClass"><span>Classes</span><select id="classSplitFilterClass"></select></label>
                                     <label class="class-split-toolbar__field" for="classSplitDisplayMode"><span>Objects</span><select id="classSplitDisplayMode" title="Choose which analyzed objects are visible. Hidden points remain in the analysis and review queue."><option value="all">All analyzed objects</option><option value="wrong_only">Suggested review queue</option><option value="rough_only">All similarity-based flags</option><option value="overlap_only">Objects with overlapping boxes</option><option value="review_only">Anything marked for review</option></select></label>
                                     <label class="class-split-toolbar__field" for="classSplitSizeFilter"><span>Size</span><select id="classSplitSizeFilter" title="Tiny / low-detail uses the source-pixel threshold configured above. Relative smallness is separate evidence."><option value="all">All sizes</option><option value="low_detail_only">Tiny / low-detail only</option><option value="exclude_low_detail">Exclude tiny / low-detail</option><option value="relative_small">Relatively small only</option></select></label>
                                     <label class="class-split-toolbar__field" for="classSplitDragMode"><span>Drag</span><select id="classSplitDragMode" title="Draw a freehand or rectangular multi-selection, or pan the map."><option value="lasso" selected>Freehand select</option><option value="select">Rectangle select</option><option value="pan">Move map</option></select></label>
@@ -1686,6 +1693,13 @@
                                     <label class="class-split-toolbar__field" id="classSplitGraphWindowField" for="classSplitGraphWindow" hidden><span>Map slice</span><select id="classSplitGraphWindow" title="The priority overview is representative. Numbered windows provide deterministic, exhaustive coverage of points currently resident in this result."><option value="overview">Priority overview</option></select><small id="classSplitGraphWindowNote">Selection tools affect only the displayed slice.</small></label>
                                     <label class="class-split-toggle class-split-toolbar__cap" for="classSplitLimitPlotPoints"><input type="checkbox" id="classSplitLimitPlotPoints" checked /><span><strong>Limit map to 50,000 points</strong><small>Recommended. Uncheck to explicitly load every matching point in high-memory mode.</small></span></label>
                                 </div>
+                                <fieldset id="classSplitGraphSubsetField" class="class-split-class-picker" hidden>
+                                    <legend>Classes shown in this plot</legend>
+                                    <div class="class-split-class-picker__actions"><button type="button" id="classSplitGraphSubsetAll" class="training-button secondary">Select all</button><button type="button" id="classSplitGraphSubsetNone" class="training-button secondary">Clear</button><button type="button" id="classSplitGraphSubsetRetry" class="training-button secondary" hidden>Retry loading classes</button></div>
+                                    <div id="classSplitGraphSubsetList" class="class-split-class-picker__list"></div>
+                                    <div id="classSplitGraphSubsetStatus" class="training-help" role="status"></div>
+                                    <small>Filters the saved map without changing its coordinates. Choose Selected classes above and run a new analysis to fit a map to that group.</small>
+                                </fieldset>
                                 <fieldset class="class-split-toolbar__group class-split-toolbar__overlap">
                                     <legend>Overlap pair</legend>
                                     <label class="class-split-toolbar__field" for="classSplitOverlapPairMode"><span>Show</span><select id="classSplitOverlapPairMode" title="Focus on one selected pair of overlapping classes, or hide that pair."><option value="any">Any overlap pair</option><option value="include">Only selected pair</option><option value="exclude">Hide selected pair</option></select></label>

@@ -169,6 +169,10 @@ def greedy_diverse_indices_with_scores(
     *,
     keep_fraction: float,
     reference_embeddings: Optional[np.ndarray] = None,
+    initial_indices: Optional[Sequence[int]] = None,
+    target_count: Optional[int] = None,
+    distance_update_fn=None,
+    on_select=None,
 ) -> Tuple[List[int], np.ndarray, np.ndarray]:
     """Return selected indices, reference novelty, and coverage scores.
 
@@ -184,28 +188,49 @@ def greedy_diverse_indices_with_scores(
         empty = np.empty((0,), dtype=np.float32)
         return [], empty, empty
     keep_count = max(1, min(total, int(math.ceil(total * normalize_keep_fraction(keep_fraction)))))
+    if target_count is not None:
+        if type(target_count) is not int or not 1 <= target_count <= total:
+            raise ValueError('target_count_out_of_range')
+        keep_count = target_count
     if reference_embeddings is not None and np.asarray(reference_embeddings).size:
         ref = normalize_rows(np.asarray(reference_embeddings, dtype=np.float32))
         min_distance = cosine_distance_matrix(emb, ref).min(axis=1)
     else:
         centroid = normalize_rows(emb.mean(axis=0, keepdims=True))
         min_distance = cosine_distance_matrix(emb, centroid).reshape(-1)
+    # Optional adapters let dataset pruning use this same retained-prefix loop
+    # with protected examples and task-aware distances. Default ingestion
+    # callers keep the original initialization, ordering and return values.
+    initial = list(dict.fromkeys(int(i) for i in (initial_indices or [])))
+    if any(i < 0 or i >= total for i in initial):
+        raise ValueError("initial_indices_out_of_range")
+    keep_count = max(keep_count, len(initial))
     selected: List[int] = []
+    if distance_update_fn is not None:
+        min_distance = np.ones(total, dtype=np.float32)
     candidate_scores = min_distance.astype(np.float32, copy=True)
     coverage_scores = np.zeros(total, dtype=np.float32)
     remaining = np.ones(total, dtype=bool)
-    for _ in range(keep_count):
+    for step in range(keep_count):
         masked = np.where(remaining, candidate_scores, -1.0)
-        idx = int(np.argmax(masked))
+        idx = initial[step] if step < len(initial) else int(np.argmax(masked))
         if not remaining[idx]:
             break
         selected.append(idx)
         coverage_scores[idx] = float(candidate_scores[idx])
         remaining[idx] = False
-        if len(selected) >= keep_count:
+        if len(selected) >= keep_count and distance_update_fn is None and on_select is None:
             break
-        distances_to_new = cosine_distance_matrix(emb, emb[idx : idx + 1]).reshape(-1)
+        distances_to_new = (
+            np.asarray(distance_update_fn(idx), dtype=np.float32).reshape(-1)
+            if distance_update_fn is not None
+            else cosine_distance_matrix(emb, emb[idx : idx + 1]).reshape(-1)
+        )
+        if distances_to_new.shape != (total,) or not np.all(np.isfinite(distances_to_new)):
+            raise ValueError("coverage_distance_update_invalid")
         candidate_scores = np.minimum(candidate_scores, distances_to_new)
+        if on_select is not None:
+            on_select(idx, len(selected), candidate_scores)
     coverage_scores[remaining] = candidate_scores[remaining]
     return selected, min_distance.astype(np.float32, copy=False), coverage_scores.astype(np.float32, copy=False)
 

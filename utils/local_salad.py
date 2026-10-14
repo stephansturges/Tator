@@ -14,9 +14,44 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
+import numpy as np
+
+
+class _PrivateDropout(nn.Module):
+    """Training-only RNG owned by the head; unrelated jobs cannot perturb it."""
+    def __init__(self, probability, seed):
+        super().__init__()
+        self.p = float(probability)
+        self.seed = int(seed)
+        self.generators = {}
+
+    def forward(self, values):
+        if not self.training or self.p <= 0:
+            return values
+        # MPS currently lacks a Generator implementation; sample on CPU, then
+        # transfer this mask. CUDA and CPU use their private native generator.
+        device = values.device if values.device.type != "mps" else torch.device("cpu")
+        key = str(device)
+        if key not in self.generators:
+            self.generators[key] = torch.Generator(device=device).manual_seed(self.seed)
+        mask = torch.rand(values.shape, device=device, generator=self.generators[key]) >= self.p
+        return values * mask.to(device=values.device, dtype=values.dtype) / (1 - self.p)
+
+
+def _head_linear(in_features, out_features, rng):
+    if rng is None:
+        return nn.Linear(in_features, out_features)
+    # Meta construction does not consume the process-global Torch RNG.
+    layer = nn.Linear(in_features, out_features, device="meta")
+    bound = 1 / math.sqrt(in_features)
+    layer.weight = nn.Parameter(torch.from_numpy(rng.uniform(-bound, bound, (out_features, in_features)).astype(np.float32)))
+    layer.bias = nn.Parameter(torch.from_numpy(rng.uniform(-bound, bound, out_features).astype(np.float32)))
+    return layer
 
 
 LOCAL_SALAD_CACHE_VERSION = "local-salad-v1"
+LOCAL_SALAD_RMS_VERSION = "local-salad-v2-rms-inputs"
 LOCAL_SALAD_POLICY = "local_training_only_no_external_salad_checkpoint"
 LOCAL_SALAD_TRAINER = "tator_local_salad_trainer"
 
@@ -31,6 +66,17 @@ class LocalSALADConfig:
     dropout: float = 0.3
     sinkhorn_iters: int = 3
     sinkhorn_reg: float = 1.0
+    patch_normalization: str = "none"
+
+    def __post_init__(self) -> None:
+        if self.patch_normalization not in {"none", "rms"}:
+            raise ValueError("patch_normalization must be 'none' or 'rms'")
+
+    @property
+    def file_format(self) -> str:
+        # Older readers must reject RMS heads rather than silently ignoring the
+        # normalization field. Existing raw-input heads retain their format.
+        return LOCAL_SALAD_RMS_VERSION if self.patch_normalization == "rms" else LOCAL_SALAD_CACHE_VERSION
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -47,6 +93,7 @@ class LocalSALADConfig:
             dropout=float(payload.get("dropout") if payload.get("dropout") is not None else 0.3),
             sinkhorn_iters=int(payload.get("sinkhorn_iters") or 3),
             sinkhorn_reg=float(payload.get("sinkhorn_reg") if payload.get("sinkhorn_reg") is not None else 1.0),
+            patch_normalization=str(payload.get("patch_normalization", "none")),
         )
 
 
@@ -84,28 +131,29 @@ def _log_optimal_transport(
 class LocalSALADHead(nn.Module):
     """Trainable SALAD-style head for DINO patch tokens."""
 
-    def __init__(self, config: LocalSALADConfig):
+    def __init__(self, config: LocalSALADConfig, *, seed: Optional[int] = None):
         super().__init__()
         if int(config.num_channels) <= 0:
             raise ValueError("num_channels must be positive")
         self.config = config
-        dropout = nn.Dropout(config.dropout) if config.dropout > 0 else nn.Identity()
+        rng = np.random.default_rng(int(seed) % (2 ** 32)) if seed is not None else None
+        dropout = (_PrivateDropout(config.dropout, seed) if seed is not None else nn.Dropout(config.dropout)) if config.dropout > 0 else nn.Identity()
         self.token_features = nn.Sequential(
-            nn.Linear(config.num_channels, config.hidden_dim),
+            _head_linear(config.num_channels, config.hidden_dim, rng),
             nn.ReLU(inplace=True),
-            nn.Linear(config.hidden_dim, config.token_dim),
+            _head_linear(config.hidden_dim, config.token_dim, rng),
         )
         self.cluster_features = nn.Sequential(
-            nn.Linear(config.num_channels, config.hidden_dim),
+            _head_linear(config.num_channels, config.hidden_dim, rng),
             dropout,
             nn.ReLU(inplace=True),
-            nn.Linear(config.hidden_dim, config.cluster_dim),
+            _head_linear(config.hidden_dim, config.cluster_dim, rng),
         )
         self.score = nn.Sequential(
-            nn.Linear(config.num_channels, config.hidden_dim),
+            _head_linear(config.num_channels, config.hidden_dim, rng),
             dropout,
             nn.ReLU(inplace=True),
-            nn.Linear(config.hidden_dim, config.num_clusters),
+            _head_linear(config.hidden_dim, config.num_clusters, rng),
         )
         self.dust_bin = nn.Parameter(torch.tensor(1.0))
 
@@ -121,6 +169,10 @@ class LocalSALADHead(nn.Module):
                 f"patch token width {patch_tokens.shape[-1]} does not match head width {self.config.num_channels}"
             )
         patches = torch.nan_to_num(patch_tokens.float(), nan=0.0, posinf=0.0, neginf=0.0)
+        if self.config.patch_normalization == "rms":
+            # Balance every patch before both learned branches and the global
+            # mean fallback. Preserve direction; do not mask particular cells.
+            patches = patches / patches.square().mean(dim=-1, keepdim=True).sqrt().clamp_min(1e-6)
         if global_token is None:
             global_work = patches.mean(dim=1)
         else:
@@ -167,7 +219,7 @@ def load_local_salad_head_file(path: Path, *, device_name: str = "cpu") -> Tuple
         payload = torch.load(resolved, map_location=device_name)
     if not isinstance(payload, dict):
         raise ValueError("local_salad_head_unsupported_format")
-    if payload.get("format") != LOCAL_SALAD_CACHE_VERSION:
+    if payload.get("format") not in {LOCAL_SALAD_CACHE_VERSION, LOCAL_SALAD_RMS_VERSION}:
         raise ValueError("local_salad_head_unsupported_format")
     metadata = dict(payload.get("metadata") or {})
     if metadata.get("policy") != LOCAL_SALAD_POLICY:
@@ -175,7 +227,9 @@ def load_local_salad_head_file(path: Path, *, device_name: str = "cpu") -> Tuple
     if metadata.get("trainer") != LOCAL_SALAD_TRAINER:
         raise ValueError("local_salad_head_trainer_required")
     config = LocalSALADConfig.from_dict(payload.get("config") or {})
-    head = LocalSALADHead(config)
+    if payload.get("format") != config.file_format:
+        raise ValueError("local_salad_head_input_policy_format_mismatch")
+    head = LocalSALADHead(config, seed=0)
     head.load_state_dict(payload.get("state_dict") or {})
     head.to(device_name)
     head.eval()

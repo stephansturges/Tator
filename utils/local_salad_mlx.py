@@ -15,9 +15,11 @@ from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import torch
+import math
 
 from utils.local_salad import (
     LOCAL_SALAD_CACHE_VERSION,
+    LOCAL_SALAD_RMS_VERSION,
     LOCAL_SALAD_POLICY,
     LOCAL_SALAD_TRAINER,
     LocalSALADConfig,
@@ -112,24 +114,56 @@ def _mx_log_optimal_transport(scores: Any, dustbin_score: Any, *, num_iters: int
     return work + mx.expand_dims(u, axis=2) + mx.expand_dims(v, axis=1) - norm
 
 
+class _PrivateMLXLinear(_MLXModuleBase):
+    def __init__(self, inputs, outputs, rng):
+        super().__init__()
+        bound = 1 / math.sqrt(inputs)
+        self.weight = mx.array(rng.uniform(-bound, bound, (outputs, inputs)).astype(np.float32))
+        self.bias = mx.array(rng.uniform(-bound, bound, outputs).astype(np.float32))
+
+    def __call__(self, values):
+        return mx.addmm(self.bias, values, self.weight.T)
+
+
+class _PrivateMLXDropout(_MLXModuleBase):
+    def __init__(self, probability, seed):
+        super().__init__()
+        self.p = float(probability)
+        self._key = mx.random.key(int(seed) % (2 ** 32))
+
+    def __call__(self, values):
+        if not self.training or self.p <= 0:
+            return values
+        self._key, draw = mx.random.split(self._key)
+        mask = mx.random.bernoulli(1 - self.p, values.shape, key=draw)
+        return values * mask / (1 - self.p)
+
+
 class MLXLocalSALADHead(_MLXModuleBase):
     """MLX implementation matching ``LocalSALADHead`` exactly."""
 
-    def __init__(self, config: LocalSALADConfig):
+    def __init__(self, config: LocalSALADConfig, *, seed: Optional[int] = None):
         if not local_salad_mlx_available():
             raise RuntimeError("local_salad_mlx_unavailable")
         super().__init__()
         if int(config.num_channels) <= 0:
             raise ValueError("num_channels must be positive")
         self.config = config
-        self.token_fc1 = mlx_nn.Linear(config.num_channels, config.hidden_dim)
-        self.token_fc2 = mlx_nn.Linear(config.hidden_dim, config.token_dim)
-        self.cluster_fc1 = mlx_nn.Linear(config.num_channels, config.hidden_dim)
-        self.cluster_dropout = mlx_nn.Dropout(config.dropout) if config.dropout > 0 else mlx_nn.Identity()
-        self.cluster_fc2 = mlx_nn.Linear(config.hidden_dim, config.cluster_dim)
-        self.score_fc1 = mlx_nn.Linear(config.num_channels, config.hidden_dim)
-        self.score_dropout = mlx_nn.Dropout(config.dropout) if config.dropout > 0 else mlx_nn.Identity()
-        self.score_fc2 = mlx_nn.Linear(config.hidden_dim, config.num_clusters)
+        rng = np.random.default_rng(int(seed) % (2 ** 32)) if seed is not None else None
+        def linear(inputs, outputs):
+            if rng is None:
+                return mlx_nn.Linear(inputs, outputs)
+            # Allocate a module directly, avoiding Linear's global RNG draws.
+            layer = _PrivateMLXLinear(inputs, outputs, rng)
+            return layer
+        self.token_fc1 = linear(config.num_channels, config.hidden_dim)
+        self.token_fc2 = linear(config.hidden_dim, config.token_dim)
+        self.cluster_fc1 = linear(config.num_channels, config.hidden_dim)
+        self.cluster_dropout = (_PrivateMLXDropout(config.dropout, int(seed)) if seed is not None else mlx_nn.Dropout(config.dropout)) if config.dropout > 0 else mlx_nn.Identity()
+        self.cluster_fc2 = linear(config.hidden_dim, config.cluster_dim)
+        self.score_fc1 = linear(config.num_channels, config.hidden_dim)
+        self.score_dropout = (_PrivateMLXDropout(config.dropout, int(seed) + 1) if seed is not None else mlx_nn.Dropout(config.dropout)) if config.dropout > 0 else mlx_nn.Identity()
+        self.score_fc2 = linear(config.hidden_dim, config.num_clusters)
         self.dust_bin = mx.array(1.0, dtype=mx.float32)
 
     @property
@@ -145,6 +179,8 @@ class MLXLocalSALADHead(_MLXModuleBase):
                 f"patch token width {patches.shape[-1]} does not match head width {self.config.num_channels}"
             )
         patches = mx.nan_to_num(patches, nan=0.0, posinf=0.0, neginf=0.0)
+        if self.config.patch_normalization == "rms":
+            patches = patches / mx.maximum(mx.sqrt(mx.mean(mx.square(patches), axis=-1, keepdims=True)), 1e-6)
         if global_token is None:
             global_work = mx.mean(patches, axis=1)
         else:
@@ -240,7 +276,7 @@ def load_mlx_local_salad_head_file(path: Path) -> Tuple[MLXLocalSALADHead, Dict[
         payload = torch.load(resolved, map_location="cpu")
     if not isinstance(payload, dict):
         raise ValueError("local_salad_head_unsupported_format")
-    if payload.get("format") != LOCAL_SALAD_CACHE_VERSION:
+    if payload.get("format") not in {LOCAL_SALAD_CACHE_VERSION, LOCAL_SALAD_RMS_VERSION}:
         raise ValueError("local_salad_head_unsupported_format")
     metadata = dict(payload.get("metadata") or {})
     if metadata.get("policy") != LOCAL_SALAD_POLICY:
@@ -248,7 +284,9 @@ def load_mlx_local_salad_head_file(path: Path) -> Tuple[MLXLocalSALADHead, Dict[
     if metadata.get("trainer") != LOCAL_SALAD_TRAINER:
         raise ValueError("local_salad_head_trainer_required")
     config = LocalSALADConfig.from_dict(payload.get("config") or {})
-    head = MLXLocalSALADHead(config)
+    if payload.get("format") != config.file_format:
+        raise ValueError("local_salad_head_input_policy_format_mismatch")
+    head = MLXLocalSALADHead(config, seed=0)
     head.load_torch_state_dict(payload.get("state_dict") or {})
     head.eval()
     return head, {"path": str(resolved), **metadata, "config": config.to_dict(), "runtime_backend": "mlx"}

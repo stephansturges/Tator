@@ -457,8 +457,9 @@ def _encode_cradio_images_mlx(
     pooling: str = CRADIO_DEFAULT_POOLING,
     normalize: bool = True,
     return_tokens: bool = False,
+    input_size: Optional[int] = None,
 ) -> np.ndarray | Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    image_size = _resolve_cradio_mlx_image_size(images)
+    image_size = _coerce_mlx_size_dimension(input_size) if input_size is not None else _resolve_cradio_mlx_image_size(images)
     pooling_norm = normalize_cradio_pooling(pooling)
     summary_encoder = getattr(model, "encode_summary_batch", None)
     if (
@@ -513,7 +514,10 @@ def encode_cradio_images(
     pooling: str = CRADIO_DEFAULT_POOLING,
     normalize: bool = True,
     return_tokens: bool = False,
+    input_size: Optional[int] = None,
 ) -> np.ndarray | Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if input_size is not None and (type(input_size) is not int or not 16 <= input_size <= 2048 or input_size % 16):
+        raise ValueError('C-RADIO input_size must be a multiple of16 between16 and2048')
     if not images:
         empty = np.empty((0, 0), dtype=np.float32)
         if return_tokens:
@@ -526,9 +530,18 @@ def encode_cradio_images(
             pooling=pooling,
             normalize=normalize,
             return_tokens=return_tokens,
+            input_size=input_size,
         )
     with torch.no_grad():
-        inputs = processor(images=list(images), return_tensors="pt", do_resize=True)
+        if input_size is None:
+            inputs = processor(images=list(images), return_tensors="pt", do_resize=True)
+        else:
+            # Explicit whole-image policy; the default path above is unchanged.
+            resized = [image.convert('RGB').resize((input_size, input_size), Image.Resampling.BICUBIC) for image in images]
+            try:
+                inputs = processor(images=resized, return_tensors="pt", do_resize=False, do_center_crop=False)
+            finally:
+                for image in resized: image.close()
         pixel_values = inputs["pixel_values"].to(device_name)
         with CRADIO_INFERENCE_LOCK:
             outputs = model(pixel_values)

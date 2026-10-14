@@ -300,9 +300,11 @@ def write_session_manifest(
     return validated
 
 
-def _scan_latest(safe_root: Path) -> Optional[dict[str, Any]]:
+def _scan_latest(safe_root: Path, excluded_job_ids=()) -> Optional[dict[str, Any]]:
     latest: Optional[dict[str, Any]] = None
     for candidate in safe_root.iterdir():
+        if candidate.name in excluded_job_ids:
+            continue
         if not candidate.is_dir() or candidate.is_symlink():
             continue
         if _JOB_ID_PATTERN.fullmatch(candidate.name) is None:
@@ -322,7 +324,7 @@ def _scan_latest(safe_root: Path) -> Optional[dict[str, Any]]:
     return latest
 
 
-def latest_session(root: Path | str) -> Optional[dict[str, Any]]:
+def latest_session(root: Path | str, *, excluded_job_ids=()) -> Optional[dict[str, Any]]:
     safe_root = _safe_root(root, create=True)
     pointer_path = safe_root / LATEST_SESSION_FILENAME
     if pointer_path.is_file() and not pointer_path.is_symlink():
@@ -333,11 +335,11 @@ def latest_session(root: Path | str) -> Optional[dict[str, Any]]:
                 and pointer.get("schema") == LATEST_SESSION_SCHEMA
             ):
                 manifest = read_session_manifest(safe_root, pointer.get("job_id"))
-                if manifest.get("status") == "completed":
+                if manifest.get("status") == "completed" and manifest.get("job_id") not in excluded_job_ids:
                     return manifest
         except (OSError, UnicodeDecodeError, ValueError, SessionManifestError):
             pass
-    manifest = _scan_latest(safe_root)
+    manifest = _scan_latest(safe_root, excluded_job_ids)
     if manifest is not None:
         write_session_manifest(safe_root, manifest, publish_latest=True)
     return manifest

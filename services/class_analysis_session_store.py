@@ -825,6 +825,101 @@ def read_session_store_metadata(path: Path | str) -> dict[str, Any]:
     return metadata
 
 
+def preserve_review_identity_before_clear(
+    job_dir: Path | str,
+    *,
+    review_keys: Iterable[str] = (),
+) -> dict[str, Any]:
+    """Keep compact source identities and reviewed evidence before graph removal.
+
+    The caller owns the storage admission reservation and supplies canonical
+    ledger keys, including choices not yet projected into ``review_state``.
+    SQLite performs the streaming copies; images and unreviewed analysis payloads
+    are never copied. The source store is opened read-only and never changed.
+    """
+    directory = Path(job_dir).absolute()
+    source = directory / SESSION_STORE_FILENAME
+    target = directory / "retained_review.sqlite3"
+    for path in (directory, source, target):
+        if path.is_symlink() or any(parent.is_symlink() for parent in path.parents):
+            raise SessionStoreError("class_analysis_retained_review_path_unsafe", status_code=409)
+    if not source.is_file():
+        # A retried operation may have quarantined the graph already. Its
+        # durable preservation artifact must exist before that retry succeeds.
+        if target.is_file():
+            with sqlite3.connect(f"{target.as_uri()}?mode=ro", uri=True) as check:
+                row = check.execute("SELECT value FROM retained_meta WHERE key='schema'").fetchone()
+                if row and row[0] == "class-analysis-retained-review-v1":
+                    return {"status": "retained", "retained_assets": [str(target)], "bytes": target.stat().st_size}
+        # Legacy sessions already retain the frozen object metadata in a
+        # separate JSONL store. The operation keeps that file and its bindings.
+        if (directory / "metadata.jsonl").is_file():
+            return {"status": "legacy_identity_retained", "retained_assets": [str(directory / "metadata.jsonl")]}
+        raise SessionStoreError("class_analysis_review_identity_unavailable", status_code=409)
+    partial = directory / (".retained_review." + uuid.uuid4().hex + ".sqlite3")
+    connection = None
+    try:
+        connection = sqlite3.connect(str(partial), uri=True)
+        connection.execute("PRAGMA journal_mode=DELETE")
+        connection.execute("PRAGMA synchronous=FULL")
+        connection.execute("PRAGMA temp_store=FILE")
+        connection.execute("PRAGMA cache_size=-4096")
+        connection.execute("ATTACH DATABASE ? AS original", (source.as_uri() + "?mode=ro",))
+        required = {"session_meta", "points_core", "point_details", "review_state", "evidence", "overlap_pairs"}
+        found = {row[0] for row in connection.execute("SELECT name FROM original.sqlite_master WHERE type='table'")}
+        if not required.issubset(found):
+            raise SessionStoreError("class_analysis_review_identity_schema_unsupported", status_code=409)
+        identity_columns = (
+            "point_id", "split", "image_relpath", "frontend_image_key", "source_key", "class_id", "class_name",
+            "x1", "y1", "x2", "y2", "review_object_key", "pair_review_key", *_POINT_IDENTITY_COLUMNS,
+        )
+        columns = {row[1] for row in connection.execute("PRAGMA original.table_info(points_core)")}
+        if not set(identity_columns).issubset(columns):
+            raise SessionStoreError("class_analysis_review_identity_schema_unsupported", status_code=409)
+        connection.execute("CREATE TABLE retained_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+        connection.executemany("INSERT INTO retained_meta VALUES (?,?)", [
+            ("schema", "class-analysis-retained-review-v1"), ("job_id", directory.name),
+            ("created_at", str(time.time())),
+        ])
+        connection.execute("CREATE TABLE source_identity AS SELECT " + ",".join(identity_columns) + " FROM original.points_core")
+        connection.execute("CREATE UNIQUE INDEX retained_point_id ON source_identity(point_id)")
+        connection.execute("CREATE TEMP TABLE ledger_keys(key TEXT PRIMARY KEY)")
+        batch = []
+        for value in review_keys:
+            batch.append((str(value),))
+            if len(batch) >= 512:
+                connection.executemany("INSERT OR IGNORE INTO ledger_keys VALUES (?)", batch)
+                batch.clear()
+        if batch:
+            connection.executemany("INSERT OR IGNORE INTO ledger_keys VALUES (?)", batch)
+        connection.execute("CREATE TEMP TABLE reviewed(point_id TEXT PRIMARY KEY)")
+        connection.execute("INSERT OR IGNORE INTO reviewed SELECT point_id FROM original.review_state")
+        connection.execute("INSERT OR IGNORE INTO reviewed SELECT point_id FROM original.points_core WHERE reviewed!=0 OR review_object_key IN (SELECT key FROM ledger_keys) OR pair_review_key IN (SELECT key FROM ledger_keys)")
+        connection.execute("INSERT OR IGNORE INTO reviewed SELECT other_point_id FROM original.overlap_pairs WHERE point_id IN (SELECT point_id FROM reviewed) AND other_point_id IS NOT NULL")
+        connection.execute("CREATE TABLE session_meta AS SELECT * FROM original.session_meta")
+        for name in ("point_details", "review_state", "evidence", "overlap_pairs"):
+            connection.execute(f"CREATE TABLE {name} AS SELECT * FROM original.{name} WHERE point_id IN (SELECT point_id FROM reviewed)")
+        identity_count = int(connection.execute("SELECT COUNT(*) FROM source_identity").fetchone()[0])
+        reviewed_count = int(connection.execute("SELECT COUNT(*) FROM reviewed").fetchone()[0])
+        connection.commit()
+        connection.close()
+        connection = None
+        with partial.open("rb") as handle:
+            os.fsync(handle.fileno())
+        os.replace(partial, target)
+        descriptor = os.open(str(directory), os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        return {"status": "retained", "retained_assets": [str(target)], "identity_count": identity_count,
+                "reviewed_point_count": reviewed_count, "bytes": target.stat().st_size}
+    finally:
+        if connection is not None:
+            connection.close()
+        partial.unlink(missing_ok=True)
+
+
 def get_class_analysis_same_class_overlap_candidates(
     path: Path | str,
 ) -> list[dict[str, Any]]:

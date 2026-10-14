@@ -8,6 +8,7 @@ import platform
 from importlib import metadata as importlib_metadata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack, contextmanager
+import contextlib
 from contextvars import ContextVar
 from pathlib import Path, PureWindowsPath
 import numpy as np
@@ -63,6 +64,11 @@ _raise_process_nofile_limit()
 from api.detectors_default import build_detectors_default_router
 from api.datasets import build_datasets_router
 from api.class_analysis import build_class_analysis_router
+from api.storage_library import build_storage_library_router
+from services.storage_library import StorageLibrary, StorageLibraryError
+from services.storage_library_inventory import StorageLibraryInventory
+from services.storage_library_operations import StorageLibraryOperations
+from services.storage_library_runtime import StorageLibraryMiddleware
 from api.data_ingestion import build_data_ingestion_router
 from api.glossaries import build_glossaries_router
 from api.predictor_settings import build_predictor_settings_router
@@ -546,13 +552,6 @@ from services.class_analysis_patch_refinement import (
 from services.class_analysis_context_features import (
     extract_same_image_context_features as _class_analysis_extract_same_image_context_features,
 )
-from services.class_analysis_cache_admin import (
-    CacheAdminError as ClassAnalysisCacheAdminError,
-    CacheBusyError as ClassAnalysisCacheBusyError,
-    CacheRootUnsafeError as ClassAnalysisCacheRootUnsafeError,
-    cache_inventory as _class_analysis_cache_inventory,
-    purge_cache as _class_analysis_purge_cache,
-)
 from services.class_analysis_session_store import (
     SESSION_STORE_FILENAME as CLASS_ANALYSIS_SESSION_STORE_FILENAME,
     SessionStoreError,
@@ -596,9 +595,7 @@ from services.class_analysis_sessions import (
 from services.class_analysis_storage_policy import (
     DEFAULT_GENERATED_DATA_BUDGET_BYTES,
     StoragePolicyError as ClassAnalysisStoragePolicyError,
-    choose_unpinned_session_evictions,
     read_generated_data_budget,
-    recoverable_session_inventory,
     write_generated_data_budget,
 )
 from services.class_analysis_selector_v6 import (
@@ -1015,6 +1012,8 @@ from utils.embedding_recipe import (
     normalize_rows as _embedding_normalize_rows,
     preprocess_crop as _embedding_preprocess_crop,
 )
+from utils.local_salad_provenance import qualified_training_rng, training_implementation_identity, sha256_file as salad_sha256_file
+
 from utils.local_salad import (
     LOCAL_SALAD_CACHE_VERSION,
     LOCAL_SALAD_POLICY,
@@ -5366,9 +5365,12 @@ app.add_middleware(
 TATOR_UI_DIR = Path(__file__).resolve().parent / "ybat-master"
 TATOR_UI_INDEX = TATOR_UI_DIR / "tator.html"
 TATOR_UI_ASSETS = {
+    "dataset_pruning.js",
+    "dataset_pruning.css",
     "annotation_diversity.js",
     "canvas.min.js",
     "class_analysis_cache_admin.js",
+    "dqe_session_store.js",
     "class_split_controls.css",
     "class_split_embedding_presets_preview.svg",
     "cute.png",
@@ -17148,6 +17150,7 @@ class DatasetUploadSessionJob:
     context: str = ""
     classes: List[str] = field(default_factory=list)
     total_images: int = 0
+    preserve_workspace: bool = False
     train_count: int = 0
     val_count: int = 0
     bytes_written: int = 0
@@ -17520,6 +17523,433 @@ CLASS_ANALYSIS_QWEN_REVIEW_JOBS: Dict[str, ClassAnalysisQwenReviewJob] = {}
 CLASS_ANALYSIS_QWEN_REVIEW_JOBS_LOCK = threading.Lock()
 
 
+_STORAGE_LIBRARY_SERVICE = None
+_STORAGE_LIBRARY_SERVICE_KEY = None
+_STORAGE_LIBRARY_SERVICE_LOCK = threading.RLock()
+
+
+def _storage_library_roots() -> Dict[str, Path]:
+    from services.annotation_entity_store import default_annotation_entity_store_path
+
+    return {
+        "analysis": CLASS_ANALYSIS_ROOT,
+        "cache": CLASS_ANALYSIS_CACHE_ROOT,
+        "salad_heads": LOCAL_SALAD_HEAD_ROOT,
+        "registry": DATASET_REGISTRY_ROOT,
+        "sam3": SAM3_DATASET_ROOT,
+        "qwen": QWEN_DATASET_ROOT,
+        "transient": DATASET_TRANSIENT_STATE_ROOT,
+        "exports": DATASET_ANNOTATION_EXPORT_CACHE_ROOT,
+        "uploads": DATASET_UPLOAD_ROOT,
+        "yolo_uploads": YOLO_DATASET_UPLOAD_SESSION_ROOT,
+        "entity": default_annotation_entity_store_path().parent,
+    }
+
+
+def _get_storage_library_service():
+    """Build on first use, never scan or mutate user storage during import."""
+    global _STORAGE_LIBRARY_SERVICE, _STORAGE_LIBRARY_SERVICE_KEY
+    from services.annotation_entity_store import default_annotation_entity_store_path
+
+    roots = _storage_library_roots()
+    key = (*tuple((name, str(path.absolute())) for name, path in sorted(roots.items())),
+           ("entity_database", str(default_annotation_entity_store_path().absolute())))
+    with _STORAGE_LIBRARY_SERVICE_LOCK:
+        if _STORAGE_LIBRARY_SERVICE is None or _STORAGE_LIBRARY_SERVICE_KEY != key:
+            library = StorageLibrary(CLASS_ANALYSIS_ROOT, roots=roots)
+            inventory = StorageLibraryInventory(
+                library,
+                dataset_roots={name: roots[name] for name in ("registry", "sam3", "qwen")},
+                transient_root=DATASET_TRANSIENT_STATE_ROOT,
+                export_root=DATASET_ANNOTATION_EXPORT_CACHE_ROOT,
+                upload_roots={"uploads": DATASET_UPLOAD_ROOT, "yolo_uploads": YOLO_DATASET_UPLOAD_SESSION_ROOT},
+                entity_store_path=default_annotation_entity_store_path(),
+            )
+            _STORAGE_LIBRARY_SERVICE = StorageLibraryOperations(
+                library,
+                inventory,
+                open_adapter=_storage_library_open_adapter,
+                action_adapter=_storage_library_action_adapter,
+                active_users_adapter=_storage_library_active_users,
+                on_change_adapter=_storage_library_after_change,
+            )
+            _STORAGE_LIBRARY_SERVICE_KEY = key
+        return _STORAGE_LIBRARY_SERVICE
+
+
+def _storage_library_active_users(item_ids=None) -> List[Dict[str, str]]:
+    """Account for jobs that outlive HTTP admission and legacy editor leases."""
+    from services.annotation_entity_store import inspect_storage_recovery
+
+    active = _class_analysis_cache_active_users()
+    terminal = {"completed", "succeeded", "failed", "cancelled", "canceled", "stopped", "complete"}
+    for prefix in (
+        "TRAINING", "QWEN_TRAINING", "SAM3_TRAINING", "YOLO_TRAINING",
+        "YOLO_HEAD_GRAFT", "RFDETR_TRAINING", "SEGMENTATION_BUILD",
+        "PROMPT_HELPER", "AGENT_MINING", "AUTO_LABEL", "DATA_INGESTION",
+        "QWEN_CAPTION_DATASET", "CALIBRATION",
+    ):
+        registry, lock = globals().get(f"{prefix}_JOBS"), globals().get(f"{prefix}_JOBS_LOCK")
+        if not isinstance(registry, dict) or lock is None:
+            continue
+        with lock:
+            for identifier, job in registry.items():
+                status = str(getattr(job, "status", "") or "unknown").lower()
+                if status not in terminal:
+                    active.append({"kind": prefix.lower(), "job_id": str(identifier), "status": status})
+    for name, registry, lock in (
+        ("analysis_upload", CLASS_ANALYSIS_ACTIVE_UPLOAD_SESSIONS, CLASS_ANALYSIS_ACTIVE_UPLOAD_SESSIONS_LOCK),
+        ("dataset_upload", DATASET_UPLOAD_SESSIONS, DATASET_UPLOAD_SESSIONS_LOCK),
+    ):
+        with lock:
+            for key, job in registry.items():
+                # In-memory resumability is not evidence that an abandoned
+                # upload is still writing. Live HTTP/chunk/finalize work holds
+                # shared admission independently of this idle registry entry.
+                if name == "dataset_upload" and _dataset_upload_session_status(job).get("stale"):
+                    continue
+                active.append({"kind": name, "job_id": str(key), "status": "uploading"})
+    with DATASET_ANNOTATION_EXPORT_JOB_LOCK:
+        for key, job in DATASET_ANNOTATION_EXPORT_JOBS.items():
+            status = str(job.get("status") or "unknown")
+            if status not in terminal | {"ready"}:
+                active.append({"kind": "export", "job_id": str(key), "status": status})
+    with OPENAI_CAPTION_BATCH_THREADS_LOCK:
+        active.extend({"kind": "caption_batch", "job_id": str(key), "status": "running"}
+                      for key, thread in OPENAI_CAPTION_BATCH_THREADS.items() if thread.is_alive())
+    for item_id in item_ids or ():
+        try:
+            item = _get_storage_library_service().library.get_item(str(item_id))
+            source = item.get("source") or {}
+            authority = item.get("authority") or {}
+            recovery = {}
+            if authority.get("kind") == "dataset":
+                dataset_id = str(source.get("dataset_id") or authority.get("key") or "")
+                try:
+                    entry = _storage_library_dataset_entry(item)
+                except HTTPException as exc:
+                    with contextlib.closing(_get_storage_library_service().library.connect()) as connection:
+                        operations = connection.execute(
+                            "SELECT o.id FROM operations o, json_each(o.request,'$.item_ids') member "
+                            "WHERE o.kind='cleanup' AND o.state IN ('queued','running','partial_failed') "
+                            "AND json_extract(o.request,'$.action') IN ('trash_dataset','unlink_dataset') AND member.value=?",
+                            (item["id"],),
+                        ).fetchall()
+                    if exc.status_code != 404 or not any(_storage_library_trash_receipt(item, row[0]) for row in operations):
+                        raise
+                    entry = None
+                if entry is not None and _dataset_entry_has_active_annotation_lock(entry):
+                    active.append({"kind": "annotation_editor", "job_id": str(item_id), "status": "editing"})
+                recovery = inspect_storage_recovery(source_mode="linked", source_id=dataset_id)
+            elif authority.get("kind") == "transient":
+                sid = str(source.get("session_id") or authority.get("key") or "")
+                with DATASET_TRANSIENT_LOCK:
+                    session = DATASET_TRANSIENT_SESSIONS.get(sid)
+                    if session is None:
+                        path = _transient_session_state_path(sid, create_root=False)
+                        session = json.loads(path.read_text(encoding="utf-8")) if path.is_file() and not path.is_symlink() else None
+                    if session and _annotation_lock_is_active(session.get("annotation_lock") or {}):
+                        active.append({"kind": "annotation_editor", "job_id": str(item_id), "status": "editing"})
+                recovery = inspect_storage_recovery(source_mode="transient", source_id=sid)
+            elif item.get("kind") == "session":
+                job_id = str(source.get("job_id") or authority.get("key") or str(item_id).split(":", 1)[-1])
+                recovery = inspect_storage_recovery(job_id=job_id)
+            if recovery.get("pending_operations") or recovery.get("pending_batches"):
+                active.append({"kind": "annotation_recovery", "job_id": str(item_id), "status": "recovery_required"})
+        except (HTTPException, OSError, ValueError, sqlite3.Error, StorageLibraryError) as exc:
+            active.append({"kind": "source_check", "job_id": str(item_id), "status": "unavailable", "detail": str(exc)})
+    return active
+
+
+def _storage_library_dataset_entry(item):
+    authority, source = item.get("authority") or {}, item.get("source") or {}
+    dataset_id = str(source.get("dataset_id") or source.get("id") or authority.get("key") or "")
+    entry = _resolve_dataset_entry(dataset_id)
+    expected = authority.get("path") if authority.get("kind") == "dataset" else None
+    actual = entry.get("registry_root") or entry.get("dataset_root")
+    if expected and (not actual or Path(str(actual)).absolute() != Path(str(expected)).absolute()):
+        raise HTTPException(status_code=409, detail="storage_library_dataset_identity_ambiguous")
+    return entry
+
+
+def _storage_library_trash_receipt(item, operation_id):
+    authority = item.get("authority") or {}
+    if authority.get("kind") != "dataset" or not re.fullmatch(r"libop_[0-9a-f]+", str(operation_id)):
+        return None
+    original = Path(str(authority["path"])).absolute()
+    trash_id = _sanitize_yolo_run_id_impl(f"{original.name}-{operation_id}")
+    trash_dir = _dataset_trash_child_dir(original.parent / DATASET_TRASH_DIRNAME, trash_id)
+    marker = _load_json_metadata(trash_dir / DATASET_TRASH_META_NAME) or {}
+    if (marker.get("storage_operation_id") == operation_id
+            and marker.get("original_path") == str(original)
+            and not original.exists() and (trash_dir / original.name).is_dir()):
+        return {"status": "trashed", "id": authority["key"], "storage_mode": "managed",
+                "trash_id": trash_id, "trash_path": str(trash_dir), "restore_available": True}
+    return None
+
+
+def _storage_library_wait_for_inventory(service, *, timeout=30.0):
+    deadline = time.monotonic() + timeout
+    while (not service.library._metadata_bootstrapped
+           or not service.library.get_meta("discovery", {}).get("metadata_complete")
+           or service.library._dirty.is_set()):
+        refresh = service.refresh({})
+        while refresh["state"] in {"queued", "running"} and time.monotonic() < deadline:
+            time.sleep(0.05)
+            refresh = service.get_operation(refresh["operation_id"])
+        if refresh["state"] != "completed" or time.monotonic() >= deadline:
+            raise StorageLibraryError("library_inventory_not_ready", "Storage inventory is still being refreshed. Retry after it finishes.")
+        if not service.library.get_meta("discovery", {}).get("metadata_complete"):
+            raise StorageLibraryError("library_inventory_not_ready", "Storage ownership could not be fully discovered. Review the inventory errors before cleanup.")
+
+
+def _storage_library_legacy_cleanup(action, item_ids):
+    """Older routes share the same durable preview and removal authority."""
+    if len(item_ids) > 200:
+        results = [_storage_library_legacy_cleanup(action, item_ids[offset:offset + 200])
+                   for offset in range(0, len(item_ids), 200)]
+        return {"status": "deleted" if all(row["operation_state"] == "completed" for row in results) else "queued",
+                "operation_ids": [row["operation_id"] for row in results],
+                "removed_logical_bytes": sum(row["removed_logical_bytes"] for row in results)}
+    service = _get_storage_library_service()
+    try:
+        _storage_library_wait_for_inventory(service)
+        preview = service.preview_cleanup({"action": action, "item_ids": item_ids})
+        operation = service.commit_cleanup({"preview_id": preview["preview_id"], "digest": preview["digest"], "idempotency_key": uuid.uuid4().hex})
+        deadline = time.monotonic() + 10
+        while operation["state"] in {"queued", "running"} and time.monotonic() < deadline:
+            time.sleep(0.05)
+            operation = service.get_operation(operation["operation_id"])
+        if operation["state"] in {"failed", "partial_failed"}:
+            raise HTTPException(status_code=409, detail=operation.get("error") or "library_cleanup_failed")
+        results = (operation.get("result") or {}).get("authoritative_results") or {}
+        result = dict(next(iter(results.values()), {})) if len(item_ids) == 1 else {}
+        return {**result, "status": result.get("status", "deleted") if operation["state"] == "completed" else "queued",
+                "operation_id": operation["operation_id"], "operation_state": operation["state"],
+                "removed_logical_bytes": (operation.get("result") or {}).get("removed_logical_bytes", 0)}
+    except StorageLibraryError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+def _storage_library_open_adapter(item, mode, payload):
+    """Return an exact source descriptor; browsing the catalog never calls this."""
+    source = dict(item.get("source") or {})
+    authority = dict(item.get("authority") or {})
+    job_id = str(source.get("job_id") or "")
+    manifest = None
+    if item.get("kind") == "session":
+        job_id = job_id or str(authority.get("key") or item["id"].split(":", 1)[-1])
+    existing_source = mode == "dataset" and (
+        authority.get("kind") in {"dataset", "transient"}
+        or (source.get("mode") == "transient" and source.get("session_id"))
+        or (source.get("mode") in {"linked", "dataset"} and source.get("id"))
+    )
+    if existing_source and source.get("mode") in {"linked", "dataset"}:
+        source["dataset_id"] = source.get("dataset_id") or source.get("id") or authority.get("key")
+    if job_id and not existing_source:
+        manifest = _read_class_analysis_session_manifest(CLASS_ANALYSIS_ROOT, job_id)
+        if mode == "plot_only":
+            return {"job_id": job_id, "manifest": manifest, "source": None, "mode": mode}
+        saved_source = manifest.get("source") or {}
+        if saved_source.get("mode") == "active_workspace":
+            snapshot_id = str(saved_source.get("snapshot_id") or "")
+            with CLASS_ANALYSIS_ACTIVE_SNAPSHOTS_LOCK:
+                known = snapshot_id in CLASS_ANALYSIS_ACTIVE_SNAPSHOTS
+            if not known:
+                _class_analysis_restore_active_snapshots_from_disk()
+            attached = create_class_analysis_session_annotation_session(job_id, session_manifest=manifest)
+            sid = str(attached["session_id"])
+            source = {
+                "mode": "transient", "session_id": sid,
+                "dataset_label": attached.get("dataset_label"),
+                "snapshot_id": attached.get("snapshot_id"),
+                "analysis_input_digest": attached.get("analysis_input_digest"),
+                "annotation_base": f"/datasets/transient/{sid}/annotation",
+                "dataset_type": "bbox",
+            }
+        else:
+            config_path = _class_analysis_job_dir(job_id) / "config.json"
+            config = _load_json_metadata(config_path) or {}
+            request = config.get("request") if isinstance(config.get("request"), dict) else config
+            expected = str(saved_source.get("analysis_input_digest") or "")
+            if not expected or _class_analysis_run_fingerprint(request) != expected:
+                raise HTTPException(status_code=409, detail={
+                    "code": "storage_library_source_version_changed",
+                    "message": "The saved analysis source version is unavailable. Open its saved plot, or open the current dataset separately.",
+                    "plot_only_available": True,
+                })
+            if saved_source.get("mode") in {"linked", "dataset"}:
+                source = {"mode": "linked", "dataset_id": str(saved_source.get("id") or request.get("dataset_id") or "")}
+            else:
+                source = {"mode": "transient", "session_id": str(saved_source.get("id") or request.get("session_id") or "")}
+    if source.get("mode") == "transient" or item.get("kind") == "transient":
+        sid = str(source.get("session_id") or authority.get("key") or "")
+        session = _resolve_transient_session(sid)
+        source.update({
+            "mode": "transient", "session_id": sid,
+            "dataset_label": session.get("label") or item.get("label"),
+            "annotation_base": f"/datasets/transient/{sid}/annotation",
+            "snapshot_id": session.get("class_analysis_snapshot_id") or source.get("snapshot_id"),
+            "dataset_type": "bbox",
+        })
+    elif item.get("kind") == "dataset" or source.get("dataset_id"):
+        dataset_id = str(source.get("dataset_id") or authority.get("key") or "")
+        entry = _storage_library_dataset_entry({**item, "source": {**source, "dataset_id": dataset_id}})
+        source.update({
+            "mode": "linked", "dataset_id": dataset_id,
+            "dataset_label": entry.get("label") or item.get("label"),
+            "annotation_base": f"/datasets/{dataset_id}/annotation",
+            "dataset_type": str(entry.get("type") or "bbox"),
+        })
+    else:
+        raise HTTPException(status_code=409, detail="storage_library_source_unavailable")
+    return {"job_id": (job_id or None) if mode != "dataset" else None,
+            "manifest": manifest if mode != "dataset" else None, "source": source, "mode": mode}
+
+
+def _storage_library_after_change(action, items, result):
+    """Do not let old tabs or fingerprint reuse resurrect removed job objects."""
+    removed = {
+        str((item.get("source") or {}).get("job_id") or (item.get("authority") or {}).get("key") or "")
+        for item in items if item.get("kind") == "session"
+    } if action in {"delete_review", "clear_analysis_files"} else set()
+    if removed:
+        with CLASS_ANALYSIS_JOBS_LOCK:
+            for job_id in removed:
+                CLASS_ANALYSIS_JOBS.pop(job_id, None)
+        with CLASS_ANALYSIS_RUN_FINGERPRINTS_LOCK:
+            for fingerprint, job_id in list(CLASS_ANALYSIS_RUN_FINGERPRINTS.items()):
+                if job_id in removed:
+                    CLASS_ANALYSIS_RUN_FINGERPRINTS.pop(fingerprint, None)
+        with CLASS_ANALYSIS_ACTIVE_SNAPSHOTS_LOCK:
+            for snapshot_id, snapshot in list(CLASS_ANALYSIS_ACTIVE_SNAPSHOTS.items()):
+                if not Path(str(snapshot.get("workspace_dir") or "")).is_dir():
+                    CLASS_ANALYSIS_ACTIVE_SNAPSHOTS.pop(snapshot_id, None)
+    return result
+
+
+def _storage_library_unavailable_reviews():
+    # The catalog tombstone remains authoritative even when shared source files
+    # require retaining part of the original review directory.
+    service = _STORAGE_LIBRARY_SERVICE
+    if service is None:
+        if not (CLASS_ANALYSIS_ROOT / "library" / "catalog.sqlite3").is_file():
+            return set()
+        service = _get_storage_library_service()
+    with contextlib.closing(service.library.connect()) as connection:
+        return {row[0].split(":", 1)[1] for row in connection.execute(
+            "SELECT id FROM items WHERE kind='session' AND state IN ('deleted','deleting','analysis_cleared')"
+        )}
+
+
+def _storage_library_require_review(job_id):
+    if str(job_id) in _storage_library_unavailable_reviews():
+        raise HTTPException(status_code=410, detail="storage_library_review_removed")
+
+
+def _storage_library_action_adapter(action, item, payload):
+    """Existing domain writers called only by an admitted management operation."""
+    authority = item.get("authority") or {}
+    source = item.get("source") or {}
+    if action == "remove_abandoned_upload" and authority.get("root_id") == "yolo_uploads":
+        with DATASET_UPLOAD_SESSIONS_LOCK:
+            sid = str(authority.get("key") or "")
+            job = DATASET_UPLOAD_SESSIONS.get(sid)
+            if job is not None:
+                if (Path(job.root_dir).absolute() != Path(authority["path"]).absolute()
+                        or not _dataset_upload_session_status(job).get("stale")):
+                    raise HTTPException(status_code=409, detail="storage_library_upload_in_use")
+                DATASET_UPLOAD_SESSIONS.pop(sid, None)
+        return {"status": "removed", "session_id": str(authority.get("key") or "")}
+    if action == "restore_dataset":
+        return restore_dataset_trash_entry(str(authority["key"]), root_id=str(authority["root_id"]))
+    if action == "clear_analysis_files":
+        from services.class_analysis_session_store import preserve_review_identity_before_clear
+
+        def canonical_review_keys():
+            ledger = _class_analysis_review_disposition_root(create=False, strict=True)
+            if ledger is None:
+                return
+            for shard_path in ledger.glob("*.json"):
+                shard = shard_path.stem
+                if re.fullmatch(r"[0-9a-f]{2}", shard) is None:
+                    continue
+                with CLASS_ANALYSIS_REVIEW_DISPOSITION_LOCKS[int(shard, 16)]:
+                    entries = _class_analysis_load_review_disposition_shard(ledger, shard, strict=True).get("entries") or {}
+                    for key, entry in entries.items():
+                        yield key
+                        if isinstance(entry, Mapping) and entry.get("source_review_object_key"):
+                            yield str(entry["source_review_object_key"])
+
+        return preserve_review_identity_before_clear(Path(authority["path"]), review_keys=canonical_review_keys())
+    if action == "trash_dataset":
+        receipt = _storage_library_trash_receipt(item, payload.get("operation_id"))
+        if receipt:
+            return receipt
+        entry = _storage_library_dataset_entry(item)
+        return _delete_dataset_entry_unmanaged(str(entry["id"]), storage_operation_id=payload.get("operation_id"))
+    if action == "unlink_dataset":
+        # Keep saved overlay edits with the removable registry record in trash.
+        # The external source path is never moved or deleted.
+        receipt = _storage_library_trash_receipt(item, payload.get("operation_id"))
+        if receipt:
+            return {**receipt, "status": "unlinked", "original_files_preserved": True}
+        entry = _storage_library_dataset_entry(item)
+        dataset_id = str(source.get("dataset_id") or authority.get("key") or "")
+        _annotation_export_revoke_identity(f"linked:{dataset_id}")
+        result = _soft_delete_managed_dataset_tree(Path(authority["path"]), [DATASET_REGISTRY_ROOT],
+                    dataset_id=dataset_id, entry=entry, storage_operation_id=payload.get("operation_id"))
+        return {**result, "status": "unlinked", "original_files_preserved": True}
+    if action == "delete_review":
+        if authority.get("kind") == "transient":
+            sid = str(source.get("session_id") or authority.get("key") or "")
+            _annotation_export_revoke_identity(f"transient:{sid}")
+            with DATASET_TRANSIENT_LOCK:
+                DATASET_TRANSIENT_SESSIONS.pop(sid, None)
+            return {"status": "deleted", "session_id": sid}
+        job_id = str(source.get("job_id") or authority.get("key") or "")
+        from services.annotation_entity_store import default_annotation_entity_store_path
+        if default_annotation_entity_store_path().exists():
+            _class_analysis_annotation_entity_store().remove_saved_review(job_id)
+        return {"status": "removed", "job_id": job_id, "shared_annotation_records_preserved": True}
+    return {"status": "ready"}
+
+
+def _storage_library_owns_http_request(scope) -> bool:
+    path = str(scope.get("path") or "")
+    method = str(scope.get("method") or "GET")
+    if path.startswith("/storage/library"):
+        return False
+    if path in {"/", "/tator.html", "/health", "/openapi.json", "/docs", "/favicon.ico"}:
+        return False
+    if path.lstrip("/") in TATOR_UI_ASSETS:
+        return False
+    if path in {"/class_analysis/cache/purge", "/class_analysis/cache/budget"}:
+        return False
+    # These legacy management handlers now enter the same coordinator. Holding
+    # shared admission here would prevent their exclusive removal reservation.
+    if method == "DELETE" and (
+        re.fullmatch(r"/datasets/[^/]+", path)
+        or re.fullmatch(r"/datasets/transient/[^/]+", path)
+        or re.fullmatch(r"/qwen/datasets/[^/]+", path)
+    ):
+        return False
+    return True
+
+
+def _storage_library_guard(function):
+    """Hold admission for workers/direct callers, including their finalizers."""
+    @functools.wraps(function)
+    def protected(*args, **kwargs):
+        service = _get_storage_library_service()
+        with service.library.protect(owner=function.__name__, purpose="worker"):
+            try:
+                return function(*args, **kwargs)
+            finally:
+                service.library.invalidate()
+    return protected
+
+
 def _class_analysis_cache_active_users() -> List[Dict[str, str]]:
     terminal = {"completed", "failed", "cancelled"}
     active: List[Dict[str, str]] = []
@@ -17565,42 +17995,72 @@ def _class_analysis_cache_active_users() -> List[Dict[str, str]]:
     return sorted(active, key=lambda row: (row["kind"], row["job_id"]))
 
 
+def _class_analysis_library_cache_items(categories=None) -> List[Dict[str, Any]]:
+    """Read cached inventory rows without walking datasets or cache trees."""
+    library = _get_storage_library_service().library
+    selected = set(categories) if categories is not None else None
+    rows: List[Dict[str, Any]] = []
+    cursor = ""
+    while True:
+        page = library.list_items(kind="cleanup", cursor=cursor, limit=100)
+        for item in page["items"]:
+            authority = item.get("authority") or {}
+            if (
+                authority.get("kind") == "cache"
+                and item.get("state") == "available"
+                and (selected is None or authority.get("category") in selected)
+            ):
+                rows.append(item)
+        cursor = page.get("next_cursor") or ""
+        if not cursor:
+            return rows
+
+
 def get_class_analysis_cache_status() -> Dict[str, Any]:
+    """Keep the legacy cache card passive and share the library's measurements."""
+    service = _get_storage_library_service()
+    summary = service.summary()
+    assets = service.library.all_assets()
+    cache_assets = [asset for asset in assets if asset["root_id"] == "cache"]
     with CLASS_ANALYSIS_STORAGE_POLICY_LOCK:
         budget = int(CLASS_ANALYSIS_CACHE_MAX_BYTES)
-    cache = _class_analysis_cache_inventory(
-        CLASS_ANALYSIS_CACHE_ROOT,
-        max_bytes=budget,
-        active_users=_class_analysis_cache_active_users(),
-    )
-    active_job_ids = {
-        str(row.get("job_id") or "")
-        for row in _class_analysis_cache_active_users()
-    }
-    try:
-        latest = _latest_class_analysis_session(CLASS_ANALYSIS_ROOT)
-    except ClassAnalysisSessionManifestError:
-        latest = None
-    latest_job_id = str((latest or {}).get("job_id") or "")
-    pinned_ids = {job_id for job_id in {*active_job_ids, latest_job_id} if job_id}
-    sessions = recoverable_session_inventory(
-        CLASS_ANALYSIS_ROOT,
-        pinned_job_ids=pinned_ids,
-    )
-    generated_total = int(cache.get("total_bytes") or 0) + int(sessions["total_bytes"])
+    categories: Dict[str, Dict[str, Any]] = {}
+    for asset in cache_assets:
+        category = str((asset.get("metadata") or {}).get("cache_category") or "other")
+        row = categories.setdefault(category, {"bytes": 0, "files": 0, "purgeable": False})
+        row["bytes"] += int(asset.get("logical_bytes") or 0)
+        row["files"] += int(asset.get("file_count") or 0)
+        row["purgeable"] = asset.get("category") == "rebuildable_cache"
+    total = sum(int(asset.get("logical_bytes") or 0) for asset in cache_assets)
+    rebuildable = sum(int(asset.get("logical_bytes") or 0) for asset in cache_assets if asset["category"] == "rebuildable_cache")
+    retained = sum(int(asset.get("logical_bytes") or 0) for asset in assets if asset["root_id"] == "analysis")
+    discovery = summary.get("discovery") or {}
+    complete = bool(discovery.get("metadata_complete")) and all(asset.get("scan_status") == "complete" for asset in cache_assets)
     return {
-        **cache,
+        "storage_library_api_version": 1,
+        "retention": {"automatic": "unused_rebuildable_cache", "saved_work": "explicit_removal_only"},
+        "status": "ready" if complete else "measuring",
+        "measurement_status": "complete" if complete else "partial",
+        "measured_at": min((float(asset["measured_at"]) for asset in cache_assets if asset.get("measured_at")), default=None),
+        "root": str(CLASS_ANALYSIS_CACHE_ROOT),
         "max_bytes": budget,
-        "generated_total_bytes": generated_total,
-        "generated_usage_fraction": generated_total / budget if budget > 0 else None,
-        "over_budget_bytes": max(0, generated_total - budget),
-        "cache_bytes": int(cache.get("total_bytes") or 0),
-        "recoverable_session_bytes": int(sessions["total_bytes"]),
-        "recoverable_session_count": int(sessions["session_count"]),
-        "pinned_session_bytes": int(sessions["pinned_bytes"]),
-        "evictable_session_bytes": int(sessions["evictable_bytes"]),
-        "pinned_job_ids": sorted(pinned_ids),
-        "budget_scope": ["regenerable_cache", "recoverable_sessions"],
+        "total_bytes": total,
+        "cache_bytes": total,
+        "managed_bytes": rebuildable,
+        "purgeable_bytes": rebuildable,
+        "protected_bytes": max(0, total - rebuildable),
+        "total_files": sum(int(asset.get("file_count") or 0) for asset in cache_assets),
+        "categories": categories,
+        "purgeable_categories": [name for name, row in categories.items() if row["purgeable"]],
+        "usage_fraction": rebuildable / budget if budget > 0 else None,
+        "generated_total_bytes": total + retained,
+        "generated_usage_fraction": rebuildable / budget if budget > 0 else None,
+        "over_budget_bytes": max(0, rebuildable - budget),
+        "recoverable_session_bytes": retained,
+        "evictable_session_bytes": 0,
+        "budget_scope": ["regenerable_cache"],
+        "active_users": _storage_library_active_users(),
+        "discovery": discovery,
     }
 
 
@@ -17630,45 +18090,31 @@ def set_class_analysis_cache_budget(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def purge_class_analysis_cache(payload: Dict[str, Any]) -> Dict[str, Any]:
-    raw_categories = (
-        payload.get("categories") if isinstance(payload, dict) else None
-    )
-    categories = raw_categories if isinstance(raw_categories, list) else None
+    raw_categories = payload.get("categories") if isinstance(payload, dict) else None
+    categories = raw_categories if raw_categories is not None else ["image_packs", "resume_embeddings"]
+    if not isinstance(categories, list) or not categories or any(not isinstance(name, str) or name not in {"image_packs", "resume_embeddings"} for name in categories):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="class_analysis_cache_category_not_purgeable")
+    service = _get_storage_library_service()
     try:
-        return _class_analysis_purge_cache(
-            CLASS_ANALYSIS_CACHE_ROOT,
-            categories=categories,
-            max_bytes=int(CLASS_ANALYSIS_CACHE_MAX_BYTES),
-            active_users_fn=_class_analysis_cache_active_users,
-        )
-    except ClassAnalysisCacheBusyError as exc:
-        raise HTTPException(
-            status_code=HTTP_409_CONFLICT,
-            detail={
-                "code": "class_analysis_cache_busy",
-                "message": (
-                    "Wait for active Data Quality Explorer jobs before "
-                    "clearing caches."
-                ),
-                "active_users": exc.active_users,
-            },
-        ) from exc
-    except (
-        ClassAnalysisCacheRootUnsafeError,
-        ClassAnalysisCacheAdminError,
-    ) as exc:
-        raise HTTPException(
-            status_code=HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "class_analysis_cache_request_invalid",
-                "message": str(exc),
-            },
-        ) from exc
+        service._require_discovery()
+        before = get_class_analysis_cache_status()
+        item_ids = [item["id"] for item in _class_analysis_library_cache_items(categories)]
+        result = _storage_library_legacy_cleanup("clear_cache", item_ids) if item_ids else {"status": "completed", "operation_ids": []}
+        after = get_class_analysis_cache_status()
+        return {
+            **result,
+            "before": before,
+            "after": after,
+            "cleared_categories": list(dict.fromkeys(categories)),
+            "bytes_reclaimed": max(0, int(before["total_bytes"]) - int(after["total_bytes"])),
+        }
+    except StorageLibraryError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 
 def get_latest_class_analysis_session() -> Dict[str, Any]:
     try:
-        manifest = _latest_class_analysis_session(CLASS_ANALYSIS_ROOT)
+        manifest = _latest_class_analysis_session(CLASS_ANALYSIS_ROOT, excluded_job_ids=_storage_library_unavailable_reviews())
     except ClassAnalysisSessionManifestError as exc:
         raise HTTPException(
             status_code=HTTP_409_CONFLICT,
@@ -17681,6 +18127,7 @@ def get_latest_class_analysis_session() -> Dict[str, Any]:
 
 
 def get_class_analysis_session_manifest(job_id: str) -> Dict[str, Any]:
+    _storage_library_require_review(job_id)
     try:
         manifest = _read_class_analysis_session_manifest(
             CLASS_ANALYSIS_ROOT,
@@ -17732,6 +18179,7 @@ def get_class_analysis_session_manifest(job_id: str) -> Dict[str, Any]:
 
 
 def _class_analysis_session_store_path(job_id: str) -> Path:
+    _storage_library_require_review(job_id)
     identifier = str(job_id or "").strip()
     if not re.fullmatch(r"ca_[A-Za-z0-9]+", identifier):
         raise HTTPException(status_code=400, detail="class_analysis_job_id_invalid")
@@ -18147,6 +18595,8 @@ def _class_analysis_publish_session_manifest(
         manifest,
         publish_latest=(manifest.get("status") == "completed"),
     )
+    if _STORAGE_LIBRARY_SERVICE is not None:
+        _STORAGE_LIBRARY_SERVICE.library.invalidate(out_dir)
 
 
 CLASS_ANALYSIS_QWEN_REVIEW_TTL_SECONDS = max(
@@ -20721,19 +21171,23 @@ def _soft_delete_managed_dataset_tree(
     *,
     dataset_id: str,
     entry: Dict[str, Any],
+    storage_operation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     if not _dataset_delete_raw_path_contained(path, allowed_roots):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_delete_forbidden")
     resolved, source_root = _dataset_source_root_for_managed_path(path, allowed_roots)
     trash_root = _dataset_trash_root_for_source_root(source_root, create=True)
-    trash_id = _dataset_unique_trash_id(resolved.name, trash_root)
+    trash_id = (_sanitize_yolo_run_id_impl(f"{resolved.name}-{storage_operation_id}")
+                if storage_operation_id else _dataset_unique_trash_id(resolved.name, trash_root))
     trash_entry_dir = _dataset_trash_child_dir(trash_root, trash_id)
-    if trash_entry_dir.exists() or trash_entry_dir.is_symlink():
+    existing_marker = _load_json_metadata(trash_entry_dir / DATASET_TRASH_META_NAME) or {}
+    resuming = bool(storage_operation_id and existing_marker.get("storage_operation_id") == storage_operation_id
+                    and existing_marker.get("original_path") == str(resolved))
+    if trash_entry_dir.is_symlink() or (trash_entry_dir.exists() and not resuming):
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail="dataset_trash_target_exists")
-    trash_entry_dir.mkdir(parents=True, exist_ok=False)
+    trash_entry_dir.mkdir(parents=True, exist_ok=resuming)
     dataset_trash_path = trash_entry_dir / resolved.name
     try:
-        resolved.rename(dataset_trash_path)
         deleted_at = time.time()
         trash_meta = {
             "trash_id": trash_id,
@@ -20744,15 +21198,18 @@ def _soft_delete_managed_dataset_tree(
             "source_root": str(source_root),
             "source": entry.get("source") or "registry",
             "storage_mode": "managed",
+            "original_storage_mode": entry.get("storage_mode") or "managed",
             "label": entry.get("label") or dataset_id,
             "dataset_dir_name": dataset_trash_path.name,
             "dataset_path": str(dataset_trash_path),
+            "storage_operation_id": storage_operation_id,
         }
         _write_dataset_metadata_json(
             trash_entry_dir / DATASET_TRASH_META_NAME,
             trash_entry_dir,
             trash_meta,
         )
+        resolved.rename(dataset_trash_path)
     except Exception:
         if dataset_trash_path.exists() and not resolved.exists():
             try:
@@ -20862,8 +21319,12 @@ def list_dataset_trash_entries() -> List[Dict[str, Any]]:
     return entries
 
 
-def _resolve_dataset_trash_entry(trash_id: str) -> Tuple[Path, Path, Path, Dict[str, Any]]:
-    for source_root in _managed_dataset_roots():
+def _resolve_dataset_trash_entry(trash_id: str, *, root_id: Optional[str] = None) -> Tuple[Path, Path, Path, Dict[str, Any]]:
+    roots = {"registry": DATASET_REGISTRY_ROOT, "sam3": SAM3_DATASET_ROOT, "qwen": QWEN_DATASET_ROOT}
+    if root_id is not None and root_id not in roots:
+        raise HTTPException(status_code=400, detail="dataset_trash_root_invalid")
+    matches = []
+    for source_root in ([roots[root_id]] if root_id else _managed_dataset_roots()):
         try:
             trash_root = _dataset_trash_root_for_source_root(source_root, create=False)
             entry_dir = _dataset_trash_child_dir(trash_root, trash_id)
@@ -20875,15 +21336,20 @@ def _resolve_dataset_trash_entry(trash_id: str) -> Tuple[Path, Path, Path, Dict[
         dataset_dir = _dataset_trash_dataset_dir(entry_dir, meta)
         if dataset_dir is None:
             continue
-        return source_root.resolve(strict=False), entry_dir, dataset_dir, meta
+        matches.append((source_root.resolve(strict=False), entry_dir, dataset_dir, meta))
+    if len(matches) > 1:
+        raise HTTPException(status_code=409, detail="dataset_trash_identity_ambiguous")
+    if matches:
+        return matches[0]
     raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_trash_entry_not_found")
 
 
 def restore_dataset_trash_entry(
     trash_id: str,
     dataset_id: Optional[str] = None,
+    *, root_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    source_root, entry_dir, dataset_dir, meta = _resolve_dataset_trash_entry(trash_id)
+    source_root, entry_dir, dataset_dir, meta = _resolve_dataset_trash_entry(trash_id, root_id=root_id)
     requested = str(dataset_id or meta.get("original_id") or dataset_dir.name).strip()
     base_id = _sanitize_yolo_run_id_impl(requested) or "restored_dataset"
     restored_id = _unique_dataset_name(base_id, root=source_root)
@@ -21192,6 +21658,7 @@ def _dataset_upload_session_to_meta(
         "context": job.context,
         "classes": list(job.classes),
         "total_images": int(job.total_images or 0),
+        "preserve_workspace": job.preserve_workspace,
         "train_count": int(job.train_count or 0),
         "val_count": int(job.val_count or 0),
         "bytes_written": int(job.bytes_written or 0),
@@ -21231,6 +21698,7 @@ def _dataset_upload_session_from_meta(
         context=str(meta.get("context") or ""),
         classes=classes,
         total_images=max(0, int(meta.get("total_images") or 0)),
+        preserve_workspace=bool(meta.get("preserve_workspace")),
         train_count=max(0, int(meta.get("train_count") or 0)),
         val_count=max(0, int(meta.get("val_count") or 0)),
         bytes_written=max(0, int(meta.get("bytes_written") or 0)),
@@ -21425,11 +21893,12 @@ def init_dataset_upload_session(payload: Dict[str, Any]) -> Dict[str, Any]:
         context=str(payload.get("context") or ""),
         classes=classes,
         total_images=max(0, total_images),
+        preserve_workspace=payload.get("preserve_workspace") is True,
     )
     _persist_dataset_upload_session(job)
     with DATASET_UPLOAD_SESSIONS_LOCK:
         DATASET_UPLOAD_SESSIONS[job_id] = job
-    return {"session_id": job_id, "job_id": job_id}
+    return {"session_id": job_id, "job_id": job_id, "preserve_workspace": job.preserve_workspace}
 
 
 def _dataset_upload_safe_image_name(raw_name: str) -> str:
@@ -21509,6 +21978,17 @@ def upload_dataset_session_batch(
                     row.get("filename") or getattr(upload, "filename", "") or ""
                 )
                 label_text = str(row.get("label_text", row.get("label", "")) or "")
+                if job.preserve_workspace and (not isinstance(row.get("text_label"), str)
+                                               or not isinstance(row.get("caption_records"), list)):
+                    raise HTTPException(status_code=400, detail="dataset_upload_workspace_metadata_required")
+                caption_records = []
+                if job.preserve_workspace:
+                    for record in row["caption_records"]:
+                        if not isinstance(record, dict) or not str(record.get("caption") or "").strip():
+                            raise HTTPException(status_code=400, detail="dataset_upload_caption_record_invalid")
+                        caption_records.append({**record, "id": str(record.get("id") or f"cap_{uuid.uuid4().hex}"),
+                                                "image_name": image_name, "image": image_name,
+                                                "image_key": f"{split}/{image_name}", "split": split})
                 split_root = (job.root_dir / split).resolve(strict=True)
                 if not _path_is_within_root_impl(split_root, root_resolved):
                     raise HTTPException(
@@ -21519,7 +21999,12 @@ def upload_dataset_session_batch(
                 label_path = (split_root / "labels" / _dataset_upload_label_name(image_name)).resolve(
                     strict=False
                 )
-                for path in (image_path, label_path):
+                workspace_files = {}
+                if job.preserve_workspace:
+                    workspace_files[split_root / "text_labels" / _annotation_text_relpath(Path(image_name))] = row["text_label"]
+                    caption_key = hashlib.sha256(f"{split}/{image_name}".encode("utf-8")).hexdigest()
+                    workspace_files[root_resolved / ".workspace_captions" / f"{caption_key}.json"] = json.dumps(caption_records, ensure_ascii=False)
+                for path in (image_path, label_path, *workspace_files):
                     if not _path_is_within_root_impl(path, root_resolved):
                         raise HTTPException(
                             status_code=HTTP_400_BAD_REQUEST,
@@ -21577,10 +22062,17 @@ def upload_dataset_session_batch(
                         detail="dataset_upload_session_path_invalid",
                         context="dataset upload session",
                     )
+                    for workspace_path, workspace_text in workspace_files.items():
+                        _write_text_within_root_atomic(
+                            workspace_path, root_resolved, workspace_text,
+                            detail="dataset_upload_session_path_invalid", context="dataset workspace preservation",
+                        )
                 except Exception:
                     try:
                         image_path.unlink(missing_ok=True)
                         label_path.unlink(missing_ok=True)
+                        for workspace_path in workspace_files:
+                            workspace_path.unlink(missing_ok=True)
                     except Exception:
                         pass
                     raise
@@ -21664,6 +22156,23 @@ def finalize_dataset_upload_session(session_id: str) -> Dict[str, Any]:
                         detail="dataset_upload_session_path_invalid",
                         context="dataset upload session",
                     )
+                if job.preserve_workspace:
+                    caption_root = source_root / ".workspace_captions"
+                    if sum(1 for _ in caption_root.glob("*.json")) != job.train_count + job.val_count:
+                        raise HTTPException(status_code=409, detail="dataset_upload_workspace_incomplete")
+
+                    def write_workspace_captions(handle):
+                        for caption_file in caption_root.glob("*.json"):
+                            if caption_file.is_symlink():
+                                raise HTTPException(status_code=400, detail="dataset_upload_session_path_invalid")
+                            for record in json.loads(caption_file.read_text(encoding="utf-8")):
+                                handle.write((json.dumps(_dataset_caption_record_public(record), ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8"))
+
+                    _write_binary_within_root_atomic(
+                        source_root / DATASET_ANNOTATION_OVERLAY_DIRNAME / "captions" / "captions.jsonl",
+                        source_root, write_workspace_captions,
+                        detail="dataset_upload_session_path_invalid", context="dataset workspace preservation",
+                    )
                 train_images = source_root / "train" / "images"
                 val_images = source_root / "val" / "images"
                 train_count = len(_iter_yolo_images(train_images)) if train_images.exists() else 0
@@ -21679,11 +22188,14 @@ def finalize_dataset_upload_session(session_id: str) -> Dict[str, Any]:
                     "train_count": train_count,
                     "val_count": val_count,
                     "image_count": train_count + val_count,
+                    "workspace_preserved": job.preserve_workspace,
                     "signature": _compute_dir_signature_impl(source_root),
                 }
                 _persist_dataset_meta(source_root, meta)
                 shutil.move(str(source_root), target_root)
                 try:
+                    if job.preserve_workspace:
+                        shutil.rmtree(target_root / ".workspace_captions")
                     target_session_meta_path = _dataset_upload_session_meta_path(target_root)
                     if (
                         target_session_meta_path.exists()
@@ -21889,7 +22401,18 @@ def _resolve_dataset_entry(dataset_id: str) -> Dict[str, Any]:
     return entry
 
 
-def delete_dataset_entry(dataset_id: str):
+def delete_dataset_entry(dataset_id: str, *, _root_id: Optional[str] = None):
+    entry = _resolve_dataset_entry(dataset_id)
+    path = Path(str(entry.get("registry_root") or entry.get("dataset_root") or "")).absolute()
+    root_id = next((name for name, root in _storage_library_roots().items()
+                    if name in {"registry", "sam3", "qwen"} and path.parent == root.absolute()), None)
+    if root_id is None or (_root_id and _root_id != root_id):
+        raise HTTPException(status_code=409, detail="storage_library_dataset_identity_ambiguous")
+    action = "unlink_dataset" if entry.get("storage_mode") == "linked" else "trash_dataset"
+    return _storage_library_legacy_cleanup(action, [f"dataset:{root_id}:{dataset_id}"])
+
+
+def _delete_dataset_entry_unmanaged(dataset_id: str, *, storage_operation_id: Optional[str] = None):
     entry = _resolve_dataset_entry(dataset_id)
     storage_mode = str(entry.get("storage_mode") or "managed").strip().lower()
     registry_root_raw = entry.get("registry_root")
@@ -21937,6 +22460,7 @@ def delete_dataset_entry(dataset_id: str):
         allowed_roots,
         dataset_id=dataset_id,
         entry=entry,
+        storage_operation_id=storage_operation_id,
     )
 
 
@@ -22151,11 +22675,16 @@ def _annotation_export_read_metadata(zip_path: Path) -> Dict[str, Any]:
 
 
 def _annotation_export_remove_cached_archive(zip_path: Path) -> bool:
-    if _annotation_export_path_is_leased(zip_path):
-        return False
-    zip_path.unlink(missing_ok=True)
-    _annotation_export_metadata_path(zip_path).unlink(missing_ok=True)
-    return True
+    # Invalidation changes eligibility, not ownership. Actual removal follows
+    # the same Keep, streaming-lease and operation rules as explicit cleanup.
+    if not zip_path.exists():
+        return True
+    metadata = _annotation_export_read_metadata(zip_path)
+    _annotation_export_write_metadata(zip_path, {**metadata, "status": "revoked", "revoked_at": time.time()})
+    service = _get_storage_library_service()
+    service.inventory.register_export(zip_path)
+    _annotation_export_prune_global_cache()
+    return False
 
 
 def _annotation_export_cached_result(
@@ -22494,67 +23023,116 @@ def _annotation_export_require_disk_capacity(
 
 
 def _annotation_export_prune_cache(cache_dir: Path, keep_token: str) -> None:
-    for partial in cache_dir.glob(".*.part-*"):
-        partial.unlink(missing_ok=True)
-    now = time.time()
-    for snapshot_dir in cache_dir.glob(".snapshot-*"):
-        try:
-            stale = now - snapshot_dir.stat().st_mtime > DATASET_ANNOTATION_EXPORT_JOB_TTL_SECONDS
-        except OSError:
-            stale = True
-        if stale:
-            shutil.rmtree(snapshot_dir, ignore_errors=True)
-    archives = sorted(
-        cache_dir.glob("*.zip"),
-        key=lambda path: path.stat().st_mtime_ns if path.exists() else 0,
-        reverse=True,
-    )
-    kept_tokens = {keep_token}
-    for path in archives:
-        if path.stem in kept_tokens:
-            continue
-        try:
-            expired = now - path.stat().st_mtime > DATASET_ANNOTATION_EXPORT_CACHE_TTL_SECONDS
-        except OSError:
-            expired = True
-        if expired:
-            _annotation_export_remove_cached_archive(path)
-            continue
-        if len(kept_tokens) < DATASET_ANNOTATION_EXPORT_CACHE_KEEP:
-            kept_tokens.add(path.stem)
-            continue
-        _annotation_export_remove_cached_archive(path)
+    # The producer registers only the archive it just finished. No full
+    # dataset/cache scan is needed on an export or download request.
+    try:
+        service = _get_storage_library_service()
+        service.inventory.register_export(cache_dir / f"{keep_token}.zip")
+    except (OSError, StorageLibraryError):
+        logger.exception("Could not register the completed annotation export")
+    _annotation_export_prune_global_cache()
+
+
+_ANNOTATION_EXPORT_LIBRARY_JANITOR_LOCK = threading.Lock()
 
 
 def _annotation_export_prune_global_cache() -> None:
-    with DATASET_ANNOTATION_EXPORT_PRUNE_LOCK:
-        archives: List[Path] = []
-        total_bytes = 0
-        now = time.time()
-        for path in DATASET_ANNOTATION_EXPORT_CACHE_ROOT.glob("*/*.zip"):
-            if not path.is_file():
-                continue
-            try:
-                stat_result = path.stat()
-            except OSError:
-                continue
-            if now - stat_result.st_mtime > DATASET_ANNOTATION_EXPORT_CACHE_TTL_SECONDS:
-                _annotation_export_remove_cached_archive(path)
-                continue
-            archives.append(path)
-            total_bytes += int(stat_result.st_size)
-        if total_bytes <= DATASET_ANNOTATION_EXPORT_CACHE_MAX_BYTES:
-            return
-        archives.sort(key=lambda path: path.stat().st_mtime_ns if path.exists() else 0)
-        for path in archives:
-            if total_bytes <= DATASET_ANNOTATION_EXPORT_CACHE_MAX_BYTES:
+    if not _ANNOTATION_EXPORT_LIBRARY_JANITOR_LOCK.acquire(blocking=False):
+        return
+    try:
+        threading.Thread(
+            target=_annotation_export_library_retention_worker,
+            name="annotation-export-storage-library-cleanup",
+            daemon=True,
+        ).start()
+    except Exception:
+        _ANNOTATION_EXPORT_LIBRARY_JANITOR_LOCK.release()
+        logger.exception("Could not start annotation export cleanup")
+
+
+def _annotation_export_library_retention_worker() -> None:
+    """Apply export age/count/byte limits through the common removal authority."""
+    try:
+        service = _get_storage_library_service()
+        # A producer invalidates inventory as it finishes. Wait for that
+        # reconciliation instead of abandoning the only scheduled cleanup.
+        _storage_library_wait_for_inventory(service, timeout=120.0)
+        # An export schedules this worker just before releasing its own
+        # admission. Let that handoff settle without upgrading its shared lock.
+        for attempt in range(20):
+            if not _storage_library_active_users():
                 break
-            try:
-                size = int(path.stat().st_size)
-            except OSError:
-                size = 0
-            if _annotation_export_remove_cached_archive(path):
-                total_bytes = max(0, total_bytes - size)
+            if attempt == 19:
+                return
+            time.sleep(0.25)
+        items = []
+        cursor = ""
+        while True:
+            page = service.library.list_items(kind="cleanup", cursor=cursor, limit=100)
+            items.extend(item for item in page["items"] if (item.get("authority") or {}).get("kind") == "export" and item.get("state") == "available")
+            cursor = page.get("next_cursor") or ""
+            if not cursor:
+                break
+        leases = service.library.active_leases()
+        candidates = []
+        groups: Dict[str, List[Dict[str, Any]]] = {}
+        total_bytes = sum(int((item.get("storage") or {}).get("logical_bytes") or 0) for item in items)
+        for item in items:
+            path = Path(str(item["authority"]["path"])).absolute()
+            groups.setdefault(str(path.parent), []).append(item)
+            if item.get("pinned") or (item.get("storage") or {}).get("status") != "complete" or _annotation_export_path_is_leased(path):
+                continue
+            if any(item["id"] in lease["item_ids"] or any(_path_is_within_root_impl(path, Path(value)) or _path_is_within_root_impl(Path(value), path) for value in lease["paths"]) for lease in leases):
+                continue
+            candidates.append(item)
+        eligible_ids = {item["id"] for item in candidates}
+        selected = {}
+        now = time.time()
+        for group in groups.values():
+            for index, item in enumerate(sorted(group, key=lambda row: float(row.get("modified_at") or 0), reverse=True)):
+                if item["id"] in eligible_ids and (
+                    now - float(item.get("modified_at") or now) > DATASET_ANNOTATION_EXPORT_CACHE_TTL_SECONDS
+                    or index >= DATASET_ANNOTATION_EXPORT_CACHE_KEEP
+                    or _annotation_export_read_metadata(Path(item["authority"]["path"])).get("status") == "revoked"
+                ):
+                    selected[item["id"]] = item
+        projected_bytes = total_bytes - sum(int((item.get("storage") or {}).get("logical_bytes") or 0) for item in selected.values())
+        for item in sorted(candidates, key=lambda row: float(row.get("modified_at") or 0)):
+            if projected_bytes <= DATASET_ANNOTATION_EXPORT_CACHE_MAX_BYTES:
+                break
+            if item["id"] not in selected:
+                selected[item["id"]] = item
+                projected_bytes -= int((item.get("storage") or {}).get("logical_bytes") or 0)
+        identifiers = list(selected)
+        for offset in range(0, len(identifiers), 200):
+            operation = None
+            for attempt in range(20):
+                try:
+                    with service.library.admission(exclusive=True, blocking=False):
+                        preview = service.preview_cleanup({"action": "clear_export", "item_ids": identifiers[offset:offset + 200]})
+                        if preview["blockers"]:
+                            return
+                        operation = service.commit_cleanup({"preview_id": preview["preview_id"], "digest": preview["digest"], "idempotency_key": "export-retention:" + uuid.uuid4().hex})
+                    break
+                except StorageLibraryError as exc:
+                    if exc.detail.get("code") == "library_inventory_not_ready" and attempt < 19:
+                        _storage_library_wait_for_inventory(service)
+                        continue
+                    if exc.detail.get("code") != "library_storage_busy" or attempt == 19:
+                        raise
+                    time.sleep(0.25)
+            deadline = time.monotonic() + 120.0
+            while operation.get("state") in {"queued", "running"} and time.monotonic() < deadline:
+                time.sleep(0.25)
+                operation = service.get_operation(operation["operation_id"])
+            if operation.get("state") != "completed":
+                return
+    except StorageLibraryError as exc:
+        logger.info("Annotation export cleanup deferred: %s", exc.detail.get("code"))
+    except Exception:
+        logger.exception("Annotation export storage cleanup failed")
+    finally:
+        _ANNOTATION_EXPORT_LIBRARY_JANITOR_LOCK.release()
 
 
 def _annotation_export_prepare_cached(
@@ -22586,10 +23164,14 @@ def _annotation_export_prepare_cached(
     )
     cache_hit = cached is not None
     if cached is None:
-        zip_path.unlink(missing_ok=True)
+        if zip_path.exists():
+            # Preserve an invalidated/kept archive until the coordinator can
+            # remove it. A replacement gets a fresh download identity.
+            token = hashlib.sha256(f"{token}:{uuid.uuid4().hex}".encode()).hexdigest()
+            zip_path = cache_dir / f"{token}.zip"
         _annotation_export_write_plan(plan, zip_path, progress=archive_progress)
         if _annotation_export_identity_generation(identity) != resolved_generation:
-            zip_path.unlink(missing_ok=True)
+            _annotation_export_remove_cached_archive(zip_path)
             raise HTTPException(
                 status_code=HTTP_409_CONFLICT,
                 detail="annotation_export_source_revoked",
@@ -22683,9 +23265,11 @@ def _annotation_export_require_class_analysis_checkpoint(
         try:
             bound_snapshot = _class_analysis_annotation_recovery_snapshot(bound_job_id)
         except HTTPException as exc:
-            if int(exc.status_code) != HTTP_404_NOT_FOUND:
+            if int(exc.status_code) not in {HTTP_404_NOT_FOUND, 410}:
                 raise
-            bound_snapshot = {"status": "missing"}
+            from services.annotation_entity_store import inspect_storage_recovery
+            pending = inspect_storage_recovery(job_id=bound_job_id, source_mode=source_mode, source_id=source_id)
+            bound_snapshot = {"status": "recovery_required" if pending["pending_operations"] or pending["pending_batches"] else "missing"}
         if str(bound_snapshot.get("status") or "") == "recovery_required":
             raise HTTPException(
                 status_code=HTTP_409_CONFLICT,
@@ -22699,6 +23283,14 @@ def _annotation_export_require_class_analysis_checkpoint(
                 },
             )
     if not job_id:
+        return
+    if job_id in _storage_library_unavailable_reviews() and (authoritative_job_id or bound_job_id == job_id):
+        from services.annotation_entity_store import inspect_storage_recovery
+        pending = inspect_storage_recovery(job_id=job_id, source_mode=source_mode, source_id=source_id)
+        if pending["pending_operations"] or pending["pending_batches"]:
+            raise HTTPException(status_code=409, detail="class_analysis_export_recovery_required")
+        # The source identity and acknowledged labels survive graph cleanup.
+        # Export them without reviving a removed review or replaying old work.
         return
     job = _get_class_analysis_job(job_id)
     summary = dict(getattr(job, "summary", None) or {})
@@ -22845,6 +23437,7 @@ def _annotation_export_job_cancelled(job_id: str, identity: str, generation: int
         )
 
 
+@_storage_library_guard
 def _annotation_export_background_worker(job_id: str) -> None:
     snapshot_dir: Optional[Path] = None
     with DATASET_ANNOTATION_EXPORT_JOB_LOCK:
@@ -23113,9 +23706,6 @@ def _annotation_export_revoke_identity(identity: str) -> None:
     with DATASET_ANNOTATION_EXPORT_PRUNE_LOCK:
         for zip_path in cache_dir.glob("*.zip"):
             _annotation_export_remove_cached_archive(zip_path)
-        for metadata_path in cache_dir.glob("*.json"):
-            if not (cache_dir / f"{metadata_path.stem}.zip").exists():
-                metadata_path.unlink(missing_ok=True)
 
 
 def prepare_dataset_annotation_export(dataset_id: str, payload: Dict[str, Any]):
@@ -33504,6 +34094,7 @@ def _openai_caption_batch_refresh_from_response(job: Mapping[str, Any], batch_pa
     return _openai_caption_batch_write(payload)
 
 
+@_storage_library_guard
 def _openai_caption_batch_submit_worker(job_id: str) -> None:
     from tools import run_openai_caption_batch_smoke as batch_smoke
 
@@ -33715,6 +34306,7 @@ def _openai_caption_batch_start_submit_thread(job_id: str) -> bool:
     return True
 
 
+@_storage_library_guard
 def _openai_caption_batch_collection_submit_worker(job_id: str) -> None:
     try:
         while True:
@@ -38248,6 +38840,7 @@ def _qwen_caption_dataset_live_auto_resume_after_failure(job: QwenCaptionDataset
         logger.exception("Failed to live auto-resume Qwen caption dataset job %s", job.job_id)
 
 
+@_storage_library_guard
 def _run_qwen_caption_dataset_job(job: QwenCaptionDatasetJob, payload: QwenCaptionDatasetJobRequest) -> None:
     job.status = "running"
     job.message = "Preparing caption dataset job"
@@ -39944,6 +40537,7 @@ def _qwen_caption_dataset_finalize_adopted_live_runner(
     _persist_qwen_caption_dataset_job(job)
 
 
+@_storage_library_guard
 def _monitor_adopted_qwen_caption_dataset_runner(
     job: QwenCaptionDatasetJob,
     request_data: Mapping[str, Any],
@@ -40887,13 +41481,7 @@ def delete_transient_dataset(session_id: str) -> Dict[str, Any]:
     sid = str(session_id or "").strip()
     if not sid:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="transient_session_required")
-    _annotation_export_revoke_identity(f"transient:{sid}")
-    with DATASET_TRANSIENT_LOCK:
-        _resolve_transient_session_locked(sid, now=time.time(), touch=False)
-        DATASET_TRANSIENT_SESSIONS.pop(sid, None)
-        _transient_session_state_delete_locked(sid)
-    _purge_expired_transient_sessions(include_persisted=True)
-    return {"status": "deleted", "session_id": sid}
+    return {**_storage_library_legacy_cleanup("delete_review", [f"transient:{sid}"]), "session_id": sid}
 
 
 def save_transient_dataset(
@@ -41363,6 +41951,10 @@ def start_transient_annotation_session(session_id: str, payload: Dict[str, Any])
     session, lock_update, _committed = _mutate_transient_session(
         session_id,
         _update_lock,
+        # Starting/contending for an editor lease does not change labels.
+        # Match heartbeat semantics so a read-only reopen cannot invalidate
+        # source-bound analyses; actual annotation mutations still advance.
+        increment_revision=False,
     )
     if not lock_update.get("ok"):
         return {
@@ -41438,7 +42030,11 @@ def stop_transient_annotation_session(session_id: str, payload: Dict[str, Any]):
 
 
 def get_transient_annotation_manifest(session_id: str):
-    session = _resolve_transient_session(session_id)
+    return _transient_annotation_manifest_from_session(session_id, _resolve_transient_session(session_id))
+
+
+def _transient_annotation_manifest_from_session(session_id: str, session: Dict[str, Any], *, publish_progress: bool = True):
+    """The existing manifest reader; pruning suppresses its progress mutation."""
     try:
         source_revision = int(session.get("_state_revision") or 0)
     except Exception:
@@ -41520,12 +42116,13 @@ def get_transient_annotation_manifest(session_id: str):
     # Image collection can be expensive. Do not hold the session lock while
     # scanning the source tree, and do not publish progress computed from an
     # older overlay revision after a concurrent snapshot/meta/heartbeat commit.
-    committed_session, _outcome, _committed = _mutate_transient_session(
-        session_id,
-        _store_progress,
-        expected_revision=source_revision,
-        increment_revision=False,
-    )
+    if publish_progress:
+        _mutate_transient_session(
+            session_id,
+            _store_progress,
+            expected_revision=source_revision,
+            increment_revision=False,
+        )
     return _class_analysis_enrich_annotation_manifest({
         "session_id": session_id,
         "session_revision": source_revision,
@@ -41552,6 +42149,7 @@ def get_transient_annotation_manifest(session_id: str):
         "class_analysis_input_digest": str(
             session.get("class_analysis_input_digest") or ""
         ),
+        "analysis_input_digest": str(session.get("class_analysis_input_digest") or ""),
     })
 
 
@@ -41933,7 +42531,7 @@ def _class_analysis_resolved_recipe(payload: Mapping[str, Any]) -> Dict[str, Any
     compact_components: List[Dict[str, Any]] = []
     if recipe_id in {THOROUGH_QUALITY_RECIPE, PRECISE_COMPACT_RECIPE}:
         dino_weight, sam_weight, salad_weight = salad_settings.fusion_weights
-        compact_dimensions = base_dimensions + 256 + salad_settings.descriptor_dim
+        compact_dimensions = base_dimensions + 768 + salad_settings.descriptor_dim
         compact_components = [
             {
                 "id": "dinov3",
@@ -41944,7 +42542,7 @@ def _class_analysis_resolved_recipe(payload: Mapping[str, Any]) -> Dict[str, Any
             {
                 "id": "sam3",
                 "label": "SAM3 mask descriptor",
-                "dimensions": 256,
+                "dimensions": 768,
                 "weight": float(sam_weight),
             },
             {
@@ -41987,7 +42585,7 @@ def _class_analysis_resolved_recipe(payload: Mapping[str, Any]) -> Dict[str, Any
                 {
                     "id": "sam3",
                     "label": "SAM3 mask descriptor",
-                    "dimensions": 256,
+                    "dimensions": 768,
                     "weight": float(
                         CLASS_ANALYSIS_SAM3_MASK_FUSION_SAM_WEIGHT
                         if aggregation == CLASS_ANALYSIS_SAM3_MASK_FUSION_SCHEMA
@@ -41995,7 +42593,7 @@ def _class_analysis_resolved_recipe(payload: Mapping[str, Any]) -> Dict[str, Any
                     ),
                 }
             )
-            compact_dimensions += 256
+            compact_dimensions += 768
         if aggregation == CLASS_ANALYSIS_SAM3_SALAD_FUSION_SCHEMA:
             compact_components.append(
                 {
@@ -42391,6 +42989,7 @@ def _class_analysis_capabilities() -> Dict[str, Any]:
         "encoders": ["dinov3", "clip", "cradio"],
         "analysis_scopes": ["selected_class", "selected_classes", "all_classes"],
         "graph_class_filter_api_version": 2,
+        "storage_library_api_version": 1,
         "review_disposition_api_version": 3,
         "review_class_reassignment_api_version": 3,
         "review_single_bbox_deletion_api_version": 2,
@@ -42923,245 +43522,143 @@ def _class_analysis_delete_quarantined(paths: Sequence[Path]) -> None:
         )
 
 
-def _class_analysis_enforce_cache_budget() -> Dict[str, int]:
-    """Apply a filesystem-only LRU budget without a startup database reload."""
+_CLASS_ANALYSIS_LIBRARY_JANITOR_LOCK = threading.Lock()
+_CLASS_ANALYSIS_LIBRARY_THUMBNAIL_JANITOR_LOCK = threading.Lock()
 
-    cache_root = _class_analysis_cache_storage_root(create=True)
-    if cache_root is None:
-        return {"files": 0, "bytes": 0, "removed_files": 0, "removed_bytes": 0}
-    files: List[Tuple[float, int, Path]] = []
-    total_bytes = 0
-    removed_files = 0
+
+def _class_analysis_enforce_cache_budget(
+    *, cache_categories=None, cache_max_bytes: Optional[int] = None,
+    refresh_inventory: bool = True, protected_paths: Sequence[Path] = (),
+) -> Dict[str, Any]:
+    """Evict only catalogued rebuildable caches through durable operations."""
+    service = _get_storage_library_service()
+    janitor_lock = _CLASS_ANALYSIS_LIBRARY_JANITOR_LOCK if cache_categories is None else _CLASS_ANALYSIS_LIBRARY_THUMBNAIL_JANITOR_LOCK
+    categories = {"image_packs", "resume_embeddings", "embeddings", "thumbnails"} if cache_categories is None else set(cache_categories)
+    if not janitor_lock.acquire(blocking=False):
+        return {"status": "already_running", "operation_ids": []}
+    operation_ids: List[str] = []
     removed_bytes = 0
-    removed_session_bytes = 0
-    remaining_session_bytes = 0
-    removed_budget_files = 0
-    protected_temp_files = 0
-    now = time.time()
+
+    def await_operation(operation):
+        deadline = time.monotonic() + 120.0
+        while operation.get("state") in {"queued", "running"} and time.monotonic() < deadline:
+            time.sleep(0.25)
+            operation = service.get_operation(operation["operation_id"])
+        return operation
+
     try:
-        for candidate in cache_root.rglob("*"):
-            try:
-                if candidate.is_symlink():
-                    candidate.unlink(missing_ok=True)
-                    removed_files += 1
-                    continue
-                if not candidate.is_file():
-                    continue
-                if not _path_is_within_root_impl(candidate.resolve(strict=False), cache_root):
-                    continue
-                stat_result = candidate.stat()
-                size = max(0, int(stat_result.st_size))
-                if candidate.name.endswith((".tmp", ".partial")):
-                    age_seconds = max(0.0, now - float(stat_result.st_mtime))
-                    if age_seconds >= float(
-                        CLASS_ANALYSIS_CACHE_STALE_TEMP_SECONDS
-                    ):
-                        candidate.unlink(missing_ok=True)
-                        removed_files += 1
-                        removed_bytes += size
-                    else:
-                        # Atomic cache writers use this suffix. A concurrent
-                        # janitor must account for the bytes but never unlink
-                        # a live writer or include it in LRU eviction.
-                        total_bytes += size
-                        protected_temp_files += 1
-                    continue
-                files.append((float(stat_result.st_mtime), size, candidate))
-                total_bytes += size
-            except OSError:
-                continue
-        with CLASS_ANALYSIS_STORAGE_POLICY_LOCK:
-            budget = int(CLASS_ANALYSIS_CACHE_MAX_BYTES)
-        active_users = _class_analysis_cache_active_users()
-        if active_users:
-            return {
-                "files": max(0, len(files) + protected_temp_files),
-                "bytes": max(0, total_bytes),
-                "removed_files": removed_files,
-                "removed_bytes": removed_bytes,
-                "removed_session_bytes": 0,
-                "remaining_session_bytes": 0,
-            }
-        active_job_ids = {
-            str(row.get("job_id") or "")
-            for row in active_users
-        }
-        try:
-            latest = _latest_class_analysis_session(CLASS_ANALYSIS_ROOT)
-        except ClassAnalysisSessionManifestError:
-            latest = None
-        latest_job_id = str((latest or {}).get("job_id") or "")
-        pinned_ids = {job_id for job_id in {*active_job_ids, latest_job_id} if job_id}
-        sessions = recoverable_session_inventory(
-            CLASS_ANALYSIS_ROOT,
-            pinned_job_ids=pinned_ids,
-        )
-        session_victims = choose_unpinned_session_evictions(
-            sessions["sessions"],
-            cache_bytes=total_bytes,
-            max_bytes=budget,
-        )
-        quarantined_sessions: List[Path] = []
-        removed_session_bytes = 0
-        audit_root = CLASS_ANALYSIS_ROOT / "audit"
-        for row in session_victims:
-            candidate = Path(str(row.get("path") or ""))
-            if (
-                candidate.parent.resolve(strict=False) != CLASS_ANALYSIS_ROOT.resolve(strict=False)
-                or candidate.name in pinned_ids
-                or not candidate.is_dir()
-                or candidate.is_symlink()
-            ):
-                continue
-            try:
-                _class_analysis_archive_job_audits(candidate, audit_root)
-                quarantine = CLASS_ANALYSIS_ROOT / f".purge-session-{candidate.name}-{uuid.uuid4().hex}"
-                os.replace(candidate, quarantine)
-                quarantined_sessions.append(quarantine)
-                removed_session_bytes += max(0, int(row.get("bytes") or 0))
-            except OSError:
-                continue
-        if quarantined_sessions:
-            _class_analysis_delete_quarantined(quarantined_sessions)
-        remaining_session_bytes = max(0, int(sessions["total_bytes"]) - removed_session_bytes)
-        cache_budget = max(0, budget - remaining_session_bytes)
-        if cache_budget <= 0:
-            victims = files
-        elif total_bytes > cache_budget:
-            victims = []
-            remaining = total_bytes
-            for entry in sorted(files, key=lambda item: item[0]):
-                if remaining <= cache_budget:
-                    break
-                victims.append(entry)
-                remaining -= entry[1]
+        if refresh_inventory:
+            refreshed = await_operation(service.refresh({}))
+            if refreshed.get("state") != "completed":
+                return {"status": "discovery_pending", "operation_ids": [], "discovery_operation_id": refreshed["operation_id"]}
         else:
-            victims = []
-        for _mtime, size, candidate in victims:
-            try:
-                candidate.unlink(missing_ok=True)
-                total_bytes -= size
-                removed_files += 1
-                removed_budget_files += 1
-                removed_bytes += size
-            except OSError:
-                continue
-        for directory in sorted(
-            [path for path in cache_root.rglob("*") if path.is_dir()],
-            key=lambda path: len(path.parts),
-            reverse=True,
-        ):
-            try:
-                directory.rmdir()
-            except OSError:
-                pass
+            service._require_discovery()
+        while True:
+            items = _class_analysis_library_cache_items(categories)
+            total_bytes = sum(int((item.get("storage") or {}).get("logical_bytes") or 0) for item in items)
+            with CLASS_ANALYSIS_STORAGE_POLICY_LOCK:
+                budget = int(CLASS_ANALYSIS_CACHE_MAX_BYTES if cache_max_bytes is None else cache_max_bytes)
+            if total_bytes <= budget:
+                return {"status": "completed", "bytes": total_bytes, "removed_bytes": removed_bytes, "operation_ids": operation_ids}
+            if _storage_library_active_users():
+                return {"status": "in_use", "bytes": total_bytes, "removed_bytes": removed_bytes, "operation_ids": operation_ids}
+            leases = service.library.active_leases()
+            candidates = []
+            for item in items:
+                if item.get("pinned") or (item.get("storage") or {}).get("status") != "complete":
+                    continue
+                parent_id = item.get("parent_id")
+                if parent_id and service.library.get_item(parent_id).get("pinned"):
+                    continue
+                path = Path(str(item["authority"]["path"])).absolute()
+                if any(_path_is_within_root_impl(path, protected) or _path_is_within_root_impl(protected, path) for protected in protected_paths):
+                    continue
+                if any(
+                    item["id"] in lease["item_ids"]
+                    or parent_id in lease["item_ids"]
+                    or any(
+                        _path_is_within_root_impl(path, Path(value))
+                        or _path_is_within_root_impl(Path(value), path)
+                        for value in lease["paths"]
+                    )
+                    for lease in leases
+                ):
+                    continue
+                assets = service.library.assets_for_items([item["id"]])
+                oldest = min(
+                    (int(json.loads(asset["signature"])[3]) for asset in assets if asset.get("signature")),
+                    default=0,
+                )
+                candidates.append((oldest, item))
+            selected = []
+            projected_bytes = total_bytes
+            for _mtime, item in sorted(candidates, key=lambda row: (row[0], row[1]["id"])):
+                selected.append(item["id"])
+                projected_bytes -= int((item.get("storage") or {}).get("logical_bytes") or 0)
+                if projected_bytes <= budget or len(selected) >= 200:
+                    break
+            if not selected:
+                return {"status": "protected", "bytes": total_bytes, "removed_bytes": removed_bytes, "operation_ids": operation_ids}
+            # The worker runs independently of HTTP/analysis shared admission.
+            # Retry briefly when the completed analysis is releasing its guard.
+            operation = None
+            for attempt in range(20):
+                try:
+                    with service.library.admission(exclusive=True, blocking=False):
+                        preview = service.preview_cleanup({"action": "clear_cache", "item_ids": selected})
+                        if preview["blockers"]:
+                            return {"status": "protected", "blockers": preview["blockers"], "operation_ids": operation_ids}
+                        operation = service.commit_cleanup({
+                            "preview_id": preview["preview_id"], "digest": preview["digest"],
+                            "idempotency_key": "cache-budget:" + uuid.uuid4().hex,
+                        })
+                    break
+                except StorageLibraryError as exc:
+                    if exc.detail.get("code") != "library_storage_busy" or attempt == 19:
+                        raise
+                    time.sleep(0.25)
+            operation_ids.append(operation["operation_id"])
+            operation = await_operation(operation)
+            if operation.get("state") != "completed":
+                return {"status": operation.get("state"), "operation_ids": operation_ids, "removed_bytes": removed_bytes}
+            removed_bytes += int((operation.get("result") or {}).get("removed_logical_bytes") or 0)
+    except StorageLibraryError as exc:
+        logger.info("Class analysis cache cleanup deferred: %s", exc.detail.get("code"))
+        return {"status": "deferred", "error": exc.detail, "operation_ids": operation_ids, "removed_bytes": removed_bytes}
     except Exception:
         logger.exception("Class analysis cache budget enforcement failed")
-    return {
-        "files": max(
-            0,
-            len(files) - removed_budget_files + protected_temp_files,
-        ),
-        "bytes": max(0, total_bytes),
-        "removed_files": removed_files,
-        "removed_bytes": removed_bytes,
-        "removed_session_bytes": removed_session_bytes,
-        "remaining_session_bytes": remaining_session_bytes,
-    }
+        return {"status": "failed", "operation_ids": operation_ids, "removed_bytes": removed_bytes}
+    finally:
+        janitor_lock.release()
 
 
 def _class_analysis_startup_cleanup_worker() -> None:
-    ready_for_analysis = False
-    with CLASS_ANALYSIS_STARTUP_CLEANUP_LOCK:
-        CLASS_ANALYSIS_STARTUP_CLEANUP_STATE.update(
-            {
-                "status": "quarantining",
-                "started_at": time.time(),
-                "ready_at": None,
-                "completed_at": None,
-                "error": None,
-            }
-        )
+    """Restore durable sources and resume catalog operations without purging."""
     try:
-        root = _class_analysis_storage_root(create=True)
-        purge_parent = root / ".purge"
-        if _class_analysis_prepare_dir(purge_parent, root) is None:
-            raise RuntimeError("class_analysis_cleanup_quarantine_invalid")
-        stale_quarantined = list(purge_parent.iterdir())
-        purge_root = purge_parent / f"startup_{uuid.uuid4().hex[:12]}"
-        audit_root = root / "audit"
-        if _class_analysis_prepare_dir(purge_root, root) is None:
-            raise RuntimeError("class_analysis_cleanup_quarantine_invalid")
-        if _class_analysis_prepare_dir(audit_root, root) is None:
-            raise RuntimeError("class_analysis_audit_root_invalid")
-        targets: List[Path] = []
-        runtime_root = root / "runtime"
-        if runtime_root.exists():
-            targets.append(runtime_root)
-        for child in root.iterdir():
-            if child.name in {".purge", "audit", "exports"} or child.name.startswith("bench_"):
-                continue
-            if child in targets:
-                continue
-            if child.name.startswith(("ca_", "cac_")):
-                if child.is_dir() and not child.is_symlink():
-                    _class_analysis_archive_job_audits(child, audit_root)
-                targets.append(child)
-            elif child.is_file() and child.suffix.lower() in {".sqlite", ".sqlite-wal", ".sqlite-shm"}:
-                targets.append(child)
+        restored_snapshots = _class_analysis_restore_active_snapshots_from_disk()
+        service = _get_storage_library_service()
+        service.resume_pending_operations()
+        discovery = service.refresh({})
         with CLASS_ANALYSIS_STARTUP_CLEANUP_LOCK:
-            CLASS_ANALYSIS_STARTUP_CLEANUP_STATE["targets"] = len(targets)
-        quarantined: List[Path] = []
-        for target in targets:
-            if not target.exists() and not target.is_symlink():
-                continue
-            if not _path_is_within_root_impl(target.resolve(strict=False), root):
-                raise RuntimeError("class_analysis_cleanup_target_outside_root")
-            destination = purge_root / f"{target.name}_{uuid.uuid4().hex[:8]}"
-            os.replace(target, destination)
-            quarantined.append(destination)
-        if _class_analysis_cache_storage_root(create=True) is None:
-            raise RuntimeError("class_analysis_cache_root_recreate_failed")
-        with CLASS_ANALYSIS_RUN_FINGERPRINTS_LOCK:
-            CLASS_ANALYSIS_RUN_FINGERPRINTS.clear()
-        with CLASS_ANALYSIS_ACTIVE_SNAPSHOTS_LOCK:
-            CLASS_ANALYSIS_ACTIVE_SNAPSHOTS.clear()
-        with CLASS_ANALYSIS_FILE_HASH_CACHE_LOCK:
-            CLASS_ANALYSIS_FILE_HASH_CACHE.clear()
-        ready_for_analysis = True
-        with CLASS_ANALYSIS_STARTUP_CLEANUP_LOCK:
-            CLASS_ANALYSIS_STARTUP_CLEANUP_STATE.update(
-                {"status": "deleting", "ready_at": time.time(), "error": None}
-            )
-        delete_targets = [*stale_quarantined, *quarantined]
-        for target in delete_targets:
-            if not _path_is_within_root_impl(target.resolve(strict=False), purge_parent):
-                raise RuntimeError("class_analysis_stale_quarantine_outside_root")
-        _class_analysis_delete_quarantined(delete_targets)
-        try:
-            purge_root.rmdir()
-            purge_root.parent.rmdir()
-        except OSError:
-            pass
-        with CLASS_ANALYSIS_STARTUP_CLEANUP_LOCK:
-            CLASS_ANALYSIS_STARTUP_CLEANUP_STATE.update(
-                {"status": "completed", "completed_at": time.time(), "error": None}
-            )
-        threading.Thread(
-            target=_class_analysis_enforce_cache_budget,
-            name="class-analysis-cache-janitor",
-            daemon=True,
-        ).start()
+            CLASS_ANALYSIS_STARTUP_CLEANUP_STATE.update({
+                "status": "completed",
+                "ready_at": time.time(),
+                "completed_at": time.time(),
+                "error": None,
+                "targets": 0,
+                "restored_active_snapshots": restored_snapshots,
+                "discovery_operation_id": discovery["operation_id"],
+                "retention": "saved_work_requires_explicit_removal",
+            })
+        if CLASS_ANALYSIS_PURGE_ON_START:
+            logger.info("Legacy class analysis startup purge is superseded by protected storage-library cleanup.")
+        _class_analysis_enforce_cache_budget()
     except Exception as exc:
-        logger.exception("Class analysis startup cleanup failed")
+        logger.exception("Class analysis storage-library startup failed")
         with CLASS_ANALYSIS_STARTUP_CLEANUP_LOCK:
-            CLASS_ANALYSIS_STARTUP_CLEANUP_STATE.update(
-                {
-                    "status": "deletion_failed" if ready_for_analysis else "failed",
-                    "completed_at": time.time(),
-                    "error": str(exc),
-                }
-            )
+            CLASS_ANALYSIS_STARTUP_CLEANUP_STATE.update({
+                "status": "failed", "completed_at": time.time(), "error": str(exc),
+            })
 
 
 def _class_analysis_restore_active_snapshots_from_disk() -> int:
@@ -43233,43 +43730,22 @@ def _class_analysis_restore_active_snapshots_from_disk() -> int:
 
 
 def _start_class_analysis_startup_cleanup() -> None:
-    if not CLASS_ANALYSIS_PURGE_ON_START:
-        restored_snapshots = _class_analysis_restore_active_snapshots_from_disk()
-        with CLASS_ANALYSIS_STARTUP_CLEANUP_LOCK:
-            CLASS_ANALYSIS_STARTUP_CLEANUP_STATE.update(
-                {
-                    "status": "disabled",
-                    "ready_at": time.time(),
-                    "completed_at": time.time(),
-                    "error": None,
-                    "restored_active_snapshots": restored_snapshots,
-                }
-            )
-        threading.Thread(
-            target=_class_analysis_enforce_cache_budget,
-            name="class-analysis-cache-janitor",
-            daemon=True,
-        ).start()
-        return
+    # Startup admits work after the asynchronous source registry restoration;
+    # no dataset walk or cache removal runs on the API startup thread.
     if os.environ.get("PYTEST_CURRENT_TEST"):
         with CLASS_ANALYSIS_STARTUP_CLEANUP_LOCK:
-            CLASS_ANALYSIS_STARTUP_CLEANUP_STATE.update(
-                {"status": "test_skipped", "ready_at": time.time(), "completed_at": time.time(), "error": None}
-            )
+            CLASS_ANALYSIS_STARTUP_CLEANUP_STATE.update({
+                "status": "test_skipped", "ready_at": time.time(),
+                "completed_at": time.time(), "error": None,
+            })
         return
     with CLASS_ANALYSIS_STARTUP_CLEANUP_LOCK:
-        if CLASS_ANALYSIS_STARTUP_CLEANUP_STATE.get("status") in {
-            "queued",
-            "quarantining",
-            "deleting",
-            "completed",
-            "deletion_failed",
-        }:
+        if CLASS_ANALYSIS_STARTUP_CLEANUP_STATE.get("status") in {"queued", "completed"}:
             return
-        CLASS_ANALYSIS_STARTUP_CLEANUP_STATE["status"] = "queued"
+        CLASS_ANALYSIS_STARTUP_CLEANUP_STATE.update({"status": "queued", "started_at": time.time(), "error": None})
     threading.Thread(
         target=_class_analysis_startup_cleanup_worker,
-        name="class-analysis-startup-cleanup",
+        name="class-analysis-storage-library-startup",
         daemon=True,
     ).start()
 
@@ -44519,6 +44995,11 @@ def _class_analysis_embedding_head_cache_identity(
             if head.get(key) is not None
         },
     }
+    if isinstance(head.get('qualified_producer_identity'), Mapping):
+        # New pruning component requests bind actual runtime/checkpoint/view
+        # provenance before entering the existing shared image-pack producer.
+        # Legacy identities remain unchanged for explicitly attested imports.
+        identity['qualified_producer'] = dict(head['qualified_producer_identity'])
     if encoder_type == "cradio":
         runtime = cradio_runtime_identity(
             identity["encoder_model"],
@@ -44557,6 +45038,8 @@ def _class_analysis_embedding_head_cache_identity(
 def _class_analysis_encoder_runtime_metadata(
     head: Mapping[str, Any],
 ) -> Dict[str, Any]:
+    if isinstance(head.get('qualified_producer_identity'), Mapping):
+        return dict(head['qualified_producer_identity'])
     encoder_type = str(head.get("encoder_type") or "dinov3").strip().lower()
     if encoder_type == "cradio":
         runtime = cradio_runtime_identity(
@@ -44679,6 +45162,7 @@ def _class_analysis_load_image_pack(
     *,
     allow_partial: bool = False,
     diagnostics: Optional[Dict[str, Any]] = None,
+    read_only: bool = False,
 ) -> Optional[List[Optional[np.ndarray]]]:
     def note(**values: Any) -> None:
         if diagnostics is not None:
@@ -44764,10 +45248,11 @@ def _class_analysis_load_image_pack(
                 os.fstat(handle.fileno())
             ) != _class_analysis_artifact_stat_identity(opened_stat):
                 raise ValueError("class_analysis_image_pack_changed")
-            try:
-                os.utime(handle.fileno(), None)
-            except OSError:
-                pass
+            if not read_only:
+                try:
+                    os.utime(handle.fileno(), None)
+                except OSError:
+                    pass
         stored_by_key = {
             key: embeddings[idx].astype(np.float32, copy=False)
             for idx, key in enumerate(stored_keys)
@@ -44791,10 +45276,11 @@ def _class_analysis_load_image_pack(
         return resolved
     except Exception as exc:
         note(status="invalid", error=str(exc), bytes_read=0)
-        _class_analysis_remove_disposable_if_same_inode(
-            safe_path,
-            opened_identity,
-        )
+        if not read_only:
+            _class_analysis_remove_disposable_if_same_inode(
+                safe_path,
+                opened_identity,
+            )
         return None
 
 
@@ -59204,6 +59690,7 @@ def _class_analysis_adjust_embeddings_to_memmap(
     mode: str,
     output_path: Path,
     chunk_size: int = 2048,
+    output_array: Optional[np.ndarray] = None,
 ) -> Tuple[np.memmap, Dict[str, Any]]:
     """Residualize and normalize embeddings without a full in-memory copy."""
 
@@ -59211,12 +59698,12 @@ def _class_analysis_adjust_embeddings_to_memmap(
     if source.ndim != 2:
         raise RuntimeError("embedding_shape_invalid")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    adjusted = np.lib.format.open_memmap(
-        output_path,
-        mode="w+",
-        dtype=np.float32,
-        shape=source.shape,
-    )
+    if output_array is None:
+        adjusted = np.lib.format.open_memmap(output_path, mode="w+", dtype=np.float32, shape=source.shape)
+    else:
+        adjusted = output_array
+        if adjusted.shape != source.shape or adjusted.dtype != np.float32:
+            raise ValueError("embedding_adjustment_output_shape_invalid")
     mode_norm = _class_analysis_normalize_embedding_adjustment(mode)
     info: Dict[str, Any] = {"mode": mode_norm, "applied": False}
     design: Optional[np.ndarray] = None
@@ -59234,9 +59721,9 @@ def _class_analysis_adjust_embeddings_to_memmap(
                 selected_names = [
                     name for name, use in zip(names, keep.tolist()) if use
                 ]
-                selected = (
-                    selected - selected.mean(axis=0, keepdims=True)
-                ) / selected.std(axis=0, keepdims=True)
+                fitted_mean = selected.mean(axis=0, keepdims=True)
+                fitted_std = selected.std(axis=0, keepdims=True)
+                selected = (selected - fitted_mean) / fitted_std
                 design = np.concatenate(
                     [
                         np.ones((selected.shape[0], 1), dtype=np.float32),
@@ -59255,6 +59742,11 @@ def _class_analysis_adjust_embeddings_to_memmap(
                             "applied": True,
                             "covariates": selected_names,
                             "point_count": int(source.shape[0]),
+                            "fitted_transform": {"schema": "independent_size_residualization_v1",
+                                "covariate_mean": fitted_mean.reshape(-1).tolist(), "covariate_std": fitted_std.reshape(-1).tolist(),
+                                "coefficients": beta.tolist(), "design_sha256": hashlib.sha256(design.tobytes()).hexdigest(),
+                                "record_digest": _class_analysis_embedding_record_digest(records),
+                                "normalization": "subtract_design_then_l2", "fit_population_count": len(records)},
                         }
                     )
                 except Exception as exc:
@@ -59275,6 +59767,37 @@ def _class_analysis_adjust_embeddings_to_memmap(
         adjusted[start:end] = chunk / np.maximum(norms, 1e-12)
     adjusted.flush()
     return adjusted, info
+
+
+def _class_analysis_replay_fitted_embedding_adjustment(
+    raw_embeddings: np.ndarray,
+    records: Sequence[Dict[str, Any]],
+    transform: Mapping[str, Any],
+) -> np.ndarray:
+    """Apply saved independent size coefficients to selected rows; never fit."""
+    raw = np.asarray(raw_embeddings, dtype=np.float32)
+    if raw.ndim != 2 or len(raw) != len(records):
+        raise ValueError('Saved adjustment rows do not match the requested records')
+    if not transform.get('applied'):
+        return raw / np.maximum(np.linalg.norm(raw, axis=1, keepdims=True), 1e-12)
+    fitted = transform.get('fitted_transform') or {}
+    if fitted.get('schema') != 'independent_size_residualization_v1' or fitted.get('normalization') != 'subtract_design_then_l2':
+        raise ValueError('The exact saved size transform is unavailable; recompute this analysis')
+    covariates, names = _class_analysis_record_covariates(records)
+    selected_names = transform.get('covariates') or []
+    if not selected_names or any(name not in names for name in selected_names):
+        raise ValueError('Saved size covariates are incompatible')
+    selected = covariates[:, [names.index(name) for name in selected_names]]
+    mean = np.asarray(fitted.get('covariate_mean'), np.float32)
+    std = np.asarray(fitted.get('covariate_std'), np.float32)
+    beta = np.asarray(fitted.get('coefficients'), np.float32)
+    if mean.shape != (len(selected_names),) or std.shape != mean.shape or beta.shape != (len(selected_names)+1, raw.shape[1]):
+        raise ValueError('Saved size coefficients are incompatible')
+    if not np.all(np.isfinite(mean)) or not np.all(np.isfinite(std)) or not np.all(std > 0) or not np.all(np.isfinite(beta)):
+        raise ValueError('Saved size coefficients are invalid')
+    design = np.concatenate([np.ones((len(raw), 1), np.float32), (selected-mean)/std], axis=1)
+    adjusted = raw-design@beta
+    return adjusted / np.maximum(np.linalg.norm(adjusted, axis=1, keepdims=True), 1e-12)
 
 
 def _class_analysis_pearson(x: np.ndarray, y: np.ndarray) -> float:
@@ -60145,6 +60668,33 @@ def _class_analysis_train_salad_head(
     background_mode = _embedding_normalize_background_mode(
         payload.get("background_mode")
     )
+    training_content = []
+    protected_training_sha = {}
+    for ordinal in train_indices:
+        record = records[ordinal]
+        path = Path(str(record.get("_image_path") or ""))
+        if str(path) not in protected_training_sha:
+            before = path.stat()
+            sha = salad_sha256_file(path)
+            after = path.stat()
+            if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                raise HTTPException(status_code=HTTP_409_CONFLICT, detail="salad_training_reference_changed")
+            protected_training_sha[str(path)] = sha
+        training_content.append({"image_sha256": protected_training_sha[str(path)], "bbox_xyxy": list(record.get("bbox_xyxy") or [])})
+    training_settings = {key: value for key, value in settings.to_dict().items() if key not in {"weight", "dino_weight", "sam_weight", "salad_weight"}}
+    training_signature = {"scope": "bbox_crop", "training_fingerprint": training_fingerprint,
+                          "content": training_content, "settings": training_settings, "seed": seed, "salad_backend": salad_backend, "salad_device": _dinov3_aux_torch_device(device_name),
+                          "view_recipe": {key: payload.get(key) for key in ["crop_mode", "padding_ratio", "preprocess_mode", "canonical_size", "background_mode", "embedding_view_mode", "dinov3_pooling"]},
+                          "runtime": _local_salad_encoder_identity("dinov3", resolved_model, backend=device_name),
+                          "implementation": _local_salad_producer_implementation_identity()}
+    reusable = _find_reusable_local_salad_head(training_signature)
+    if reusable:
+        saved_id = reusable["head_id"]
+        saved_head, saved_metadata = _load_local_salad_head(saved_id, device_name=salad_device_name if "salad_device_name" in locals() else _dinov3_aux_torch_device(device_name), backend=salad_backend)
+        runtime = dict(saved_metadata.get("crop_training_runtime") or {})
+        runtime.update(reused_existing_head=True, persistent_head_id=saved_id, persistent_head_sha256=salad_sha256_file(_local_salad_head_path(saved_id)),
+                       all_objects_encoded=False, encoding_status='pending_full_object_stream')
+        return saved_head, runtime
     token_dir = out_dir / "work" / "salad_training_tokens"
     if _class_analysis_prepare_dir(token_dir, out_dir) is None:
         raise HTTPException(
@@ -60164,7 +60714,10 @@ def _class_analysis_train_salad_head(
 
     def prepare_pair(record: Mapping[str, Any]) -> Tuple[Image.Image, Image.Image]:
         image_path = Path(str(record.get("_image_path") or ""))
-        with Image.open(image_path) as loaded:
+        raw = image_path.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != protected_training_sha[str(image_path)]:
+            raise HTTPException(status_code=HTTP_409_CONFLICT, detail="salad_training_reference_changed")
+        with Image.open(io.BytesIO(raw)) as loaded:
             source = loaded.convert("RGB")
         try:
             views, _bounds, _metadata = _embedding_make_crop_views(
@@ -60300,19 +60853,17 @@ def _class_analysis_train_salad_head(
         salad_device_name = device_name
         if is_mlx_dinov3_encoder(model_obj):
             salad_device_name = _dinov3_aux_torch_device(device_name)
-        with CLASS_ANALYSIS_SALAD_TRAIN_LOCK:
+        with CLASS_ANALYSIS_SALAD_TRAIN_LOCK, qualified_training_rng(seed, salad_backend) as training_rng_receipt:
             if salad_backend == "mlx":
                 import mlx.core as mx
 
-                mx.random.seed(seed)
-                salad_head: Any = MLXLocalSALADHead(config)
+                salad_head: Any = MLXLocalSALADHead(config, seed=seed)
                 optimizer = make_mlx_local_salad_optimizer(
                     learning_rate=settings.learning_rate,
                     weight_decay=settings.weight_decay,
                 )
             else:
-                torch.manual_seed(seed)
-                salad_head = LocalSALADHead(config).to(salad_device_name)
+                salad_head = LocalSALADHead(config, seed=seed).to(salad_device_name)
                 salad_head.train()
                 optimizer = torch.optim.AdamW(
                     salad_head.parameters(),
@@ -60399,10 +60950,12 @@ def _class_analysis_train_salad_head(
         runtime = {
             "schema": CLASS_ANALYSIS_SAM3_SALAD_FUSION_SCHEMA,
             "policy": "bounded_source_diverse_label_free_reservoir_v1",
+            "training_rng_receipt": training_rng_receipt,
             "training_fingerprint": training_fingerprint,
             "dataset_object_count": len(records),
             "train_object_count": len(train_indices),
-            "all_objects_encoded": True,
+            "all_objects_encoded": False,
+            "encoding_status": "pending_full_object_stream",
             "temporary_token_bytes_peak": temporary_bytes_peak,
             "temporary_tokens_deleted": True,
             "backend": salad_backend,
@@ -60411,6 +60964,27 @@ def _class_analysis_train_salad_head(
             "loss_final": losses[-1] if losses else None,
             "seconds": time.time() - started_at,
         }
+        for path_text, expected_sha in protected_training_sha.items():
+            if salad_sha256_file(Path(path_text)) != expected_sha:
+                raise HTTPException(status_code=HTTP_409_CONFLICT, detail="salad_training_reference_changed_before_publication")
+        with LOCAL_SALAD_HEAD_LOCK:
+            persistent_id = _unique_local_salad_head_id("crop_" + hashlib.sha256(_data_ingestion_canonical_json(training_signature).encode()).hexdigest()[:20])
+            persistent_path = _local_salad_head_path(persistent_id)
+            persistent_root = _local_salad_head_root(create=True)
+            metadata = {"id": persistent_id, "label": "DQE crop SALAD " + settings.preset,
+                        "encoder_type": "dinov3", "encoder_model": resolved_model,
+                        "representation_scope": "bbox_crop", "source_mode": payload.get("source_mode"),
+                        "reference_dataset_id": payload.get("source_id", ""), "reference_label": payload.get("dataset_label", ""),
+                        "train_image_count": len(protected_training_sha), "train_object_count": len(train_indices),
+                        "training_signature": training_signature, "training_rng_receipt": training_rng_receipt,
+                        "salad_backend": salad_backend, "crop_training_runtime": runtime,
+                        "created_at": time.time(), "format": LOCAL_SALAD_CACHE_VERSION,
+                        "policy": LOCAL_SALAD_POLICY, "trainer": LOCAL_SALAD_TRAINER}
+            head_payload = {"format": LOCAL_SALAD_CACHE_VERSION, "config": config.to_dict(),
+                            "state_dict": mlx_local_salad_state_dict(salad_head) if is_mlx_local_salad_head(salad_head) else {key: value.detach().cpu() for key, value in salad_head.state_dict().items()},
+                            "metadata": metadata}
+            _class_analysis_write_binary(persistent_path, persistent_root, lambda handle: torch.save(head_payload, handle), detail="local_salad_head_path_invalid")
+        runtime.update(persistent_head_id=persistent_id, persistent_head_sha256=salad_sha256_file(persistent_path), reused_existing_head=False)
         with CLASS_ANALYSIS_JOBS_LOCK:
             job.runtime = {
                 **dict(job.runtime or {}),
@@ -60604,6 +61178,7 @@ def _class_analysis_extract_sam3_mask_embeddings(
                                 image.size,
                             )
                         )
+                        records[index]["sam3_mask_evidence"] = {"used_bbox_fallback": bool(used_fallback), "mask_score": mask_score, "source_dimensions": list(image.size), "descriptor_dimension": int(vector.size)}
                         store[index] = vector
                         completed += 1
                         fallback_count += int(used_fallback)
@@ -60640,7 +61215,11 @@ def _class_analysis_extract_sam3_mask_embeddings(
         except Exception:
             pass
     store.flush()
-    runtime = {
+    evidence_path = output_path.with_suffix(".mask-evidence.jsonl")
+    with evidence_path.open("w") as handle:
+        for ordinal, record in enumerate(records):
+            handle.write(json.dumps({"row": ordinal, "crop_cache_key": record.get("crop_cache_key"), **dict(record.get("sam3_mask_evidence") or {})}, sort_keys=True) + "\n")
+    runtime = {"per_object_evidence_path": str(evidence_path),
         "schema": CLASS_ANALYSIS_SAM3_MASK_FUSION_SCHEMA,
         "backend": "mlx-bf16",
         "object_count": len(records),
@@ -61312,6 +61891,8 @@ def _class_analysis_stream_encode_records_locked(
             )
     if feature_store is None:
         raise RuntimeError("embedding_failed")
+    if completed != total:
+        raise RuntimeError('class_analysis_object_stream_incomplete')
     feature_store.flush()
     sample_memory(force=True)
     if cache_stats is not None:
@@ -61321,12 +61902,20 @@ def _class_analysis_stream_encode_records_locked(
                 "misses": int(cache_misses),
                 "errors": int(cache_errors),
                 "total": int(total),
+                "completed": int(completed),
+                "all_objects_encoded": completed == total,
                 "miss_reasons": dict(cache_miss_reasons),
                 "bytes_read": int(cache_bytes_read),
                 "bytes_written": int(cache_bytes_written),
             }
         )
     with CLASS_ANALYSIS_JOBS_LOCK:
+        job.runtime = {**dict(job.runtime or {}), 'object_encoding': {'total': int(total), 'completed': int(completed),
+                       'all_objects_encoded': completed == total, 'encoder_type': encoder_type,
+                       'head_id': str(head.get('embedding_salad_head_id') or '')}}
+        if aggregation == CLASS_ANALYSIS_SAM3_SALAD_FUSION_SCHEMA and job.runtime.get('salad_fusion'):
+            job.runtime['salad_fusion'] = {**job.runtime['salad_fusion'], 'all_objects_encoded': completed == total,
+                                          'encoding_status': 'completed', 'encoded_object_count': int(completed)}
         _class_analysis_publish_cache_status(
             job,
             encoder_label,
@@ -72618,6 +73207,7 @@ def _class_analysis_run_evidence_batch(
     return rows, False, backend
 
 
+@_storage_library_guard
 def _class_analysis_evidence_worker(job_id: str, owner_id: str) -> None:
     started_at = time.time()
     cache_hits = 0
@@ -73637,9 +74227,13 @@ def _class_analysis_exact_neighbors_chunked(
     cancel_event: Optional[threading.Event] = None,
     query_indices: Optional[Sequence[int]] = None,
     chunk_size: int = 256,
+    exclude_groups: Optional[Sequence[Any]] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     data = np.asarray(embeddings, dtype=np.float32)
     n_samples = int(data.shape[0])
+    groups = None if exclude_groups is None else np.asarray(exclude_groups)
+    if groups is not None and groups.shape != (n_samples,):
+        raise ValueError("neighbor_exclusion_groups_do_not_match_rows")
     resolved_k = min(max(1, int(neighbor_k or 1)), max(1, n_samples - 1))
     queries = (
         np.arange(n_samples, dtype=np.int64)
@@ -73652,13 +74246,15 @@ def _class_analysis_exact_neighbors_chunked(
         np.inf,
         dtype=np.float32,
     )
-    candidate_count = min(n_samples, resolved_k + 1)
+    candidate_count = min(n_samples, resolved_k + (1 if groups is None else 0))
     for start in range(0, len(queries), max(1, int(chunk_size or 256))):
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("cancelled")
         end = min(len(queries), start + max(1, int(chunk_size or 256)))
         query_ids = queries[start:end]
         similarities = np.asarray(data[query_ids] @ data.T, dtype=np.float32)
+        if groups is not None:
+            similarities[groups[query_ids, None] == groups[None, :]] = -np.inf
         partition = np.argpartition(
             -similarities,
             kth=max(0, candidate_count - 1),
@@ -73678,6 +74274,8 @@ def _class_analysis_exact_neighbors_chunked(
         )
         for local_idx, query_id in enumerate(query_ids.tolist()):
             keep = ranked[local_idx] != int(query_id)
+            if groups is not None:
+                keep &= np.isfinite(ranked_similarity[local_idx])
             neighbor_ids = ranked[local_idx][keep][:resolved_k]
             neighbor_similarity = ranked_similarity[local_idx][keep][:resolved_k]
             output_indices[start + local_idx, : len(neighbor_ids)] = neighbor_ids
@@ -73687,13 +74285,13 @@ def _class_analysis_exact_neighbors_chunked(
     return output_indices, output_distances
 
 
-def _class_analysis_approximate_neighbor_attempt(
+def _class_analysis_build_neighbor_index(
     embeddings: np.ndarray,
     *,
     neighbor_k: int,
     seed: int,
     stronger: bool,
-) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+):
     try:
         from pynndescent import NNDescent
     except Exception as exc:
@@ -73714,6 +74312,21 @@ def _class_analysis_approximate_neighbor_attempt(
         "n_iters": 12 if stronger else 8,
     }
     index = NNDescent(np.asarray(embeddings, dtype=np.float32), **params)
+    return index, params
+
+
+def _class_analysis_approximate_neighbor_attempt(
+    embeddings: np.ndarray,
+    *,
+    neighbor_k: int,
+    seed: int,
+    stronger: bool,
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    n_samples = int(embeddings.shape[0])
+    resolved_k = min(max(1, int(neighbor_k or 1)), max(1, n_samples - 1))
+    index, params = _class_analysis_build_neighbor_index(
+        embeddings, neighbor_k=neighbor_k, seed=seed, stronger=stronger
+    )
     neighbor_graph = index.neighbor_graph
     # The public property returns independent arrays. Release the index and its
     # internal graph before allocating the normalized output matrices.
@@ -73751,6 +74364,166 @@ def _class_analysis_approximate_neighbor_attempt(
         output_indices[idx, : len(neighbor_ids)] = neighbor_ids
         output_distances[idx, : len(neighbor_distances)] = neighbor_distances
     return output_indices, output_distances, params
+
+
+def _class_analysis_compute_group_excluded_neighbors(
+    embeddings: np.ndarray,
+    group_ids: Sequence[Any],
+    *,
+    neighbor_k: int,
+    seed: int,
+    memory_budget_mb: Optional[int] = None,
+    job: Optional[ClassAnalysisJob] = None,
+    query_indices: Optional[Sequence[int]] = None,
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    """Shared ANN with a feasible cross-group budget and a masked exact audit.
+
+    Groups are actual source images for pruning objects. The original DQE
+    unfiltered neighbor API remains unchanged. Neither a full NxN matrix nor
+    an expanded all-query neighbor matrix is retained here.
+    """
+    started = time.monotonic()
+    data = np.asarray(embeddings, dtype=np.float32)
+    n, width = data.shape
+    groups = np.asarray(group_ids)
+    if groups.shape != (n,):
+        raise ValueError("neighbor_exclusion_groups_do_not_match_rows")
+    queries = np.arange(n, dtype=np.int64) if query_indices is None else np.asarray(query_indices, dtype=np.int64)
+    if queries.ndim != 1 or np.any(queries < 0) or np.any(queries >= n):
+        raise ValueError("neighbor_query_indices_invalid")
+    k = min(max(1, int(neighbor_k)), max(0, n-1))
+    _, inverse, counts = np.unique(groups, return_inverse=True, return_counts=True)
+    own_counts = counts[inverse[queries]]
+    feasible = np.minimum(k, n-own_counts)
+    budget_mb = int(memory_budget_mb or recommended_quality_memory_mb(available_quality_memory_mb()))
+    workspace_bytes = max(1, int(budget_mb * 1024 * 1024 * .08))
+    exact_chunk = max(1, min(256, workspace_bytes // max(1, n*4 + width*4)))
+    cancel = job.cancel_event if job is not None else None
+    common = {"version": "source_group_exclusion_v2_audit_repair", "neighbor_k": k, "seed": int(seed),
+              "budget_scope": "cross-image object neighbors after source-image exclusion",
+              "memory_policy": "budgeted", "memory_budget_mb": budget_mb,
+              "exact_chunk_size": exact_chunk, "query_count": len(queries), "population_count": n,
+              "query_scope": "complete_population" if query_indices is None else "explicit_query_cohort",
+              "infeasible_full_k_queries": int(np.count_nonzero(feasible < k)),
+              "zero_feasible_cross_image_queries": int(np.count_nonzero(feasible == 0))}
+    if not np.any(feasible):
+        return np.full((len(queries), k), -1, np.int64), np.full((len(queries), k), np.inf, np.float32), {
+            **common, "method": "no_cross_group_candidates", "elapsed_seconds": time.monotonic()-started,
+            "audit": {"scope": "group_excluded", "sample_count": 0, "recall_at_k": 1.}}
+    if n <= CLASS_ANALYSIS_EXACT_NEIGHBOR_LIMIT:
+        indices, distances = _class_analysis_exact_neighbors_chunked(
+            data, neighbor_k=max(1, k), cancel_event=cancel, query_indices=queries,
+            chunk_size=exact_chunk, exclude_groups=groups)
+        return indices[:, :k], distances[:, :k], {**common, "method": "exact_group_excluded_cosine",
+            "elapsed_seconds": time.monotonic()-started,
+            "audit": {"scope": "group_excluded", "sample_count": len(queries), "recall_at_k": 1.}}
+    attempts = []
+    accepted = None
+    from threadpoolctl import threadpool_limits
+    for stronger in (False, True):
+        if cancel is not None and cancel.is_set(): raise RuntimeError("cancelled")
+        index, parameters = _class_analysis_build_neighbor_index(data, neighbor_k=k, seed=seed, stronger=stronger)
+        output = np.full((len(queries), k), -1, np.int64)
+        distances = np.full((len(queries), k), np.inf, np.float32)
+        stats = {"adaptive_query_count": 0, "exact_short_query_count": 0, "breadth_counts": {}}
+        def keep_cross_group(local, ids, values):
+            valid = (ids >= 0) & (ids < n) & np.isfinite(values)
+            ids, values = ids[valid], values[valid]
+            valid = groups[ids] != groups[queries[local]]
+            ids, values = ids[valid], values[valid]
+            order = np.argsort(values, kind="stable")
+            seen = set(); selected = []
+            for position in order:
+                if int(ids[position]) not in seen:
+                    seen.add(int(ids[position])); selected.append(int(position))
+                if len(selected) >= feasible[local]: break
+            selected = selected[:int(feasible[local])]
+            output[local] = -1; distances[local] = np.inf
+            output[local, :len(selected)] = ids[selected]
+            distances[local, :len(selected)] = values[selected]
+            return len(selected)
+        try:
+            graph_indices, graph_distances = index.neighbor_graph
+            pending = []
+            for local, query in enumerate(queries):
+                if feasible[local] and keep_cross_group(local, graph_indices[query], graph_distances[query]) < feasible[local]:
+                    pending.append(local)
+            graph_width = graph_indices.shape[1]
+            del graph_indices, graph_distances
+            breadth = max(k+1, graph_width*2)
+            fallback = []
+            while pending:
+                if cancel is not None and cancel.is_set(): raise RuntimeError("cancelled")
+                buckets = {}
+                for local in pending:
+                    # More than own_count+K cannot be necessary to return K
+                    # distinct cross-group entries. This is a per-query bound.
+                    request_k = min(n, int(own_counts[local])+int(feasible[local]), breadth)
+                    if (request_k*12 + width*4) > workspace_bytes:
+                        fallback.append(local)
+                    else: buckets.setdefault(request_k, []).append(local)
+                pending = []
+                for request_k, local_ids in sorted(buckets.items()):
+                    batch = max(1, min(128, workspace_bytes // max(1, request_k*12 + width*4)))
+                    stats['breadth_counts'][str(request_k)] = stats['breadth_counts'].get(str(request_k), 0)+len(local_ids)
+                    for start in range(0, len(local_ids), batch):
+                        if cancel is not None and cancel.is_set(): raise RuntimeError("cancelled")
+                        local_batch = local_ids[start:start+batch]
+                        with threadpool_limits(limits=2):
+                            ids, values = index.query(data[queries[local_batch]], k=request_k)
+                        stats['adaptive_query_count'] += len(local_batch)
+                        for local, row_ids, row_values in zip(local_batch, ids, values):
+                            if keep_cross_group(local, row_ids, row_values) < feasible[local]:
+                                if request_k >= min(n, int(own_counts[local])+int(feasible[local])): fallback.append(local)
+                                else: pending.append(local)
+                breadth *= 2
+            if fallback:
+                exact_ids, exact_values = _class_analysis_exact_neighbors_chunked(
+                    data, neighbor_k=k, cancel_event=cancel, query_indices=queries[fallback],
+                    chunk_size=exact_chunk, exclude_groups=groups)
+                output[fallback], distances[fallback] = exact_ids, exact_values
+                stats['exact_short_query_count'] = len(fallback)
+        finally:
+            del index
+        rng = np.random.default_rng(int(seed))
+        audit_positions = np.sort(rng.choice(len(queries), min(512, len(queries)), replace=False))
+        with threadpool_limits(limits=2):
+            expected, expected_distances = _class_analysis_exact_neighbors_chunked(
+                data, neighbor_k=k, cancel_event=cancel, query_indices=queries[audit_positions],
+                chunk_size=min(32, exact_chunk), exclude_groups=groups)
+        recalls = []
+        for local, row in zip(audit_positions, expected):
+            reference = set(int(value) for value in row if value >= 0)
+            actual = set(int(value) for value in output[local] if value >= 0)
+            recalls.append(len(reference & actual)/len(reference) if reference else 1.)
+        audit = {"scope": "group_excluded", "sample_count": len(audit_positions),
+                 "sampling": "seeded uniform over query scope", "recall_at_k": float(np.mean(recalls)) if recalls else 1.,
+                 "minimum_query_recall_at_k": float(min(recalls)) if recalls else 1.}
+        attempts.append({"stronger": stronger, "parameters": parameters, "audit": audit, **stats})
+        accepted = (output, distances, audit)
+        if audit['recall_at_k'] >= .95: break
+    output, distances, audit = accepted
+    if audit['recall_at_k'] < .90:
+        with threadpool_limits(limits=2):
+            output, distances = _class_analysis_exact_neighbors_chunked(
+                data, neighbor_k=k, cancel_event=cancel, query_indices=queries,
+                chunk_size=exact_chunk, exclude_groups=groups)
+        return output, distances, {**common, "method": "exact_group_excluded_after_ann_recall_fallback",
+            "elapsed_seconds": time.monotonic()-started, "attempts": attempts,
+            "audit": {"scope": "group_excluded", "sample_count": len(queries), "recall_at_k": 1.}}
+    # Exact audit work is already paid for. Do not knowingly retain a bad
+    # audited query, but keep ANN quality before repair as the acceptance gate.
+    repaired_positions = [ordinal for ordinal, recall in enumerate(recalls) if recall < 1.]
+    for ordinal in repaired_positions:
+        output[audit_positions[ordinal]] = expected[ordinal]
+        distances[audit_positions[ordinal]] = expected_distances[ordinal]
+    return output, distances, {**common, "method": "pynndescent_group_excluded_adaptive",
+        "elapsed_seconds": time.monotonic()-started, "attempts": attempts, "audit": audit,
+        "exact_audit_repair": {"count": len(repaired_positions),
+            "query_indices": [int(queries[audit_positions[ordinal]]) for ordinal in repaired_positions],
+            "pre_repair_audit": audit, "post_repair_audited_recall_at_k": 1.,
+            "scope": "Only already-audited rows were repaired from exact results; other ANN queries remain unaudited"},
+        "warning": "group_excluded_neighbor_recall_below_target" if audit['recall_at_k'] < .95 else ""}
 
 
 def _class_analysis_neighbor_recall_audit(
@@ -74373,6 +75146,7 @@ def _class_analysis_close_memmap_arrays(*values: Any) -> None:
             pass
 
 
+@_storage_library_guard
 def _run_class_analysis_job(job: ClassAnalysisJob) -> None:
     work_dir: Optional[Path] = None
     out_dir: Optional[Path] = None
@@ -75013,6 +75787,7 @@ def _run_class_analysis_job(job: ClassAnalysisJob) -> None:
         }
         if not stage1_checkpoint_reused:
             # Fresh jobs initially commit the NPY layout before hashing it.
+            from services.dataset_pruning_cache import file_state as _raw_pruning_file_state
             # Complete that same manifest with the exact Stage-1 binding so
             # V2/V3 evaluators can prove matrix equality without depending on
             # whether this happened to be a resumed run.
@@ -75025,6 +75800,7 @@ def _run_class_analysis_job(job: ClassAnalysisJob) -> None:
                     "shape": [int(value) for value in embeddings.shape],
                     "embeddings": "embeddings.npy",
                     "raw_embeddings": "raw_embeddings.npy",
+                    "raw_artifact_state": _raw_pruning_file_state(out_dir / "raw_embeddings.npy"),
                     "run_fingerprint": str(
                         job.request.get("run_fingerprint") or ""
                     ),
@@ -77266,10 +78042,14 @@ def _class_analysis_find_restored_annotation_session_locked(
     return copy.deepcopy(max(candidates.values(), key=rank))
 
 
-def create_class_analysis_session_annotation_session(job_id: str) -> Dict[str, Any]:
+def create_class_analysis_session_annotation_session(
+    job_id: str, *, session_manifest: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     """Open the exact saved analysis snapshot through the annotation API."""
 
-    session_manifest = get_class_analysis_session_manifest(job_id)
+    if session_manifest is None:
+        _storage_library_require_review(job_id)
+    session_manifest = session_manifest or _read_class_analysis_session_manifest(CLASS_ANALYSIS_ROOT, job_id)
     source = (
         session_manifest.get("source")
         if isinstance(session_manifest.get("source"), Mapping)
@@ -78250,6 +79030,7 @@ def _class_analysis_validated_publication_memory(
 
 
 def _get_class_analysis_job(job_id: str) -> ClassAnalysisJob:
+    _storage_library_require_review(job_id)
     raw_job_id = str(job_id or "")
     with CLASS_ANALYSIS_JOBS_LOCK:
         job = CLASS_ANALYSIS_JOBS.get(raw_job_id)
@@ -80603,6 +81384,7 @@ def _class_analysis_cluster_search_result(
     )
 
 
+@_storage_library_guard
 def _run_class_analysis_cluster_search_job(job: ClassAnalysisClusterJob) -> None:
     try:
         with CLASS_ANALYSIS_CLUSTER_JOBS_LOCK:
@@ -80718,33 +81500,24 @@ def cancel_class_analysis_cluster_search(cluster_job_id: str) -> Dict[str, Any]:
 def _class_analysis_prune_thumbnail_lru(*, protect_path: Optional[Path] = None) -> None:
     if CLASS_ANALYSIS_THUMBNAIL_CACHE_BYTES <= 0:
         return
+    service = _get_storage_library_service()
     try:
-        root = _class_analysis_storage_root(create=True)
-        files: List[Tuple[float, int, Path]] = []
-        total = 0
-        for job_dir in root.glob("ca_*"):
-            thumb_dir = job_dir / "thumbnails"
-            if not thumb_dir.is_dir() or thumb_dir.is_symlink():
-                continue
-            for path in thumb_dir.glob("*.jpg"):
-                if path.is_symlink() or not path.is_file():
-                    continue
-                stat_result = path.stat()
-                size = int(stat_result.st_size)
-                total += size
-                files.append((float(stat_result.st_atime), size, path))
-        if total <= CLASS_ANALYSIS_THUMBNAIL_CACHE_BYTES:
-            return
-        protected = Path(protect_path).resolve(strict=False) if protect_path is not None else None
-        for _atime, size, path in sorted(files, key=lambda item: item[0]):
-            if protected is not None and path.resolve(strict=False) == protected:
-                continue
-            path.unlink(missing_ok=True)
-            total -= size
-            if total <= CLASS_ANALYSIS_THUMBNAIL_CACHE_BYTES:
-                break
+        if protect_path is not None:
+            thumbnail_dir = Path(protect_path).absolute().parent
+            with service.library.protect(owner="thumbnail_inventory", purpose="cache_measurement"):
+                service.inventory.register_thumbnail_cache(
+                    thumbnail_dir, parent_id=f"session:{thumbnail_dir.parent.name}",
+                )
+        _class_analysis_enforce_cache_budget(
+            cache_categories={"session_thumbnails"},
+            cache_max_bytes=CLASS_ANALYSIS_THUMBNAIL_CACHE_BYTES,
+            refresh_inventory=False,
+            protected_paths=[Path(protect_path).absolute()] if protect_path is not None else (),
+        )
+    except StorageLibraryError as exc:
+        logger.info("Thumbnail cache cleanup deferred: %s", exc.detail.get("code"))
     except Exception:
-        return
+        logger.exception("Thumbnail cache cleanup failed")
 
 
 def _class_analysis_thumbnail_generation_lock(
@@ -94819,6 +95592,7 @@ def _class_analysis_qwen_review_preflight_model_selection(
     )
 
 
+@_storage_library_guard
 def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None:
     try:
         _class_analysis_qwen_review_dir(job, create=True)
@@ -96339,6 +97113,10 @@ def _local_salad_head_path(head_id: str) -> Path:
     safe = _class_analysis_safe_slug(str(head_id or ""), "")
     if not safe:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_id_required")
+    from services.dataset_pruning_profiles import validate_head_reference
+    reference = _get_dataset_salad_profiles().read().get("head_references", {}).get(safe)
+    if reference is not None:
+        return validate_head_reference(reference)
     return _local_salad_head_root(create=False) / f"{safe}.pt"
 
 
@@ -96384,7 +97162,8 @@ def _load_local_salad_head(
         if not path.exists():
             raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="local_salad_head_not_found")
         resolved_path = path.resolve(strict=True)
-        if not _path_is_within_root_impl(resolved_path, root):
+        reference = _get_dataset_salad_profiles().read().get("head_references", {}).get(str(head_id))
+        if not _path_is_within_root_impl(resolved_path, root) and not (reference and str(resolved_path) == reference.get("path")):
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_path_invalid")
     except HTTPException:
         raise
@@ -96412,32 +97191,75 @@ def _encode_local_salad_head_np(head: Any, patch_tokens: Any, global_token: Any 
     return feats.detach().float().cpu().numpy().astype(np.float32)
 
 
+def _get_dataset_salad_profiles():
+    from services.dataset_pruning_profiles import DatasetProfiles
+    return DatasetProfiles(_local_salad_head_root(create=False))
+
+
+def _register_local_salad_head_reference(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Register qualified completed artifacts without copying or rewriting checkpoints.
+
+    This internal bridge is intentionally not a public arbitrary-path endpoint.
+    The same registry, CPU loader, profile bundle and scope checks consume its alias.
+    """
+    from services.dataset_pruning_profiles import validate_head_reference, reference_file_state
+    reference = dict(payload.get("artifact_reference") or {})
+    path = validate_head_reference(reference)
+    evidence = reference.get("qualification_evidence")
+    if not isinstance(evidence, list) or not 1 <= len(evidence) <= 16:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="salad_reference_qualification_required")
+    for proof in evidence:
+        proof_path = Path(str(proof.get("path") or ""))
+        before = reference_file_state(proof_path)
+        if salad_sha256_file(proof_path) != proof.get("sha256") or reference_file_state(proof_path) != before:
+            raise HTTPException(status_code=HTTP_409_CONFLICT, detail="salad_reference_qualification_changed")
+    _head, metadata = load_local_salad_head_file(path, device_name="cpu")
+    validate_head_reference(reference)
+    with LOCAL_SALAD_HEAD_LOCK:
+        result = _get_dataset_salad_profiles().register_reference(payload, metadata)
+    # Protection is recoverable from the authoritative registry after a crash.
+    _get_storage_library_service().inventory.register_salad_profiles()
+    return result
+
+
 def _list_local_salad_heads() -> List[Dict[str, Any]]:
     entries: List[Dict[str, Any]] = []
     try:
         root = _local_salad_head_root(create=False)
     except HTTPException:
         return entries
-    if not root.exists():
-        return entries
-    for path in sorted(root.glob("*.pt")):
+    management = _get_dataset_salad_profiles().snapshot()
+    candidates = [(path.stem, path, None) for path in sorted(root.glob("*.pt"))]
+    candidates.extend((head_id, Path(reference.get("path") or ""), reference)
+                      for head_id, reference in sorted(management.get("head_references", {}).items()))
+    for head_id, path, reference in candidates:
         try:
-            if not _path_is_within_root_impl(path.resolve(), root):
+            if reference is None and not _path_is_within_root_impl(path.resolve(), root):
                 continue
         except Exception:
             continue
         entry: Dict[str, Any] = {
-            "id": path.stem,
+            "id": head_id,
             "filename": path.name,
-            "updated_at": path.stat().st_mtime,
+            "updated_at": path.stat().st_mtime if path.exists() else None,
             "status": "available",
         }
         try:
+            if reference is not None:
+                from services.dataset_pruning_profiles import validate_head_reference
+                validate_head_reference(reference)
+                entry["artifact_reference"] = {"head_sha256": reference["head_sha256"],
+                    "immutable": True, "original_profile_id": reference.get("historical_metadata", {}).get("id")}
             _head, metadata = load_local_salad_head_file(path, device_name="cpu")
+            if reference is not None:
+                validate_head_reference(reference)
             config = dict(metadata.get("config") or {})
             entry.update(
                 {
                     "label": metadata.get("label") or path.stem,
+                    "head_sha256": salad_sha256_file(path),
+                    "representation_scope": metadata.get("representation_scope") or "whole_image",
+                    "training_rng_receipt": metadata.get("training_rng_receipt"),
                     "encoder_type": metadata.get("encoder_type") or "dinov3",
                     "encoder_model": metadata.get("encoder_model") or "",
                     "cradio_pooling": metadata.get("cradio_pooling") or None,
@@ -96471,6 +97293,11 @@ def _list_local_salad_heads() -> List[Dict[str, Any]]:
             entry["status"] = f"unreadable:{_redact_public_path_text(exc)}"
             entry["label"] = path.stem
         entries.append(entry)
+    for entry in entries:
+        record = management["profiles"].get(entry["id"], {})
+        entry["display_label"] = record.get("display_label") or entry.get("label") or entry["id"]
+        entry["archived"] = bool(record.get("archived"))
+        entry["deployment_datasets"] = [identity for identity, association in management["datasets"].items() if entry["id"] in association.get("head_ids", [])]
     return entries
 
 
@@ -96561,8 +97388,17 @@ def _data_ingestion_reference_fingerprint(
                 stat_mtime_ns = stat_mtime_ns or int(stat_result.st_mtime_ns)
             except OSError:
                 pass
+        image_path = Path(str(row.get("image_path") or row.get("path") or ""))
+        before = image_path.stat()
+        image_sha256 = salad_sha256_file(image_path)
+        after = image_path.stat()
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+            raise HTTPException(status_code=HTTP_409_CONFLICT, detail="salad_training_reference_changed")
+        row["_salad_image_sha256"] = image_sha256
+        row["_salad_file_state"] = [after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns]
         rows.append(
             {
+                "image_sha256": image_sha256,
                 "filename": str(row.get("filename") or row.get("saved_name") or ""),
                 "source_type": str(row.get("source_type") or "image"),
                 "frame_index": _coerce_int(row.get("frame_index"), 0, minimum=0),
@@ -96575,10 +97411,13 @@ def _data_ingestion_reference_fingerprint(
                 "source_dataset_id": str(row.get("source_dataset_id") or ""),
             }
         )
+    ordered_digest = hashlib.sha256(json.dumps(rows, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
     rows.sort(key=lambda item: json.dumps(item, sort_keys=True, ensure_ascii=False))
     digest = hashlib.sha256(json.dumps(rows, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
     return {
-        "version": 1,
+        "version": 2,
+        "ordered_row_digest": ordered_digest,
+        "identity_policy": "image_bytes_sha256_with_producer_state_bracketing",
         "source": str(source or ""),
         "dataset_id": str(dataset_id or ""),
         "label": str(label or ""),
@@ -96609,6 +97448,12 @@ def _data_ingestion_profile_bundle_manifest(profile_id: str, metadata: Dict[str,
             "epochs",
             "batch_size",
             "salad_backend",
+            "representation_scope",
+            "training_signature",
+            "training_rng_receipt",
+            "seed",
+            "augmentation_profile",
+            "train_view_max_side",
             "created_at",
             "format",
             "policy",
@@ -96641,10 +97486,14 @@ def export_data_ingestion_reference_profile(profile_id: str):
     path = _local_salad_head_path(safe_profile_id)
     head_root = _local_salad_head_root(create=False)
     safe_path = _safe_existing_regular_file_within_root_impl(path, head_root)
+    if safe_path is None and safe_profile_id in _get_dataset_salad_profiles().read().get("head_references", {}):
+        safe_path = _local_salad_head_path(safe_profile_id)
     if safe_path is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="reference_profile_not_found")
     _head, metadata = _load_local_salad_head(safe_profile_id, device_name="cpu", backend="torch")
     profile_bytes = safe_path.read_bytes()
+    if safe_profile_id in _get_dataset_salad_profiles().read().get("head_references", {}):
+        _local_salad_head_path(safe_profile_id)  # Recheck protected reference after the bytes used by the bundle.
     manifest = _data_ingestion_profile_bundle_manifest(safe_profile_id, metadata)
     manifest_bytes = json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8")
     checksums = {
@@ -96828,6 +97677,8 @@ def _validate_local_salad_head_reference(head_id: str, request: Dict[str, Any]) 
     if not str(head_id or "").strip():
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_required")
     _head, metadata = _load_local_salad_head(head_id, device_name="cpu", backend="torch")
+    if metadata.get("representation_scope", "whole_image") != "whole_image":
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_scope_mismatch")
     if not _local_salad_head_reference_matches_request(metadata, request):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_reference_mismatch")
     return dict(metadata)
@@ -96835,6 +97686,61 @@ def _validate_local_salad_head_reference(head_id: str, request: Dict[str, Any]) 
 
 def _data_ingestion_canonical_json(value: Any) -> str:
     return json.dumps(json_sanitize(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _local_salad_producer_implementation_identity() -> Dict[str, Any]:
+    import inspect, marshal
+    functions = [_run_local_salad_training_job, _class_analysis_train_salad_head,
+                 _data_ingestion_train_view, _data_ingestion_apply_spatial_augments,
+                 _data_ingestion_apply_photometric_augments, _data_ingestion_apply_degradation_augments,
+                 _data_ingestion_load_augmented_pair, _data_ingestion_dinov3_tokens,
+                 _encode_mlx_dinov3_pil_images, _class_analysis_salad_training_plan,
+                 _data_ingestion_reference_fingerprint, _local_salad_encoder_identity, _embedding_make_crop_views]
+    return {**training_implementation_identity(),
+            "producer_functions": {fn.__name__: hashlib.sha256(marshal.dumps(inspect.unwrap(fn).__code__)).hexdigest() for fn in functions},
+            "embedding_recipe_sha256": salad_sha256_file(Path(__file__).parent / "utils" / "embedding_recipe.py"),
+            "crop_training_identity_sha256": salad_sha256_file(Path(__file__).parent / "utils" / "class_analysis_salad.py")}
+
+
+def _local_salad_encoder_identity(encoder_type: str, model_name: str, *, backend: str = "", pooling: str = "summary") -> Dict[str, Any]:
+    from services.dataset_pruning_cache import file_state
+    if encoder_type == "cradio":
+        runtime = cradio_runtime_identity(model_name, requested_backend=backend or None, pooling=pooling, output_mode="summary_and_spatial")
+        if not runtime.get("persistent_cache_safe"):
+            runtime["process_epoch"] = CLASS_ANALYSIS_UNRESOLVED_RUNTIME_EPOCH
+        return runtime
+    status = mlx_dinov3_status(model_name).to_dict()
+    resolved = backend or status.get("resolved") or "torch"
+    paths = []
+    if resolved == "mlx":
+        model_root = Path(status["model_dir"])
+        paths = [model_root / "config.json", model_root / "model.safetensors", Path(status["worker_path"])]
+    else:
+        try:
+            from huggingface_hub import try_to_load_from_cache
+            for filename in ("config.json", "preprocessor_config.json", "model.safetensors", "pytorch_model.bin"):
+                cached = try_to_load_from_cache(model_name, filename)
+                if isinstance(cached, str) and Path(cached).is_file():
+                    paths.append(Path(cached))
+        except Exception:
+            pass
+    artifacts = []
+    for path in paths:
+        if not path.is_file():
+            continue
+        before = file_state(path)
+        sha = salad_sha256_file(path)
+        if file_state(path) != before:
+            raise HTTPException(status_code=HTTP_409_CONFLICT, detail="salad_encoder_artifact_changed")
+        artifacts.append({"name": path.name, "sha256": sha, "bytes": before[2]})
+    safe = any(item["name"] in {"model.safetensors", "pytorch_model.bin"} for item in artifacts)
+    transport = str(os.environ.get("MLX_DINOV3_TRANSPORT", "safetensors_pixels")) if resolved == "mlx" else "transformers_processor"
+    return {"schema": "local-salad-dinov3-producer-v1", "encoder_model": model_name,
+            "resolved_backend": resolved, "artifacts": artifacts, "persistent_cache_safe": safe,
+            "dtype_policy": "converted_checkpoint_native_float32_outputs" if resolved == "mlx" else "loaded_backbone_parameter_dtype_float32_tokens",
+            "transport": transport, "input_policy": {"size": [224, 224], "resample": "BILINEAR", "pixels": "uint8_RGB"} if resolved == "mlx" and transport not in {"image_paths", "legacy"} else {"policy": "persisted_processor_or_worker_image_decode"},
+            "implementation_sha256": salad_sha256_file(Path(__file__).parent / "services" / "mlx_dinov3.py"),
+            "process_epoch": "" if safe else CLASS_ANALYSIS_UNRESOLVED_RUNTIME_EPOCH}
 
 
 def _local_salad_training_signature(
@@ -96852,10 +97758,17 @@ def _local_salad_training_signature(
     temperature: float,
     seed: int,
     salad_backend: str,
+    encoder_backend: str = "",
+    trainer_device: str = "",
 ) -> Dict[str, Any]:
     encoder_norm = str(encoder_type or "dinov3").strip().lower()
     return {
-        "format": LOCAL_SALAD_CACHE_VERSION,
+        "implementation": _local_salad_producer_implementation_identity(),
+        "scope": "whole_image",
+        "trainer_device": trainer_device or "unqualified_legacy",
+        "token_policy": "dinov3_patch_tokens_without_registers;cradio_spatial_tokens_global_width_fallback",
+        "runtime_identity": _local_salad_encoder_identity(encoder_norm, resolved_model, backend=encoder_backend, pooling=cradio_pooling),
+        "format": config.file_format,
         "policy": LOCAL_SALAD_POLICY,
         "trainer": LOCAL_SALAD_TRAINER,
         "augmentation_profile": LOCAL_SALAD_AUGMENTATION_PROFILE,
@@ -96885,20 +97798,18 @@ def _local_salad_training_signature_matches(metadata: Mapping[str, Any], signatu
 
 def _find_reusable_local_salad_head(training_signature: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     try:
-        root = _local_salad_head_root(create=False)
+        entries = _list_local_salad_heads()
     except HTTPException:
         return None
-    if not root.exists():
-        return None
-    paths = sorted(root.glob("*.pt"), key=lambda path: path.stat().st_mtime if path.exists() else 0.0, reverse=True)
-    for path in paths:
+    for entry in sorted(entries, key=lambda entry: entry.get('updated_at') or 0, reverse=True):
+        if entry.get('status') != 'available' or entry.get('archived'):
+            continue
         try:
-            if path.is_symlink() or not _path_is_within_root_impl(path.resolve(strict=True), root):
-                continue
-            _head, metadata = load_local_salad_head_file(path, device_name="cpu")
+            path = _local_salad_head_path(entry['id'])
+            _head, metadata = _load_local_salad_head(entry['id'], device_name="cpu", backend='torch')
             if _local_salad_training_signature_matches(metadata, training_signature):
                 return {
-                    "head_id": path.stem,
+                    "head_id": entry['id'],
                     "path": str(path),
                     "metadata": dict(metadata),
                 }
@@ -96922,7 +97833,7 @@ def _data_ingestion_capabilities() -> Dict[str, Any]:
         "default_cradio_pooling": "summary",
         "cradio_backend": _public_cradio_backend_capabilities(),
         "dinov3_backend": mlx_dinov3_status(CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL).to_dict(),
-        "local_salad_heads": _list_local_salad_heads(),
+        "local_salad_heads": [head for head in _list_local_salad_heads() if head.get("representation_scope", "whole_image") == "whole_image" and not head.get("archived")],
         "ffmpeg_available": bool(shutil.which("ffmpeg")),
         "image_exts": sorted(DATA_INGESTION_IMAGE_EXTS),
         "video_exts": sorted(DATA_INGESTION_VIDEO_EXTS),
@@ -96938,6 +97849,7 @@ def _data_ingestion_capabilities() -> Dict[str, Any]:
         ),
         "image_load_workers_max": worker_max,
         "salad_policy": "local_training_only",
+        "dataset_salad_profiles": _get_dataset_salad_profiles().snapshot(),
         "local_salad_policy": LOCAL_SALAD_POLICY,
         "local_salad_trainer": LOCAL_SALAD_TRAINER,
         "local_salad_augmentation_profile": LOCAL_SALAD_AUGMENTATION_PROFILE,
@@ -97199,6 +98111,7 @@ def _data_ingestion_transient_session_media_rows(
     field_name: str,
     max_count: int = 0,
     open_path: str = "",
+    _session_snapshot: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     sid = str(session_id or "").strip()
     raw_open_path = str(open_path or "").strip()
@@ -97207,7 +98120,7 @@ def _data_ingestion_transient_session_media_rows(
     session: Dict[str, Any] = {}
     if sid:
         try:
-            session = _resolve_transient_session(sid)
+            session = _session_snapshot if _session_snapshot is not None else _resolve_transient_session(sid)
         except HTTPException as exc:
             if exc.status_code not in {HTTP_404_NOT_FOUND, 410} or not raw_open_path:
                 raise
@@ -97390,13 +98303,19 @@ def _data_ingestion_reference_embedding_cache_entry(
         head_mtime_ns = int(head_stat.st_mtime_ns)
     except Exception:
         pass
+    from services.dataset_pruning_adapter import scene_recipe as _pruning_scene_recipe
+    from services.dataset_pruning_cache import file_state as _pruning_file_state
+    recipe = _pruning_scene_recipe(__import__("sys").modules[__name__],"local_salad",encoder_model,salad_head_id,cradio_pooling)
     row_payload = []
     for idx, row in enumerate(reference_rows):
         source_dataset_id = str(row.get("source_dataset_id") or "").strip()
         if not source_dataset_id:
             return None
+        pixel_path = Path(str(row.get("image_path") or row.get("path") or ""))
+        if not pixel_path.is_file(): return None
         row_payload.append(
             {
+                "file_state": _pruning_file_state(pixel_path),
                 "idx": idx,
                 "source_dataset_id": source_dataset_id,
                 "split": str(row.get("split") or ""),
@@ -97411,7 +98330,8 @@ def _data_ingestion_reference_embedding_cache_entry(
     ).hexdigest()
     spec = {
         "kind": "data_ingestion_reference_embeddings",
-        "version": 1,
+        "version": 2,
+        "pruning_scene_recipe": recipe,
         "local_salad_cache_version": LOCAL_SALAD_CACHE_VERSION,
         "salad_head_id": salad_head_id,
         "salad_head_size": head_size,
@@ -97826,6 +98746,8 @@ def _data_ingestion_encode_prepared_images(
     progress_start: float = 0.35,
     progress_end: float = 0.82,
     return_local_vendi: bool = False,
+    cradio_input_size: Optional[int] = None,
+    dinov3_pooling: str = 'pooler',
 ) -> np.ndarray | Tuple[np.ndarray, List[Dict[str, float]]]:
     if not prepared:
         if return_local_vendi:
@@ -97875,7 +98797,13 @@ def _data_ingestion_encode_prepared_images(
         batch_rows = prepared[start : start + resolved_batch]
         images: List[Image.Image] = []
         try:
-            if base_encoder == "dinov3" and is_mlx_dinov3_encoder(model_obj):
+            if base_encoder == 'dinov3' and encoder_norm != 'local_salad' and dinov3_pooling != 'pooler':
+                images = _data_ingestion_open_images_for_batch(batch_rows)
+                values = _encode_pil_batch_for_head(images, head={'encoder_type': 'dinov3', 'encoder_model': model_name,
+                    'embedding_aggregation': 'pooled', 'dinov3_pooling': dinov3_pooling, 'normalize_embeddings': True}, batch_size_override=resolved_batch)
+                if values is None: raise RuntimeError('DINOv3 pooled representation unavailable')
+                features.append(values)
+            elif base_encoder == "dinov3" and is_mlx_dinov3_encoder(model_obj):
                 arrays = _encode_mlx_dinov3_image_paths(
                     model_obj,
                     [str(row.get("image_path") or "") for row in batch_rows],
@@ -97908,6 +98836,11 @@ def _data_ingestion_encode_prepared_images(
             else:
                 images = _data_ingestion_open_images_for_batch(batch_rows)
                 if base_encoder == "cradio":
+                    if device_name == 'mlx':
+                        from utils.cradio_embedding import _resolve_cradio_mlx_image_size
+                        pruning_grid = cradio_input_size if cradio_input_size is not None else _resolve_cradio_mlx_image_size(images)
+                        pruning_grid = [pruning_grid, pruning_grid] if type(pruning_grid) is int else [pruning_grid[1], pruning_grid[0]]
+                        for row in batch_rows: row['pruning_encoded_grid'] = pruning_grid
                     pooling = normalize_cradio_pooling(
                         salad_meta.get("cradio_pooling") if encoder_norm == "local_salad" else cradio_pooling
                     )
@@ -97920,6 +98853,7 @@ def _data_ingestion_encode_prepared_images(
                             pooling=pooling,
                             normalize=False,
                             return_tokens=True,
+                            input_size=cradio_input_size,
                         )
                         if spatial_tokens.ndim != 3 or spatial_tokens.shape[1] <= 0:
                             raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="cradio_spatial_tokens_missing")
@@ -97946,6 +98880,7 @@ def _data_ingestion_encode_prepared_images(
                                 images,
                                 pooling=pooling,
                                 normalize=True,
+                                input_size=cradio_input_size,
                             )
                         )
                 else:
@@ -98026,6 +98961,7 @@ def _data_ingestion_encode_prepared_images(
     return encoded
 
 
+@_storage_library_guard
 def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
     try:
         out_dir = _data_ingestion_job_dir(job.job_id, create=True)
@@ -98094,6 +99030,19 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
         batch_size = _coerce_int(request.get("batch_size"), 16, minimum=1)
         local_vendi_enabled = _data_ingestion_local_vendi_enabled(request.get("local_vendi_enabled"))
         local_vendi_weight = _data_ingestion_local_vendi_weight(request.get("local_vendi_weight")) if local_vendi_enabled else 0.0
+        # Bind pruning publication to pixels and head/runtime before encoding.
+        from services.dataset_pruning_cache import file_state as _pruning_file_state
+        for pruning_row in [*candidates, *references]:
+            try:
+                pruning_row["pruning_file_state"] = _pruning_file_state(Path(pruning_row["image_path"]))
+            except OSError:
+                pruning_row["pruning_file_state"] = None # Publication is optional; the encoder owns unreadable-media errors.
+        try:
+            from services.dataset_pruning_adapter import scene_recipe as _pruning_scene_recipe
+            pruning_encoding_recipe = _pruning_scene_recipe(
+                __import__("sys").modules[__name__], encoder, salad_encoder_model, salad_head_id, salad_cradio_pooling)
+        except Exception:
+            pruning_encoding_recipe = None
         candidate_encoded = _data_ingestion_encode_prepared_images(
             candidates,
             job=job,
@@ -98317,6 +99266,27 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
                 else np.empty((0, 0), dtype=np.float32)
             )
         _class_analysis_write_npz(out_dir / "embeddings.npz", out_dir, **embedding_arrays)
+        # Publish descriptors already computed by ingestion for image-level
+        # pruning reuse. Cache publication must not fail an ingestion result.
+        try:
+            from services.dataset_pruning_adapter import publish_ingestion_descriptors
+            pruning_recipe = publish_ingestion_descriptors(
+                __import__("sys").modules[__name__], candidates, candidate_embeddings,
+                encoder, salad_encoder_model, salad_head_id, salad_cradio_pooling, expected_recipe=pruning_encoding_recipe,
+            )
+            publish_ingestion_descriptors(
+                __import__("sys").modules[__name__], references, reference_embeddings,
+                encoder, salad_encoder_model, salad_head_id, salad_cradio_pooling, expected_recipe=pruning_encoding_recipe,
+            )
+            if pruning_recipe:
+                result["summary"]["pruning_scene_recipe"] = pruning_recipe
+                for item in ranked_items:
+                    idx = int(item.get("index", -1))
+                    if 0 <= idx < len(candidates) and candidates[idx].get("image_sha256"):
+                        item["image_sha256"] = candidates[idx]["image_sha256"]
+                _class_analysis_write_json(result_path, out_dir, result)
+        except Exception:
+            logger.exception("Could not publish ingestion descriptors for pruning reuse")
         with DATA_INGESTION_JOBS_LOCK:
             job.result_path = str(result_path)
             _data_ingestion_update(job, status="completed", progress=1.0, message="Data ingestion analysis completed.", result=result)
@@ -98501,9 +99471,25 @@ def _data_ingestion_load_augmented_pair(
     left_seed: int,
     right_seed: int,
 ) -> Tuple[Image.Image, Image.Image]:
-    with _data_ingestion_open_image(Path(str(row.get("image_path") or ""))) as original:
-        left = _data_ingestion_train_view(original, random.Random(int(left_seed)))
-        right = _data_ingestion_train_view(original, random.Random(int(right_seed)))
+    image_path = Path(str(row.get("image_path") or ""))
+    expected_sha = str(row.get("_salad_image_sha256") or "")
+    if expected_sha:
+        # Decode the exact protected bytes whose SHA participates in the fit
+        # signature. A fingerprint of an earlier read cannot authorize new bytes.
+        raw = image_path.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != expected_sha:
+            raise HTTPException(status_code=HTTP_409_CONFLICT, detail="salad_training_reference_changed")
+        with Image.open(io.BytesIO(raw)) as loaded:
+            original = loaded.convert("RGB")
+        try:
+            left = _data_ingestion_train_view(original, random.Random(int(left_seed)))
+            right = _data_ingestion_train_view(original, random.Random(int(right_seed)))
+        finally:
+            original.close()
+    else:
+        with _data_ingestion_open_image(image_path) as original:
+            left = _data_ingestion_train_view(original, random.Random(int(left_seed)))
+            right = _data_ingestion_train_view(original, random.Random(int(right_seed)))
     return left, right
 
 
@@ -98584,6 +99570,7 @@ def _data_ingestion_dinov3_tokens(
     return patches, global_token
 
 
+@_storage_library_guard
 def _run_local_salad_training_job(job: DataIngestionJob) -> None:
     try:
         out_dir = _data_ingestion_job_dir(job.job_id, create=True)
@@ -98676,6 +99663,7 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
             token_dim=_coerce_int(request.get("token_dim"), 256, minimum=8),
             hidden_dim=_coerce_int(request.get("hidden_dim"), 512, minimum=64),
             dropout=_coerce_float(request.get("dropout"), 0.3, minimum=0.0, maximum=0.8),
+            patch_normalization=str(request.get("patch_normalization", "none")),
         )
         salad_backend = resolve_local_salad_backend(request.get("local_salad_backend"))
         learning_rate = _coerce_float(request.get("learning_rate"), 1e-4, minimum=1e-7)
@@ -98699,6 +99687,8 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
             temperature=temperature,
             seed=seed,
             salad_backend=salad_backend,
+            encoder_backend=device_name,
+            trainer_device="mlx" if salad_backend == "mlx" else salad_device_name,
         )
         force_rebuild = _env_bool("DATA_INGESTION_FORCE_PROFILE_REBUILD", False)
         raw_force_rebuild = request.get("force_rebuild_profile")
@@ -98733,139 +99723,144 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
                         result=result,
                     )
                 return
-        if salad_backend == "mlx":
-            head: Any = MLXLocalSALADHead(config)
-            optimizer = make_mlx_local_salad_optimizer(
-                learning_rate=learning_rate,
-                weight_decay=weight_decay,
-            )
-        else:
-            head = LocalSALADHead(config).to(salad_device_name)
-            head.train()
-            optimizer = torch.optim.AdamW(
-                head.parameters(),
-                lr=learning_rate,
-                weight_decay=weight_decay,
-            )
-        rng = random.Random(seed)
-        losses: List[float] = []
-        total_steps = max(1, epochs * math.ceil(len(prepared) / batch_size))
-        step = 0
-        view_workers = _data_ingestion_worker_count(media_workers, batch_size)
-        view_executor: Optional[ThreadPoolExecutor] = None
-        if view_workers > 1:
-            view_executor = ThreadPoolExecutor(max_workers=view_workers, thread_name_prefix="salad-train-view")
-        try:
-            for epoch in range(epochs):
-                if job.cancel_event.is_set():
-                    raise RuntimeError("cancelled")
-                order = list(range(len(prepared)))
-                rng.shuffle(order)
-                for start in range(0, len(order), batch_size):
-                    batch_ids = order[start : start + batch_size]
-                    if len(batch_ids) < 2:
-                        continue
-                    images_left: List[Image.Image] = []
-                    images_right: List[Image.Image] = []
-                    try:
-                        pair_specs = [
-                            (
-                                prepared[idx],
-                                rng.randrange(0, 2**32 - 1),
-                                rng.randrange(0, 2**32 - 1),
-                            )
-                            for idx in batch_ids
-                        ]
-                        if view_executor is not None:
-                            pairs = list(
-                                view_executor.map(
-                                    lambda spec: _data_ingestion_load_augmented_pair(*spec),
-                                    pair_specs,
+        with qualified_training_rng(seed, salad_backend) as training_rng_receipt:
+            if salad_backend == "mlx":
+                head: Any = MLXLocalSALADHead(config, seed=seed)
+                optimizer = make_mlx_local_salad_optimizer(
+                    learning_rate=learning_rate,
+                    weight_decay=weight_decay,
+                )
+            else:
+                head = LocalSALADHead(config, seed=seed).to(salad_device_name)
+                head.train()
+                optimizer = torch.optim.AdamW(
+                    head.parameters(),
+                    lr=learning_rate,
+                    weight_decay=weight_decay,
+                )
+            rng = random.Random(seed)
+            losses: List[float] = []
+            total_steps = max(1, epochs * math.ceil(len(prepared) / batch_size))
+            step = 0
+            view_workers = _data_ingestion_worker_count(media_workers, batch_size)
+            view_executor: Optional[ThreadPoolExecutor] = None
+            if view_workers > 1:
+                view_executor = ThreadPoolExecutor(max_workers=view_workers, thread_name_prefix="salad-train-view")
+            try:
+                for epoch in range(epochs):
+                    if job.cancel_event.is_set():
+                        raise RuntimeError("cancelled")
+                    order = list(range(len(prepared)))
+                    rng.shuffle(order)
+                    for start in range(0, len(order), batch_size):
+                        batch_ids = order[start : start + batch_size]
+                        if len(batch_ids) < 2:
+                            continue
+                        images_left: List[Image.Image] = []
+                        images_right: List[Image.Image] = []
+                        try:
+                            pair_specs = [
+                                (
+                                    prepared[idx],
+                                    rng.randrange(0, 2**32 - 1),
+                                    rng.randrange(0, 2**32 - 1),
                                 )
-                            )
-                        else:
-                            pairs = [_data_ingestion_load_augmented_pair(*spec) for spec in pair_specs]
-                        images_left = [left for left, _right in pairs]
-                        images_right = [right for _left, right in pairs]
-                        split_at = len(images_left)
-                        all_views = [*images_left, *images_right]
-                        if encoder_type == "cradio":
-                            _feats_all, patches_all_np, global_all_np = encode_cradio_images(
-                                model_obj,
-                                processor_obj,
-                                device_name,
-                                all_views,
-                                pooling=cradio_pooling,
-                                normalize=False,
-                                return_tokens=True,
-                            )
-                            patches_a_np, patches_b_np = patches_all_np[:split_at], patches_all_np[split_at:]
-                            global_a_np, global_b_np = global_all_np[:split_at], global_all_np[split_at:]
-                            if salad_backend == "mlx":
-                                patches_a, global_a = patches_a_np, global_a_np
-                                patches_b, global_b = patches_b_np, global_b_np
+                                for idx in batch_ids
+                            ]
+                            if view_executor is not None:
+                                pairs = list(
+                                    view_executor.map(
+                                        lambda spec: _data_ingestion_load_augmented_pair(*spec),
+                                        pair_specs,
+                                    )
+                                )
                             else:
-                                patches_a = torch.from_numpy(patches_a_np).to(salad_device_name)
-                                patches_b = torch.from_numpy(patches_b_np).to(salad_device_name)
-                                global_a = torch.from_numpy(global_a_np).to(salad_device_name)
-                                global_b = torch.from_numpy(global_b_np).to(salad_device_name)
-                        else:
-                            patches_all, global_all = _data_ingestion_dinov3_tokens(
-                                model_obj,
-                                processor_obj,
-                                device_name,
-                                all_views,
-                                return_numpy=salad_backend == "mlx",
-                                image_format="JPEG" if is_mlx_dinov3_encoder(model_obj) else "PNG",
-                            )
-                            patches_a, patches_b = patches_all[:split_at], patches_all[split_at:]
-                            global_a, global_b = global_all[:split_at], global_all[split_at:]
-                            if salad_backend != "mlx":
-                                patches_a = patches_a.to(salad_device_name)
-                                patches_b = patches_b.to(salad_device_name)
-                                global_a = global_a.to(salad_device_name)
-                                global_b = global_b.to(salad_device_name)
-                        if salad_backend == "mlx":
-                            loss_value = mlx_local_salad_train_step(
-                                head,
-                                optimizer,
-                                patches_a,
-                                global_a,
-                                patches_b,
-                                global_b,
-                                temperature=temperature,
-                                max_grad_norm=1.0,
-                            )
-                        else:
-                            optimizer.zero_grad(set_to_none=True)
-                            desc_a = head(patches_a, global_token=global_a)
-                            desc_b = head(patches_b, global_token=global_b)
-                            loss = symmetric_infonce_loss(desc_a, desc_b, temperature=temperature)
-                            loss.backward()
-                            torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0)
-                            optimizer.step()
-                            loss_value = float(loss.detach().cpu().item())
-                        losses.append(float(loss_value))
-                    finally:
-                        for img in [*images_left, *images_right]:
-                            try:
-                                img.close()
-                            except Exception:
-                                pass
-                    step += 1
-                    progress = 0.18 + 0.72 * (step / total_steps)
-                    recent = float(np.mean(losses[-10:])) if losses else 0.0
-                    stage = _local_salad_training_stage(progress)
-                    _data_ingestion_update(
-                        job,
-                        progress=progress,
-                        message=f"{stage} • epoch {epoch + 1}/{epochs}, step {step}/{total_steps}, loss {recent:.4f}",
-                    )
-        finally:
-            if view_executor is not None:
-                view_executor.shutdown(wait=True, cancel_futures=True)
+                                pairs = [_data_ingestion_load_augmented_pair(*spec) for spec in pair_specs]
+                            images_left = [left for left, _right in pairs]
+                            images_right = [right for _left, right in pairs]
+                            split_at = len(images_left)
+                            all_views = [*images_left, *images_right]
+                            if encoder_type == "cradio":
+                                _feats_all, patches_all_np, global_all_np = encode_cradio_images(
+                                    model_obj,
+                                    processor_obj,
+                                    device_name,
+                                    all_views,
+                                    pooling=cradio_pooling,
+                                    normalize=False,
+                                    return_tokens=True,
+                                )
+                                patches_a_np, patches_b_np = patches_all_np[:split_at], patches_all_np[split_at:]
+                                global_a_np, global_b_np = global_all_np[:split_at], global_all_np[split_at:]
+                                if salad_backend == "mlx":
+                                    patches_a, global_a = patches_a_np, global_a_np
+                                    patches_b, global_b = patches_b_np, global_b_np
+                                else:
+                                    patches_a = torch.from_numpy(patches_a_np).to(salad_device_name)
+                                    patches_b = torch.from_numpy(patches_b_np).to(salad_device_name)
+                                    global_a = torch.from_numpy(global_a_np).to(salad_device_name)
+                                    global_b = torch.from_numpy(global_b_np).to(salad_device_name)
+                            else:
+                                patches_all, global_all = _data_ingestion_dinov3_tokens(
+                                    model_obj,
+                                    processor_obj,
+                                    device_name,
+                                    all_views,
+                                    return_numpy=salad_backend == "mlx",
+                                    image_format="JPEG" if is_mlx_dinov3_encoder(model_obj) else "PNG",
+                                )
+                                patches_a, patches_b = patches_all[:split_at], patches_all[split_at:]
+                                global_a, global_b = global_all[:split_at], global_all[split_at:]
+                                if salad_backend != "mlx":
+                                    patches_a = patches_a.to(salad_device_name)
+                                    patches_b = patches_b.to(salad_device_name)
+                                    global_a = global_a.to(salad_device_name)
+                                    global_b = global_b.to(salad_device_name)
+                            if salad_backend == "mlx":
+                                loss_value = mlx_local_salad_train_step(
+                                    head,
+                                    optimizer,
+                                    patches_a,
+                                    global_a,
+                                    patches_b,
+                                    global_b,
+                                    temperature=temperature,
+                                    max_grad_norm=1.0,
+                                )
+                            else:
+                                optimizer.zero_grad(set_to_none=True)
+                                desc_a = head(patches_a, global_token=global_a)
+                                desc_b = head(patches_b, global_token=global_b)
+                                loss = symmetric_infonce_loss(desc_a, desc_b, temperature=temperature)
+                                loss.backward()
+                                torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0)
+                                optimizer.step()
+                                loss_value = float(loss.detach().cpu().item())
+                            losses.append(float(loss_value))
+                        finally:
+                            for img in [*images_left, *images_right]:
+                                try:
+                                    img.close()
+                                except Exception:
+                                    pass
+                        step += 1
+                        progress = 0.18 + 0.72 * (step / total_steps)
+                        recent = float(np.mean(losses[-10:])) if losses else 0.0
+                        stage = _local_salad_training_stage(progress)
+                        _data_ingestion_update(
+                            job,
+                            progress=progress,
+                            message=f"{stage} • epoch {epoch + 1}/{epochs}, step {step}/{total_steps}, loss {recent:.4f}",
+                        )
+            finally:
+                if view_executor is not None:
+                    view_executor.shutdown(wait=True, cancel_futures=True)
         if job.cancel_event.is_set():
             raise RuntimeError("cancelled")
+        for reference_row in prepared:
+            reference_path = Path(str(reference_row.get("image_path") or reference_row.get("path") or ""))
+            if salad_sha256_file(reference_path) != reference_row.get("_salad_image_sha256"):
+                raise HTTPException(status_code=HTTP_409_CONFLICT, detail="salad_training_reference_changed_before_publication")
         requested_name = str(request.get("head_name") or "").strip() or f"local_salad_{time.strftime('%Y%m%d_%H%M%S')}"
         with LOCAL_SALAD_HEAD_LOCK:
             if job.cancel_event.is_set():
@@ -98907,16 +99902,18 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
                 "temperature": temperature,
                 "seed": seed,
                 "training_signature": training_signature,
+                "training_rng_receipt": training_rng_receipt,
+                "representation_scope": "whole_image",
                 "salad_backend": salad_backend,
                 "loss_final": float(losses[-1]) if losses else None,
                 "loss_mean_last10": float(np.mean(losses[-10:])) if losses else None,
                 "created_at": time.time(),
-                "format": LOCAL_SALAD_CACHE_VERSION,
+                "format": config.file_format,
                 "policy": LOCAL_SALAD_POLICY,
                 "trainer": LOCAL_SALAD_TRAINER,
             }
             head_payload = {
-                "format": LOCAL_SALAD_CACHE_VERSION,
+                "format": config.file_format,
                 "config": config.to_dict(),
                 "state_dict": mlx_local_salad_state_dict(head) if is_mlx_local_salad_head(head) else head.cpu().state_dict(),
                 "metadata": metadata,
@@ -100002,42 +100999,7 @@ def delete_qwen_dataset(dataset_id: str):
         or Path(raw_id).is_absolute()
     ):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_id_invalid")
-    qwen_root = _qwen_dataset_storage_root(
-        create=False, detail="qwen_dataset_delete_forbidden"
-    )
-    dataset_path = qwen_root / raw_id
-    if dataset_path.is_symlink():
-        raise HTTPException(
-            status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_delete_forbidden"
-        )
-    try:
-        dataset_root = dataset_path.resolve(strict=True)
-    except Exception:
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_dataset_not_found") from None
-    if not dataset_root.exists() or not dataset_root.is_dir():
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_dataset_not_found")
-    if not _path_is_within_root_impl(dataset_root, qwen_root):
-        raise HTTPException(
-            status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_delete_forbidden"
-        )
-    blocking_registry = _active_job_registry_referencing_path_root(dataset_root)
-    if blocking_registry:
-        raise HTTPException(
-            status_code=HTTP_409_CONFLICT,
-            detail=f"qwen_dataset_delete_blocked_active_jobs:{blocking_registry}",
-        )
-    return _soft_delete_managed_dataset_tree(
-        dataset_path,
-        [QWEN_DATASET_ROOT],
-        dataset_id=raw_id,
-        entry={
-            "id": raw_id,
-            "label": raw_id,
-            "dataset_root": str(dataset_root),
-            "source": "qwen",
-            "storage_mode": "managed",
-        },
-    )
+    return delete_dataset_entry(raw_id, _root_id="qwen")
 
 
 def init_qwen_dataset_upload(run_name: Optional[str]) -> Dict[str, Any]:
@@ -102377,6 +103339,7 @@ def _calibration_prepass_worker(
 ## NOTE: calibration job runner uses *_impl directly to avoid wrapper drift.
 
 
+@_storage_library_guard
 def _run_prompt_helper_job(job: PromptHelperJob, payload: PromptHelperRequest) -> None:
     with PROMPT_HELPER_JOBS_LOCK:
         PROMPT_HELPER_JOBS[job.job_id] = job
@@ -102508,6 +103471,7 @@ def _run_prompt_helper_job(job: PromptHelperJob, payload: PromptHelperRequest) -
         job.updated_at = time.time()
 
 
+@_storage_library_guard
 def _run_prompt_helper_search_job(job: PromptHelperJob, payload: PromptHelperSearchRequest) -> None:
     with PROMPT_HELPER_JOBS_LOCK:
         PROMPT_HELPER_JOBS[job.job_id] = job
@@ -104897,6 +105861,7 @@ def _update_best_clip_head_sweep_summary(
     return best_summary, best_key or key
 
 
+@_storage_library_guard
 def _run_prompt_recipe_job(job: PromptHelperJob, payload: PromptRecipeRequest) -> None:
     with PROMPT_HELPER_JOBS_LOCK:
         PROMPT_HELPER_JOBS[job.job_id] = job
@@ -105064,6 +106029,7 @@ def _run_prompt_recipe_job(job: PromptHelperJob, payload: PromptRecipeRequest) -
         job.updated_at = time.time()
 
 
+@_storage_library_guard
 def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> None:
     """
     SAM3 Recipe Mining (steps mode).
@@ -106152,7 +107118,7 @@ def _register_job_and_start_thread(
     with lock:
         registry[job.job_id] = job
     try:
-        thread = threading.Thread(target=target, args=args, daemon=True, name=name)
+        thread = threading.Thread(target=_storage_library_guard(target), args=args, daemon=True, name=name)
         thread.start()
     except Exception:
         with lock:
@@ -106225,6 +107191,7 @@ def _cancel_agent_mining_job(job_id: str) -> AgentMiningJob:
     return job
 
 
+@_storage_library_guard
 def _run_auto_label_job(job: AutoLabelJob, payload: AutoLabelRequest) -> None:
     with AUTO_LABEL_JOBS_LOCK:
         AUTO_LABEL_JOBS[job.job_id] = job
@@ -108528,6 +109495,7 @@ def _save_sam3_config(cfg: OmegaConf, job_id: str) -> Tuple[str, Path]:
     return f"configs/generated/{config_file.name}", config_file
 
 
+@_storage_library_guard
 def _start_sam3_training_worker(
     job: Sam3TrainingJob,
     cfg: OmegaConf,
@@ -108781,7 +109749,7 @@ def _start_sam3_training_worker(
                 torch_module=torch,
             )
 
-    thread = threading.Thread(target=worker, name=f"sam3-train-{job.job_id}", daemon=True)
+    thread = threading.Thread(target=_storage_library_guard(worker), name=f"sam3-train-{job.job_id}", daemon=True)
     thread.start()
 
 
@@ -108843,6 +109811,7 @@ def _cleanup_rfdetr_run_dir(run_dir: Path) -> None:
     _cleanup_detector_run_dir(run_dir, RFDETR_JOB_ROOT)
 
 
+@_storage_library_guard
 def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
     def worker() -> None:
         run_dir = _yolo_run_dir_impl(
@@ -109136,7 +110105,7 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
                 }
             )
 
-    thread = threading.Thread(target=worker, name=f"yolo-train-{job.job_id}", daemon=True)
+    thread = threading.Thread(target=_storage_library_guard(worker), name=f"yolo-train-{job.job_id}", daemon=True)
     thread.start()
 
 
@@ -109612,10 +110581,11 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
             _persist_head_graft_meta()
             job.thread_ident = None
 
-    thread = threading.Thread(target=worker, name=f"yolo-graft-{job.job_id}", daemon=True)
+    thread = threading.Thread(target=_storage_library_guard(worker), name=f"yolo-graft-{job.job_id}", daemon=True)
     thread.start()
 
 
+@_storage_library_guard
 def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
     def worker() -> None:
         run_dir = _rfdetr_run_dir_impl(
@@ -109949,7 +110919,7 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                 time_fn=time.time,
             )
 
-    thread = threading.Thread(target=worker, name=f"rfdetr-train-{job.job_id}", daemon=True)
+    thread = threading.Thread(target=_storage_library_guard(worker), name=f"rfdetr-train-{job.job_id}", daemon=True)
     thread.start()
 
 
@@ -110941,6 +111911,7 @@ def _validate_job_exists(job_id: str) -> ClipTrainingJob:
         return job
 
 
+@_storage_library_guard
 def _start_training_worker(
     job: ClipTrainingJob,
     *,
@@ -111587,6 +112558,7 @@ async def start_clip_training(
     return {"job_id": job_id}
 
 
+@_storage_library_guard
 def _start_qwen_training_worker(job: QwenTrainingJob, config: QwenTrainingConfig) -> None:
     result_path = Path(config.result_path)
 
@@ -111656,7 +112628,7 @@ def _start_qwen_training_worker(job: QwenTrainingJob, config: QwenTrainingConfig
         finally:
             _finalize_qwen_training_environment()
 
-    thread = threading.Thread(target=worker, name=f"qwen-train-{job.job_id}", daemon=True)
+    thread = threading.Thread(target=_storage_library_guard(worker), name=f"qwen-train-{job.job_id}", daemon=True)
     thread.start()
 
 
@@ -120351,6 +121323,19 @@ def _class_analysis_annotation_transaction_manifest(
     )
 
 
+def _pruning_transient_session_snapshot(session_id: str) -> Dict[str, Any]:
+    """Pruning reads saved labels without renewing or publishing editor state."""
+    with DATASET_TRANSIENT_LOCK:
+        return _resolve_transient_session_locked(session_id, now=time.time(), touch=False)
+
+
+def _pruning_annotation_source_state(kind: str, source_id: str) -> Dict[str, Any]:
+    if kind == 'transient':
+        session = _pruning_transient_session_snapshot(source_id)
+        return {'labelmap': list(session.get('classes') or []), 'session_revision': int(session.get('_state_revision') or 0)}
+    return _class_analysis_annotation_transaction_source_state(kind, source_id)
+
+
 def _class_analysis_annotation_transaction_record(
     source_kind: str,
     source_id: str,
@@ -122701,6 +123686,30 @@ def recover_class_analysis_annotation_session(job_id: str, payload: Dict[str, An
         "labels_changed": bool(results),
     }
 
+
+_DATASET_PRUNING_SERVICE = None
+_DATASET_PRUNING_SERVICE_LOCK = threading.RLock()
+
+
+def _get_dataset_pruning_service():
+    global _DATASET_PRUNING_SERVICE
+    from services.dataset_pruning_adapter import TatorPruningAdapter
+    from services.dataset_pruning_jobs import PruningService
+    root = CLASS_ANALYSIS_ROOT / "pruning"
+    if _storage_path_has_symlink_component(root):
+        raise HTTPException(status_code=400, detail="pruning_storage_path_invalid")
+    with _DATASET_PRUNING_SERVICE_LOCK:
+        if _DATASET_PRUNING_SERVICE is None or _DATASET_PRUNING_SERVICE.root != root:
+            _DATASET_PRUNING_SERVICE = PruningService(root, TatorPruningAdapter(__import__("sys").modules[__name__]))
+        return _DATASET_PRUNING_SERVICE
+
+
+from api.dataset_pruning import build_dataset_pruning_router
+app.include_router(build_dataset_pruning_router(_get_dataset_pruning_service))
+
+app.include_router(build_storage_library_router(_get_storage_library_service))
+app.add_middleware(StorageLibraryMiddleware, service_factory=_get_storage_library_service,
+                   owns_request=_storage_library_owns_http_request)
 
 app.include_router(
     build_class_analysis_router(

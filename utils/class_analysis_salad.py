@@ -240,8 +240,9 @@ def class_analysis_salad_training_fingerprint(
     return _stable_digest(
         CLASS_ANALYSIS_SAM3_SALAD_FUSION_SCHEMA,
         seed,
-        settings.to_dict(),
+        {key: value for key, value in asdict(settings).items() if key != "weight"},
         identities,
+        "persistent_head_training_without_fusion_weight_v2",
     )
 
 

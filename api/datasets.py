@@ -524,6 +524,8 @@ def build_datasets_router(
     @router.post("/datasets/trash/{trash_id}/restore")
     def restore_dataset(trash_id: str, payload: dict = Body(None)):  # noqa: B008
         restore_id = (payload or {}).get("dataset_id")
+        if (payload or {}).get("root_id"):
+            return restore_fn(trash_id, restore_id, root_id=payload["root_id"])
         return restore_fn(trash_id, restore_id)
 
     @router.delete("/datasets/{dataset_id}")

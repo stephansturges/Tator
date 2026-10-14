@@ -15878,7 +15878,8 @@ def test_class_analysis_memmap_adjustment_streams_rank_deficient_rhs(
         chunk_size=9,
     )
 
-    assert actual_info == expected_info
+    # The streamed path also persists coefficients for later cache-only replay.
+    assert {key: value for key, value in actual_info.items() if key != "fitted_transform"} == expected_info
     assert np.allclose(actual, expected, rtol=3e-5, atol=3e-6)
     assert np.allclose(np.linalg.norm(actual, axis=1), 1.0, atol=2e-6)
     api._class_analysis_close_memmap_arrays(source, actual)
@@ -22191,7 +22192,7 @@ def test_class_analysis_corrupt_review_shard_reads_and_writes_closed(
     assert shard_path.read_text(encoding="utf-8") == "{not-json"
 
 
-def test_class_analysis_startup_cleanup_purges_runtime_but_preserves_audit_and_exports(
+def test_class_analysis_startup_cleanup_preserves_saved_work_audit_and_exports(
     tmp_path,
     monkeypatch,
 ):
@@ -22230,19 +22231,19 @@ def test_class_analysis_startup_cleanup_purges_runtime_but_preserves_audit_and_e
     api._class_analysis_startup_cleanup_worker()
 
     assert api.CLASS_ANALYSIS_STARTUP_CLEANUP_STATE["status"] == "completed"
-    assert not (class_root / "ca_old").exists()
-    assert not (class_root / "runtime").exists()
-    assert not (class_root / "analysis.sqlite").exists()
+    assert (class_root / "ca_old").is_dir()
+    assert (class_root / "runtime" / "state.json").is_file()
+    assert (class_root / "analysis.sqlite").read_bytes() == b"sqlite"
     assert cache_root.is_dir()
     assert (cache_root / "stale.bin").read_bytes() == b"cache"
-    assert (class_root / "audit" / "ca_old" / "review_1" / "events.jsonl").is_file()
+    assert (review_dir / "events.jsonl").is_file()
     assert review_ledger.read_text(encoding="utf-8") == '{"schema":"review-ledger"}'
     assert (class_root / "exports" / "keep.json").is_file()
     assert (class_root / "bench_reference" / "keep.json").is_file()
-    assert not (class_root / ".purge").exists()
+    assert (class_root / ".purge" / "interrupted" / "stale.bin").read_bytes() == b"stale"
 
 
-def test_class_analysis_disabled_startup_purge_restores_active_snapshot(
+def test_class_analysis_startup_cleanup_restores_snapshot_with_legacy_purge_disabled(
     tmp_path,
     monkeypatch,
 ):
@@ -22283,9 +22284,9 @@ def test_class_analysis_disabled_startup_purge_restores_active_snapshot(
         }
     )
 
-    api._start_class_analysis_startup_cleanup()
+    api._class_analysis_startup_cleanup_worker()
 
-    assert api.CLASS_ANALYSIS_STARTUP_CLEANUP_STATE["status"] == "disabled"
+    assert api.CLASS_ANALYSIS_STARTUP_CLEANUP_STATE["status"] == "completed"
     assert (
         api.CLASS_ANALYSIS_STARTUP_CLEANUP_STATE[
             "restored_active_snapshots"
@@ -22349,15 +22350,16 @@ def test_class_analysis_cache_budget_removes_oldest_files_only(
     monkeypatch,
 ):
     cache_root = tmp_path / "cache"
-    cache_root.mkdir()
-    oldest = cache_root / "oldest.npz"
-    newest = cache_root / "newest.npz"
+    (cache_root / "embeddings").mkdir(parents=True)
+    oldest = cache_root / "embeddings" / "oldest.npz"
+    newest = cache_root / "embeddings" / "newest.npz"
     oldest.write_bytes(b"a" * 80)
     newest.write_bytes(b"b" * 80)
     oldest.touch()
     newest.touch()
     os.utime(oldest, (1, 1))
     os.utime(newest, (2, 2))
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", tmp_path / "class_analysis")
     monkeypatch.setattr(api, "CLASS_ANALYSIS_CACHE_ROOT", cache_root)
     monkeypatch.setattr(api, "CLASS_ANALYSIS_CACHE_MAX_BYTES", 100)
 
@@ -22374,10 +22376,10 @@ def test_class_analysis_cache_budget_preserves_live_atomic_temp_files(
     monkeypatch,
 ):
     cache_root = tmp_path / "cache"
-    cache_root.mkdir()
-    live_temp = cache_root / "bank.npz.writer.tmp"
-    stale_temp = cache_root / "abandoned.npz.writer.tmp"
-    ordinary = cache_root / "ordinary.npz"
+    (cache_root / "embeddings").mkdir(parents=True)
+    live_temp = cache_root / "embeddings" / "bank.npz.writer.tmp"
+    stale_temp = cache_root / "embeddings" / "abandoned.npz.writer.tmp"
+    ordinary = cache_root / "embeddings" / "ordinary.npz"
     live_temp.write_bytes(b"l" * 80)
     stale_temp.write_bytes(b"s" * 20)
     ordinary.write_bytes(b"o" * 80)
@@ -22385,21 +22387,21 @@ def test_class_analysis_cache_budget_preserves_live_atomic_temp_files(
     os.utime(live_temp, (now, now))
     os.utime(stale_temp, (1, 1))
     os.utime(ordinary, (2, 2))
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", tmp_path / "class_analysis")
     monkeypatch.setattr(api, "CLASS_ANALYSIS_CACHE_ROOT", cache_root)
     monkeypatch.setattr(api, "CLASS_ANALYSIS_CACHE_MAX_BYTES", 100)
-    monkeypatch.setattr(
-        api,
-        "CLASS_ANALYSIS_CACHE_STALE_TEMP_SECONDS",
-        60,
-    )
-
-    result = api._class_analysis_enforce_cache_budget()
+    service = api._get_storage_library_service()
+    lease = service.library.create_lease(paths=[live_temp], purpose="cache_writer")
+    try:
+        result = api._class_analysis_enforce_cache_budget()
+    finally:
+        service.library.release(lease["lease_id"], lease["lease_token"])
 
     assert live_temp.read_bytes() == b"l" * 80
     assert not stale_temp.exists()
     assert not ordinary.exists()
     assert result["bytes"] == 80
-    assert result["files"] == 1
+    assert result["removed_bytes"] == 100
 
 
 def test_class_analysis_stream_encoder_bounds_batches_and_reuses_image_packs(
@@ -23453,7 +23455,7 @@ def test_class_analysis_exact_neighbor_search_honors_cancellation():
         )
 
 
-def test_class_analysis_startup_cleanup_fails_closed_on_symlinked_audit_root(
+def test_class_analysis_startup_cleanup_keeps_symlinked_audit_root_unmodified(
     tmp_path,
     monkeypatch,
 ):
@@ -23484,8 +23486,9 @@ def test_class_analysis_startup_cleanup_fails_closed_on_symlinked_audit_root(
     try:
         api._class_analysis_startup_cleanup_worker()
 
-        assert api.CLASS_ANALYSIS_STARTUP_CLEANUP_STATE["status"] == "failed"
-        assert api.CLASS_ANALYSIS_STARTUP_CLEANUP_STATE["error"] == "class_analysis_audit_root_invalid"
+        assert api.CLASS_ANALYSIS_STARTUP_CLEANUP_STATE["status"] == "completed"
+        assert api.CLASS_ANALYSIS_STARTUP_CLEANUP_STATE["error"] is None
+        assert (class_root / "audit").is_symlink()
         assert list(outside.iterdir()) == []
     finally:
         api.CLASS_ANALYSIS_STARTUP_CLEANUP_STATE.clear()
@@ -23499,15 +23502,22 @@ def test_class_analysis_cleanup_deletion_does_not_block_new_analysis(
     original_cleanup_state = dict(api.CLASS_ANALYSIS_STARTUP_CLEANUP_STATE)
     class_root = tmp_path / "class_analysis"
     cache_root = class_root / "cache"
-    cache_root.mkdir(parents=True)
-    (cache_root / "stale.bin").write_bytes(b"cache")
+    cached_unit = cache_root / "embeddings" / "old"
+    cached_unit.mkdir(parents=True)
+    (cached_unit / "stale.bin").write_bytes(b"cache")
     monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", class_root)
     monkeypatch.setattr(api, "CLASS_ANALYSIS_CACHE_ROOT", cache_root)
-    monkeypatch.setattr(
-        api,
-        "_class_analysis_delete_quarantined",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("delete interrupted")),
-    )
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_CACHE_MAX_BYTES", 0)
+    import services.storage_library_operations as storage_operations
+
+    original_remove = storage_operations.shutil.rmtree
+
+    def interrupted_removal(path, *args, **kwargs):
+        if Path(path).name.startswith(".tator-delete-"):
+            raise RuntimeError("delete interrupted")
+        return original_remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(storage_operations.shutil, "rmtree", interrupted_removal)
     api.CLASS_ANALYSIS_STARTUP_CLEANUP_STATE.clear()
     api.CLASS_ANALYSIS_STARTUP_CLEANUP_STATE.update(
         {
@@ -23523,9 +23533,17 @@ def test_class_analysis_cleanup_deletion_does_not_block_new_analysis(
     try:
         api._class_analysis_startup_cleanup_worker()
 
-        assert api.CLASS_ANALYSIS_STARTUP_CLEANUP_STATE["status"] == "deletion_failed"
+        assert api.CLASS_ANALYSIS_STARTUP_CLEANUP_STATE["status"] == "completed"
         assert api.CLASS_ANALYSIS_STARTUP_CLEANUP_STATE["ready_at"] is not None
-        assert api.CLASS_ANALYSIS_STARTUP_CLEANUP_STATE["error"] == "delete interrupted"
+        service = api._get_storage_library_service()
+        connection = service.library.connect()
+        try:
+            operation_id = connection.execute("SELECT id FROM operations WHERE kind='cleanup'").fetchone()[0]
+        finally:
+            connection.close()
+        operation = service.get_operation(operation_id)
+        assert operation["state"] == "partial_failed"
+        assert operation["error"]["message"] == "delete interrupted"
         assert cache_root.is_dir()
         api._class_analysis_require_cleanup_complete()
     finally:
@@ -23546,7 +23564,6 @@ def test_class_analysis_cleanup_supports_external_persistent_cache(
     cache_file.write_bytes(b"cache")
     monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", class_root)
     monkeypatch.setattr(api, "CLASS_ANALYSIS_CACHE_ROOT", cache_root)
-    monkeypatch.setattr(api, "_class_analysis_delete_quarantined", lambda *_args: None)
     api.CLASS_ANALYSIS_STARTUP_CLEANUP_STATE.clear()
     api.CLASS_ANALYSIS_STARTUP_CLEANUP_STATE.update(
         {

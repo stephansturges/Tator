@@ -728,6 +728,8 @@
     const TAB_LABELING = "labeling";
     const TAB_DATA_INGESTION = "data-ingestion";
     const TAB_CLASS_SPLIT = "class-split";
+    const TAB_DATASET_PRUNING = "dataset-pruning";
+    let datasetPruningExplorer = null;
     const TAB_PREPASS_BUILDER = "prepass-builder";
     const TAB_TRAINING = "training";
     const TAB_QWEN_TRAIN = "qwen-train";
@@ -846,6 +848,7 @@
         TAB_LABELING,
         TAB_DATA_INGESTION,
         TAB_CLASS_SPLIT,
+        TAB_DATASET_PRUNING,
         TAB_PREPASS_BUILDER,
         TAB_TRAINING,
         TAB_QWEN_TRAIN,
@@ -862,6 +865,95 @@
         TAB_PREDICTORS,
         TAB_SETTINGS,
     ]);
+
+    // Capture ownership before an asynchronous save/retry can yield. Headers
+    // fence a replacement server even when it reuses dataset and lock IDs.
+    function dqeCaptureRequest() {
+        const apiRoot = API_ROOT;
+        const backendId = annotationSourceState?.apiRoot === apiRoot && annotationSourceState?.backendId
+            ? annotationSourceState.backendId
+            : (datasetPruningBackendBinding?.apiRoot === apiRoot ? datasetPruningBackendBinding.backendId : "");
+        const loadToken = annotationSourceState?.loadToken;
+        const generation = classSplitState?.analysisGeneration;
+        return {
+            apiRoot, backendId, loadToken,
+            isCurrent: () => API_ROOT === apiRoot && (dqeSessionStore?.getBackend() || "") === backendId
+                && annotationSourceState?.loadToken === loadToken && classSplitState?.analysisGeneration === generation,
+            fetch(url, options = {}) {
+                const headers = new Headers(options.headers || (url instanceof Request ? url.headers : undefined));
+                const method = String(options.method || (url instanceof Request ? url.method : "GET")).toUpperCase();
+                const target = new URL(url instanceof Request ? url.url : url, window.location.href);
+                const owner = new URL(apiRoot);
+                if (!["GET", "HEAD", "OPTIONS"].includes(method) && backendId
+                    && target.origin === owner.origin && target.pathname.startsWith(`${owner.pathname.replace(/\/$/, "")}/`)
+                    && !headers.has("X-Tator-Backend-Id")) headers.set("X-Tator-Backend-Id", backendId);
+                return window.fetch(url, { ...options, headers });
+            },
+        };
+    }
+
+    function fetch(url, options) {
+        return dqeCaptureRequest().fetch(url, options);
+    }
+
+    const dqeSessionStore = window.TatorDqeSessionStore?.create();
+
+    // Pruning needs a verified persistent server identity without loading the
+    // independent DQE Library or replacing the existing annotation workspace.
+    let datasetPruningBackendBinding = null;
+    let datasetPruningVerifiedRoot = "";
+    let datasetPruningBackendCheck = null;
+    let datasetPruningBackendSequence = 0;
+
+    function datasetPruningVerifiedApiRoot() {
+        return datasetPruningVerifiedRoot === API_ROOT
+            && datasetPruningBackendBinding?.apiRoot === API_ROOT
+            && datasetPruningBackendBinding.backendId === dqeSessionStore?.getBackend()
+            ? API_ROOT : "";
+    }
+
+    async function verifyDatasetPruningBackend() {
+        const apiRoot = API_ROOT;
+        if (!apiRoot || !dqeSessionStore) {
+            throw new Error("Connect a backend before opening dataset pruning.");
+        }
+        if (datasetPruningBackendCheck?.apiRoot === apiRoot) {
+            return datasetPruningBackendCheck.promise;
+        }
+        const sequence = ++datasetPruningBackendSequence;
+        const expectedBackend = datasetPruningBackendBinding?.apiRoot === apiRoot
+            ? datasetPruningBackendBinding.backendId : "";
+        const isCurrent = () => sequence === datasetPruningBackendSequence && API_ROOT === apiRoot;
+        const promise = (async () => {
+            const response = await window.fetch(`${apiRoot}/storage/library/summary`, {
+                cache: "no-store",
+                headers: expectedBackend ? { "X-Tator-Backend-Id": expectedBackend } : {},
+            });
+            const summary = await response.json();
+            if (!isCurrent()) throw new DOMException("The selected backend changed.", "AbortError");
+            if (!response.ok) {
+                throw new Error(typeof summary.detail === "string" ? summary.detail
+                    : summary.detail?.message || `Backend identity check failed (HTTP ${response.status}).`);
+            }
+            if (Number(summary.api_version) !== 1 || typeof summary.backend_id !== "string" || !summary.backend_id.trim()) {
+                throw new Error("This backend cannot verify the persistent identity required by dataset pruning.");
+            }
+            if (expectedBackend && summary.backend_id !== expectedBackend) {
+                throw new Error("The backend identity changed. Reload the page and reopen the dataset before pruning.");
+            }
+            dqeSessionStore.setBackend(summary.backend_id);
+            datasetPruningBackendBinding = { apiRoot, backendId: summary.backend_id };
+            datasetPruningVerifiedRoot = apiRoot;
+            return datasetPruningBackendBinding;
+        })().catch((error) => {
+            if (isCurrent()) datasetPruningVerifiedRoot = "";
+            throw error;
+        }).finally(() => {
+            if (datasetPruningBackendCheck?.sequence === sequence) datasetPruningBackendCheck = null;
+        });
+        datasetPruningBackendCheck = { apiRoot, sequence, promise };
+        return promise;
+    }
 
     function readDataQualityExplorerSession() {
         try {
@@ -21444,6 +21536,7 @@ async function cancelRfDetrTrainingJobRequest() {
         tabElements.labelingButton = document.getElementById("tabLabelingButton");
         tabElements.dataIngestionButton = document.getElementById("tabDataIngestionButton");
         tabElements.classSplitButton = document.getElementById("tabClassSplitButton");
+        tabElements.datasetPruningButton = document.getElementById("tabDatasetPruningButton");
         tabElements.prepassBuilderButton = document.getElementById("tabPrepassBuilderButton");
         tabElements.trainingButton = document.getElementById("tabTrainingButton");
         tabElements.qwenTrainButton = document.getElementById("tabQwenTrainButton");
@@ -21462,6 +21555,7 @@ async function cancelRfDetrTrainingJobRequest() {
         tabElements.labelingPanel = document.getElementById("tabLabeling");
         tabElements.dataIngestionPanel = document.getElementById("tabDataIngestion");
         tabElements.classSplitPanel = document.getElementById("tabClassSplit");
+        tabElements.datasetPruningPanel = document.getElementById("tabDatasetPruning");
         tabElements.prepassBuilderPanel = document.getElementById("tabPrepassBuilder");
         tabElements.trainingPanel = document.getElementById("tabTraining");
         tabElements.qwenTrainPanel = document.getElementById("tabQwenTrain");
@@ -21481,6 +21575,12 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function handleTopTabNavigationClick(event) {
+        if (event.target?.closest?.("[data-pruning-open-tab]")) {
+            event.preventDefault(); event.stopPropagation(); bindTabNavigationElements(); setActiveTab(TAB_DATASET_PRUNING); return;
+        }
+        if (event.target?.closest?.("[data-pruning-open-profiles]") && !datasetPruningExplorer) {
+            event.preventDefault(); event.stopPropagation(); initClassSplitExplorer(); void datasetPruningExplorer?.openProfiles(); return;
+        }
         const button = event.target && event.target.closest ? event.target.closest(".tab-button[data-tab]") : null;
         if (!button || button.disabled) {
             return;
@@ -21512,6 +21612,7 @@ async function cancelRfDetrTrainingJobRequest() {
         if (tabElements.dataIngestionButton) {
             tabElements.dataIngestionButton.addEventListener("click", () => setActiveTab(TAB_DATA_INGESTION));
         }
+        tabElements.datasetPruningButton?.addEventListener("click", () => setActiveTab(TAB_DATASET_PRUNING));
         if (tabElements.classSplitButton) {
             tabElements.classSplitButton.addEventListener("click", () => setActiveTab(TAB_CLASS_SPLIT));
         }
@@ -21575,6 +21676,8 @@ async function cancelRfDetrTrainingJobRequest() {
         if (tabElements.dataIngestionButton) {
             tabElements.dataIngestionButton.classList.toggle("active", tabName === TAB_DATA_INGESTION);
         }
+        tabElements.datasetPruningButton?.classList.toggle("active", tabName === TAB_DATASET_PRUNING);
+        tabElements.datasetPruningPanel?.classList.toggle("active", tabName === TAB_DATASET_PRUNING);
         if (tabElements.classSplitButton) {
             tabElements.classSplitButton.classList.toggle("active", tabName === TAB_CLASS_SPLIT);
         }
@@ -21690,6 +21793,10 @@ async function cancelRfDetrTrainingJobRequest() {
                     console.error("Failed to load active training job", error);
                 });
             }
+        }
+        if (tabName === TAB_DATASET_PRUNING) {
+            initClassSplitExplorer();
+            void datasetPruningExplorer?.activate();
         }
         if (tabName === TAB_CLASS_SPLIT) {
             initClassSplitExplorer();
@@ -80343,12 +80450,21 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             const sessionBytes = Number(payload.recoverable_session_bytes) || 0;
             const sessionCount = Number(payload.recoverable_session_count) || 0;
             const over = Number(payload.over_budget_bytes) || 0;
-            status.textContent = [
+            const libraryPolicy = payload.storage_library_api_version === 1;
+            status.textContent = libraryPolicy ? [
+                `${formatBytes(payload.managed_bytes || 0)} reusable cache · ${formatBytes(budget)} budget`,
+                `${formatBytes(sessionBytes)} saved review data retained`,
+                payload.measurement_status === "complete" ? "Measured" : "Measurement incomplete",
+                over > 0 ? `${formatBytes(over)} over cache budget; active and kept data retained` : "Saved work requires explicit removal",
+            ].join(" • ") : [
                 `${formatBytes(total)} of ${formatBytes(budget)} generated data`,
                 `${formatBytes(cacheBytes)} reusable cache`,
                 `${formatBytes(sessionBytes)} in ${sessionCount} recoverable session${sessionCount === 1 ? "" : "s"}`,
                 over > 0 ? `${formatBytes(over)} over budget; pinned data is retained` : "latest session pinned",
             ].join(" • ");
+            if (classSplitElements.cacheBudgetSave) classSplitElements.cacheBudgetSave.title = libraryPolicy
+                ? "Applies to unused reusable cache. Saved datasets and reviews are retained until explicitly removed."
+                : "This older backend applies its generated-data budget to cache and recoverable sessions; its latest session is retained.";
             status.dataset.tone = over > 0 ? "warn" : "success";
             if (classSplitElements.cacheBudgetGiB && budget > 0) {
                 classSplitElements.cacheBudgetGiB.value = String(Math.round(budget / 1024 ** 3));
@@ -80373,7 +80489,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
     async function saveClassAnalysisCacheBudget() {
         const raw = Number(classSplitElements.cacheBudgetGiB?.value);
         if (!Number.isFinite(raw) || raw < 1 || raw > 4096) {
-            setClassSplitJobStatus("Generated-data budget must be between 1 and 4096 GiB.", "warn");
+            setClassSplitJobStatus("Cache budget must be between 1 and 4096 GiB.", "warn");
             return;
         }
         setClassAnalysisCacheControlsBusy(true);
@@ -80392,7 +80508,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             setClassAnalysisCacheControlsBusy(false);
             return;
         }
-        setClassSplitJobStatus(`Generated-data budget set to ${Math.round(raw)} GiB.`, "success");
+        setClassSplitJobStatus(`Cache budget set to ${Math.round(raw)} GiB.`, "success");
         await refreshClassAnalysisCacheStatus();
     }
 
@@ -80410,9 +80526,11 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             const detail = await response.text();
             if (!response.ok) throw new Error(parseApiError(detail, `HTTP ${response.status}`));
             const payload = parseJsonObjectSafe(detail, {});
+            const pending = payload.status === "queued" || payload.operation_state === "queued" || payload.operation_state === "running";
             setClassSplitJobStatus(
-                `Regenerable cache cleared; reclaimed ${formatBytes(Number(payload.bytes_reclaimed) || 0)}.`,
-                "success"
+                pending ? "Cache cleanup queued on the backend. Refresh usage after it finishes."
+                    : `Regenerable cache cleared; removed ${formatBytes(Number(payload.bytes_reclaimed) || 0)}.`,
+                pending ? "" : "success"
             );
         } catch (error) {
             setClassSplitJobStatus(`Cache clear failed: ${error.message || error}`, "error");
@@ -80441,6 +80559,52 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             return;
         }
         classSplitState.initialized = true;
+        datasetPruningExplorer = window.TatorDatasetPruning?.create({
+            verifyBackend: verifyDatasetPruningBackend,
+            context: () => {
+                const base = getClassSplitAnnotationExportBase();
+                const transient = base.match(/\/datasets\/transient\/([^/]+)\/annotation$/);
+                const linked = base.match(/\/datasets\/([^/]+)\/annotation$/);
+                return {
+                    apiRoot: datasetPruningVerifiedApiRoot(),
+                    backendId: datasetPruningVerifiedApiRoot() ? dqeSessionStore.getBackend() : "",
+                    datasetName: String(annotationSourceState.datasetLabel || ""),
+                    analysisJobId: String(classSplitState.currentJobId || ""),
+                    annotationSource: transient ? { kind: "transient", id: decodeURIComponent(transient[1]) }
+                        : linked ? { kind: "dataset", id: decodeURIComponent(linked[1]) } : null,
+                    revision: getClassSplitAnnotationSessionRevision(),
+                };
+            },
+            checkpoint: async () => {
+                await verifyDatasetPruningBackend();
+                if (classSplitState.currentJobId && classSplitState.result) {
+                    await saveClassSplitSessionState({ forDownload: true });
+                    return;
+                }
+                // Pruning can obtain descriptors from the shared producer
+                // without creating an unrelated DQE ranking/projection job.
+                await flushAnnotationSnapshot({ manual: true });
+                await waitForClassSplitSessionPersistenceIdle();
+                if (annotationSourceState.dirtyRecordsByKey.size || annotationSourceState.saveInFlight) {
+                    throw new Error("Save the current annotations before dataset pruning.");
+                }
+                if (!Number.isSafeInteger(getClassSplitAnnotationSessionRevision())) {
+                    throw new Error("Attach the dataset annotation workspace before dataset pruning.");
+                }
+            },
+            getRecipe: () => classSplitState.lastRequest || {},
+            openDQE: () => setActiveTab(TAB_CLASS_SPLIT),
+            openIngestionProfiles: () => { setActiveTab(TAB_DATA_INGESTION); document.getElementById("dataIngestionHeadName")?.focus(); },
+            profileContext: () => {
+                const selected = activeTab === TAB_DATA_INGESTION ? getDataIngestionReferenceDatasetId()
+                    : activeTab === TAB_DATASETS ? String(datasetManagerElements.pathDatasetId?.value || datasetManagerElements.glossaryDatasetSelect?.value || "").trim() : "";
+                if (selected) return {kind: "dataset", id: selected};
+                const base = getClassSplitAnnotationExportBase();
+                const transient = base.match(/\/datasets\/transient\/([^/]+)\/annotation$/);
+                const linked = base.match(/\/datasets\/([^/]+)\/annotation$/);
+                return transient ? {kind: "transient", id: decodeURIComponent(transient[1])} : linked ? {kind: "dataset", id: decodeURIComponent(linked[1])} : null;
+            },
+        });
         classSplitElements.datasetStatus = document.getElementById("classSplitDatasetStatus");
         classSplitElements.sessionRestore = document.getElementById("classSplitSessionRestore");
         classSplitElements.sessionRestoreButton = document.getElementById("classSplitSessionRestoreButton");

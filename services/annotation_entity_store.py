@@ -106,6 +106,55 @@ def default_annotation_entity_store_path() -> Path:
     return state_root / "annotation_entities.sqlite3"
 
 
+def _storage_recovery_counts(connection, job_ids: list[str]) -> dict[str, int]:
+    """Read only unresolved writes, without loading their potentially large payloads."""
+    if not job_ids:
+        return {"pending_operations": 0, "pending_batches": 0}
+    slots = ",".join("?" for _ in job_ids)
+    operations = connection.execute(
+        f"SELECT COUNT(*) FROM annotation_entity_transactions WHERE job_id IN ({slots}) "
+        "AND status NOT IN ('complete','conflict','rejected','superseded','legacy_unrecoverable')",
+        job_ids,
+    ).fetchone()[0]
+    batches = connection.execute(
+        f"SELECT COUNT(*) FROM annotation_operation_batches WHERE job_id IN ({slots}) "
+        "AND state NOT IN ('complete','partial','cancelled','conflict')",
+        job_ids,
+    ).fetchone()[0]
+    return {"pending_operations": int(operations), "pending_batches": int(batches)}
+
+
+def inspect_storage_recovery(
+    *,
+    path: Path | None = None,
+    job_id: str = "",
+    source_mode: str = "",
+    source_id: str = "",
+) -> dict[str, Any]:
+    """Passive management read: never create/migrate a user's entity database."""
+    store_path = path or default_annotation_entity_store_path()
+    if not store_path.exists():
+        return {"pending_operations": 0, "pending_batches": 0, "job_ids": []}
+    if store_path.is_symlink():
+        raise ValueError("annotation_storage_path_unsafe")
+    connection = sqlite3.connect(store_path.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        jobs = {str(job_id)} if job_id else set()
+        if source_mode and source_id:
+            jobs.update(str(row[0]) for row in connection.execute(
+                "SELECT job_id FROM annotation_source_analysis_bindings "
+                "WHERE source_mode=? AND source_id=? UNION "
+                "SELECT job_id FROM annotation_entity_transactions "
+                "WHERE source_mode=? AND source_id=? UNION "
+                "SELECT job_id FROM annotation_operation_batches "
+                "WHERE source_mode=? AND source_id=?",
+                (source_mode, source_id, source_mode, source_id, source_mode, source_id),
+            ))
+        return {**_storage_recovery_counts(connection, sorted(jobs)), "job_ids": sorted(jobs)}
+    finally:
+        connection.close()
+
+
 class AnnotationEntityStore:
     def __init__(self, path: str | Path | None = None) -> None:
         self.path = Path(path or default_annotation_entity_store_path())
@@ -1007,6 +1056,35 @@ class AnnotationEntityStore:
         if operation is None:
             raise RuntimeError("conflicted annotation transaction was not readable")
         return operation
+
+    def remove_saved_review(self, job_id: str) -> dict[str, int]:
+        """Remove one explicitly discarded review, retaining shared source records.
+
+        Dataset annotations and source entity identities can be used by another
+        analysis. Only job-owned receipts/bindings and terminal batches are removed.
+        The storage coordinator owns the surrounding source and filesystem leases.
+        """
+        if not job_id:
+            raise ValueError("annotation_storage_job_required")
+        counts: dict[str, int] = {}
+        with self.transaction() as connection:
+            pending = _storage_recovery_counts(connection, [str(job_id)])
+            if any(pending.values()):
+                raise ValueError("annotation_storage_recovery_pending")
+            connection.execute(
+                "DELETE FROM annotation_operation_batch_items WHERE batch_id IN "
+                "(SELECT batch_id FROM annotation_operation_batches WHERE job_id=?)",
+                (str(job_id),),
+            )
+            for table in (
+                "annotation_operation_batches", "analysis_point_entities",
+                "annotation_entity_transactions", "annotation_job_sources",
+                "annotation_source_analysis_bindings",
+            ):
+                counts[table] = connection.execute(
+                    f"DELETE FROM {table} WHERE job_id=?", (str(job_id),)
+                ).rowcount
+        return counts
 
     def list_operations(
         self,

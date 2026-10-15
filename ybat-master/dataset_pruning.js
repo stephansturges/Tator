@@ -1295,9 +1295,12 @@
                 begin(adapters.context()); message(error.message, true); return false;
             }
         }
-        async function openProfiles() {
+        async function openProfiles(refreshOf = null) {
+            const stillRequested = () => !refreshOf || (state.dialog === refreshOf && refreshOf.open);
             if (!await verifyBackend()) return;
+            if (!stillRequested()) return;
             if (!state.initialized && !state.busy && !state.exporting) await restore();
+            if (!stillRequested()) return;
             const context = begin(adapters.context());
             const target = adapters.profileContext?.() || context.annotationSource; const identity = target?.kind && target?.id ? `${target.kind}:${target.id}` : sourceKey(context);
             if (!context.apiRoot || !identity) { message("Choose a dataset on a connected backend before managing its profiles.", true); return; }
@@ -1345,7 +1348,7 @@
             const prefActions = h("div", "pruning-inline"), scene = button("Use draft whole-image recipe by default", () => saveRecipe("whole_image")), object = button("Use draft object recipe by default", () => saveRecipe("bbox_crop"));
             scene.dataset.mutation = object.dataset.mutation = ""; prefActions.append(scene, object); preferences.append(prefActions);
             if (Object.keys(preferred).length) preferences.append(h("pre", "pruning-help", JSON.stringify(preferred, null, 2))); n.append(preferences);
-            const actions = h("div", "pruning-inline"); actions.append(button("Train a new whole-image version", () => { n.close(); adapters.openIngestionProfiles?.(); }), button("Import a profile with the existing tool", () => { n.close(); adapters.openIngestionProfiles?.(); document.getElementById("dataIngestionProfileUploadButton")?.click(); }), button("Refresh shared registry", openProfiles));
+            const actions = h("div", "pruning-inline"); actions.append(button("Train a new whole-image version", () => { n.close(); adapters.openIngestionProfiles?.(); }), button("Import a profile with the existing tool", () => { n.close(); adapters.openIngestionProfiles?.(); document.getElementById("dataIngestionProfileUploadButton")?.click(); }), button("Refresh shared registry", () => openProfiles(n)));
             actions.append(button("Train / inspect crop SALAD in DQE", () => { n.close(); adapters.openDQE?.(); }));
             n.append(actions, h("p", "pruning-help", "Rename changes management metadata only, preserving checkpoint bytes and caches. Retraining creates a new immutable version. Imported bundles contain the head and checksum manifest, not backbone weights, datasets or vector caches. SAM3 mask features have no supported SALAD trainer here."));
             const status = h("p", "pruning-status"); status.dataset.profileStatus = ""; n.append(status); controls();

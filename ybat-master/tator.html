@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <title>🥔 Tator Annotation Tool</title>
     <link href="ybat.css?v=20260817d" rel="stylesheet">
-    <link href="class_split_controls.css?v=20260925d" rel="stylesheet">
+    <link href="class_split_controls.css?v=20261015a" rel="stylesheet">
     <link href="dataset_pruning.css?v=20261014a" rel="stylesheet">
 
     <!-- 1) Keep scripts in an order that ensures ybat.js is available
@@ -15,10 +15,11 @@
     <script src="filesaver.min.js?v=20260409a"></script>
     <script src="plotly-2.35.2.min.js?v=20260520a"></script>
     <script src="annotation_diversity.js?v=20260530a"></script>
-    <script src="class_analysis_cache_admin.js?v=20260808a"></script>
     <script src="dqe_session_store.js?v=20260926b"></script>
-    <script src="dataset_pruning.js?v=20261014d"></script>
-    <script src="ybat.js?v=20261014d"></script>
+    <script src="dqe_workspace_switch.js?v=20261015a"></script>
+    <script src="dqe_library.js?v=20261015a"></script>
+    <script src="dataset_pruning.js?v=20261015a"></script>
+    <script src="ybat.js?v=20261015a"></script>
 </head>
 <body>
     <div id="ingestProgress" class="ingest-progress" aria-live="polite" aria-atomic="true">
@@ -1441,6 +1442,41 @@
                                 <button type="button" id="classSplitSessionRestoreButton" class="training-button secondary">Restore saved session</button>
                                 <div id="classSplitSessionRestoreStatus" class="training-help" role="status" aria-live="polite"></div>
                             </div>
+                            <details id="dqeLibrary" class="dqe-library">
+                                <summary><strong>Datasets &amp; sessions</strong></summary>
+                                <div id="dqeLibraryBackend" class="training-help">Connecting to backend storage …</div>
+                                <div id="dqeLibraryVolumes" class="training-help"></div>
+                                <div id="dqeLibraryBrowser" class="training-help">Reading browser storage …</div>
+                                <details class="dqe-library__details"><summary>Browser storage details</summary><div id="dqeLibraryBrowserDetails"></div></details>
+                                <div id="dqeLibraryPolicy" class="training-help"></div>
+                                <div class="dqe-library__actions">
+                                    <button type="button" id="dqeLibraryRefresh" class="training-button secondary">Refresh</button>
+                                    <button type="button" id="dqeLibraryRescan" class="training-button secondary">Measure storage</button>
+                                </div>
+                                <div id="dqeLibraryControls" hidden>
+                                    <div class="dqe-library__toolbar">
+                                        <label>Show <select id="dqeLibraryView"><option value="dataset">Datasets</option><option value="session">Review sessions</option><option value="cleanup">Cleanup</option><option value="trash">Deleted datasets</option></select></label>
+                                        <label>Search <input type="search" id="dqeLibrarySearch" placeholder="Dataset or review name" /></label>
+                                    </div>
+                                    <div id="dqeLibraryList" class="dqe-library__list"></div>
+                                    <button type="button" id="dqeLibraryMore" class="training-button secondary" hidden>Show more</button>
+                                    <div id="dqeLibraryCleanup" hidden>
+                                        <label>Cleanup action <select id="dqeLibraryCleanupAction"></select></label>
+                                        <button type="button" id="dqeLibraryPreview" class="training-button secondary" disabled>Preview selected cleanup</button>
+                                        <div id="dqeLibraryPreviewDetails" class="dqe-library__preview"></div>
+                                        <button type="button" id="dqeLibraryConfirm" class="training-button danger" hidden>Confirm cleanup</button>
+                                    </div>
+                                </div>
+                                <div id="dqeLibraryOperation" role="status" aria-live="polite" class="training-help"></div>
+                                <div id="dqeLibraryStatus" role="status" aria-live="polite" class="training-help"></div>
+                                <button type="button" id="dqeWorkspaceCancel" class="training-button secondary" hidden>Cancel opening</button>
+                                <div id="dqeWorkspacePreserve" class="dqe-library__preview" hidden>
+                                    <p>This dataset is open from local files. Save it to the backend library before opening another workspace.</p>
+                                    <label>Dataset name <input id="dqeWorkspacePreserveName" type="text" value="Saved labeling workspace" /></label>
+                                    <button type="button" id="dqeWorkspacePreserveSave" class="training-button">Save to library and continue</button>
+                                    <button type="button" id="dqeWorkspacePreserveCancel" class="training-button secondary">Keep current workspace</button>
+                                </div>
+                            </details>
                             <details class="class-analysis-cache-card" aria-label="Data Quality Explorer cache">
                                 <summary>
                                     <strong>Cache</strong>

@@ -21,6 +21,26 @@ if [[ -f "${ENV_FILE}" ]]; then
   set +a
 fi
 
+# Keep optional CLIP weights out of the startup path. Classifier workflows can
+# still load their configured backbone explicitly when they need it.
+export TATOR_SKIP_CLIP_LOAD="${TATOR_SKIP_CLIP_LOAD:-1}"
+
+# Albumentations 2.x is outside this profile's supported dependency range, so
+# its import-time latest-version check is not actionable here.
+export NO_ALBUMENTATIONS_UPDATE="${NO_ALBUMENTATIONS_UPDATE:-1}"
+
+# SAM3 currently imports CUDA-only helpers and a deprecated timm compatibility
+# namespace even on macOS. Suppress only those known upstream import warnings;
+# keep all other warnings visible. Put caller-provided filters last so they can
+# override these defaults when stricter diagnostics are wanted.
+tator_macos_warning_filters="ignore:pkg_resources is deprecated as an API:UserWarning:sam3.model_builder,ignore:CUDA is not available or torch_xla is imported. Disabling autocast.:UserWarning:sam3.model.sam3_video_inference,ignore:Importing from timm.models.layers is deprecated:FutureWarning:timm.models.layers"
+if [[ -n "${PYTHONWARNINGS:-}" ]]; then
+  export PYTHONWARNINGS="${tator_macos_warning_filters},${PYTHONWARNINGS}"
+else
+  export PYTHONWARNINGS="${tator_macos_warning_filters}"
+fi
+unset tator_macos_warning_filters
+
 MLX_SAM_CACHE_ROOT="${TATOR_MLX_SAM_CACHE_ROOT:-${ROOT_DIR}/.cache/tator/mlx-sam}"
 MLX_SAM_MODEL_DEFAULT="${MLX_SAM_CACHE_ROOT}/models/sam-vit-base"
 MLX_SAM_SOURCE_DEFAULT="${MLX_SAM_CACHE_ROOT}/mlx-examples/segment_anything"

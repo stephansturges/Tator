@@ -512,3 +512,14 @@ html.theme-pipboy .class-split-workspace {
 .class-split-class-picker__list label { display: flex; align-items: center; gap: 8px; overflow-wrap: anywhere; }
 .class-split-class-picker__list input { flex: 0 0 auto; }
 .class-split-class-picker [hidden] { display: none; }
+.dqe-library { margin: 0.6rem 0; border: 1px solid var(--border-color, #bbb); border-radius: 6px; padding: 0.7rem; }
+.dqe-library summary { cursor: pointer; }
+.dqe-library__toolbar, .dqe-library__actions, .dqe-library__item-header { display: flex; flex-wrap: wrap; gap: 0.65rem; align-items: center; margin: 0.5rem 0; }
+.dqe-library__toolbar label { display: flex; align-items: center; gap: 0.4rem; }
+.dqe-library__list { max-height: 34rem; overflow: auto; }
+.dqe-library__item { border-top: 1px solid var(--border-color, #bbb); padding: 0.7rem 0; }
+.dqe-library__item .dqe-library__item { margin-left: 1rem; }
+.dqe-library__details { margin: 0.4rem 0; }
+.dqe-library__preview { padding: 0.7rem; margin-top: 0.5rem; background: color-mix(in srgb, currentColor 5%, transparent); }
+.dqe-library__error, #dqeLibraryStatus[data-tone="error"] { color: #b45309; }
+.dqe-library [hidden] { display: none !important; }

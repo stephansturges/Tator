@@ -870,9 +870,10 @@
     // fence a replacement server even when it reuses dataset and lock IDs.
     function dqeCaptureRequest() {
         const apiRoot = API_ROOT;
+        const libraryContext = dqeLibrary?.getContext();
         const backendId = annotationSourceState?.apiRoot === apiRoot && annotationSourceState?.backendId
             ? annotationSourceState.backendId
-            : (datasetPruningBackendBinding?.apiRoot === apiRoot ? datasetPruningBackendBinding.backendId : "");
+            : (libraryContext?.apiRoot === apiRoot ? libraryContext.backendId : "");
         const loadToken = annotationSourceState?.loadToken;
         const generation = classSplitState?.analysisGeneration;
         return {
@@ -897,67 +898,735 @@
     }
 
     const dqeSessionStore = window.TatorDqeSessionStore?.create();
+    let dqeLibrary = null;
+    let dqeLibraryReady = null;
+    let dqeWorkspaceSwitch = null;
+    let dqeWorkspaceBusy = false;
+    let dqeBackendSwitchSaving = false;
+    let dqeAttachment = null;
+    let dqeAttachmentTimer = null;
+    let dqePreservationResolve = null;
+    let dqeViewerLeasePromise = null;
 
-    // Pruning needs a verified persistent server identity without loading the
-    // independent DQE Library or replacing the existing annotation workspace.
+    // The library owns backend identity. Pruning additionally verifies it on
+    // entry and before saving, so startup and failed reconnects cannot bypass
+    // the identity check by using an unverified API URL.
     let datasetPruningBackendBinding = null;
     let datasetPruningVerifiedRoot = "";
     let datasetPruningBackendCheck = null;
     let datasetPruningBackendSequence = 0;
 
+    function invalidateDatasetPruningBackend() {
+        datasetPruningVerifiedRoot = "";
+        datasetPruningBackendSequence += 1;
+        datasetPruningBackendCheck = null;
+    }
+
     function datasetPruningVerifiedApiRoot() {
+        const context = dqeLibrary?.getContext();
         return datasetPruningVerifiedRoot === API_ROOT
+            && context?.apiRoot === API_ROOT
             && datasetPruningBackendBinding?.apiRoot === API_ROOT
-            && datasetPruningBackendBinding.backendId === dqeSessionStore?.getBackend()
+            && datasetPruningBackendBinding.backendId === context.backendId
+            && context.backendId === dqeSessionStore?.getBackend()
             ? API_ROOT : "";
     }
 
     async function verifyDatasetPruningBackend() {
+        await initializeDqeLibrary();
         const apiRoot = API_ROOT;
-        if (!apiRoot || !dqeSessionStore) {
-            throw new Error("Connect a backend before opening dataset pruning.");
+        const context = dqeLibrary?.getContext();
+        if (!apiRoot || context?.apiRoot !== apiRoot || !context.backendId || !dqeLibrary.supported()) {
+            invalidateDatasetPruningBackend();
+            throw new Error("Connect and verify the backend before opening dataset pruning.");
         }
-        if (datasetPruningBackendCheck?.apiRoot === apiRoot) {
-            return datasetPruningBackendCheck.promise;
-        }
+        if (datasetPruningBackendCheck?.context === context) return datasetPruningBackendCheck.promise;
         const sequence = ++datasetPruningBackendSequence;
-        const expectedBackend = datasetPruningBackendBinding?.apiRoot === apiRoot
-            ? datasetPruningBackendBinding.backendId : "";
-        const isCurrent = () => sequence === datasetPruningBackendSequence && API_ROOT === apiRoot;
-        const promise = (async () => {
-            const response = await window.fetch(`${apiRoot}/storage/library/summary`, {
-                cache: "no-store",
-                headers: expectedBackend ? { "X-Tator-Backend-Id": expectedBackend } : {},
-            });
-            const summary = await response.json();
+        const isCurrent = () => sequence === datasetPruningBackendSequence && API_ROOT === apiRoot
+            && dqeLibrary.getContext() === context && dqeSessionStore.getBackend() === context.backendId;
+        const promise = dqeLibrary.request("/summary", { cache: "no-store" }, context).then((summary) => {
             if (!isCurrent()) throw new DOMException("The selected backend changed.", "AbortError");
-            if (!response.ok) {
-                throw new Error(typeof summary.detail === "string" ? summary.detail
-                    : summary.detail?.message || `Backend identity check failed (HTTP ${response.status}).`);
-            }
-            if (Number(summary.api_version) !== 1 || typeof summary.backend_id !== "string" || !summary.backend_id.trim()) {
+            if (Number(summary.api_version) !== 1 || summary.backend_id !== context.backendId) {
                 throw new Error("This backend cannot verify the persistent identity required by dataset pruning.");
             }
-            if (expectedBackend && summary.backend_id !== expectedBackend) {
-                throw new Error("The backend identity changed. Reload the page and reopen the dataset before pruning.");
-            }
-            dqeSessionStore.setBackend(summary.backend_id);
-            datasetPruningBackendBinding = { apiRoot, backendId: summary.backend_id };
+            datasetPruningBackendBinding = { apiRoot, backendId: context.backendId };
             datasetPruningVerifiedRoot = apiRoot;
             return datasetPruningBackendBinding;
-        })().catch((error) => {
+        }).catch((error) => {
             if (isCurrent()) datasetPruningVerifiedRoot = "";
             throw error;
         }).finally(() => {
             if (datasetPruningBackendCheck?.sequence === sequence) datasetPruningBackendCheck = null;
         });
-        datasetPruningBackendCheck = { apiRoot, sequence, promise };
+        datasetPruningBackendCheck = { context, sequence, promise };
         return promise;
+    }
+
+    function dqeIsInternalSave() {
+        return dqeBackendSwitchSaving || dqeWorkspaceSwitch?.operation()?.phase === "saving";
+    }
+
+    function dqeRecoveryStorageKey(kind, legacy, id = classSplitState?.currentJobId || "") {
+        return dqeSessionStore?.recoveryKey(kind, id) || legacy;
+    }
+
+    function dqeAnnotationResumeKey() {
+        return dqeRecoveryStorageKey("annotationSource", ANNOTATION_SOURCE_RESUME_STORAGE_KEY, "source");
+    }
+
+    async function dqeRequestJson(url, options = {}) {
+        const response = await fetch(url, options);
+        const body = await response.text();
+        const value = parseJsonObjectSafe(body, {});
+        if (!response.ok) {
+            const error = new Error(parseApiError(body, `HTTP ${response.status}`));
+            error.httpStatus = response.status;
+            error.detail = value.detail;
+            throw error;
+        }
+        return value;
+    }
+
+    function dqeJson(method, value, signal, backendId = "") {
+        return { method, headers: { "Content-Type": "application/json", ...(backendId ? { "X-Tator-Backend-Id": backendId } : {}) }, body: JSON.stringify(value), ...(signal ? { signal } : {}) };
+    }
+
+    function dqeSourceBase(source, apiRoot) {
+        const mode = source.mode;
+        const path = source.annotation_base || (mode === "linked"
+            ? `/datasets/${encodeURIComponent(source.dataset_id || source.datasetId || "")}/annotation`
+            : `/datasets/transient/${encodeURIComponent(source.session_id || source.sessionId || "")}/annotation`);
+        const base = new URL(path, `${apiRoot}/`);
+        if (base.origin !== new URL(apiRoot).origin || !/\/datasets\/(?:transient\/)?[^/]+\/annotation\/?$/.test(base.pathname)) {
+            throw new Error("The selected source is not an annotation endpoint on this backend.");
+        }
+        return base.href.replace(/\/$/, "");
+    }
+
+    async function prepareDqeAnnotationSource(source, context) {
+        if (!source) return null;
+        const mode = String(source.mode || "");
+        if (!["linked", "transient"].includes(mode)) throw new Error("This source cannot be opened for annotation.");
+        const base = dqeSourceBase(source, context.apiRoot);
+        const datasetId = String(source.dataset_id || source.datasetId || "");
+        const sessionId = String(source.session_id || source.sessionId || "");
+        const resume = readAnnotationSourceResumeDescriptor();
+        const matches = resume?.mode === mode && (mode === "linked" ? resume.datasetId === datasetId : resume.sessionId === sessionId);
+        const lockSessionId = matches && resume.lockSessionId ? resume.lockSessionId : generateUUID();
+        const prepared = { mode, datasetId, sessionId, datasetLabel: source.dataset_label || source.label || datasetId || sessionId, datasetTypeHint: source.dataset_type || "", base, apiRoot: context.apiRoot, backendId: context.backendId, lockSessionId, manifest: null, lock: {}, readOnly: false };
+        try {
+            const lease = await dqeRequestJson(`${base}/session/start`, dqeJson("POST", { session_id: lockSessionId, editor_name: getAnnotationEditorName(), force: false }, context.controller?.signal, context.backendId));
+            prepared.lock = lease.lock || {};
+            prepared.readOnly = String(lease.status || "").toLowerCase() === "warning";
+            if (prepared.readOnly && !window.confirm("Another editor holds this dataset's lock. Open the saved workspace read-only?")) throw new DOMException("Read-only opening cancelled.", "AbortError");
+            if (!prepared.readOnly) prepared.heartbeat = setInterval(() => {
+                dqeRequestJson(`${base}/session/heartbeat`, dqeJson("POST", { session_id: lockSessionId, editor_name: getAnnotationEditorName() }, undefined, context.backendId))
+                    .then((reply) => { if (String(reply.status || "").toLowerCase() === "warning") prepared.leaseLost = true; })
+                    .catch(() => { prepared.leaseLost = true; });
+            }, ANNOTATION_HEARTBEAT_INTERVAL_MS);
+            prepared.manifest = await dqeRequestJson(`${base}/manifest`, { signal: context.controller?.signal });
+            const expectedSnapshot = String(source.snapshot_id || "");
+            if (expectedSnapshot && String(prepared.manifest.class_analysis_snapshot_id || "") !== expectedSnapshot) throw new Error("The prepared dataset does not match the selected review snapshot.");
+            // The backend resolves the exact input/overlay branch before issuing
+            // the descriptor. Verify any manifest digest it supplies as well.
+            const manifestDigest = prepared.manifest.analysis_input_digest || prepared.manifest.class_analysis_input_digest;
+            if (source.analysis_input_digest && manifestDigest && source.analysis_input_digest !== manifestDigest) throw new Error("The annotation input changed while opening the selected review.");
+            return prepared;
+        } catch (error) {
+            await releaseDqeAnnotationSource(prepared);
+            throw error;
+        }
+    }
+
+    async function releaseDqeAnnotationSource(source) {
+        if (source?.heartbeat) clearInterval(source.heartbeat);
+        if (!source?.base || !source.lockSessionId || source.readOnly) return;
+        if (source.base === getAnnotationBasePath() && source.lockSessionId === annotationSourceState.lockSessionId) return;
+        await dqeRequestJson(`${source.base}/session/stop`, dqeJson("POST", { session_id: source.lockSessionId }, undefined, source.backendId));
+    }
+
+    function captureDqeWorkspace() {
+        const selectState = (id) => {
+            const select = document.getElementById(id);
+            return { options: Array.from(select?.options || [], (option) => ({ value: option.value, text: option.textContent })), index: select?.selectedIndex ?? -1 };
+        };
+        return {
+            apiRoot: API_ROOT, attachment: dqeAttachment,
+            annotation: { ...annotationSourceState }, annotationBase: getAnnotationBasePath(),
+            graph: snapshotClassSplitReviewState(), recovery: readDataQualityExplorerSession(),
+            snapshotId: classSplitState.snapshotId, snapshotSignature: classSplitState.snapshotSignature,
+            annotationRecovery: classSplitState.annotationRecovery,
+            libraryRecoveryBlock: classSplitState.libraryRecoveryBlock,
+            images, bboxes, classes, loadedClassList, datasetType, textLabels, textLabelsDatasetId,
+            textLabelRecords, captionRecordsByImage, captionSelectedByImage,
+            localImportedYoloRowsByImage: new Map(localImportedYoloRowsByImage),
+            localImportedYoloFingerprintByImage: new Map(localImportedYoloFingerprintByImage),
+            localDirtyLabelImageKeys: new Set(localDirtyLabelImageKeys),
+            currentImage, currentClass, currentBbox, imageListIndex, classListIndex,
+            imageOptions: selectState("imageList"), classOptions: selectState("classList"),
+            scale, canvasX, canvasY, screenX, screenY, activeTab,
+            selectedBboxes: new Set(selectedBboxes), negativeBboxes: new Set(negativeBboxes),
+            resume: readAnnotationSourceResumeDescriptor(),
+            graphView: captureDqeGraphView(),
+            captionOutput: qwenElements.captionOutput?.value || "",
+            captionGlossary: { ...qwenCaptionGlossaryState }, captionGlossaryText: qwenElements.captionGlossary?.value || "",
+            captionSaved: new Map(captionAutoSaveState.lastSaved), captionAttempted: new Map(captionAutoSaveState.lastAttempted),
+        };
+    }
+
+    async function preserveDqeCaptionDrafts() {
+        if (captionAutoSaveState.timerId) {
+            clearTimeout(captionAutoSaveState.timerId);
+            captionAutoSaveState.timerId = null;
+            captionAutoSaveState.pendingImage = null;
+        }
+        await Promise.all(Array.from(captionAutoSaveState.pendingSaves || []));
+        if (currentImage?.name) {
+            const draft = String(qwenElements.captionOutput?.value || "").trim();
+            const selected = getSelectedCaptionRecord(currentImage.name);
+            if (selectedCaptionIsStoredAlternate(currentImage.name)) {
+                if (selected && draft !== selected.caption && !await updateSelectedCaptionFromTextarea()) throw new Error("Save or cancel the current caption edit before switching workspaces.");
+            } else if (draft !== String(textLabels?.[currentImage.name] || "").trim()
+                || (captionAutoSaveState.lastSaved.has(currentImage.name) && draft !== captionAutoSaveState.lastSaved.get(currentImage.name))) {
+                if (isAnnotationDatasetModeActive() || getCaptionRecordDatasetId()) {
+                    if (!await saveCaptionImmediate(currentImage.name, draft)) throw new Error("The current caption could not be saved. The workspace remains open.");
+                } else { textLabels[currentImage.name] = draft; captureAnnotationDirtyStateForImage(currentImage.name); }
+            }
+        }
+        if (qwenCaptionGlossaryState.saveInFlight) throw new Error("Wait for the glossary save before switching workspaces.");
+        if (qwenCaptionGlossaryState.dirty && !await saveCaptionGlossaryToDataset()) throw new Error("Save the edited caption glossary to a dataset before switching workspaces.");
+    }
+
+    function captureDqeGraphView() {
+        const graph = classSplitElements.graph;
+        return {
+            projection: getClassSplitProjectionChoice(),
+            classFilter: getClassSplitGraphClassNames(),
+            xRange: graph?.layout?.xaxis?.range?.slice(), yRange: graph?.layout?.yaxis?.range?.slice(),
+            dragMode: getClassSplitGraphDragMode(),
+            limitPoints: classSplitElements.limitPlotPoints?.checked !== false,
+        };
+    }
+
+    function restoreDqePendingState(saved, jobId) {
+        restoreClassSplitPendingTrainingCommits(saved.pendingTrainingClassCommits);
+        restoreClassSplitPendingReviewCommits(saved.pendingReviewDispositionCommits, jobId);
+        restoreClassSplitPendingAnnotationTransactions(saved.pendingAnnotationTransactions, jobId);
+        restoreClassSplitFailedReviewActions(saved.failedReviewDispositionActions, jobId);
+    }
+
+    async function restoreDqeWorkspace(snapshot) {
+        stopAnnotationTimers();
+        imageSelectionRequestToken += 1;
+        imageDimensionScanToken += 1;
+        const loadToken = annotationSourceState.loadToken + 1;
+        Object.assign(annotationSourceState, snapshot.annotation, { loadToken, autosaveTimer: null, heartbeatTimer: null });
+        images = snapshot.images; bboxes = snapshot.bboxes; classes = snapshot.classes;
+        loadedClassList = snapshot.loadedClassList; datasetType = snapshot.datasetType;
+        textLabels = snapshot.textLabels; textLabelsDatasetId = snapshot.textLabelsDatasetId;
+        textLabelRecords = snapshot.textLabelRecords; captionRecordsByImage = snapshot.captionRecordsByImage;
+        captionSelectedByImage = snapshot.captionSelectedByImage;
+        captionAutoSaveState.lastSaved = new Map(snapshot.captionSaved); captionAutoSaveState.lastAttempted = new Map(snapshot.captionAttempted);
+        if (qwenElements.captionOutput) qwenElements.captionOutput.value = snapshot.captionOutput;
+        const glossaryRequestId = qwenCaptionGlossaryState.loadRequestId + 1;
+        Object.assign(qwenCaptionGlossaryState, snapshot.captionGlossary, { loadRequestId: glossaryRequestId });
+        if (qwenElements.captionGlossary) qwenElements.captionGlossary.value = snapshot.captionGlossaryText;
+        updateCaptionGlossaryControls();
+        localImportedYoloRowsByImage = new Map(snapshot.localImportedYoloRowsByImage);
+        localImportedYoloFingerprintByImage = new Map(snapshot.localImportedYoloFingerprintByImage);
+        localDirtyLabelImageKeys = new Set(snapshot.localDirtyLabelImageKeys);
+        currentImage = snapshot.currentImage; currentClass = snapshot.currentClass; currentBbox = snapshot.currentBbox;
+        imageListIndex = snapshot.imageListIndex; classListIndex = snapshot.classListIndex;
+        scale = snapshot.scale; canvasX = snapshot.canvasX; canvasY = snapshot.canvasY; screenX = snapshot.screenX; screenY = snapshot.screenY;
+        const restoreOptions = (id, data) => {
+            const select = document.getElementById(id);
+            if (!select) return;
+            select.replaceChildren(...data.options.map((item) => new Option(item.text, item.value)));
+            select.selectedIndex = data.index;
+        };
+        restoreOptions("imageList", snapshot.imageOptions); restoreOptions("classList", snapshot.classOptions);
+        selectedBboxes.clear(); snapshot.selectedBboxes.forEach((box) => selectedBboxes.add(box));
+        negativeBboxes.clear(); snapshot.negativeBboxes.forEach((box) => negativeBboxes.add(box));
+        classSplitState.snapshotId = snapshot.snapshotId; classSplitState.snapshotSignature = snapshot.snapshotSignature;
+        classSplitState.annotationRecovery = snapshot.annotationRecovery;
+        classSplitState.libraryRecoveryBlock = snapshot.libraryRecoveryBlock || "";
+        restoreDqePendingState(snapshot.recovery, snapshot.graph?.currentJobId || "");
+        if (snapshot.graph) restoreClassSplitReviewState(snapshot.graph);
+        else clearDqeGraphWorkspace();
+        if (snapshot.resume) persistAnnotationSourceResumeDescriptor(snapshot.resume);
+        dqeAttachment = snapshot.attachment;
+        updateAnnotationSourceUi(); syncLabelingSourceControls(); startAnnotationTimers();
+        updateQwenClassOptions({ resetOverride: true }); updateSam3ClassOptions({ resetOverride: true });
+        setActiveTab(snapshot.activeTab);
+        await applyDqeGraphView(snapshot.graphView);
+    }
+
+    function clearDqeGraphWorkspace() {
+        advanceClassSplitAnalysisGeneration();
+        stopClassSplitEvidencePoll();
+        classSplitState.currentJobId = ""; classSplitState.result = null;
+        classSplitState.sessionManifest = null; classSplitState.currentSourceHandle = null;
+        classSplitState.restoredSession = false; classSplitState.restoredSourceCompatible = false;
+        classSplitState.pointsById = new Map(); classSplitState.reviewedPointsById = new Map();
+        classSplitState.lassoPointIds = new Set(); classSplitState.selectedPointId = "";
+        classSplitState.annotationRecovery = null;
+        classSplitState.libraryRecoveryBlock = "";
+        hideClassSplitResultUiUntilReady();
+        refreshClassSplitControls();
+    }
+
+    async function applyDqeGraphView(view) {
+        if (!view || !classSplitState.result) return;
+        if (classSplitElements.limitPlotPoints) classSplitElements.limitPlotPoints.checked = view.limitPoints !== false;
+        if (view.dragMode) setClassSplitGraphDragMode(view.dragMode);
+        if (view.xRange?.length === 2 && view.yRange?.length === 2 && classSplitElements.graph?.data) {
+            await Plotly.relayout(classSplitElements.graph, { "xaxis.range": view.xRange, "yaxis.range": view.yRange });
+        }
+    }
+
+    async function preserveDqeLocalWorkspace(context) {
+        const localFiles = Object.values(images || {}).filter((record) => record.meta instanceof File);
+        if (!localFiles.length || isAnnotationDatasetModeActive()) return;
+        if (context.controller.signal.aborted) throw new DOMException("The current local dataset was kept.", "AbortError");
+        dqeLibrary.show();
+        const panel = document.getElementById("dqeWorkspacePreserve");
+        panel.hidden = false;
+        const accepted = await new Promise((resolve) => {
+            dqePreservationResolve = resolve;
+            context.controller.signal.addEventListener("abort", () => resolve(false), { once: true });
+        });
+        dqePreservationResolve = null;
+        panel.hidden = true;
+        if (!accepted) throw new DOMException("The current local dataset was kept.", "AbortError");
+        const label = document.getElementById("dqeWorkspacePreserveName").value.trim() || "Saved labeling workspace";
+        const preserved = await uploadCurrentDatasetToCache({ transport: "chunked", preserveWorkspace: true, throwOnError: true, runName: `${sanitizeDatasetFilename(label)}_${Date.now()}`, context: "Saved before switching Data Quality Explorer workspace", split: false, labelLinesForImage: (key) => {
+            const rows = localImportedYoloRowsByImage.get(key);
+            return Array.isArray(rows) && localImportedYoloFingerprintByImage.get(key) === localAnnotationGeometryFingerprint(key) ? rows : null;
+        } });
+        if (preserved?.workspace_preserved !== true) throw new Error("The backend did not confirm that all labels and captions were preserved. The local workspace remains open.");
+    }
+
+    function setDqeWorkspaceBusy(busy) {
+        dqeWorkspaceBusy = busy;
+        const cancel = document.getElementById("dqeWorkspaceCancel");
+        if (cancel) cancel.hidden = !busy;
+        // The caption editor and Dataset Manager share the current workspace.
+        // Freeze their drafts too while a prepared target is being installed.
+        document.querySelectorAll(".tab-panel:not(#tabClassSplit)").forEach((node) => { node.inert = busy; });
+        document.querySelectorAll("#tabClassSplit .class-split-workspace > :not(.class-split-workspace__header)").forEach((node) => { node.inert = busy; });
+        refreshClassSplitControls(); syncLabelingSourceControls();
+    }
+
+    async function renewDqeAttachment() {
+        const attachment = dqeAttachment;
+        if (!attachment) return;
+        try {
+            await dqeRequestJson(`${attachment.apiRoot}/storage/library/leases/${encodeURIComponent(attachment.lease_id)}/heartbeat`, dqeJson("POST", { lease_token: attachment.lease_token }, undefined, attachment.backendId));
+            if (dqeAttachment === attachment && attachment.warning && annotationSourceState.statusMessage === attachment.warning) {
+                annotationSourceState.readOnly = attachment.previousReadOnly;
+                annotationSourceState.statusMessage = "";
+                if (classSplitState.libraryRecoveryBlock === attachment.warning) classSplitState.libraryRecoveryBlock = "";
+                attachment.warning = "";
+                syncLabelingSourceControls(); refreshClassSplitControls();
+            }
+        } catch (error) {
+            if (dqeAttachment !== attachment) return;
+            // A lost reservation cannot license continued writes after deletion.
+            if (!attachment.warning) attachment.previousReadOnly = annotationSourceState.readOnly;
+            annotationSourceState.readOnly = true;
+            annotationSourceState.statusMessage = `Workspace protection needs reconnecting: ${error.message || error}`;
+            attachment.warning = annotationSourceState.statusMessage;
+            classSplitState.libraryRecoveryBlock = attachment.warning;
+            syncLabelingSourceControls();
+            dqeLibrary.message(annotationSourceState.statusMessage, "error");
+        }
+    }
+
+    async function reserveDqeLibraryWorkspace(target, context, { idempotencyKey = generateUUID(), signal = context.controller?.signal, isCurrent = null } = {}) {
+        const payload = { ...target, client_id: dqeSessionStore.getTabId(), idempotency_key: idempotencyKey };
+        const deadline = Date.now() + 60000;
+        const check = () => {
+            if (signal?.aborted || (isCurrent && !isCurrent())) throw new DOMException("Opening was cancelled before the workspace changed.", "AbortError");
+            if (API_ROOT !== context.apiRoot || dqeSessionStore.getBackend() !== context.backendId) throw new Error("The backend changed while discovering the selected workspace.");
+        };
+        while (true) {
+            check();
+            try { return await dqeLibrary.request("/open", dqeJson("POST", payload, signal), context); }
+            catch (error) {
+                const code = typeof error.detail === "string" ? error.detail : error.detail?.code;
+                if (code !== "library_inventory_not_ready") throw error;
+                if (Date.now() >= deadline) throw new Error("Storage discovery is still running. The current workspace was kept; retry when discovery finishes.");
+                dqeLibrary.message("Discovering the selected dataset and its saved dependencies …");
+                await new Promise((resolve, reject) => {
+                    const abort = () => { clearTimeout(timer); reject(new DOMException("Opening cancelled.", "AbortError")); };
+                    const timer = setTimeout(() => { signal?.removeEventListener("abort", abort); resolve(); }, 500);
+                    signal?.addEventListener("abort", abort, { once: true });
+                });
+                check();
+                // Discovery can change item revisions before measurement ends.
+                // Read the current revision before retrying the same open intent.
+                const refreshed = await dqeLibrary.request(`/items/${encodeURIComponent(payload.item_id)}`, { ...(signal ? { signal } : {}) }, context);
+                payload.expected_revision = (refreshed.item || refreshed).revision;
+            }
+        }
+    }
+
+    async function reconnectDqeAttachmentForSave() {
+        const previous = dqeAttachment;
+        if (!previous?.warning || (!isAnnotationDatasetModeActive() && !classSplitState.currentJobId)) return;
+        const context = dqeLibrary.getContext();
+        if (context.backendId !== previous.backendId || context.apiRoot !== previous.apiRoot) throw new Error("Reconnect the workspace's original backend before saving its pending edits.");
+        const active = dqeSessionStore.readActive();
+        const payload = await dqeLibrary.request(`/items/${encodeURIComponent(active.itemId || `session:${classSplitState.currentJobId}`)}`, {}, context);
+        const item = payload.item || payload;
+        const reservation = await reserveDqeLibraryWorkspace({
+            item_id: item.id, expected_revision: item.revision, mode: active.mode || (isAnnotationDatasetModeActive() ? "review" : "plot_only"),
+        }, context);
+        try {
+            if (isAnnotationDatasetModeActive()) {
+                if (!reservation.descriptor?.source || dqeSourceBase(reservation.descriptor.source, context.apiRoot) !== getAnnotationBasePath()) throw new Error("The saved source version changed. Pending edits remain in the current workspace.");
+                const lock = await dqeRequestJson(`${getAnnotationBasePath()}/session/start`, dqeJson("POST", {
+                    session_id: annotationSourceState.lockSessionId, editor_name: getAnnotationEditorName(), force: false,
+                }, undefined, previous.backendId));
+                if (lock.read_only || ["readonly", "warning"].includes(String(lock.status || "").toLowerCase())) throw new Error("Another editor owns this source. Pending edits remain open until it is available.");
+                annotationSourceState.lock = lock.lock || annotationSourceState.lock;
+            }
+            await dqeLibrary.request(`/open/${encodeURIComponent(reservation.operation_id)}/commit`, dqeJson("POST", { lease_token: reservation.lease_token }), context);
+        } catch (error) {
+            await dqeLibrary.request(`/open/${encodeURIComponent(reservation.operation_id)}/cancel`, dqeJson("POST", { lease_token: reservation.lease_token }), context).catch(() => {});
+            throw error;
+        }
+        dqeAttachment = { ...reservation, apiRoot: context.apiRoot, backendId: context.backendId };
+        if (annotationSourceState.statusMessage === previous.warning) {
+            annotationSourceState.statusMessage = "";
+            annotationSourceState.readOnly = !!previous.previousReadOnly;
+        }
+        if (classSplitState.libraryRecoveryBlock === previous.warning) classSplitState.libraryRecoveryBlock = "";
+        dqeSessionStore.confirmed({ ...active, attachment: { lease_id: reservation.lease_id, lease_token: reservation.lease_token, operation_id: reservation.operation_id, apiRoot: context.apiRoot, backendId: context.backendId } });
+        await dqeRequestJson(`${previous.apiRoot}/storage/library/leases/${encodeURIComponent(previous.lease_id)}?lease_token=${encodeURIComponent(previous.lease_token)}`, { method: "DELETE", headers: { "X-Tator-Backend-Id": previous.backendId } }).catch(() => {});
+    }
+
+    async function initializeDqeLibrary() {
+        if (dqeLibraryReady) return dqeLibraryReady;
+        if (!window.TatorDqeLibrary || !dqeSessionStore || !window.TatorDqeWorkspaceSwitch) return;
+        dqeLibrary = window.TatorDqeLibrary.create({
+            formatBytes, store: dqeSessionStore,
+            legacyRefresh: refreshClassAnalysisCacheStatus,
+            browserSource: () => { const files = Object.values(images || {}).filter((record) => record.meta instanceof File); return { count: files.length, bytes: files.reduce((sum, record) => sum + record.meta.size, 0) }; },
+            backendReady(context) {
+                if (context.apiRoot !== datasetPruningBackendBinding?.apiRoot
+                    || context.backendId !== datasetPruningBackendBinding?.backendId) invalidateDatasetPruningBackend();
+                dqeSessionStore.setBackend(context.backendId);
+            },
+            identityLost() {
+                invalidateDatasetPruningBackend();
+                classSplitState.libraryRecoveryBlock = "The backend identity changed. Verify the backend, then reopen this dataset from Datasets & sessions before editing.";
+                annotationSourceState.readOnly = true;
+                syncLabelingSourceControls(); refreshClassSplitControls();
+            },
+            open: (target) => dqeWorkspaceSwitch.open(target),
+            async restoreTrash(item) {
+                if (!window.confirm(`Restore ${item.label || "this dataset"} to the library?`)) return;
+                const context = dqeLibrary.getContext();
+                const path = item.capabilities?.restore_url || `/datasets/trash/${encodeURIComponent(item.source?.id || "")}/restore`;
+                const url = new URL(path, `${context.apiRoot}/`);
+                if (url.origin !== new URL(context.apiRoot).origin) throw new Error("The restore action belongs to another backend.");
+                await dqeRequestJson(url.href, dqeJson("POST", { expected_revision: item.revision }, undefined, context.backendId));
+                await Promise.allSettled([refreshDatasetList(), refreshDatasetTrashList()]);
+            },
+            changed: async () => { await Promise.allSettled([refreshDatasetList(), refreshDatasetTrashList(), refreshDatasetUploadSessions()]); },
+        });
+        dqeWorkspaceSwitch = window.TatorDqeWorkspaceSwitch.create({
+            context: () => dqeLibrary.getContext(),
+            identity: () => dqeSessionStore.readActive(),
+            status: (message) => {
+                dqeLibrary.message(message);
+                const cancel = document.getElementById("dqeWorkspaceCancel");
+                if (cancel) cancel.disabled = dqeWorkspaceSwitch?.operation()?.phase === "publishing";
+            },
+            journal: (value) => dqeSessionStore.record("switch", value),
+            busy: setDqeWorkspaceBusy,
+            assertCanSwitch() {
+                if (dqeWorkspaceBusy || dqeViewerLeasePromise || classSplitState.active || classSplitState.startupOperation || imageLoadInProgress || qwenCaptionBatchActive || qwenCaptionArchiveMutationActive() || magicTweakRunning || isAutoLabelUsingCurrentAnnotationSession() || classSplitState.sessionPersistenceOperation) throw new Error("Finish the current analysis, upload, labeling or export operation before opening another workspace.");
+            },
+            async heartbeat(context) {
+                if (context.reservation?.lease_id) await dqeLibrary.request(`/leases/${encodeURIComponent(context.reservation.lease_id)}/heartbeat`, dqeJson("POST", { lease_token: context.reservation.lease_token }), context);
+            },
+            async reserve(context) {
+                return reserveDqeLibraryWorkspace(context.target, context, { idempotencyKey: context.id });
+            },
+            async preserve(context) {
+                await reconnectDqeAttachmentForSave();
+                await preserveDqeCaptionDrafts();
+                captureCurrentAnnotationDirtyState();
+                if (classSplitState.currentJobId && classSplitState.result) await saveClassSplitSessionState();
+                else if (isAnnotationDatasetModeActive() && !await saveDirtyAnnotationsBeforeReload()) throw new Error("The current labels could not be saved. The workspace remains open.");
+                await preserveDqeLocalWorkspace(context);
+                await waitForAnnotationSnapshotIdle();
+                if (!persistDataQualityExplorerSession()) throw new Error("Browser recovery could not be saved. The current workspace remains open.");
+            },
+            capture: captureDqeWorkspace,
+            async prepare(context) {
+                const descriptor = context.reservation.descriptor || {};
+                const saved = dqeSessionStore.readSession(context.target.mode !== "dataset" ? descriptor.job_id || "draft" : "draft");
+                let source = null;
+                try {
+                    source = await prepareDqeAnnotationSource(descriptor.source, context);
+                    let graph = null;
+                    if (context.target.mode !== "dataset" && descriptor.job_id && descriptor.manifest) {
+                        if (descriptor.manifest.artifacts?.session_store?.file) graph = { ...await loadClassSplitBoundedResult(descriptor.job_id, descriptor.manifest, { apiRoot: context.apiRoot, signal: context.controller.signal, view: saved.graphView }), bounded: true };
+                        else graph = { result: await dqeRequestJson(`${context.apiRoot}/class_analysis/jobs/${encodeURIComponent(descriptor.job_id)}/result`, { signal: context.controller.signal }), queuePointIds: [], bounded: false };
+                    }
+                    return { descriptor, source, graph, saved, readOnly: source?.readOnly || !source };
+                } catch (error) {
+                    if (source) await releaseDqeAnnotationSource(source);
+                    throw error;
+                }
+            },
+            async install(prepared, context) {
+                stopAnnotationTimers(); stopClassSplitEvidencePoll();
+                imageSelectionRequestToken += 1;
+                advanceClassSplitAnalysisGeneration();
+                if (prepared.source?.leaseLost) throw new Error("The target annotation lease expired while preparing. The current workspace was kept.");
+                if (prepared.source) await openDatasetInAnnotationMode({ ...prepared.source, preparedSource: prepared.source, activateLabeling: false });
+                else { resetAnnotationSourceState(); resetImageList(); resetClassList(); }
+                const jobId = prepared.graph ? prepared.descriptor.job_id || "" : "";
+                classSplitState.snapshotId = prepared.descriptor.source?.snapshot_id || prepared.descriptor.manifest?.source?.snapshot_id || "";
+                classSplitState.snapshotSignature = "";
+                classSplitState.lastRequest = null;
+                classSplitState.annotationRecovery = null;
+                const legacy = dqeSessionStore.legacy();
+                const legacyPending = [legacy.pendingReviewDispositionCommits, legacy.pendingAnnotationTransactions, legacy.pendingTrainingClassCommits, legacy.failedReviewDispositionActions].some((items) => items?.length);
+                classSplitState.libraryRecoveryBlock = !dqeSessionStore.legacyBound() && legacy.jobId === jobId && legacyPending
+                    ? "Previous browser recovery for this review has not been matched to its exact source. Pending records were kept; editing is disabled until recovery is reconciled."
+                    : "";
+                restoreDqePendingState(prepared.saved, jobId);
+                classSplitState.sessionRecoveryHydrated = true;
+                classSplitState.sessionExportRecord = null;
+                if (prepared.graph) {
+                    classSplitState.pendingGraphClassFilter = prepared.saved.graphClassFilter || (prepared.saved.graphView ? { jobId, classes: prepared.saved.graphView.classFilter } : null);
+                    classSplitState.pendingRestoreSelectedPointId = prepared.saved.selectedPointId || "";
+                    classSplitState.vignetteFilterJobId = jobId;
+                    classSplitState.vignetteCategory = CLASS_SPLIT_REFINEMENT_FILTER_CATEGORIES.includes(prepared.saved.vignetteCategory) ? prepared.saved.vignetteCategory : "review_queue";
+                    classSplitState.vignetteSort = CLASS_SPLIT_VIGNETTE_SORT_MODES.includes(prepared.saved.vignetteSort) ? prepared.saved.vignetteSort : "priority";
+                    classSplitState.showAllRough = prepared.saved.showAllRough !== false;
+                    const plotReady = await applyClassSplitResultPayload(prepared.graph.result, jobId, { boundedTransport: prepared.graph.bounded, restoredSession: true, restoredSourceCompatible: Boolean(prepared.source), manifest: prepared.descriptor.manifest, deferSessionCommit: true });
+                    if (plotReady === false && getClassSplitGraphViewModel().points.length && !getClassSplitGraphViewModel().projectionUnavailable) throw new Error("The target graph could not be rendered. The previous workspace was kept.");
+                    classSplitState.currentSourceHandle = prepared.source ? getClassSplitServerSourceHandle() : null;
+                    classSplitState.boundedGraphClassFilterKey = JSON.stringify(prepared.saved.graphView?.classFilter ?? null);
+                    classSplitState.restoredSourceCompatible = Boolean(prepared.source);
+                    await applyDqeGraphView(prepared.saved.graphView);
+                    setActiveTab(TAB_CLASS_SPLIT);
+                } else {
+                    clearDqeGraphWorkspace();
+                    setActiveTab(context.target.activateLabeling === false ? activeTab : TAB_LABELING);
+                }
+            },
+            async commit(context) {
+                try {
+                    await dqeLibrary.request(`/open/${encodeURIComponent(context.reservation.operation_id)}/commit`, dqeJson("POST", { lease_token: context.reservation.lease_token }), context);
+                } catch (error) {
+                    const operation = await dqeLibrary.request(`/operations/${encodeURIComponent(context.reservation.operation_id)}`, {}, context);
+                    if (operation.state !== "completed") throw error;
+                }
+            },
+            confirm(prepared, context) {
+                if (prepared.source?.heartbeat) clearInterval(prepared.source.heartbeat);
+                dqeAttachment = { ...context.reservation, apiRoot: context.apiRoot, backendId: context.backendId };
+                dqeSessionStore.confirmed({ attachment: { lease_id: dqeAttachment.lease_id, lease_token: dqeAttachment.lease_token, operation_id: dqeAttachment.operation_id, backendId: context.backendId, apiRoot: context.apiRoot }, itemId: context.target.item_id, jobId: prepared.graph ? prepared.descriptor.job_id || "" : "", snapshotId: prepared.descriptor.source?.snapshot_id || "", mode: context.target.mode });
+                if (prepared.source) persistAnnotationSourceResumeDescriptor(annotationSourceState); else clearAnnotationSourceResumeDescriptor();
+                persistDataQualityExplorerSession();
+                startAnnotationTimers();
+                if (dqeAttachmentTimer) clearInterval(dqeAttachmentTimer);
+                dqeAttachmentTimer = setInterval(renewDqeAttachment, 20000);
+                if (prepared.graph) {
+                    if (prepared.graph.bounded) void hydrateClassSplitBoundedQueue(prepared.graph.queuePointIds);
+                    void restoreClassSplitQwenReviews(prepared.descriptor.job_id).catch((error) => console.warn("Could not restore review history", error));
+                    if (prepared.source) void recoverClassSplitBackendAnnotationTransactions(prepared.descriptor.job_id).catch((error) => dqeLibrary.message(error.message || error, "error"));
+                }
+            },
+            async releasePrevious(snapshot) {
+                const old = snapshot.annotation;
+                const sameLease = old.lockSessionId && old.lockSessionId === annotationSourceState.lockSessionId && snapshot.annotationBase === getAnnotationBasePath();
+                if (!sameLease) await releaseDqeAnnotationSource({ base: snapshot.annotationBase, lockSessionId: old.lockSessionId, readOnly: old.readOnly, backendId: old.backendId }).catch((error) => console.warn("Old annotation lease release deferred", error));
+                if (snapshot.attachment?.lease_id) await dqeRequestJson(`${snapshot.attachment.apiRoot}/storage/library/leases/${encodeURIComponent(snapshot.attachment.lease_id)}?lease_token=${encodeURIComponent(snapshot.attachment.lease_token)}`, { method: "DELETE", headers: { "X-Tator-Backend-Id": snapshot.attachment.backendId } }).catch((error) => console.warn("Old library lease release deferred", error));
+            },
+            rollback: restoreDqeWorkspace,
+            async cancel(context, prepared) {
+                if (prepared?.source) await releaseDqeAnnotationSource(prepared.source);
+                if (context.reservation?.operation_id) await dqeLibrary.request(`/open/${encodeURIComponent(context.reservation.operation_id)}/cancel`, dqeJson("POST", { lease_token: context.reservation.lease_token }), context);
+            },
+        });
+        document.getElementById("dqeWorkspaceCancel")?.addEventListener("click", () => dqeWorkspaceSwitch.cancel());
+        document.getElementById("dqeWorkspacePreserveSave")?.addEventListener("click", () => dqePreservationResolve?.(true));
+        document.getElementById("dqeWorkspacePreserveCancel")?.addEventListener("click", () => dqePreservationResolve?.(false));
+        dqeLibraryReady = dqeLibrary.init(API_ROOT).then(async () => {
+            if (!dqeLibrary.supported()) return;
+            const interrupted = dqeSessionStore.readOperation("switch");
+            const activeRecord = dqeSessionStore.readActive();
+            if (interrupted?.reservation?.operation_id && interrupted.reservation.lease_id !== activeRecord.attachment?.lease_id) {
+                try {
+                    await dqeLibrary.request(`/open/${encodeURIComponent(interrupted.reservation.operation_id)}/cancel`, dqeJson("POST", { lease_token: interrupted.reservation.lease_token }));
+                    dqeSessionStore.record("switch", null);
+                } catch (error) { dqeLibrary.message(`An interrupted open is retained for recovery: ${error.message || error}`, "warn"); }
+            }
+            if (activeRecord.attachment?.backendId === dqeSessionStore.getBackend()) {
+                dqeAttachment = { ...activeRecord.attachment, apiRoot: API_ROOT };
+                await renewDqeAttachment();
+                if (dqeAttachmentTimer) clearInterval(dqeAttachmentTimer);
+                dqeAttachmentTimer = setInterval(renewDqeAttachment, 20000);
+            }
+            const legacy = dqeSessionStore.legacy();
+            if (legacy.jobId && legacy.snapshotId && !dqeSessionStore.readActive().jobId) {
+                try {
+                    const payload = await dqeLibrary.request(`/items/${encodeURIComponent(`session:${legacy.jobId}`)}`);
+                    const item = payload.item || payload;
+                    if (dqeSessionStore.migrateLegacy({ jobId: legacy.jobId, snapshotId: item.source?.snapshot_id })) {
+                        const resume = window.sessionStorage.getItem(ANNOTATION_SOURCE_RESUME_STORAGE_KEY);
+                        if (resume) window.sessionStorage.setItem(dqeAnnotationResumeKey(), JSON.stringify(dqeSessionStore.sanitizeLegacySource(parseJsonObjectSafe(resume, {}))));
+                        for (const [kind, legacyKey] of [["annotationBatch", "tator.classSplit.annotationBatch.v1"], ["export", "tator.dqe.annotation-export.v1"]]) {
+                            const raw = window.localStorage.getItem(legacyKey);
+                            const record = parseJsonObjectSafe(raw || "{}", {});
+                            if ((record.jobId || record.job_id || record.analysisJobId) === legacy.jobId) {
+                                window.localStorage.setItem(dqeRecoveryStorageKey(kind, legacyKey, legacy.jobId), JSON.stringify({ ...record, backendId: dqeSessionStore.getBackend() }));
+                            }
+                        }
+                    }
+                } catch (_) { dqeLibrary.message("Previous browser recovery needs an exact backend/session match before it can be replayed.", "warn"); }
+            }
+        });
+        return dqeLibraryReady;
+    }
+
+    async function waitForDqeCatalogEntry(path, context, isCurrent = () => true) {
+        const read = async () => {
+            if (!isCurrent()) throw new DOMException("The workspace changed while updating its library entry.", "AbortError");
+            try { return await dqeLibrary.request(path, {}, context); }
+            catch (error) { if (error.httpStatus === 404) return null; throw error; }
+        };
+        const present = (payload) => Boolean(payload?.item?.id || payload?.id || payload?.items?.length);
+        let payload = await read();
+        if (present(payload)) return payload;
+        const refresh = await dqeLibrary.request("/refresh", dqeJson("POST", {}), context);
+        const deadline = Date.now() + 60000;
+        let operation = refresh;
+        while (!present(payload)) {
+            if (Date.now() >= deadline) throw new Error("Library discovery is still running. Refresh the library and retry opening it.");
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            payload = await read();
+            if (present(payload)) return payload;
+            if (refresh.operation_id) operation = await dqeLibrary.request(`/operations/${encodeURIComponent(refresh.operation_id)}`, {}, context);
+            if (["completed", "failed", "partial_failed", "cancelled"].includes(operation.state) || !refresh.operation_id) break;
+        }
+        if (!present(payload)) throw new Error(operation.error?.message || "The selected workspace has not been registered in the library. Refresh inventory and retry.");
+        return payload;
+    }
+
+    async function openDqeDatasetSource(options) {
+        if (dqeWorkspaceSwitch?.isBusy()) throw new Error("Wait for the current workspace switch to finish.");
+        const sourceId = String(options.mode === "linked" ? options.datasetId : options.sessionId);
+        const context = dqeLibrary.getContext();
+        const current = () => dqeLibrary.getContext().backendId === context.backendId && API_ROOT === context.apiRoot;
+        const payload = await waitForDqeCatalogEntry(`/items?kind=dataset&source_id=${encodeURIComponent(sourceId)}&limit=30`, context, current);
+        if (!current()) throw new Error("The backend changed while discovering this dataset. Open it again from the current library.");
+        const matches = (payload.items || []).filter((item) => String(item.source?.id || item.source?.dataset_id || item.source?.session_id || "") === sourceId);
+        if (matches.length !== 1) throw new Error("This dataset is not uniquely registered in the storage library. Refresh inventory before opening it.");
+        return dqeWorkspaceSwitch.open({ item_id: matches[0].id, expected_revision: matches[0].revision, mode: "dataset", activateLabeling: options.activateLabeling });
+    }
+
+    async function protectDqeCurrentReview(jobId) {
+        if (!dqeLibrary?.supported() || !jobId) return;
+        const context = dqeLibrary.getContext();
+        const generation = classSplitState.analysisGeneration;
+        const current = () => !dqeWorkspaceBusy && API_ROOT === context.apiRoot
+            && dqeSessionStore.getBackend() === context.backendId
+            && classSplitState.currentJobId === jobId && classSplitState.analysisGeneration === generation;
+        if (!current()) return;
+        if (dqeAttachment?.item?.id === `session:${jobId}` && !dqeAttachment.warning) return;
+        if (dqeViewerLeasePromise) return dqeViewerLeasePromise;
+        const protect = (async () => {
+            let reservation = null;
+            const previous = dqeAttachment;
+            try {
+                const payload = await waitForDqeCatalogEntry(`/items/${encodeURIComponent(`session:${jobId}`)}`, context, current);
+                const item = payload.item || payload;
+                reservation = await reserveDqeLibraryWorkspace({ item_id: item.id, mode: "plot_only", expected_revision: item.revision }, context, { isCurrent: current });
+                if (!current()) throw new DOMException("The displayed review changed.", "AbortError");
+                try { await dqeLibrary.request(`/open/${encodeURIComponent(reservation.operation_id)}/commit`, dqeJson("POST", { lease_token: reservation.lease_token }), context); }
+                catch (error) {
+                    const operation = await dqeLibrary.request(`/operations/${encodeURIComponent(reservation.operation_id)}`, {}, context);
+                    if (operation.state !== "completed") throw error;
+                }
+                if (!current()) throw new DOMException("The displayed review changed.", "AbortError");
+                dqeAttachment = { ...reservation, apiRoot: context.apiRoot, backendId: context.backendId };
+                dqeSessionStore.confirmed({ ...dqeSessionStore.readActive(), itemId: item.id, jobId, mode: "review", snapshotId: classSplitState.snapshotId || "", attachment: { lease_id: reservation.lease_id, lease_token: reservation.lease_token, operation_id: reservation.operation_id, apiRoot: context.apiRoot, backendId: context.backendId } });
+                if (dqeAttachmentTimer) clearInterval(dqeAttachmentTimer);
+                dqeAttachmentTimer = setInterval(renewDqeAttachment, 20000);
+                if (previous?.lease_id && previous.lease_id !== reservation.lease_id) {
+                    await dqeRequestJson(`${previous.apiRoot}/storage/library/leases/${encodeURIComponent(previous.lease_id)}?lease_token=${encodeURIComponent(previous.lease_token)}`, { method: "DELETE", headers: { "X-Tator-Backend-Id": previous.backendId } }).catch(() => {});
+                }
+            } catch (error) {
+                if (reservation?.operation_id && dqeAttachment?.lease_id !== reservation.lease_id) await dqeLibrary.request(`/open/${encodeURIComponent(reservation.operation_id)}/cancel`, dqeJson("POST", { lease_token: reservation.lease_token }), context).catch(() => {});
+                if (current()) dqeLibrary.message(`The saved review needs its library connection retried: ${error.message || error}`, "error");
+                throw error;
+            }
+        })();
+        dqeViewerLeasePromise = protect;
+        try { await protect; }
+        finally { if (dqeViewerLeasePromise === protect) dqeViewerLeasePromise = null; }
+    }
+
+    async function restoreDqeLibrarySession({ forceRestore = false } = {}) {
+        if (classSplitState.currentJobId || classSplitState.active || dqeWorkspaceBusy) return;
+        const active = dqeSessionStore.readActive();
+        if (active.jobId) {
+            const context = dqeCaptureRequest();
+            try {
+                const status = await dqeRequestJson(`${context.apiRoot}/class_analysis/jobs/${encodeURIComponent(active.jobId)}`);
+                if (!context.isCurrent() || dqeWorkspaceBusy || classSplitState.currentJobId) return;
+                if (["queued", "running", "pending"].includes(String(status.status || "").toLowerCase())) {
+                    const saved = dqeSessionStore.readSession(active.jobId);
+                    restoreDqePendingState(saved, active.jobId);
+                    classSplitState.sessionRecoveryHydrated = true;
+                    classSplitState.currentJobId = active.jobId;
+                    classSplitState.pendingRestoreSelectedPointId = saved.selectedPointId || "";
+                    classSplitState.active = true;
+                    setClassSplitJobStatus("Reconnecting to the active analysis …", "");
+                    renderClassSplitProgress({ progress: Number(status.progress || 0), message: "Reconnecting to the active Data Quality Explorer job …" });
+                    refreshClassSplitControls();
+                    void pollClassSplitJob(active.jobId);
+                    return;
+                }
+            } catch (error) { if (![404, 410].includes(error.httpStatus)) throw error; }
+        }
+        let item;
+        if (active.itemId || active.jobId) {
+            try { const payload = await dqeLibrary.request(`/items/${encodeURIComponent(active.itemId || `session:${active.jobId}`)}`); item = payload.item || payload; }
+            catch (error) { if (![404, 410].includes(error.httpStatus)) throw error; }
+        }
+        if (!item) {
+            const payload = await dqeLibrary.request("/items?kind=session&limit=30");
+            item = (payload.items || []).find((candidate) => candidate.capabilities?.open_review || candidate.capabilities?.plot_only);
+        }
+        if (!item) { setClassSplitSessionRestoreStatus("No saved review is available. Open Datasets & sessions to browse datasets."); return; }
+        setClassSplitSessionRestoreStatus(`${item.label || "Saved review"} is available. Restore it or choose another in Datasets & sessions.`);
+        if (!forceRestore) {
+            const saved = dqeSessionStore.readSession(item.source?.job_id || active.jobId || "");
+            if (saved.dismissedRestoreJobId === item.id) return;
+            if (!window.confirm(`Restore saved Data Quality Explorer session?\n\n${item.label || item.id}\n\nThe graph and its exact saved workspace will reconnect. Other saved reviews are available in Datasets & sessions.`)) {
+                dqeSessionStore.saveSession({ ...saved, jobId: item.source?.job_id || active.jobId || "draft", dismissedRestoreJobId: item.id });
+                return;
+            }
+        }
+        const mode = item.capabilities?.open_review ? "review" : item.capabilities?.plot_only ? "plot_only" : "dataset";
+        await dqeWorkspaceSwitch.open({ item_id: item.id, expected_revision: item.revision, mode });
     }
 
     function readDataQualityExplorerSession() {
         try {
-            const value = JSON.parse(window.sessionStorage?.getItem(DATA_QUALITY_SESSION_KEY) || "{}");
+            const value = dqeSessionStore?.getBackend()
+                ? dqeSessionStore.readSession(classSplitState?.currentJobId || "")
+                : JSON.parse(window.sessionStorage?.getItem(DATA_QUALITY_SESSION_KEY) || "{}");
             return value && typeof value === "object" ? value : {};
         } catch (error) {
             console.warn("Ignoring invalid Data Quality Explorer session state", error);
@@ -1159,7 +1828,7 @@
             const existing = readDataQualityExplorerSession();
             const explorerInitialized = Boolean(classSplitState?.sessionRecoveryHydrated);
             const sessionAttached = explorerInitialized && Boolean(classSplitState?.currentJobId);
-            window.sessionStorage.setItem(DATA_QUALITY_SESSION_KEY, JSON.stringify({
+            const record = {
                 activeTab: TOP_TAB_KEYS.has(activeTab) ? activeTab : TAB_LABELING,
                 jobId: sessionAttached
                     ? String(classSplitState?.currentJobId || "")
@@ -1244,7 +1913,15 @@
                     ? String(classSplitState?.vignetteFilterJobId || classSplitState?.currentJobId || "")
                     : String(existing.vignetteFilterJobId || existing.jobId || ""),
                 dismissedRestoreJobId: String(existing.dismissedRestoreJobId || ""),
-            }));
+                graphView: sessionAttached && classSplitState.result ? captureDqeGraphView() : existing.graphView,
+            };
+            if (dqeSessionStore?.getBackend()) {
+                dqeSessionStore.saveSession(record);
+                if (sessionAttached && !dqeWorkspaceBusy) {
+                    const active = dqeSessionStore.readActive();
+                    dqeSessionStore.confirmed({ ...active, itemId: active.jobId === record.jobId ? active.itemId : `session:${record.jobId}`, attachment: active.jobId === record.jobId ? active.attachment : null, jobId: record.jobId, snapshotId: record.snapshotId });
+                }
+            } else window.sessionStorage.setItem(DATA_QUALITY_SESSION_KEY, JSON.stringify(record));
             return true;
         } catch (error) {
             console.warn("Could not persist Data Quality Explorer session state", error);
@@ -1263,7 +1940,17 @@
             return classSplitState.sessionRestorePromise;
         }
         const pending = Promise.resolve()
-            .then(() => restoreDataQualityExplorerSession(options))
+            .then(async () => {
+                await initializeDqeLibrary();
+                if (dqeLibrary?.supported()) return restoreDqeLibrarySession(options);
+                if (dqeLibrary && !dqeLibrary.legacy()) {
+                    await dqeLibrary.refresh();
+                    if (dqeLibrary.supported()) return restoreDqeLibrarySession(options);
+                    setClassSplitSessionRestoreStatus("The storage library is unavailable. Refresh it to retry; the saved workspace was kept.");
+                    return;
+                }
+                return restoreDataQualityExplorerSession(options);
+            })
             .catch((error) => {
                 console.warn("Could not restore the Data Quality Explorer session", error);
                 setClassSplitSessionRestoreStatus(
@@ -4534,10 +5221,11 @@ const AUTOMATION_LOCKED_TABS = new Set([
             timeoutMessage = "The local backend did not respond in time.",
         } = {}
     ) {
+        const requestContext = dqeCaptureRequest();
         const controller = new AbortController();
         const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
         try {
-            const response = await fetch(url, {
+            const response = await requestContext.fetch(url, {
                 ...options,
                 signal: controller.signal,
             });
@@ -4589,6 +5277,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
     function classSplitRecoveryMutationBlockReason(
         jobId = classSplitState.currentJobId
     ) {
+        if (classSplitState.libraryRecoveryBlock) return classSplitState.libraryRecoveryBlock;
         const safeJobId = String(jobId || "").trim();
         const recovery = classSplitState.annotationRecovery;
         if (
@@ -4766,7 +5455,8 @@ const AUTOMATION_LOCKED_TABS = new Set([
                 !ignoredReviewActionPointIds.has(String(pointId || "").trim())
             ));
         return Boolean(
-            startupOperationBusy
+            (dqeWorkspaceBusy && !dqeIsInternalSave())
+            || startupOperationBusy
             || undoOperationBusy
             || Boolean(
                 classSplitState.sessionPersistenceOperation
@@ -5415,6 +6105,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         pendingImage: null,
         lastSaved: new Map(),
         lastAttempted: new Map(),
+        pendingSaves: new Set(),
     };
 
     let settingsUiInitialized = false;
@@ -6401,12 +7092,12 @@ const sam3TrainState = {
             if (!storage) {
                 return null;
             }
-            const raw = storage.getItem(ANNOTATION_SOURCE_RESUME_STORAGE_KEY) || "";
+            const raw = storage.getItem(dqeAnnotationResumeKey()) || "";
             if (!raw) {
                 return null;
             }
             if (raw.length > 8192) {
-                storage.removeItem(ANNOTATION_SOURCE_RESUME_STORAGE_KEY);
+                storage.setItem(dqeAnnotationResumeKey(), "null");
                 return null;
             }
             const parsed = JSON.parse(raw);
@@ -6414,13 +7105,13 @@ const sam3TrainState = {
                 ? normalizeAnnotationSourceResumeDescriptor(parsed)
                 : null;
             if (!descriptor) {
-                storage.removeItem(ANNOTATION_SOURCE_RESUME_STORAGE_KEY);
+                storage.setItem(dqeAnnotationResumeKey(), "null");
             }
             return descriptor;
         } catch (error) {
             console.warn("Ignoring invalid annotation source resume state", error);
             try {
-                window.sessionStorage?.removeItem(ANNOTATION_SOURCE_RESUME_STORAGE_KEY);
+                window.sessionStorage?.setItem(dqeAnnotationResumeKey(), "null");
             } catch (_storageError) {
                 // Storage may be unavailable; the active page can continue without resume state.
             }
@@ -6442,7 +7133,7 @@ const sam3TrainState = {
             // lets a reloaded tab resume its own lease without taking a lock
             // held by a different editor.
             storage.setItem(
-                ANNOTATION_SOURCE_RESUME_STORAGE_KEY,
+                dqeAnnotationResumeKey(),
                 JSON.stringify(descriptor),
             );
             return true;
@@ -6479,7 +7170,7 @@ const sam3TrainState = {
                     return false;
                 }
             }
-            storage.removeItem(ANNOTATION_SOURCE_RESUME_STORAGE_KEY);
+            storage.setItem(dqeAnnotationResumeKey(), "null");
             return true;
         } catch (error) {
             console.warn("Could not clear annotation source resume state", error);
@@ -6717,7 +7408,9 @@ const sam3TrainState = {
         allowLibrarySave = false,
         ignoreCurrentImageHydration = false,
     } = {}) {
-        return isAnnotationReadOnly()
+        return (dqeWorkspaceBusy && !dqeIsInternalSave())
+            || Boolean(classSplitState.libraryRecoveryBlock)
+            || isAnnotationReadOnly()
             || isAutoLabelUsingCurrentAnnotationSession()
             || (annotationSourceState.librarySaveInFlight && !allowLibrarySave)
             || classSplitState.dualBBoxTransactionInFlight
@@ -6729,6 +7422,8 @@ const sam3TrainState = {
 
     function annotationMutationBlockedMessage(actionLabel) {
         const prefix = actionLabel || "Editing";
+        if (dqeWorkspaceBusy) return `${prefix} is unavailable while the workspace is switching.`;
+        if (classSplitState.libraryRecoveryBlock) return classSplitState.libraryRecoveryBlock;
         if (isAnnotationReadOnly()) {
             const holder = String(annotationSourceState.lock?.holder || "another editor");
             return `${prefix} is disabled in read-only mode (lock held by ${holder}).`;
@@ -6883,6 +7578,7 @@ const sam3TrainState = {
     }
 
     function getAnnotationBasePath() {
+        if (annotationSourceState.annotationBase) return annotationSourceState.annotationBase;
         if (annotationSourceState.mode === "linked" && annotationSourceState.datasetId) {
             return `${API_ROOT}/datasets/${encodeURIComponent(annotationSourceState.datasetId)}/annotation`;
         }
@@ -6932,6 +7628,9 @@ const sam3TrainState = {
         // Invalidate any in-flight async open/reload work so stale responses cannot repopulate UI state.
         annotationSourceState.loadToken += 1;
         annotationSourceState.mode = "none";
+        annotationSourceState.annotationBase = "";
+        annotationSourceState.apiRoot = "";
+        annotationSourceState.backendId = "";
         annotationSourceState.datasetId = "";
         annotationSourceState.sessionId = "";
         annotationSourceState.transientOpenPath = "";
@@ -7383,6 +8082,7 @@ const sam3TrainState = {
         background = false,
         allowLibrarySave = false,
     } = {}) {
+        const requestContext = dqeCaptureRequest();
         if (!isAnnotationDatasetModeActive()) {
             return false;
         }
@@ -7439,7 +8139,7 @@ const sam3TrainState = {
         updateAnnotationSourceUi();
         let saveSucceeded = false;
         try {
-            const resp = await fetch(`${base}/snapshot`, {
+            const resp = await requestContext.fetch(`${base}/snapshot`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -7616,6 +8316,7 @@ const sam3TrainState = {
     }
 
     async function annotationHeartbeatTick() {
+        const requestContext = dqeCaptureRequest();
         if (!isAnnotationDatasetModeActive() || isAnnotationReadOnly()) {
             return;
         }
@@ -7623,12 +8324,14 @@ const sam3TrainState = {
         if (!base) {
             return;
         }
-        const resp = await fetch(`${base}/session/heartbeat`, {
+        const loadToken = annotationSourceState.loadToken;
+        const resp = await requestContext.fetch(`${base}/session/heartbeat`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(annotationSessionPayload()),
         });
         const detail = await resp.text();
+        if (loadToken !== annotationSourceState.loadToken || base !== getAnnotationBasePath()) return;
         if (!resp.ok) {
             if (
                 annotationSourceState.mode === "transient"
@@ -7872,6 +8575,7 @@ const sam3TrainState = {
     }
 
     async function stopAnnotationSession() {
+        const requestContext = dqeCaptureRequest();
         if (!isAnnotationDatasetModeActive() || !annotationSourceState.lockSessionId) {
             return;
         }
@@ -7880,7 +8584,7 @@ const sam3TrainState = {
             return;
         }
         try {
-            await fetch(`${base}/session/stop`, {
+            await requestContext.fetch(`${base}/session/stop`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ session_id: annotationSourceState.lockSessionId }),
@@ -7945,13 +8649,14 @@ const sam3TrainState = {
         force = false,
         resumeSameEditor = false,
     } = {}) {
+        const requestContext = dqeCaptureRequest();
         const base = getAnnotationBasePath();
         if (!base) {
             return;
         }
         const editorName = getAnnotationEditorName();
         const requestSession = async (forceValue) => {
-            const resp = await fetch(`${base}/session/start`, {
+            const resp = await requestContext.fetch(`${base}/session/start`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(annotationSessionPayload({
@@ -8050,7 +8755,11 @@ const sam3TrainState = {
         activateLabeling = true,
         afterSessionStarted = null,
         progressCallback = null,
+        preparedSource = null,
     }) {
+        if (!preparedSource && dqeLibrary?.supported()) {
+            return openDqeDatasetSource({ mode, datasetId, sessionId, datasetLabel, datasetTypeHint, transientOpenPath, activateLabeling });
+        }
         const normalizedMode = String(mode || "").trim().toLowerCase();
         if (normalizedMode !== "linked" && normalizedMode !== "transient") {
             throw new Error("Unsupported annotation dataset mode.");
@@ -8076,7 +8785,7 @@ const sam3TrainState = {
         };
 
         reportLoadProgress(0.02, "Closing the previous labeling source safely ...");
-        const closed = await closeAnnotationDataset({
+        const closed = preparedSource || await closeAnnotationDataset({
             clearCanvas: false,
             clearResumeDescriptor: false,
         });
@@ -8103,9 +8812,12 @@ const sam3TrainState = {
             annotationSourceState.sessionId = String(sessionId || "").trim();
             annotationSourceState.transientOpenPath = String(transientOpenPath || "").trim();
             annotationSourceState.datasetLabel = String(datasetLabel || "").trim();
-            annotationSourceState.lockSessionId = resumedLockSessionId || generateUUID();
-            annotationSourceState.lock = {};
-            annotationSourceState.readOnly = false;
+            annotationSourceState.lockSessionId = preparedSource?.lockSessionId || resumedLockSessionId || generateUUID();
+            annotationSourceState.lock = preparedSource?.lock || {};
+            annotationSourceState.readOnly = preparedSource?.readOnly || false;
+            annotationSourceState.annotationBase = preparedSource?.base || "";
+            annotationSourceState.apiRoot = preparedSource?.apiRoot || API_ROOT;
+            annotationSourceState.backendId = preparedSource?.backendId || dqeSessionStore?.getBackend() || "";
             annotationSourceState.manifest = null;
             annotationSourceState.imageRowsByKey = new Map();
             annotationSourceState.rawLabelLinesByKey = new Map();
@@ -8130,7 +8842,7 @@ const sam3TrainState = {
             if (!base) {
                 throw new Error("Unable to resolve annotation API path.");
             }
-            await startAnnotationSession({
+            if (!preparedSource) await startAnnotationSession({
                 force: false,
                 resumeSameEditor: resumeMatchesSource,
             });
@@ -8147,12 +8859,7 @@ const sam3TrainState = {
             reportLoadProgress(0.16, "Loading the image and label manifest ...");
             updateAnnotationSourceUi();
             syncLabelingSourceControls();
-            const manifestResp = await fetch(`${base}/manifest`);
-            const detail = await manifestResp.text();
-            if (!manifestResp.ok) {
-                throw new Error(parseApiError(detail, `HTTP ${manifestResp.status}`));
-            }
-            const manifest = parseJsonObjectSafe(detail, {});
+            const manifest = preparedSource?.manifest || await dqeRequestJson(`${base}/manifest`);
             if (loadToken !== annotationSourceState.loadToken) {
                 return;
             }
@@ -8286,11 +8993,13 @@ const sam3TrainState = {
                 return;
             }
             reportLoadProgress(0.96, "Finalizing image lookup and annotation controls ...");
-            persistAnnotationSourceResumeDescriptor(annotationSourceState);
+            if (!preparedSource) persistAnnotationSourceResumeDescriptor(annotationSourceState);
             updateAnnotationSourceUi();
             syncLabelingSourceControls();
-            startAnnotationTimers();
-            reconcileClassSplitPendingReviewCommitsAfterAnnotationLoad();
+            if (!preparedSource) {
+                startAnnotationTimers();
+                reconcileClassSplitPendingReviewCommitsAfterAnnotationLoad();
+            }
             if (activateLabeling) {
                 setActiveTab(TAB_LABELING);
             }
@@ -8304,7 +9013,7 @@ const sam3TrainState = {
             reportLoadProgress(1, "Labeling workspace ready.");
         } catch (error) {
             // If loading fails, reset annotation linkage but preserve any existing local workspace.
-            await stopAnnotationSession();
+            if (!preparedSource) await stopAnnotationSession();
             stopAnnotationTimers();
             resetAnnotationSourceState();
             throw error;
@@ -8438,6 +9147,10 @@ const sam3TrainState = {
     }
 
     async function resumeAnnotationSourceAfterPageRestore() {
+        await initializeDqeLibrary();
+        if (dqeLibrary && !dqeLibrary.supported() && !dqeLibrary.legacy()) return false;
+        if (dqeLibrary?.supported() && dqeSessionStore.readActive().jobId) return false;
+        if (dqeWorkspaceBusy) return false;
         if (isAnnotationDatasetModeActive()) {
             return true;
         }
@@ -10201,9 +10914,10 @@ const sam3TrainState = {
         uploadRows,
         options = {},
     }) {
+        const requestContext = dqeCaptureRequest();
         const classNames = labelmapEntries.map((entry) => entry.name);
         const total = uploadRows.length;
-        const startResp = await fetch(`${API_ROOT}/datasets/upload_session/start`, {
+        const startResp = await requestContext.fetch(`${requestContext.apiRoot}/datasets/upload_session/start`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -10212,6 +10926,7 @@ const sam3TrainState = {
                 context: contextText,
                 classes: classNames,
                 total_images: total,
+                ...(options.preserveWorkspace ? { preserve_workspace: true } : {}),
             }),
         });
         const startDetail = await startResp.text();
@@ -10246,13 +10961,14 @@ const sam3TrainState = {
                         filename: row.safeName,
                         split: row.splitName,
                         label_text: row.labelText,
+                        ...(options.preserveWorkspace ? { text_label: row.textLabel, caption_records: row.captionRecords } : {}),
                     })),
                 }));
                 batch.forEach((row) => {
                     formData.append("files", row.imageRecord.meta, row.safeName);
                 });
                 reportProgress(`Uploading ${statusPrefix} ${completed}/${total} images ...`);
-                const resp = await fetch(`${API_ROOT}/datasets/upload_session/${encodeURIComponent(sessionId)}/batch`, {
+                const resp = await requestContext.fetch(`${requestContext.apiRoot}/datasets/upload_session/${encodeURIComponent(sessionId)}/batch`, {
                     method: "POST",
                     body: formData,
                     signal: abortController.signal,
@@ -10264,7 +10980,7 @@ const sam3TrainState = {
                 completed += batch.length;
                 reportProgress(`Uploaded ${statusPrefix} ${completed}/${total} images ...`);
             }
-            const finalizeResp = await fetch(`${API_ROOT}/datasets/upload_session/${encodeURIComponent(sessionId)}/finalize`, {
+            const finalizeResp = await requestContext.fetch(`${requestContext.apiRoot}/datasets/upload_session/${encodeURIComponent(sessionId)}/finalize`, {
                 method: "POST",
                 signal: abortController.signal,
             });
@@ -10278,7 +10994,7 @@ const sam3TrainState = {
             return parseJsonObjectSafe(finalizeDetail, {});
         } catch (error) {
             try {
-                await fetch(`${API_ROOT}/datasets/upload_session/${encodeURIComponent(sessionId)}/cancel`, { method: "POST" });
+                await requestContext.fetch(`${requestContext.apiRoot}/datasets/upload_session/${encodeURIComponent(sessionId)}/cancel`, { method: "POST" });
             } catch (cancelError) {
                 console.warn("Dataset upload session cleanup failed", cancelError);
             }
@@ -10454,9 +11170,21 @@ const sam3TrainState = {
                 if (root) {
                     root.file(`${splitName}/labels/${labelRel}`, labelText);
                 }
-                uploadRows.push({ imageRecord, safeName, splitName, labelText });
+                let captionRecords = [];
+                if (options.preserveWorkspace) {
+                    if (!(imageRecord.width > 0 && imageRecord.height > 0)) throw new Error(`Image dimensions are unavailable for ${imageKey}; the workspace was kept.`);
+                    const candidates = [...captionRecordsForImage(imageKey), ...(textLabelRecords || []).filter((record) => [record.image_name, record.image, record.image_key].includes(imageKey))];
+                    const seen = new Set();
+                    captionRecords = candidates.map((record) => ({ ...normalizeCaptionRecord(record), id: record.id || generateUUID(), image_name: safeName, image: safeName, image_key: `${splitName}/${safeName}`, split: splitName })).filter((record) => {
+                        const identity = `${record.id}:${record.caption}`;
+                        if (!record.caption || seen.has(identity)) return false;
+                        seen.add(identity); return true;
+                    });
+                }
+                uploadRows.push({ imageRecord, safeName, splitName, labelText, textLabel: String(textLabels?.[imageKey] || ""), captionRecords });
             }
             const datasetTypeValue = datasetType === "seg" ? "seg" : "bbox";
+            if (options.preserveWorkspace && skippedInvalidClassRows) throw new Error("Some annotations refer to removed classes. Restore those classes before saving and switching this workspace.");
             if (useChunkedUpload) {
                 const data = await uploadCurrentDatasetToCacheChunked({
                     runName,
@@ -33389,6 +34117,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function refreshCaptionGlossaryForCurrentContext(options = {}) {
+        const requestContext = dqeCaptureRequest();
         if (!qwenElements.captionGlossary) {
             return;
         }
@@ -33415,7 +34144,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 throw new Error(parseApiError(detail, resp.statusText || `HTTP ${resp.status}`));
             }
             const data = await resp.json();
-            if (requestId !== qwenCaptionGlossaryState.loadRequestId) {
+            if (!requestContext.isCurrent() || requestId !== qwenCaptionGlossaryState.loadRequestId) {
                 return;
             }
             const saved = String(data?.glossary || "").trim();
@@ -33429,9 +34158,10 @@ async function cancelRfDetrTrainingJobRequest() {
                 source: saved ? "dataset" : "default",
             });
         } catch (error) {
-            if (requestId !== qwenCaptionGlossaryState.loadRequestId) {
+            if (!requestContext.isCurrent() || requestId !== qwenCaptionGlossaryState.loadRequestId) {
                 return;
             }
+            if (!requestContext.isCurrent()) return false;
             console.warn("Failed to load caption glossary", error);
             setCaptionGlossaryText(currentDefault, { datasetId, source: "default" });
             setCaptionGlossaryStatus(`Using labelmap default; glossary load failed: ${error.message || error}`);
@@ -33455,6 +34185,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function saveCaptionGlossaryToDataset() {
+        const requestContext = dqeCaptureRequest();
         if (!guardQwenCaptionArchiveIdle("saving the caption glossary")) {
             return false;
         }
@@ -33469,7 +34200,7 @@ async function cancelRfDetrTrainingJobRequest() {
         setCaptionGlossaryStatus("Saving dataset glossary...");
         try {
             const glossary = String(qwenElements.captionGlossary.value || "").trim();
-            const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/glossary`, {
+            const resp = await requestContext.fetch(`${requestContext.apiRoot}/datasets/${encodeURIComponent(datasetId)}/glossary`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ glossary }),
@@ -35023,6 +35754,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function saveCaptionAsAlternate({ makePrimary = false, source = "manual" } = {}) {
+        const requestContext = dqeCaptureRequest();
         const imageName = currentImage?.name || "";
         const caption = String(qwenElements.captionOutput?.value || "").trim();
         if (!imageName || !caption) {
@@ -35047,7 +35779,7 @@ async function cancelRfDetrTrainingJobRequest() {
             setSamStatus("Caption saved locally for this browser session; select a dataset to persist alternates.", { variant: "warn", duration: 4000 });
             return record;
         }
-        const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/captions/${encodeURIComponent(imageName)}`, {
+        const resp = await requestContext.fetch(`${requestContext.apiRoot}/datasets/${encodeURIComponent(datasetId)}/captions/${encodeURIComponent(imageName)}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(captionMutationPayload({
@@ -35073,6 +35805,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function updateSelectedCaptionFromTextarea() {
+        const requestContext = dqeCaptureRequest();
         const imageName = currentImage?.name || "";
         const selected = imageName ? getSelectedCaptionRecord(imageName) : null;
         const caption = String(qwenElements.captionOutput?.value || "").trim();
@@ -35101,7 +35834,7 @@ async function cancelRfDetrTrainingJobRequest() {
             setQwenCaptionStatus("Updated locally");
             return true;
         }
-        const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/captions/by_id/${encodeURIComponent(selected.id)}`, {
+        const resp = await requestContext.fetch(`${requestContext.apiRoot}/datasets/${encodeURIComponent(datasetId)}/captions/by_id/${encodeURIComponent(selected.id)}`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(captionMutationPayload({ caption })),
@@ -35122,6 +35855,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function setSelectedCaptionAsPrimary() {
+        const requestContext = dqeCaptureRequest();
         const imageName = currentImage?.name || "";
         const selected = imageName ? getSelectedCaptionRecord(imageName) : null;
         if (!imageName || !selected || selected.id.startsWith("primary:")) {
@@ -35137,7 +35871,7 @@ async function cancelRfDetrTrainingJobRequest() {
             renderCaptionAlternatesForCurrentImage();
             return true;
         }
-        const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/captions/by_id/${encodeURIComponent(selected.id)}`, {
+        const resp = await requestContext.fetch(`${requestContext.apiRoot}/datasets/${encodeURIComponent(datasetId)}/captions/by_id/${encodeURIComponent(selected.id)}`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(captionMutationPayload({ make_primary: true })),
@@ -35156,6 +35890,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function deleteSelectedCaption() {
+        const requestContext = dqeCaptureRequest();
         const imageName = currentImage?.name || "";
         const selected = imageName ? getSelectedCaptionRecord(imageName) : null;
         if (!imageName || !selected || selected.id.startsWith("primary:")) {
@@ -35168,7 +35903,7 @@ async function cancelRfDetrTrainingJobRequest() {
             renderCaptionAlternatesForCurrentImage();
             return true;
         }
-        const resp = await fetch(withCaptionMutationSessionQuery(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/captions/by_id/${encodeURIComponent(selected.id)}`), {
+        const resp = await requestContext.fetch(withCaptionMutationSessionQuery(`${requestContext.apiRoot}/datasets/${encodeURIComponent(datasetId)}/captions/by_id/${encodeURIComponent(selected.id)}`), {
             method: "DELETE",
         });
         if (!resp.ok) {
@@ -35560,6 +36295,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function loadCaptionForCurrentImage(options = {}) {
+        const requestContext = dqeCaptureRequest();
         if (!qwenElements.captionOutput || !currentImage?.name) {
             return false;
         }
@@ -35581,6 +36317,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         try {
             const bundle = await loadCaptionBundleForImage(imageName, datasetId);
+            if (!requestContext.isCurrent()) return false;
             let caption = String(bundle?.primary_caption || "").trim();
             const records = Array.isArray(bundle?.captions)
                 ? bundle.captions.map(normalizeCaptionRecord).filter((record) => record.id && record.caption)
@@ -35610,6 +36347,7 @@ async function cancelRfDetrTrainingJobRequest() {
             renderCaptionAlternatesForCurrentImage();
             return true;
         } catch (error) {
+            if (!requestContext.isCurrent()) return false;
             console.warn("Failed to load caption label", error);
             renderCaptionAlternatesForCurrentImage();
             return false;
@@ -35617,6 +36355,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function captionExistsForImage(imageName, datasetIdOverride = null) {
+        const requestContext = dqeCaptureRequest();
         if (isAnnotationDatasetModeActive()) {
             return !!String(textLabels?.[imageName] || "").trim();
         }
@@ -35630,17 +36369,20 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         try {
             const caption = await loadCaptionForImage(imageName, datasetId);
+            if (!requestContext.isCurrent()) return false;
             if (caption) {
                 textLabels[imageName] = caption;
             }
             return !!caption;
         } catch (error) {
+            if (!requestContext.isCurrent()) return false;
             console.warn("Caption exists check failed", error);
             return false;
         }
     }
 
     async function persistCaptionLabel(imageName, caption, datasetIdOverride = null) {
+        const requestContext = dqeCaptureRequest();
         const context = resolveCaptionPersistenceContext(datasetIdOverride);
         const normalizedCaption = String(caption || "").trim();
         if (!imageName) {
@@ -35678,7 +36420,7 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!datasetId) {
             return { skipped: true };
         }
-        const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/text_labels/${encodeURIComponent(imageName)}`, {
+        const resp = await requestContext.fetch(`${requestContext.apiRoot}/datasets/${encodeURIComponent(datasetId)}/text_labels/${encodeURIComponent(imageName)}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ caption: normalizedCaption }),
@@ -35691,6 +36433,13 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function saveCaptionImmediate(imageName, caption, options = {}) {
+        const pending = saveCaptionImmediateOwned(imageName, caption, options);
+        captionAutoSaveState.pendingSaves.add(pending);
+        try { return await pending; }
+        finally { captionAutoSaveState.pendingSaves.delete(pending); }
+    }
+
+    async function saveCaptionImmediateOwned(imageName, caption, options = {}) {
         if (!imageName) {
             return false;
         }
@@ -35756,6 +36505,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 return;
             }
         }
+        const requestContext = dqeCaptureRequest();
         const trimmed = String(caption || "").trim();
         const lastSaved = captionAutoSaveState.lastSaved.get(imageName);
         if (lastSaved === trimmed) {
@@ -35770,6 +36520,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         captionAutoSaveState.pendingImage = imageName;
         captionAutoSaveState.timerId = window.setTimeout(() => {
+            if (!requestContext.isCurrent()) return;
             captionAutoSaveState.timerId = null;
             captionAutoSaveState.pendingImage = null;
             if (captionAutoSaveState.lastSaved.get(imageName) === trimmed) {
@@ -45695,13 +46446,64 @@ async function cancelRfDetrTrainingJobRequest() {
         return applySegAwareDetections(boxes, className, "Qwen");
     }
 
-    function applyApiRootValue(rawValue) {
+    async function applyApiRootValue(rawValue) {
         const normalized = normalizeApiRoot(rawValue);
         if (!normalized) {
             setSettingsStatus("Enter a valid http(s) URL (e.g. http://localhost:8000)", "error");
             return;
         }
-        API_ROOT = normalized;
+        if (normalized !== API_ROOT && dqeLibrary) {
+            if (dqeWorkspaceBusy || dqeViewerLeasePromise || classSplitState.active || classSplitState.startupOperation || imageLoadInProgress || qwenCaptionBatchActive || qwenCaptionArchiveMutationActive() || magicTweakRunning || isAutoLabelUsingCurrentAnnotationSession() || classSplitState.sessionPersistenceOperation) {
+                setSettingsStatus("Finish the current workspace operation before changing backend.", "warn");
+                return;
+            }
+            let snapshot = null;
+            const oldContext = dqeLibrary.getContext();
+            // Own the switch before connection probing yields: another open or
+            // backend change must not prepare against the same old workspace.
+            setDqeWorkspaceBusy(true);
+            const cancelSwitch = document.getElementById("dqeWorkspaceCancel");
+            if (cancelSwitch) cancelSwitch.disabled = true;
+            try {
+                let summary = null;
+                try { summary = await dqeRequestJson(`${normalized}/storage/library/summary`); }
+                catch (error) { if (dqeLibrary.supported() || ![404, 405].includes(error.httpStatus)) throw error; }
+                if (summary && (summary.api_version !== 1 || !summary.backend_id)) throw new Error("Update the target backend before switching a saved workspace between servers.");
+                dqeBackendSwitchSaving = true;
+                await reconnectDqeAttachmentForSave();
+                await preserveDqeCaptionDrafts();
+                if (classSplitState.currentJobId && classSplitState.result) await saveClassSplitSessionState();
+                else if (isAnnotationDatasetModeActive() && !await saveDirtyAnnotationsBeforeReload()) throw new Error("The current labels could not be saved; the backend was kept.");
+                if (!persistDataQualityExplorerSession()) throw new Error("Browser recovery could not be saved; the backend was kept.");
+                snapshot = captureDqeWorkspace();
+                dqeBackendSwitchSaving = false;
+                stopAnnotationTimers();
+                clearDqeGraphWorkspace();
+                if (isAnnotationDatasetModeActive()) { resetAnnotationSourceState(); resetImageList(); resetClassList(); }
+                restoreDqePendingState({}, "");
+                classSplitState.sessionRecoveryHydrated = false;
+                dqeAttachment = null;
+                if (dqeAttachmentTimer) clearInterval(dqeAttachmentTimer);
+                API_ROOT = normalized;
+                if (summary) dqeLibrary.adoptBackend({ apiRoot: normalized, backendId: summary.backend_id }, summary);
+                else await dqeLibrary.changeBackend(normalized);
+                await releaseDqeAnnotationSource({ base: snapshot.annotationBase, lockSessionId: snapshot.annotation.lockSessionId, readOnly: snapshot.annotation.readOnly, backendId: snapshot.annotation.backendId }).catch(() => {});
+                if (snapshot.attachment?.lease_id) await dqeRequestJson(`${snapshot.attachment.apiRoot}/storage/library/leases/${encodeURIComponent(snapshot.attachment.lease_id)}?lease_token=${encodeURIComponent(snapshot.attachment.lease_token)}`, { method: "DELETE", headers: { "X-Tator-Backend-Id": snapshot.attachment.backendId } }).catch(() => {});
+                await dqeLibrary.refresh();
+                await loadClassSplitCapabilities();
+            } catch (error) {
+                if (snapshot && API_ROOT === oldContext.apiRoot) await restoreDqeWorkspace(snapshot);
+                setSettingsStatus(`${API_ROOT === oldContext.apiRoot ? "Backend unchanged" : "Backend changed; reconnect needs attention"}: ${error.message || error}`, "error");
+                return;
+            } finally {
+                dqeBackendSwitchSaving = false;
+                setDqeWorkspaceBusy(false);
+                if (cancelSwitch) cancelSwitch.disabled = false;
+            }
+        } else if (dqeWorkspaceBusy) {
+            setSettingsStatus("Wait for the workspace switch before changing backend.", "warn");
+            return;
+        } else API_ROOT = normalized;
         try {
             localStorage.setItem(API_STORAGE_KEY, normalized);
         } catch (error) {
@@ -51781,6 +52583,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function postClassSplitActiveWorkspaceForm(formData, { signal = null, onProgress = null } = {}) {
+        const requestContext = dqeCaptureRequest();
         return new Promise((resolve, reject) => {
             const xhr = new XMLHttpRequest();
             let settled = false;
@@ -51812,7 +52615,8 @@ async function cancelRfDetrTrainingJobRequest() {
             if (signal) {
                 signal.addEventListener("abort", handleAbort, { once: true });
             }
-            xhr.open("POST", `${API_ROOT}/class_analysis/jobs/active_workspace`);
+            xhr.open("POST", `${requestContext.apiRoot}/class_analysis/jobs/active_workspace`);
+            if (requestContext.backendId) xhr.setRequestHeader("X-Tator-Backend-Id", requestContext.backendId);
             xhr.upload.onprogress = (event) => {
                 if (typeof onProgress !== "function") {
                     return;
@@ -51853,6 +52657,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function postClassSplitActiveWorkspaceChunked(snapshot, { signal = null, onProgress = null } = {}) {
+        const requestContext = dqeCaptureRequest();
         const total = Math.max(0, Array.isArray(snapshot?.rows) ? snapshot.rows.length : 0);
         if (!total) {
             throw new Error("No active workspace images to upload.");
@@ -51869,9 +52674,9 @@ async function cancelRfDetrTrainingJobRequest() {
                 message: message || `Snapshot-uploading ${Math.round(progress * 100)}% (${completed}/${total} images) ...`,
             });
         };
-        const startResp = await fetch(`${API_ROOT}/class_analysis/jobs/active_workspace/upload_session/start`, {
+        const startResp = await requestContext.fetch(`${requestContext.apiRoot}/class_analysis/jobs/active_workspace/upload_session/start`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { "Content-Type": "application/json", ...(requestContext.backendId ? { "X-Tator-Backend-Id": requestContext.backendId } : {}) },
             body: JSON.stringify({
                 ...snapshot.manifest,
                 images: [],
@@ -51907,7 +52712,7 @@ async function cancelRfDetrTrainingJobRequest() {
                     formData.append("files", blob, row.upload_name);
                 }
                 report(completed, `Snapshot-uploading ${Math.round((completed / total) * 100)}% (${completed}/${total} images) ...`);
-                const batchResp = await fetch(`${API_ROOT}/class_analysis/jobs/active_workspace/upload_session/${encodeURIComponent(sessionId)}/batch`, {
+                const batchResp = await requestContext.fetch(`${requestContext.apiRoot}/class_analysis/jobs/active_workspace/upload_session/${encodeURIComponent(sessionId)}/batch`, {
                     method: "POST",
                     body: formData,
                     signal,
@@ -51919,7 +52724,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 completed += rows.length;
                 report(completed);
             }
-            const finalizeResp = await fetch(`${API_ROOT}/class_analysis/jobs/active_workspace/upload_session/${encodeURIComponent(sessionId)}/finalize`, {
+            const finalizeResp = await requestContext.fetch(`${requestContext.apiRoot}/class_analysis/jobs/active_workspace/upload_session/${encodeURIComponent(sessionId)}/finalize`, {
                 method: "POST",
                 signal,
             });
@@ -51934,7 +52739,7 @@ async function cancelRfDetrTrainingJobRequest() {
             };
         } catch (error) {
             try {
-                await fetch(`${API_ROOT}/class_analysis/jobs/active_workspace/upload_session/${encodeURIComponent(sessionId)}/cancel`, { method: "POST" });
+                await requestContext.fetch(`${requestContext.apiRoot}/class_analysis/jobs/active_workspace/upload_session/${encodeURIComponent(sessionId)}/cancel`, { method: "POST" });
             } catch (cancelError) {
                 console.warn("Data Quality Explorer active workspace upload cleanup failed", cancelError);
             }
@@ -53338,7 +54143,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (classSplitElements.sessionRestoreButton) {
             classSplitElements.sessionRestoreButton.disabled = Boolean(
-                classSplitState.sessionRestorePromise || classSplitState.active || classSplitState.startupOperation
+                dqeWorkspaceBusy || classSplitState.sessionRestorePromise || classSplitState.active || classSplitState.startupOperation
             );
         }
         const stats = getClassSplitActiveWorkspaceStats();
@@ -53936,6 +54741,8 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function startClassSplitAnalysis({ reuseLast = false } = {}) {
+        const requestContext = dqeCaptureRequest();
+        if (dqeWorkspaceBusy) return;
         if (classSplitState.sessionRestorePromise) {
             setClassSplitJobStatus("Wait for the saved session to finish reconnecting before starting another analysis.", "warn");
             return;
@@ -54060,9 +54867,9 @@ async function cancelRfDetrTrainingJobRequest() {
                     progress: Math.max(0.01, sourceHandle.uploadedActiveWorkspace ? 0.96 : 0.01),
                     message: `Starting backend ${sourceHandle.sourceMode} analysis for ${sourceHandle.objectCount} objects from ${sourceHandle.imageCount} images ...`,
                 });
-                resp = await fetch(`${API_ROOT}/class_analysis/jobs`, {
+                resp = await requestContext.fetch(`${requestContext.apiRoot}/class_analysis/jobs`, {
                     method: "POST",
-                    headers: { "Content-Type": "application/json" },
+                    headers: { "Content-Type": "application/json", ...(requestContext.backendId ? { "X-Tator-Backend-Id": requestContext.backendId } : {}) },
                     body: JSON.stringify(payload),
                 });
             } else {
@@ -54099,11 +54906,11 @@ async function cancelRfDetrTrainingJobRequest() {
                         : `Snapshot-uploading ${workspaceCountLabel} ...`,
                 });
                 if (classSplitState.snapshotId) {
-                    const reuseResp = await fetch(
-                        `${API_ROOT}/class_analysis/jobs/active_workspace/snapshots/${encodeURIComponent(classSplitState.snapshotId)}`,
+                    const reuseResp = await requestContext.fetch(
+                        `${requestContext.apiRoot}/class_analysis/jobs/active_workspace/snapshots/${encodeURIComponent(classSplitState.snapshotId)}`,
                         {
                             method: "POST",
-                            headers: { "Content-Type": "application/json" },
+                            headers: { "Content-Type": "application/json", ...(requestContext.backendId ? { "X-Tator-Backend-Id": requestContext.backendId } : {}) },
                             body: JSON.stringify({
                                 ...workspace.manifest,
                                 images: publicClassSplitActiveWorkspaceRows(workspace.rows),
@@ -54397,6 +55204,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function cancelClassSplitJob() {
+        const requestContext = dqeCaptureRequest();
         const uploadSessionId = String(classSplitState.activeUploadSessionId || "").trim();
         const uploadAbortController = classSplitState.activeUploadAbortController;
         if (uploadAbortController || uploadSessionId) {
@@ -54405,9 +55213,9 @@ async function cancelRfDetrTrainingJobRequest() {
                     uploadAbortController.abort();
                 }
                 if (uploadSessionId) {
-                    await fetch(`${API_ROOT}/class_analysis/jobs/active_workspace/upload_session/${encodeURIComponent(uploadSessionId)}/cancel`, {
+                    await requestContext.fetch(`${requestContext.apiRoot}/class_analysis/jobs/active_workspace/upload_session/${encodeURIComponent(uploadSessionId)}/cancel`, {
                         method: "POST",
-                    }).catch(() => fetch(`${API_ROOT}/datasets/upload_session/${encodeURIComponent(uploadSessionId)}/cancel`, {
+                    }).catch(() => requestContext.fetch(`${requestContext.apiRoot}/datasets/upload_session/${encodeURIComponent(uploadSessionId)}/cancel`, {
                         method: "POST",
                     }));
                 }
@@ -54427,7 +55235,7 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         try {
-            const resp = await fetch(`${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/cancel`, {
+            const resp = await requestContext.fetch(`${requestContext.apiRoot}/class_analysis/jobs/${encodeURIComponent(jobId)}/cancel`, {
                 method: "POST",
             });
             const detail = await resp.text();
@@ -55268,29 +56076,52 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
-    async function loadClassSplitBoundedResult(jobId, manifest) {
+    async function loadClassSplitBoundedResult(jobId, manifest, { apiRoot = API_ROOT, signal, view = null } = {}) {
         const projectionMode = normalizeClassSplitProjectionChoice(
-            manifest?.recipe?.projection || "umap"
+            view?.projection || manifest?.recipe?.projection || "umap"
         );
         const graphParameters = new URLSearchParams({
             projection_mode: projectionMode,
             reviewed: "unreviewed",
             limit: "50000",
         });
+        if (Array.isArray(view?.classFilter)) view.classFilter.forEach((name) => graphParameters.append("class_names", name));
         const [graph, queue, reviewHistory] = await Promise.all([
             fetchClassSplitBoundedJson(
-                `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/graph?${graphParameters}`,
-                "bounded graph"
+                `${apiRoot}/class_analysis/jobs/${encodeURIComponent(jobId)}/graph?${graphParameters}`,
+                "bounded graph", { signal }
             ),
             fetchClassSplitBoundedJson(
-                `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/review_queue?category=review&limit=36`,
-                "review queue"
+                `${apiRoot}/class_analysis/jobs/${encodeURIComponent(jobId)}/review_queue?category=review&limit=36`,
+                "review queue", { signal }
             ),
             fetchClassSplitBoundedJson(
-                `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/review_history?projection_mode=${encodeURIComponent(projectionMode)}&limit=250`,
-                "review history"
+                `${apiRoot}/class_analysis/jobs/${encodeURIComponent(jobId)}/review_history?projection_mode=${encodeURIComponent(projectionMode)}&limit=250`,
+                "review history", { signal }
             ),
         ]);
+        if (Array.isArray(view?.classFilter) && view.classFilter.length === 0) {
+            graph.columns = { point_id: [] }; graph.returned = 0; graph.total_matching = 0; graph.truncated = false; graph.next_cursor = null;
+        }
+        if (view?.limitPoints === false && graph.next_cursor) {
+            const seen = new Set();
+            let cursor = String(graph.next_cursor);
+            while (cursor) {
+                if (seen.has(cursor)) throw new Error("The saved all-points graph returned a repeated cursor.");
+                seen.add(cursor);
+                graphParameters.set("cursor", cursor);
+                const page = await fetchClassSplitBoundedJson(`${apiRoot}/class_analysis/jobs/${encodeURIComponent(jobId)}/graph?${graphParameters}`, "saved all-points graph", { signal });
+                Object.entries(page.columns || {}).forEach(([name, values]) => {
+                    if (!Array.isArray(values)) return;
+                    if (!Array.isArray(graph.columns[name])) graph.columns[name] = [];
+                    for (const value of values) graph.columns[name].push(value);
+                });
+                cursor = String(page.next_cursor || "");
+            }
+            graph.returned = graph.columns?.point_id?.length || 0;
+            if (graph.returned < Number(graph.total_matching || 0)) throw new Error("The saved all-points graph ended before every point was loaded.");
+            graph.truncated = false; graph.next_cursor = null;
+        }
         const points = classSplitBoundedGraphPoints(graph);
         const rawGraphReturned = Number(graph.returned);
         const graphReturned = Number.isFinite(rawGraphReturned) && rawGraphReturned >= 0
@@ -55586,8 +56417,8 @@ async function cancelRfDetrTrainingJobRequest() {
         rebuildClassSplitCandidateIndexes();
         clearClassSplitDatasetAnalysis();
         stopClassSplitPlotFlash();
-        renderClassSplitResult();
-        scheduleClassSplitPendingReviewCommitDrain();
+        const plotReady = renderClassSplitResult();
+        if (!options.deferSessionCommit) scheduleClassSplitPendingReviewCommitDrain();
         if (discardedUncommittedPendingReviews) {
             enqueueTaskNotice(
                 `${discardedUncommittedPendingReviews} interrupted review action${discardedUncommittedPendingReviews === 1 ? " was" : "s were"} not restored because the label change was not committed. The candidate${discardedUncommittedPendingReviews === 1 ? " is" : "s are"} back in the queue.`,
@@ -55606,7 +56437,8 @@ async function cancelRfDetrTrainingJobRequest() {
             );
         }
         classSplitState.pendingPreviousReviewState = null;
-        persistDataQualityExplorerSession();
+        if (!options.deferSessionCommit) persistDataQualityExplorerSession();
+        return plotReady;
     }
 
     async function loadClassSplitResult(jobId, options = {}) {
@@ -55623,11 +56455,12 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (manifest?.artifacts?.session_store?.file) {
             const bounded = await loadClassSplitBoundedResult(jobId, manifest);
-            applyClassSplitResultPayload(bounded.result, jobId, {
+            await applyClassSplitResultPayload(bounded.result, jobId, {
                 boundedTransport: true,
                 restoredSession: options.restoredSession === true,
                 manifest,
             });
+            if (options.restoredSession !== true) await protectDqeCurrentReview(jobId);
             if (getClassSplitGraphClassNames() !== null) {
                 await refreshClassSplitGraphClassFilter();
             }
@@ -55652,10 +56485,11 @@ async function cancelRfDetrTrainingJobRequest() {
             error.httpStatus = resp.status;
             throw error;
         }
-        applyClassSplitResultPayload(parseJsonObjectSafe(detail, {}), jobId, {
+        await applyClassSplitResultPayload(parseJsonObjectSafe(detail, {}), jobId, {
             boundedTransport: false,
             restoredSession: false,
         });
+        await protectDqeCurrentReview(jobId);
         await restoreClassSplitQwenReviews(jobId);
         await retryClassSplitPendingTrainingCommitsAfterAnnotationSave();
     }
@@ -60489,6 +61323,7 @@ async function cancelRfDetrTrainingJobRequest() {
         return Boolean(
             record
             && record.backendOrigin === window.location.origin
+            && (!dqeSessionStore?.getBackend() || record.backendId === dqeSessionStore.getBackend())
             && record.analysisJobId === String(classSplitState.currentJobId || "")
             && record.exportBase === getClassSplitAnnotationExportBase()
             && Number.isSafeInteger(recordRevision)
@@ -60503,7 +61338,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         try {
             const parsed = JSON.parse(
-                window.localStorage.getItem(CLASS_SPLIT_EXPORT_RECORD_STORAGE_KEY) || "null"
+                window.localStorage.getItem(dqeRecoveryStorageKey("export", CLASS_SPLIT_EXPORT_RECORD_STORAGE_KEY)) || "null"
             );
             if (classSplitExportRecordMatchesCurrent(parsed)) {
                 classSplitState.sessionExportRecord = parsed;
@@ -60519,13 +61354,14 @@ async function cancelRfDetrTrainingJobRequest() {
         const normalized = {
             ...record,
             backendOrigin: window.location.origin,
+            backendId: dqeSessionStore?.getBackend() || "",
             analysisJobId: String(classSplitState.currentJobId || ""),
             updatedAt: new Date().toISOString(),
         };
         classSplitState.sessionExportRecord = normalized;
         try {
             window.localStorage.setItem(
-                CLASS_SPLIT_EXPORT_RECORD_STORAGE_KEY,
+                dqeRecoveryStorageKey("export", CLASS_SPLIT_EXPORT_RECORD_STORAGE_KEY),
                 JSON.stringify(normalized)
             );
         } catch (_) {
@@ -60537,7 +61373,7 @@ async function cancelRfDetrTrainingJobRequest() {
     function clearClassSplitExportRecord() {
         classSplitState.sessionExportRecord = null;
         try {
-            window.localStorage.removeItem(CLASS_SPLIT_EXPORT_RECORD_STORAGE_KEY);
+            window.localStorage.setItem(dqeRecoveryStorageKey("export", CLASS_SPLIT_EXPORT_RECORD_STORAGE_KEY), "null");
         } catch (_) {
             // Ignore unavailable browser storage.
         }
@@ -60974,7 +61810,8 @@ async function cancelRfDetrTrainingJobRequest() {
         exportBase,
         expectedRevision
     ) {
-        const response = await fetch(`${exportBase}/export/prepare`, {
+        const requestContext = dqeCaptureRequest();
+        const response = await requestContext.fetch(`${exportBase}/export/prepare`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -65071,6 +65908,7 @@ function captureClassSplitGraphSettlementState(pointIds) {
             jobId = classSplitState.currentJobId,
         } = {}
     ) {
+        const requestContext = dqeCaptureRequest();
         if (!enabled) {
             return null;
         }
@@ -65084,10 +65922,10 @@ function captureClassSplitGraphSettlementState(pointIds) {
         let httpStatus = 0;
         try {
             const { response, detail } = await fetchClassSplitReviewRequest(
-                `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(captureJobId)}/training_actions`,
+                `${requestContext.apiRoot}/class_analysis/jobs/${encodeURIComponent(captureJobId)}/training_actions`,
                 {
                     method: "POST",
-                    headers: { "Content-Type": "application/json" },
+                    headers: { "Content-Type": "application/json", ...(requestContext.backendId ? { "X-Tator-Backend-Id": requestContext.backendId } : {}) },
                     keepalive: true,
                     body: JSON.stringify({
                         ...(payload || {}),
@@ -69076,7 +69914,7 @@ function getClassSplitSingleBboxDeletionUiState(
         renderClassSplitBulkPanel();
         renderClassSplitDatasetAnalysis();
         refreshClassSplitClusterControls();
-        renderClassSplitPlot();
+        return renderClassSplitPlot();
     }
 
     function selectClassSplitPoint(
@@ -70428,6 +71266,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         pointIds,
         { clearPreconditionsById = null } = {}
     ) {
+        const requestContext = dqeCaptureRequest();
         const safeJobId = String(jobId || "").trim();
         const generation = classSplitState.analysisGeneration;
         if (
@@ -70531,7 +71370,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                     for (const target of hydrationTargets) {
                         if (!classSplitAsyncRequestIsCurrent(generation, safeJobId)) return;
                         const detailPayload = await fetchClassSplitBoundedJson(
-                            `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(safeJobId)}/points/${encodeURIComponent(target.pointId)}`,
+                            `${requestContext.apiRoot}/class_analysis/jobs/${encodeURIComponent(safeJobId)}/points/${encodeURIComponent(target.pointId)}`,
                             "review state",
                             { timeoutMs: 15000 }
                         );
@@ -70632,7 +71471,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                     return;
                 }
                 const { response, detail } = await fetchClassSplitReviewRequest(
-                    `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(safeJobId)}/result`,
+                    `${requestContext.apiRoot}/class_analysis/jobs/${encodeURIComponent(safeJobId)}/result`,
                     { cache: "no-store" },
                     {
                         timeoutMessage: "Review-state reconciliation timed out.",
@@ -70883,6 +71722,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
     }
 
     async function saveClassSplitReviewDisposition(pointId, disposition, options = {}) {
+        const requestContext = dqeCaptureRequest();
         const safeId = String(pointId || "");
         const safeDisposition = String(disposition || "").trim();
         const deferUi = options.deferUi === true;
@@ -71253,10 +72093,10 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             requestPayload.client_action_id = clientActionId;
             requestDispatched = true;
             const { response, detail } = await fetchClassSplitReviewRequest(
-                `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/points/${encodeURIComponent(safeId)}/review_disposition`,
+                `${requestContext.apiRoot}/class_analysis/jobs/${encodeURIComponent(jobId)}/points/${encodeURIComponent(safeId)}/review_disposition`,
                 {
                     method: "POST",
-                    headers: { "Content-Type": "application/json" },
+                    headers: { "Content-Type": "application/json", ...(requestContext.backendId ? { "X-Tator-Backend-Id": requestContext.backendId } : {}) },
                     keepalive: true,
                     body: JSON.stringify(requestPayload),
                 },
@@ -72601,6 +73441,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
     }
 
     async function deleteClassSplitReviewHistory() {
+        const requestContext = dqeCaptureRequest();
         const jobId = String(classSplitState.currentJobId || "").trim();
         if (!jobId) {
             throw new Error("No completed Data Quality Explorer job is available.");
@@ -72691,10 +73532,10 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             let deletedCount = 0;
             if (durableEntries.length) {
                 const { response, detail } = await fetchClassSplitReviewRequest(
-                    `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/review_history/delete`,
+                    `${requestContext.apiRoot}/class_analysis/jobs/${encodeURIComponent(jobId)}/review_history/delete`,
                     {
                         method: "POST",
-                        headers: { "Content-Type": "application/json" },
+                        headers: { "Content-Type": "application/json", ...(requestContext.backendId ? { "X-Tator-Backend-Id": requestContext.backendId } : {}) },
                         body: JSON.stringify({
                             schema: "class-analysis-review-history-delete-v1",
                             client_action_id: clientActionId,
@@ -75804,6 +76645,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
     }
 
     async function drainClassSplitPendingAnnotationTransactions() {
+        const requestContext = dqeCaptureRequest();
         if (classSplitState.annotationTransactionDrainPromise) {
             return classSplitState.annotationTransactionDrainPromise;
         }
@@ -75832,9 +76674,9 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                             annotation_save: getClassSplitAnnotationSaveEnvelope(),
                         };
                     const endpoint = transactionKind === "dual_bbox_delete_v1"
-                        ? `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/points/${encodeURIComponent(String(entry.pointId || entry.request?.point_id || ""))}/dual_bbox_annotation_transaction`
-                        : `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/annotation_transactions`;
-                    const response = await fetch(
+                        ? `${requestContext.apiRoot}/class_analysis/jobs/${encodeURIComponent(jobId)}/points/${encodeURIComponent(String(entry.pointId || entry.request?.point_id || ""))}/dual_bbox_annotation_transaction`
+                        : `${requestContext.apiRoot}/class_analysis/jobs/${encodeURIComponent(jobId)}/annotation_transactions`;
+                    const response = await requestContext.fetch(
                         endpoint,
                         {
                             method: "POST",
@@ -75936,6 +76778,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
     }
 
     async function recoverClassSplitBackendAnnotationTransactions(jobId) {
+        const requestContext = dqeCaptureRequest();
         const safeJobId = String(jobId || "").trim();
         if (!safeJobId) return;
         const applyRecovery = (value) => {
@@ -75948,8 +76791,8 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                 renderClassSplitSessionPersistenceStatus();
             }
         };
-        const recoveryResponse = await fetch(
-            `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(safeJobId)}/annotation_session/recovery`
+        const recoveryResponse = await requestContext.fetch(
+            `${requestContext.apiRoot}/class_analysis/jobs/${encodeURIComponent(safeJobId)}/annotation_session/recovery`
         );
         const recoveryDetail = await recoveryResponse.text();
         if (!recoveryResponse.ok) {
@@ -75980,8 +76823,8 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             await resumeClassSplitAnnotationBatch(batch);
         }
         if (activeBatches.length) {
-            const refreshedResponse = await fetch(
-                `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(safeJobId)}/annotation_session/recovery`
+            const refreshedResponse = await requestContext.fetch(
+                `${requestContext.apiRoot}/class_analysis/jobs/${encodeURIComponent(safeJobId)}/annotation_session/recovery`
             );
             const refreshedDetail = await refreshedResponse.text();
             if (!refreshedResponse.ok) {
@@ -76000,8 +76843,8 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                 .filter(Boolean)
             : [];
         if (!operationIds.length) return recovery;
-        const retryResponse = await fetch(
-            `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(safeJobId)}/annotation_session/recover`,
+        const retryResponse = await requestContext.fetch(
+            `${requestContext.apiRoot}/class_analysis/jobs/${encodeURIComponent(safeJobId)}/annotation_session/recover`,
             {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -76187,6 +77030,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         action,
         targetClassName = ""
     ) {
+        const requestContext = dqeCaptureRequest();
         const pointId = String(point?.point_id || "").trim();
         const requestJobId = String(classSplitState.currentJobId || "").trim();
         const requestGeneration = classSplitState.analysisGeneration;
@@ -76291,8 +77135,8 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
 
         let response;
         try {
-            response = await fetch(
-                `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(requestJobId)}/annotation_transactions`,
+            response = await requestContext.fetch(
+                `${requestContext.apiRoot}/class_analysis/jobs/${encodeURIComponent(requestJobId)}/annotation_transactions`,
                 {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -76570,7 +77414,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
     }
 
     function setClassSplitAnnotationBatchRecovery(record) {
-        const recoveryKey = "tator.classSplit.annotationBatch.v1";
+        const recoveryKey = dqeRecoveryStorageKey("annotationBatch", "tator.classSplit.annotationBatch.v1");
         const next = { ...record };
         classSplitState.annotationBatchOperation = next;
         localStorage.setItem(recoveryKey, JSON.stringify(next));
@@ -76581,7 +77425,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         const expectedId = String(batchId || "").trim();
         const expectedJobId = String(jobId || "").trim();
         if (!expectedId || !expectedJobId) return false;
-        const recoveryKey = "tator.classSplit.annotationBatch.v1";
+        const recoveryKey = dqeRecoveryStorageKey("annotationBatch", "tator.classSplit.annotationBatch.v1");
         const active = classSplitState.annotationBatchOperation;
         if (
             String(active?.batchId || active?.batch_id || "").trim() === expectedId
@@ -76601,7 +77445,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
     }
 
     function clearClassSplitAnnotationBatchRecovery(batchId = "", jobId = "") {
-        const recoveryKey = "tator.classSplit.annotationBatch.v1";
+        const recoveryKey = dqeRecoveryStorageKey("annotationBatch", "tator.classSplit.annotationBatch.v1");
         const saved = parseJsonObjectSafe(localStorage.getItem(recoveryKey) || "{}", {});
         const active = classSplitState.annotationBatchOperation;
         const expectedId = String(
@@ -76630,7 +77474,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             classSplitState.annotationBatchOperation = null;
         }
         if (owns(saved)) {
-            localStorage.removeItem(recoveryKey);
+            localStorage.setItem(recoveryKey, "null");
         }
     }
 
@@ -76647,6 +77491,10 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         operation = null,
         cancelIncompleteUpload = false,
     }) {
+        const requestContext = dqeCaptureRequest();
+        const fetchBatchJson = (url, options = {}) => fetchClassSplitAnnotationBatchJson(url, {
+            ...options, headers: { ...options.headers, ...(requestContext.backendId ? { "X-Tator-Backend-Id": requestContext.backendId } : {}) },
+        });
         const receipts = [];
         let previousCompleted = -1;
         let stalled = 0;
@@ -76655,13 +77503,13 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                 cancelIncompleteUpload
                 && ["draft", "uploading"].includes(String(batch?.state || ""))
             ) {
-                batch = await fetchClassSplitAnnotationBatchJson(`${base}/cancel`, {
+                batch = await fetchBatchJson(`${base}/cancel`, {
                     method: "POST",
                 });
                 clearClassSplitAnnotationBatchRecovery(batchId, jobId);
                 return { batch, receipts, cancelled: true };
             }
-            batch = await fetchClassSplitAnnotationBatchJson(`${base}/process`, {
+            batch = await fetchBatchJson(`${base}/process`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -76716,6 +77564,10 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         records,
         operation = null,
     }) {
+        const requestContext = dqeCaptureRequest();
+        const fetchBatchJson = (url, options = {}) => fetchClassSplitAnnotationBatchJson(url, {
+            ...options, headers: { ...options.headers, ...(requestContext.backendId ? { "X-Tator-Backend-Id": requestContext.backendId } : {}) },
+        });
         const batchId = `annotation-batch:${generateUUID()}`;
         const items = records.map((record, sequence) => ({
             sequence,
@@ -76723,9 +77575,9 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             payload: record,
         }));
         const manifestHash = await hashClassSplitBatchManifest(items);
-        const base = `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}`
+        const base = `${requestContext.apiRoot}/class_analysis/jobs/${encodeURIComponent(jobId)}`
             + `/annotation_batches/${encodeURIComponent(batchId)}`;
-        const recoveryKey = "tator.classSplit.annotationBatch.v1";
+        const recoveryKey = dqeRecoveryStorageKey("annotationBatch", "tator.classSplit.annotationBatch.v1");
         const recoveryRecord = {
             batchId,
             jobId,
@@ -76735,8 +77587,8 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             createdAt: new Date().toISOString(),
         };
         setClassSplitAnnotationBatchRecovery({ ...recoveryRecord, phase: "creating" });
-        let batch = await fetchClassSplitAnnotationBatchJson(
-            `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/annotation_batches`,
+        let batch = await fetchBatchJson(
+            `${requestContext.apiRoot}/class_analysis/jobs/${encodeURIComponent(jobId)}/annotation_batches`,
             {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -76758,7 +77610,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             updatedAt: new Date().toISOString(),
         });
         for (let offset = 0; offset < items.length; offset += CLASS_SPLIT_ANNOTATION_BATCH_PAGE_SIZE) {
-            batch = await fetchClassSplitAnnotationBatchJson(`${base}/items`, {
+            batch = await fetchBatchJson(`${base}/items`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -76774,7 +77626,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                 updatedAt: new Date().toISOString(),
             });
         }
-        batch = await fetchClassSplitAnnotationBatchJson(`${base}/start`, {
+        batch = await fetchBatchJson(`${base}/start`, {
             method: "POST",
         });
         updateClassSplitAnnotationBatchRecovery(batchId, jobId, {
@@ -76803,10 +77655,14 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
     }
 
     async function resumeClassSplitAnnotationBatch(batchSummary) {
+        const requestContext = dqeCaptureRequest();
+        const fetchBatchJson = (url, options = {}) => fetchClassSplitAnnotationBatchJson(url, {
+            ...options, headers: { ...options.headers, ...(requestContext.backendId ? { "X-Tator-Backend-Id": requestContext.backendId } : {}) },
+        });
         const jobId = String(batchSummary?.job_id || classSplitState.currentJobId || "").trim();
         const batchId = String(batchSummary?.batch_id || "").trim();
         if (!jobId || !batchId) return null;
-        const base = `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}`
+        const base = `${requestContext.apiRoot}/class_analysis/jobs/${encodeURIComponent(jobId)}`
             + `/annotation_batches/${encodeURIComponent(batchId)}`;
         let batch = batchSummary;
         const existingRecovery = classSplitState.annotationBatchOperation;
@@ -78500,6 +79356,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         jobId,
         generation = classSplitState.analysisGeneration
     ) {
+        const requestContext = dqeCaptureRequest();
         if (!classSplitDualBBoxAnnotationTransactionApiAvailable()) {
             throw new Error(
                 "Restart the backend to load exact overlapping-box annotation transactions."
@@ -78658,7 +79515,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             { force: true, preserveViewport: true }
         );
         await optimisticGraphMutation.completion;
-        const endpoint = `${API_ROOT}/class_analysis/jobs/${encodeURIComponent(safeJobId)}/points/${encodeURIComponent(contract.conflict.point_id)}/dual_bbox_annotation_transaction`;
+        const endpoint = `${requestContext.apiRoot}/class_analysis/jobs/${encodeURIComponent(safeJobId)}/points/${encodeURIComponent(contract.conflict.point_id)}/dual_bbox_annotation_transaction`;
         const acceptCommittedReceipt = async (result) => {
             let attestation = null;
             try {
@@ -78727,7 +79584,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                     endpoint,
                     {
                         method: "POST",
-                        headers: { "Content-Type": "application/json" },
+                        headers: { "Content-Type": "application/json", ...(requestContext.backendId ? { "X-Tator-Backend-Id": requestContext.backendId } : {}) },
                         body: JSON.stringify({
                             ...requestPayload,
                             ...getClassSplitAnnotationSaveEnvelope(),
@@ -80513,6 +81370,11 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
     }
 
     async function clearClassAnalysisRegenerableCache() {
+        if (dqeLibrary?.supported()) {
+            dqeLibrary.show("cleanup");
+            dqeLibrary.message("Select the reusable cache items to preview exactly what will be removed.");
+            return;
+        }
         if (!window.confirm("Delete regenerable Data Quality Explorer crops and embeddings? Recoverable analyses and review receipts will be kept.")) {
             return;
         }
@@ -80528,10 +81390,14 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             const payload = parseJsonObjectSafe(detail, {});
             const pending = payload.status === "queued" || payload.operation_state === "queued" || payload.operation_state === "running";
             setClassSplitJobStatus(
-                pending ? "Cache cleanup queued on the backend. Refresh usage after it finishes."
+                pending ? "Cache cleanup queued on the backend. Open Datasets & sessions to follow its progress."
                     : `Regenerable cache cleared; removed ${formatBytes(Number(payload.bytes_reclaimed) || 0)}.`,
                 pending ? "" : "success"
             );
+            if (pending && dqeSessionStore?.getBackend()) {
+                dqeSessionStore.record("cleanup", { operation_id: payload.operation_id || payload.operation_ids?.[0] });
+                await dqeLibrary.refresh();
+            }
         } catch (error) {
             setClassSplitJobStatus(`Cache clear failed: ${error.message || error}`, "error");
         } finally {
@@ -80567,7 +81433,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                 const linked = base.match(/\/datasets\/([^/]+)\/annotation$/);
                 return {
                     apiRoot: datasetPruningVerifiedApiRoot(),
-                    backendId: datasetPruningVerifiedApiRoot() ? dqeSessionStore.getBackend() : "",
+                    backendId: dqeSessionStore?.getBackend() || "",
                     datasetName: String(annotationSourceState.datasetLabel || ""),
                     analysisJobId: String(classSplitState.currentJobId || ""),
                     annotationSource: transient ? { kind: "transient", id: decodeURIComponent(transient[1]) }
@@ -80617,10 +81483,9 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         classSplitElements.cacheClear = document.getElementById("classAnalysisCacheClear");
         classSplitElements.cacheBudgetGiB = document.getElementById("classAnalysisCacheBudgetGiB");
         classSplitElements.cacheBudgetSave = document.getElementById("classAnalysisCacheBudgetSave");
-        classSplitElements.cacheRefresh?.addEventListener("click", refreshClassAnalysisCacheStatus);
+        classSplitElements.cacheRefresh?.addEventListener("click", () => dqeLibrary?.supported() ? dqeLibrary.refresh() : refreshClassAnalysisCacheStatus());
         classSplitElements.cacheBudgetSave?.addEventListener("click", saveClassAnalysisCacheBudget);
         classSplitElements.cacheClear?.addEventListener("click", clearClassAnalysisRegenerableCache);
-        void refreshClassAnalysisCacheStatus();
         classSplitElements.jobStatus = document.getElementById("classSplitJobStatus");
         classSplitElements.scopeSelected = document.getElementById("classSplitScopeSelected");
         classSplitElements.scopeSubset = document.getElementById("classSplitScopeSubset");
@@ -86453,6 +87318,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
     }
 
     async function ingestImageFiles(files, imageList, imagesInput) {
+        if (dqeWorkspaceBusy) throw new Error("Wait for the workspace switch before loading images.");
         resetImageList();
         const selectedFiles = Array.from(files || []);
         const supportedFiles = selectedFiles.filter((file) => {

@@ -314,3 +314,5 @@ tmp/
 /tmp_*.json
 /models/*_evaluation.json
 /models/*_training_report.json
+
+.agent-state/

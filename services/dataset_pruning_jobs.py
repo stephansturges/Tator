@@ -100,6 +100,10 @@ class PruningService(PlanningMixin):
         self.family_views = BoundedViews(48)
         self.init_planning()
 
+    def review_ledger(self, path):
+        factory = getattr(self.adapter, 'review_ledger', None)
+        return factory(path) if factory else ReviewLedger(path)
+
     def directory(self, job_id: str) -> Path:
         if not re.fullmatch(r"dp_[a-f0-9]{16}",str(job_id)):
             raise HTTPException(404,"Pruning analysis not found")
@@ -354,7 +358,7 @@ class PruningService(PlanningMixin):
                 write_json(directory/"images.json",images)
                 write_json(directory/"result.json",result)
                 self.inherit_manual_intent(directory, source, images)
-                with ReviewLedger(directory / 'review.sqlite3').transaction() as initial_review:
+                with self.review_ledger(directory / 'review.sqlite3').transaction() as initial_review:
                     initial_review.setdefault('budget', int(.20 * len(images)))
                 shutil.copy2(derived/"scene.npy",directory/"scene.npy")
                 self.cache.close_maps()
@@ -427,7 +431,7 @@ class PruningService(PlanningMixin):
         return directory,result,source,images,chosen
 
     def review(self,job_id,payload):
-        if payload.get('view') == 'impact' or payload.get('preview_id') or ReviewLedger(self.directory(job_id) / 'review.sqlite3').read().get('plans', {}).get('active'):
+        if payload.get('view') == 'impact' or payload.get('preview_id') or self.review_ledger(self.directory(job_id) / 'review.sqlite3').read().get('plans', {}).get('active'):
             return self.planning_selection(job_id, payload)
         with self.lock:
             directory,result,source,images,chosen = self.load_selection(job_id,payload)
@@ -456,7 +460,7 @@ class PruningService(PlanningMixin):
 
     def review_context(self, job_id, payload, check_selection=True):
         directory, result, source, images, _ = self.load_selection(job_id, {**payload, 'removed_count': 0}, check_selection)
-        ledger = ReviewLedger(directory / 'review.sqlite3')
+        ledger = self.review_ledger(directory / 'review.sqlite3')
         snapshot = self.completed_snapshots.load(directory)
         paths = [directory / name for name in ('scene.npy', 'evidence.sqlite3', 'evidence.sqlite3-wal')]
         binding = snapshot.binding + artifact_states(paths)
@@ -497,7 +501,7 @@ class PruningService(PlanningMixin):
             if previous.is_symlink() or not (previous / 'review.sqlite3').is_file(): continue
             try:
                 if read_json(previous / 'source.json').get('identity') != source['identity']: continue
-                state = ReviewLedger(previous / 'review.sqlite3').read()
+                state = self.review_ledger(previous / 'review.sqlite3').read()
                 for identifier, field in self.manual_intent_fields(state).items():
                     if field.get('image_sha256') != current.get(identifier): continue
                     last_keep = max(field.get('last_keep_at', 0), latest.get(identifier, {}).get('last_keep_at', 0))
@@ -561,7 +565,7 @@ class PruningService(PlanningMixin):
             if previous == directory or previous.is_symlink() or not (previous / 'review.sqlite3').is_file(): continue
             try:
                 if read_json(previous / 'source.json')['identity'] != source['identity']: continue
-                state = ReviewLedger(previous / 'review.sqlite3').read()
+                state = self.review_ledger(previous / 'review.sqlite3').read()
                 for identifier, field in self.manual_intent_fields(state).items():
                     if field.get('image_sha256') != current.get(identifier): continue
                     last_keep = max(field.get('last_keep_at', 0), latest.get(identifier, {}).get('last_keep_at', 0))
@@ -570,7 +574,7 @@ class PruningService(PlanningMixin):
             except (OSError, ValueError, KeyError, sqlite3.Error) as error:
                 raise HTTPException(503, 'Saved manual Keep intent needs repair before creating another review') from error
         if latest:
-            with ReviewLedger(directory / 'review.sqlite3').transaction() as state:
+            with self.review_ledger(directory / 'review.sqlite3').transaction() as state:
                 state['pins'] = latest
                 state['inherited_manual_intent'] = {'source_identity': source['identity'], 'count': sum(bool(field['value']) for field in latest.values()), 'policy': 'exact_image_id_and_pixel_sha_only'}
 
@@ -636,7 +640,7 @@ class PruningService(PlanningMixin):
         return self.review_public(state, plan, context[1])
 
     def families(self, job_id, payload):
-        if payload.get('preview_id') or ReviewLedger(self.directory(job_id) / 'review.sqlite3').read().get('plans', {}).get('active'):
+        if payload.get('preview_id') or self.review_ledger(self.directory(job_id) / 'review.sqlite3').read().get('plans', {}).get('active'):
             return self.planning_families(job_id, payload)
         with self.adapter.guard(), self.lock:
             context = self.review_context(job_id, payload)
@@ -770,7 +774,7 @@ class PruningService(PlanningMixin):
 
     def plan_preview(self, job_id, payload):
         if payload.get('kind') == 'settings': return self.settings_preview(job_id, payload)
-        if ReviewLedger(self.directory(job_id) / 'review.sqlite3').read().get('plans', {}).get('active'):
+        if self.review_ledger(self.directory(job_id) / 'review.sqlite3').read().get('plans', {}).get('active'):
             return self.planning_family_preview(job_id, payload)
         with self.adapter.guard(), self.lock:
             context = self.review_context(job_id, payload)
@@ -838,7 +842,7 @@ class PruningService(PlanningMixin):
         staged = PairStore(staged_path)
         with self.adapter.guard():
             with self.lock:
-                ledger = ReviewLedger(self.directory(job_id)/'review.sqlite3')
+                ledger = self.review_ledger(self.directory(job_id)/'review.sqlite3')
                 state = ledger.read(); receipt = state['operations'].get(token)
                 if receipt:
                     if receipt['identity'] != identity: raise HTTPException(409, 'This identity belongs to another operation')
@@ -915,14 +919,14 @@ class PruningService(PlanningMixin):
                 staged.abort(); staged_path.unlink(missing_ok=True)
 
     def review_mutation(self, job_id, payload):
-        if payload.get('action') in {'apply_plan', 'pin'} or ReviewLedger(self.directory(job_id) / 'review.sqlite3').read().get('plans', {}).get('active'):
+        if payload.get('action') in {'apply_plan', 'pin'} or self.review_ledger(self.directory(job_id) / 'review.sqlite3').read().get('plans', {}).get('active'):
             return self.planning_review_mutation(job_id, payload)
         if payload.get('action') == 'measure_direct': return self.measure_direct(job_id, payload)
         token = str(payload.get('request_id') or '')
         if not re.fullmatch(r'[a-f0-9]{32}', token): raise HTTPException(400, 'A stable review request identity is required')
         identity = digest(payload)
         with self.adapter.guard(), self.lock:
-            saved = ReviewLedger(self.directory(job_id) / 'review.sqlite3').read()['operations'].get(token)
+            saved = self.review_ledger(self.directory(job_id) / 'review.sqlite3').read()['operations'].get(token)
             if saved and saved['identity'] != identity:
                 raise HTTPException(409, 'This request identity belongs to another review operation')
             try:

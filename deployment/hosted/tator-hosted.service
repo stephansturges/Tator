@@ -1,0 +1,30 @@
+[Unit]
+Description=Tator hosted dataset and annotation service
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tator
+Group=tator
+WorkingDirectory=/opt/tator
+EnvironmentFile=/etc/tator/hosted.env
+Environment=PYTHONUNBUFFERED=1
+Environment=HF_HOME=/var/lib/tator-hosted/model-cache
+Environment=TORCH_HOME=/var/lib/tator-hosted/model-cache/torch
+ExecStart=/opt/tator/.venv/bin/python -m uvicorn hosted_app:create_app --factory --host 127.0.0.1 --port 8010 --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-access-log
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=90
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/tator-hosted
+# GPU devices remain accessible; model workers have the same service identity.
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -21,6 +21,7 @@ import uuid
 
 import numpy as np
 from fastapi import HTTPException
+from utils.capture_metadata import CAPTURE_GROUP_FIELDS, portable_capture_metadata
 
 from services.dataset_pruning import (PruningConfig, build_order, coverage_for_retained,
     digest, reevaluate_pair_evidence, removal_evidence, selection, _assignment_image_input, _config, UnionFind)
@@ -65,8 +66,9 @@ def export_scene_groups(images, previous, config, *, witness_metrics=()):
         for mapping, key in [(original, previous[i]), (pixels, image['image_sha256'])]:
             if key in mapping: union.union(i, mapping[key])
             else: mapping[key] = i
-        for field in ['source_group', 'video_id']:
-            value = image.get(field)
+        metadata = portable_capture_metadata(image)
+        for field in CAPTURE_GROUP_FIELDS:
+            value = metadata.get(field)
             if value is not None and value != '':
                 key = (field, str(value))
                 if key in videos: union.union(i, videos[key])
@@ -932,7 +934,7 @@ class PlanningMixin:
         token = str(payload.get('request_id') or '')
         if not re.fullmatch('[a-f0-9]{32}', token): raise HTTPException(400, 'A stable review request identity is required')
         identity = digest(payload)
-        ledger = ReviewLedger(self.directory(job_id) / 'review.sqlite3')
+        ledger = self.review_ledger(self.directory(job_id) / 'review.sqlite3')
         # A retry may overlap both the expensive calculation and the initial
         # capture of the original request. A durable receipt always wins over
         # a subsequently stale source/plan; a different payload never does.

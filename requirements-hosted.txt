@@ -1,0 +1,11 @@
+# Lightweight control process; model workers also use the platform's existing requirements.
+fastapi>=0.110,<1
+pydantic>=2.7,<3
+uvicorn[standard]>=0.24,<1
+python-multipart>=0.0.18,<1
+argon2-cffi>=23.1,<26
+Pillow>=10
+httpx>=0.27,<1
+# Retained DQE/pruning review calculations run in the control process.
+numpy>=1.24,<3
+scipy>=1.10,<2

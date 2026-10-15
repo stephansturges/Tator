@@ -26,6 +26,11 @@ def reconstruct_cached_object_rows(api, cache, images, recipe, manifest):
                 for image in images for obj in image['objects']}
     if not original or recipe.get('evidence_mode') == 'scene_only':
         return SelectedObjectFeatures({}, 0)
+    # A retained final-feature cache can supply the exact already-fitted rows.
+    # This is a replay protocol, never an encoder/refit fallback.
+    replay = getattr(cache, 'replay_object_rows', None)
+    if replay is not None:
+        return replay(images, recipe, manifest)
     records = object_records(api, copy.deepcopy(images), recipe['bbox']['preprocessing'])
     matrices, weights = [], []
     for component in recipe['bbox']['components']:

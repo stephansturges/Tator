@@ -8,7 +8,7 @@ to their own derived namespace and cannot approve a removal.
 from __future__ import annotations
 
 import copy
-from contextlib import closing
+from contextlib import closing, nullcontext
 import json
 from pathlib import Path
 import re
@@ -487,7 +487,7 @@ def calibrate(service, job_id, payload):
                   "encoder_calls": 0, "head_training_calls": 0, "geometry_refits": 0}
         path = _database_path(directory)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(sqlite3.connect(path, timeout=30)) as db:
+        with getattr(service.adapter, 'calibration_commit_guard', nullcontext)(), closing(sqlite3.connect(path, timeout=30)) as db:
             with db:
                 db.execute("CREATE TABLE IF NOT EXISTS profiles (profile_id TEXT PRIMARY KEY,content TEXT,content_digest TEXT)")
                 db.execute("CREATE TABLE IF NOT EXISTS operations (request_id TEXT PRIMARY KEY,identity TEXT,response TEXT)")

@@ -720,7 +720,8 @@
     const YOLO_EXPORT_HANDLE_DB_NAME = "tatorExportHandles";
     const YOLO_EXPORT_HANDLE_STORE = "handles";
     const YOLO_EXPORT_DIRECTORY_HANDLE_KEY = "yoloCaptionsExportDirectory";
-    let API_ROOT = loadStoredApiRoot();
+    const hostedMode = Boolean(window.TatorHosted);
+    let API_ROOT = hostedMode ? window.location.origin : loadStoredApiRoot();
     window.getTatorApiRoot = () => API_ROOT;
     let yoloExportDirectoryHandle = null;
     let yoloExportDirectoryHandleLoaded = false;
@@ -888,7 +889,9 @@
                 if (!["GET", "HEAD", "OPTIONS"].includes(method) && backendId
                     && target.origin === owner.origin && target.pathname.startsWith(`${owner.pathname.replace(/\/$/, "")}/`)
                     && !headers.has("X-Tator-Backend-Id")) headers.set("X-Tator-Backend-Id", backendId);
-                return window.fetch(url, { ...options, headers });
+                return hostedMode
+                    ? window.TatorHosted.fetch(url, { ...options, headers })
+                    : window.fetch(url, { ...options, headers });
             },
         };
     }
@@ -2494,6 +2497,7 @@
     }
 
     async function fetchDetectorDefault() {
+        if (hostedMode) return detectorState.mode;
         const requestId = detectorState.defaultFetchRequestId + 1;
         detectorState.defaultFetchRequestId = requestId;
         try {
@@ -2519,6 +2523,7 @@
     }
 
     function renderDetectorStatus() {
+        if (hostedMode) return; // Actual dataset selection is rendered from the hosted catalog.
         const yoloName = detectorState.yoloActive?.run_name || detectorState.yoloActive?.run_id;
         const rfdetrName = detectorState.rfdetrActive?.run_name || detectorState.rfdetrActive?.run_id;
         const yoloLabel = yoloName ? `YOLO active: ${yoloName}` : "YOLO active: none";
@@ -2533,6 +2538,7 @@
     }
 
     async function refreshDetectorStatus() {
+        if (hostedMode) return; // Hosted workspace owns this global configuration.
         const requestId = detectorState.statusRefreshRequestId + 1;
         detectorState.statusRefreshRequestId = requestId;
         try {
@@ -2566,6 +2572,7 @@
     }
 
     async function maybeAutoSelectDetectorRun() {
+        if (hostedMode) return; // Hosted workspace owns this global configuration.
         const requestId = detectorState.autoSelectRequestId + 1;
         detectorState.autoSelectRequestId = requestId;
         const mode = detectorState.mode;
@@ -7408,7 +7415,8 @@ const sam3TrainState = {
         allowLibrarySave = false,
         ignoreCurrentImageHydration = false,
     } = {}) {
-        return (dqeWorkspaceBusy && !dqeIsInternalSave())
+        return (hostedMode && !window.TatorHosted.editable)
+            || (dqeWorkspaceBusy && !dqeIsInternalSave())
             || Boolean(classSplitState.libraryRecoveryBlock)
             || isAnnotationReadOnly()
             || isAutoLabelUsingCurrentAnnotationSession()
@@ -7589,6 +7597,7 @@ const sam3TrainState = {
     }
 
     function annotationImageUrlForRecord(imageRecord) {
+        if (hostedMode) return imageRecord ? window.TatorHosted.mediaUrlFor(imageRecord.annotationRelpath || window.TatorHosted.imageId) : null;
         const base = getAnnotationBasePath();
         if (!base || !imageRecord) {
             return null;
@@ -8082,6 +8091,7 @@ const sam3TrainState = {
         background = false,
         allowLibrarySave = false,
     } = {}) {
+        if (hostedMode) return window.TatorHosted.save({ manual });
         const requestContext = dqeCaptureRequest();
         if (!isAnnotationDatasetModeActive()) {
             return false;
@@ -8390,6 +8400,7 @@ const sam3TrainState = {
     }
 
     function hydrateDatasetBboxesForImage(imageRecord, options = {}) {
+        if (hostedMode) return hydrateHostedImage(imageRecord, options);
         if (!isDatasetBackedImageRecord(imageRecord)) {
             return true;
         }
@@ -10029,6 +10040,7 @@ const sam3TrainState = {
     }
 
     async function refreshGlossaryLibrary(options = {}) {
+        if (hostedMode) return; // Hosted workspace owns this global configuration.
         if (glossaryLibraryState.inFlight) {
             // Coalesce bursts of refresh calls; run one more pass after current fetch settles.
             glossaryLibraryState.pendingRefresh = true;
@@ -12988,6 +13000,7 @@ function updateRfDetrTrainStartAvailability(entry) {
     }
 
     async function loadRfDetrRunList(force = false) {
+        if (hostedMode) return; // Hosted workspace owns this global configuration.
         if (!force && rfdetrRunState.items.length) {
             populateRfDetrRunSelect();
             populateDetectorRunSelect("rfdetr");
@@ -13039,6 +13052,7 @@ function updateRfDetrTrainStartAvailability(entry) {
     }
 
     async function loadYoloRunList(force = false) {
+        if (hostedMode) return; // Hosted workspace owns this global configuration.
         if (!force && yoloRunState.items.length) {
             populateYoloRunSelect();
             populateDetectorRunSelect("yolo");
@@ -13848,6 +13862,7 @@ async function fetchAutomationJobs(url) {
 }
 
 async function refreshAutomationLockStatus() {
+        if (hostedMode) return; // Hosted workspace owns this global configuration.
     if (automationLockState.refreshInFlight) {
         // Coalesce overlapping polls; run one follow-up refresh afterward.
         automationLockState.refreshNeedsRefresh = true;
@@ -14022,6 +14037,10 @@ function updateAutomationLockTabs() {
 }
 
 function ensureAutomationAvailable(actionLabel) {
+    if (hostedMode && window.TatorHosted.automationPauseReason) {
+        setSamStatus(window.TatorHosted.automationPauseReason, { variant: "warn", duration: 4000 });
+        return false;
+    }
     if (isAnnotationMutationBlocked()) {
         const message = annotationMutationBlockedMessage(actionLabel || "Automation");
         setSamStatus(message, { variant: "warn", duration: 4000 });
@@ -22393,6 +22412,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function setActiveTab(tabName) {
+        if (hostedMode && tabName !== TAB_LABELING) return;
         const previous = activeTab;
         activeTab = tabName;
         if (annotationFocusMode && tabName !== TAB_LABELING) {
@@ -25214,6 +25234,7 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!pick || pick === "active") {
             return null;
         }
+        if (hostedMode) return pick;
         if (pick.includes("/")) {
             return pick;
         }
@@ -25282,6 +25303,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function refreshQwenSettings(options = {}) {
+        if (hostedMode) return; // Hosted workspace owns this global configuration.
         const silent = !!options.silent;
         const hasSettingsUi = !!(
             qwenSettingsElements.trustRemoteCode
@@ -26941,6 +26963,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (qwenElements.captionBuildInstructionDataset) {
             qwenElements.captionBuildInstructionDataset.addEventListener("click", () => {
+                if (hostedMode) { handleQwenCaption({ instructionDataset: true }).catch(console.error); return; }
                 if (!ensureAutomationAvailable("training dataset creation")) {
                     return;
                 }
@@ -29273,6 +29296,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function addSam3LabelmapClassFromUi() {
+        if (hostedMode) { openHostedClassManagement(); return; }
         const className = String(sam3TextElements.newClassInput?.value || "").trim();
         if (!className) {
             setSam3LabelmapStatus("Enter a class name first.", "warn");
@@ -29345,6 +29369,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function saveSam3LabelmapFromUi() {
+        if (hostedMode) { openHostedClassManagement(); return; }
         const labelmap = orderedClassNames();
         if (!labelmap.length) {
             setSam3LabelmapStatus("Load or create classes before saving.", "warn");
@@ -29676,6 +29701,10 @@ async function cancelRfDetrTrainingJobRequest() {
                     ? "OpenAI provider is selected; configure an OpenAI model and backend-local key path or OPENAI_API_KEY."
                     : "The model backend is unavailable; preview may work only after backend/model status recovers.";
             }
+            if (hostedMode) reason = locked ? "Automation is suspended. Manual editing and saving remain available."
+                : busy ? "The caption job is running. Its result will be available for review."
+                : !providerReady ? "Select an available model in Tools & models; paid providers require administrator setup."
+                : "Generate a proposal for this image, then review it. Dataset construction and exports are managed in the workspace.";
             qwenElements.captionInstructionActionReason.textContent = reason;
         }
     }
@@ -34069,9 +34098,9 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (qwenElements.captionGlossarySave) {
             qwenElements.captionGlossarySave.disabled = locked || !datasetId;
-            qwenElements.captionGlossarySave.textContent = qwenCaptionGlossaryState.saveInFlight
-                ? "Saving..."
-                : "Save to dataset";
+            qwenElements.captionGlossarySave.textContent = hostedMode ? "Dataset guidance in workspace"
+                : qwenCaptionGlossaryState.saveInFlight ? "Saving..." : "Save to dataset";
+            if (hostedMode) qwenElements.captionGlossarySave.hidden = window.TatorHostedBoot.user.role !== "admin";
         }
     }
 
@@ -34090,7 +34119,7 @@ async function cancelRfDetrTrainingJobRequest() {
             : source === "default"
                 ? "Using editable default from labelmap"
                 : "Using local editable glossary";
-        const saveText = datasetId ? "Save edits to make it canonical for this dataset." : "No dataset selected; edits apply to caption requests only.";
+        const saveText = hostedMode ? "Edits here apply to your caption requests only." : datasetId ? "Save edits to make it canonical for this dataset." : "No dataset selected; edits apply to caption requests only.";
         setCaptionGlossaryStatus(`${sourceText}${classCount ? ` for ${classCount} classes` : ""}. ${saveText}`);
         updateCaptionGlossaryControls();
         updateQwenCaptionPromptStack();
@@ -34117,6 +34146,11 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function refreshCaptionGlossaryForCurrentContext(options = {}) {
+        if (hostedMode) {
+            setCaptionGlossaryStatus("Edits here apply to your requests. Shared dataset guidance is managed in the workspace.");
+            updateCaptionGlossaryControls();
+            return;
+        }
         const requestContext = dqeCaptureRequest();
         if (!qwenElements.captionGlossary) {
             return;
@@ -34179,12 +34213,13 @@ async function cancelRfDetrTrainingJobRequest() {
         });
         qwenCaptionGlossaryState.dirty = true;
         qwenCaptionGlossaryState.text = text;
-        setCaptionGlossaryStatus("Reset from current classes. Save to dataset to make this canonical.");
+        setCaptionGlossaryStatus(hostedMode ? "Reset from current classes for your caption requests." : "Reset from current classes. Save to dataset to make this canonical.");
         updateCaptionGlossaryControls();
         return true;
     }
 
     async function saveCaptionGlossaryToDataset() {
+        if (hostedMode) { document.getElementById("hostedBack")?.click(); return false; }
         const requestContext = dqeCaptureRequest();
         if (!guardQwenCaptionArchiveIdle("saving the caption glossary")) {
             return false;
@@ -34810,6 +34845,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function updateCaptionDatasetSummary() {
+        if (hostedMode) { syncHostedCaptionDataset(); return; }
         if (!qwenElements.captionDatasetSummary) {
             return;
         }
@@ -34844,6 +34880,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function refreshQwenCaptionDatasets(options = {}) {
+        if (hostedMode) { syncHostedCaptionDataset(); return; }
         if (!qwenElements.captionDatasetSelect) {
             return;
         }
@@ -35001,6 +35038,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function refreshQwenAgentDatasets(options = {}) {
+        if (hostedMode) return; // Hosted workspace owns this global configuration.
         if (!qwenElements.agentDatasetSelect) {
             return;
         }
@@ -35262,6 +35300,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function refreshQwenAgentEnsembleJobs(selectedId) {
+        if (hostedMode) return; // Hosted workspace owns this global configuration.
         if (!qwenElements.agentEnsembleJob) {
             return;
         }
@@ -35345,6 +35384,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function refreshQwenAgentDetectorRunsFor(mode, selectEl, selectedId) {
+        if (hostedMode) return; // Saved hosted pipelines own their installed component identities.
         if (!selectEl) {
             return;
         }
@@ -35486,6 +35526,7 @@ async function cancelRfDetrTrainingJobRequest() {
         const caption = String(source.caption || "").trim();
         const id = String(source.id || "").trim();
         return {
+            ...source,
             id,
             image_name: imageName,
             image: imageName,
@@ -35753,6 +35794,15 @@ async function cancelRfDetrTrainingJobRequest() {
         return normalized;
     }
 
+    async function saveHostedCaptionChange(imageName, change) {
+        if (!window.TatorHosted.editable || imageName !== currentImage?.name) {
+            throw new Error("Reconnect editing on this image before changing its captions.");
+        }
+        change();
+        renderCaptionAlternatesForCurrentImage();
+        if (!await window.TatorHosted.save({ manual: true })) throw new Error("Your caption is retained in this tab. Reconnect to save it.");
+    }
+
     async function saveCaptionAsAlternate({ makePrimary = false, source = "manual" } = {}) {
         const requestContext = dqeCaptureRequest();
         const imageName = currentImage?.name || "";
@@ -35762,6 +35812,21 @@ async function cancelRfDetrTrainingJobRequest() {
             return null;
         }
         const datasetId = getCaptionRecordDatasetId();
+        if (hostedMode) {
+            let record;
+            await saveHostedCaptionChange(imageName, () => {
+                if (makePrimary) {
+                    textLabels[imageName] = caption;
+                    captionRecordsByImage[imageName] = captionRecordsForImage(imageName).map((item) => ({ ...item, is_primary: false }));
+                }
+                record = rememberCaptionRecord({ id: generateUUID(), image_name: imageName, caption, source,
+                    title: source === "manual" ? "Manual alternate" : "", is_primary: makePrimary,
+                    created_at: new Date().toISOString(), updated_at: new Date().toISOString() });
+                setSelectedCaptionId(imageName, record.id);
+            });
+            setQwenCaptionStatus("Caption saved");
+            return record;
+        }
         if (!datasetId) {
             const record = rememberCaptionRecord({
                 id: `local_${Date.now()}_${Math.random().toString(16).slice(2)}`,
@@ -35822,6 +35887,14 @@ async function cancelRfDetrTrainingJobRequest() {
             renderCaptionAlternatesForCurrentImage();
             return true;
         }
+        if (hostedMode) {
+            await saveHostedCaptionChange(imageName, () => {
+                rememberCaptionRecord({ ...selected, caption, updated_at: new Date().toISOString() });
+                if (selected.is_primary) textLabels[imageName] = caption;
+            });
+            setQwenCaptionStatus("Caption updated");
+            return true;
+        }
         const datasetId = getCaptionRecordDatasetId();
         if (!datasetId || selected.metadata?.local_only) {
             const records = captionRecordsForImage(imageName).map((record) => (
@@ -35861,6 +35934,14 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!imageName || !selected || selected.id.startsWith("primary:")) {
             return false;
         }
+        if (hostedMode) {
+            await saveHostedCaptionChange(imageName, () => {
+                textLabels[imageName] = selected.caption;
+                captionRecordsByImage[imageName] = captionRecordsForImage(imageName).map((item) => ({ ...item, is_primary: item.id === selected.id }));
+            });
+            setQwenCaptionStatus("Primary caption updated");
+            return true;
+        }
         const datasetId = getCaptionRecordDatasetId();
         if (!datasetId || selected.metadata?.local_only) {
             textLabels[imageName] = selected.caption || "";
@@ -35895,6 +35976,14 @@ async function cancelRfDetrTrainingJobRequest() {
         const selected = imageName ? getSelectedCaptionRecord(imageName) : null;
         if (!imageName || !selected || selected.id.startsWith("primary:")) {
             return false;
+        }
+        if (hostedMode) {
+            await saveHostedCaptionChange(imageName, () => {
+                captionRecordsByImage[imageName] = captionRecordsForImage(imageName).filter((item) => item.id !== selected.id);
+                setSelectedCaptionId(imageName, "");
+            });
+            setQwenCaptionStatus("Alternate caption removed");
+            return true;
         }
         const datasetId = getCaptionRecordDatasetId();
         if (!datasetId || selected.metadata?.local_only) {
@@ -36295,6 +36384,11 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function loadCaptionForCurrentImage(options = {}) {
+        if (hostedMode) {
+            setCaptionOutputValue(getSelectedCaptionRecord(currentImage?.name)?.caption || textLabels?.[currentImage?.name] || "");
+            renderCaptionAlternatesForCurrentImage();
+            return true;
+        }
         const requestContext = dqeCaptureRequest();
         if (!qwenElements.captionOutput || !currentImage?.name) {
             return false;
@@ -36382,6 +36476,13 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function persistCaptionLabel(imageName, caption, datasetIdOverride = null) {
+        if (hostedMode) {
+            await saveHostedCaptionChange(imageName, () => {
+                textLabels[imageName] = caption;
+                captionRecordsByImage[imageName] = captionRecordsForImage(imageName).map((item) => ({ ...item, is_primary: item.caption === caption && item.is_primary }));
+            });
+            return { status: "saved", caption, dataset_id: hostedCanvasDataset.id, persistence: "hosted_annotation_version" };
+        }
         const requestContext = dqeCaptureRequest();
         const context = resolveCaptionPersistenceContext(datasetIdOverride);
         const normalizedCaption = String(caption || "").trim();
@@ -36576,6 +36677,10 @@ async function cancelRfDetrTrainingJobRequest() {
             fallback_model_id: meta?.fallbackModel || null,
             loop_cooldown: meta?.loopCooldown ?? null,
             recovery_events: Array.isArray(result?.recovery_events) ? result.recovery_events : [],
+            generated_qa_pairs: Array.isArray(result?.generated_qa_pairs) ? structuredClone(result.generated_qa_pairs) : [],
+            caption_quality: result?.caption_quality ? structuredClone(result.caption_quality) : null,
+            backend_job_id: result?.backend_job_id || null,
+            evidence: result?.evidence ? structuredClone(result.evidence) : null,
             used_boxes: result?.used_boxes ?? null,
             counts: result?.used_counts ?? null,
             created_at: new Date().toISOString(),
@@ -36585,6 +36690,12 @@ async function cancelRfDetrTrainingJobRequest() {
             textLabelRecords = [];
         }
         textLabelRecords.push(record);
+        if (hostedMode && normalizedCaption) {
+            if (isPrimary) captionRecordsByImage[imageName] = captionRecordsForImage(imageName).map((item) => ({ ...item, is_primary: false }));
+            rememberCaptionRecord({ ...record, id: record.id || generateUUID(), source: record.caption_source,
+                metadata: { generation: structuredClone(record) } });
+            renderCaptionAlternatesForCurrentImage();
+        }
     }
 
     async function handleQwenCaptionPromptPreview() {
@@ -36676,7 +36787,7 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!guardQwenCaptionArchiveIdle("previewing the training dataset caption process")) {
             return;
         }
-        const imageNames = getCaptionImageList({ startAtCurrent: true });
+        const imageNames = hostedMode ? (currentImage?.name ? [currentImage.name] : []) : getCaptionImageList({ startAtCurrent: true });
         if (!imageNames.length) {
             setSamStatus("No images loaded.", { variant: "warn", duration: 3000 });
             return;
@@ -36766,7 +36877,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
-    async function handleQwenCaption() {
+    async function handleQwenCaption({ instructionDataset = false } = {}) {
         if (!guardQwenCaptionArchiveIdle("starting another caption job")) {
             return;
         }
@@ -36778,7 +36889,7 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!captionProviderReadyForBackend()) {
             setSamStatus(
                 remoteProvider
-                    ? "OpenAI provider needs a model and backend-local key path or OPENAI_API_KEY."
+                    ? (hostedMode ? "Ask the administrator to enable a paid caption model for this dataset." : "OpenAI provider needs a model and backend-local key path or OPENAI_API_KEY.")
                     : "Qwen backend is unavailable",
                 { variant: "warn", duration: 3500 },
             );
@@ -36835,7 +36946,7 @@ async function cancelRfDetrTrainingJobRequest() {
             const datasetBackedResult = await runQwenCaptionSingleBackendJob(
                 requestImageName,
                 requestFields,
-                { signal: abortController.signal },
+                { signal: abortController.signal, instructionDataset },
             );
             let result = datasetBackedResult;
             if (!result) {
@@ -37250,6 +37361,15 @@ async function cancelRfDetrTrainingJobRequest() {
             return null;
         }
         const provider = getCaptionProviderSettings();
+        if (hostedMode) {
+            const paid = provider.provider === CAPTION_PROVIDER_OPENAI;
+            for (const input of [qwenElements.captionTemperature, qwenElements.captionTopP, qwenElements.captionTopK, qwenElements.captionPresencePenalty]) {
+                if (input) { input.disabled = paid; input.title = paid ? "Local sampling settings apply only to Qwen. Paid calls use the reasoning setting above." : ""; }
+            }
+            el.textContent = paid ? "Paid calls use the server's configured prices and spending limits. Charges are recorded per stage; a caption may need several stages." : "Local Qwen selected; no external provider charge.";
+            if (shardPlanEl) shardPlanEl.textContent = paid && provider.serviceTier === "batch" ? "Asynchronous batches use a separate saved run." : "";
+            return paid ? {source: "hosted_server_budget", model: provider.model} : null;
+        }
         if (provider.provider !== CAPTION_PROVIDER_OPENAI) {
             el.textContent = "Local provider selected; remote API cost is $0.";
             el.classList.remove("is-warn");
@@ -37455,6 +37575,9 @@ async function cancelRfDetrTrainingJobRequest() {
                 }
                 const status = String(job?.status || "").toLowerCase();
                 const result = job?.result || {};
+                if (hostedMode && status === "waiting_for_editor") {
+                    throw new Error("Captioning paused. Reconnect editing on this image to resume the saved job.");
+                }
                 const processed = Number(result.processed || 0);
                 const totalCases = Number(result.total_cases || 1);
                 const failed = Number(result.failed || 0);
@@ -37524,6 +37647,8 @@ async function cancelRfDetrTrainingJobRequest() {
                 truncated: !!record.truncated,
                 recovery_events: Array.isArray(record.recovery_events) ? record.recovery_events : [],
                 caption_quality: record.caption_quality || null,
+                generated_qa_pairs: Array.isArray(record.generated_qa_pairs) ? record.generated_qa_pairs : [],
+                evidence: result.evidence || null,
                 backend_job_id: jobId,
             };
         } finally {
@@ -37567,6 +37692,8 @@ async function cancelRfDetrTrainingJobRequest() {
                     truncated: !!record.truncated,
                     recovery_events: Array.isArray(record.recovery_events) ? record.recovery_events : [],
                     caption_quality: record.caption_quality || null,
+                    generated_qa_pairs: Array.isArray(record.generated_qa_pairs) ? record.generated_qa_pairs : [],
+                    evidence: result.evidence || null,
                     backend_job_id: job?.job_id || null,
                 },
                 {
@@ -37689,6 +37816,7 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function qwenCaptionBackendTerminalPhase(status) {
         const normalized = String(status || "").toLowerCase();
+        if (normalized === "waiting_for_editor") return "paused";
         if (normalized === "completed") {
             return "complete";
         }
@@ -38093,7 +38221,7 @@ async function cancelRfDetrTrainingJobRequest() {
         if (status === "interrupted" && !hasQwenCaptionBackendResumeEvidence(job)) {
             return false;
         }
-        if (["queued", "running", "interrupted", "failed"].includes(status)) {
+        if (["queued", "running", "interrupted", "failed", "waiting_for_editor"].includes(status)) {
             return true;
         }
         return status === "completed" && qwenCaptionBackendJobFailureCount(job) > 0;
@@ -40428,13 +40556,14 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function updateQwenAgentButtons() {
         const locked = isGpuHeavyLockActive();
+        const available = hostedMode ? window.TatorHosted.edrReady : qwenAvailable;
         const busy = qwenAgentActive || qwenAgentBatchActive;
         const stopRequested = qwenAgentBatchCancel;
         if (qwenElements.prepassRunButton) {
-            qwenElements.prepassRunButton.disabled = locked || !qwenAvailable || busy || !currentImage;
+            qwenElements.prepassRunButton.disabled = locked || !available || busy || !currentImage;
         }
         if (qwenElements.prepassBatchRun) {
-            qwenElements.prepassBatchRun.disabled = locked || !qwenAvailable || busy;
+            qwenElements.prepassBatchRun.disabled = locked || !available || busy;
         }
         if (qwenElements.prepassStopButton) {
             // Disable repeated stop clicks once a stop request is already latched.
@@ -41020,6 +41149,11 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function buildQwenAgentPayload(imageName) {
+        if (hostedMode) {
+            const catalog = await window.TatorHosted.api(`/api/hosted/tools/catalog?dataset_id=${encodeURIComponent(window.TatorHosted.datasetId)}`);
+            if (!catalog.edr?.model_id) throw new Error("Ask the administrator to select a detection recipe for this dataset.");
+            return { image_name: imageName, recipe_id: catalog.edr.model_id };
+        }
         const imageRecord = images[imageName];
         if (!imageRecord) {
             throw new Error(`Unknown image: ${imageName}`);
@@ -41701,6 +41835,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function refreshPrepassRecipes() {
+        if (hostedMode) return;
         if (!qwenElements.agentRecipeSelect && !qwenElements.prepassRecipeSelect && !qwenElements.canonicalRecipeSelect) {
             return;
         }
@@ -42500,8 +42635,8 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!ensureAutomationAvailable("Prepass")) {
             return false;
         }
-        if (!qwenAvailable) {
-            setSamStatus("Qwen backend is unavailable", { variant: "warn", duration: 3500 });
+        if (hostedMode ? !window.TatorHosted.edrReady : !qwenAvailable) {
+            setSamStatus(hostedMode ? "The dataset detection recipe is not ready. Check Tools & models." : "Qwen backend is unavailable", { variant: "warn", duration: 3500 });
             return false;
         }
         if (qwenAgentActive) {
@@ -42619,7 +42754,7 @@ async function cancelRfDetrTrainingJobRequest() {
             setSamStatus("No images selected for prepass run.", { variant: "warn", duration: 3000 });
             return;
         }
-        if (!qwenAvailable) {
+        if (hostedMode ? !window.TatorHosted.edrReady : !qwenAvailable) {
             setSamStatus("Qwen backend is unavailable", { variant: "warn", duration: 3500 });
             return;
         }
@@ -46740,6 +46875,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function syncSam3RuntimeUi() {
+        if (hostedMode) { if (sam3RuntimeField) sam3RuntimeField.hidden = true; return; }
         const visible = samVariant === "sam3";
         if (sam3RuntimeField) {
             sam3RuntimeField.hidden = !visible;
@@ -46756,6 +46892,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function refreshSam3RuntimeOptions() {
+        if (hostedMode) return; // Hosted workspace owns this global configuration.
         if (!sam3RuntimeSelect) {
             return;
         }
@@ -82665,7 +82802,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
 
     document.addEventListener("DOMContentLoaded", () => {
         installTatorBackGestureGuard();
-        const restoredSession = readDataQualityExplorerSession();
+        const restoredSession = hostedMode ? {} : readDataQualityExplorerSession();
         if (TOP_TAB_KEYS.has(restoredSession.activeTab)) {
             activeTab = restoredSession.activeTab;
         }
@@ -82728,11 +82865,13 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         predictorElements.imageRam = document.getElementById("predictorImageRam");
         predictorElements.systemFreeRam = document.getElementById("predictorSystemFreeRam");
         initQwenPanel();
-        initQwenTrainingTab();
-        initQwenModelTab();
-        initAgentMiningUi();
-        initClassSplitExplorer();
-        startAutomationLockPolling();
+        if (!hostedMode) {
+            initQwenTrainingTab();
+            initQwenModelTab();
+            initAgentMiningUi();
+            initClassSplitExplorer();
+            startAutomationLockPolling();
+        }
 
         registerFileLabel(imagesSelectButton, document.getElementById("images"));
         registerFileLabel(classesSelectButton, document.getElementById("classes"));
@@ -82775,9 +82914,9 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         // chosen tab above. Annotation recovery waits for the page load event
         // so the canvas/listeners are ready, then reconnects without changing
         // that restored tab.
-        scheduleAnnotationSourceResumeAfterPageRestore();
+        if (!hostedMode) scheduleAnnotationSourceResumeAfterPageRestore();
         window.addEventListener("pageshow", (event) => {
-            if (event.persisted) {
+            if (event.persisted && !hostedMode) {
                 scheduleAnnotationSourceResumeAfterPageRestore();
             }
         });
@@ -83620,7 +83759,8 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             return;
         }
         if (all) {
-            const ok = window.confirm(`Run detector on all ${batchConfig.names.length} images? This can take a while.`);
+            const scope = hostedMode ? "loaded work images" : "images";
+            const ok = window.confirm(`Run detector on all ${batchConfig.names.length} ${scope}? This runs one image at a time and can take a while.`);
             if (!ok) {
                 return;
             }
@@ -85121,16 +85261,16 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         setupTabNavigation();
         listenCanvas();
         listenCanvasMouse();
-        listenImageLoad();
+        if (!hostedMode) listenImageLoad();
         listenImageSelect();
-        listenClassLoad();
+        if (!hostedMode) listenClassLoad();
         listenClassSelect();
-        listenBboxLoad();
-        listenBboxSave();
+        if (!hostedMode) listenBboxLoad();
+        if (!hostedMode) listenBboxSave();
         listenKeyboard();
-        preloadYoloExportDirectoryHandle();
+        if (!hostedMode) preloadYoloExportDirectoryHandle();
         listenImageSearch();
-        listenImageCrop();
+        if (!hostedMode) listenImageCrop();
         ensureBatchTweakElements();
         initAnnotationDiversityControls();
         datasetTypeBadge = document.getElementById("datasetTypeBadge");
@@ -86448,6 +86588,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             resizing: null
         };
         pendingApiBboxes[bbox.uuid] = bbox;
+        if (hostedMode && (samMode || autoMode || pointMode || multiPointMode)) bbox._hostedPending = true;
     };
 
     const updateBboxAfterTransform = ({ commitPointerTransform = false } = {}) => {
@@ -86830,6 +86971,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             stampBboxCreation(targetBbox);
         }
         pendingApiBboxes[targetBbox.uuid] = targetBbox;
+        if (hostedMode) targetBbox._hostedPending = true;
         tweakPreserveSet.add(targetBbox.uuid);
         try {
             let applied = false;
@@ -87501,6 +87643,13 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
 
     function setCurrentImage(image) {
         if (!image) return;
+        if (hostedMode && image.annotationRelpath && image.annotationRelpath !== window.TatorHosted.imageId) {
+            window.TatorHosted.navigate(image.annotationRelpath).catch((error) => {
+                if (currentImage) syncImageSelectionToName(currentImage.name, { ensureVisible: true });
+                setSamStatus(error.message, { variant: "error", duration: 6000 });
+            });
+            return;
+        }
         captureCurrentAnnotationDirtyState();
         // Monotonic token so late async image loads cannot override a newer selection.
         const selectionToken = ++imageSelectionRequestToken;
@@ -88789,6 +88938,10 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
     }
 
     async function runYoloCaptionsExport({ preferDirectory = false } = {}) {
+        if (hostedMode) {
+            setSamStatus("Dataset exports are available to administrators in the dataset workspace.", { variant: "info", duration: 4000 });
+            return;
+        }
         if (bboxExportInProgress) {
             setSamStatus("BBox export already running. Please wait.", { variant: "info", duration: 3000 });
             return;
@@ -90564,6 +90717,272 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             }
         }
     }
+
+    // Hosted persistence keeps native pixel geometry and stable object IDs.
+    // YOLO text is an export representation, never the editable source of truth.
+    let hostedCanvasRecord = null;
+    let hostedCanvasDataset = null;
+    function hydrateHostedImage(imageRecord, options = {}) {
+        if (!hostedCanvasRecord || !imageRecord || (options.allowApply && !options.allowApply())) return false;
+        if (imageRecord.annotationRelpath !== hostedCanvasRecord.id) return false;
+        const key = imageRecord.name;
+        if (annotationSourceState.hydratedKeys.has(key)) return true;
+        const buckets = {};
+        for (const object of hostedCanvasRecord.annotations.objects || []) {
+            const cls = hostedCanvasDataset.classes.find((item) => item.id === object.class_id);
+            if (!cls) throw new Error("An annotation refers to an unavailable class. Reload the dataset before editing.");
+            const [x, y, width, height] = object.bbox;
+            const box = { x, y, width, height, class: cls.name, uuid: object.id,
+                _hostedId: object.id, marked: false, type: object.polygon ? "polygon" : "bbox" };
+            if (object.polygon) box.points = object.polygon.map(([px, py]) => ({ x: px, y: py }));
+            (buckets[cls.name] ||= []).push(box);
+        }
+        bboxes[key] = buckets;
+        textLabels[key] = hostedCanvasRecord.annotations.caption || "";
+        captionRecordsByImage[key] = (hostedCanvasRecord.annotations.alternate_captions || []).map((item, index) => {
+            const saved = typeof item === "string" ? { caption: item } : item;
+            return normalizeCaptionRecord({ ...saved, id: saved.id || `imported:${hostedCanvasRecord.id}:${index}`,
+                image_name: key, image: key, image_key: key });
+        });
+        annotationSourceState.hydratedKeys.add(key);
+        setAnnotationHydrationState(key, "ready");
+        return true;
+    }
+    function openHostedClassManagement() {
+        if (window.TatorHostedBoot.user.role === "admin") {
+            document.getElementById("hostedBack")?.click();
+            return;
+        }
+        document.getElementById("hostedClassRequest")?.click();
+        const name = document.querySelector("#hostedClassDialog input");
+        if (name) { name.value = sam3TextElements.newClassInput?.value || ""; name.focus(); }
+    }
+
+    function syncHostedCaptionDataset() {
+        if (!window.TatorHostedCanvas || !hostedCanvasDataset || !qwenElements.captionDatasetSelect) return;
+        const dataset = hostedCanvasDataset;
+        qwenCaptionDatasetState.selectedId = dataset.id;
+        qwenCaptionDatasetState.items = [{ ...dataset, label: dataset.name }];
+        qwenElements.captionDatasetSelect.replaceChildren(new Option(dataset.name, dataset.id));
+        qwenElements.captionDatasetSelect.disabled = true;
+        if (qwenElements.captionDatasetSummary) qwenElements.captionDatasetSummary.textContent = `Current dataset: ${dataset.name}. Work on the loaded images; manage dataset jobs in the workspace.`;
+        if (qwenElements.captionDatasetRefresh) qwenElements.captionDatasetRefresh.hidden = true;
+    }
+
+    function configureHostedRoles(catalog) {
+        const admin = window.TatorHostedBoot.user.role === "admin";
+        const hide = (id, field = false) => {
+            const element = document.getElementById(id);
+            if (!element) return;
+            (field ? element.closest(".qwen-caption-settings__field, label") || element : element).hidden = true;
+        };
+        syncHostedCaptionDataset();
+        for (const id of ["qwenCaptionAllowModelDownload", "qwenCaptionRequirePilotCertification", "qwenCaptionPilotOutputDir",
+            "qwenCaptionPilotRequirePromptBudget", "qwenCaptionPilotTargetImages", "qwenCaptionPilotMaxP95DurationHours", "qwenCaptionPilotMinCases",
+            "qwenCaptionPilotSafetyFactor", "qwenCaptionPilotDeterministicRecoveryConfidence", "qwenCaptionPilotMaxPromptTokens", "qwenCaptionPilotPromptAdaptedRate",
+            "qwenCaptionArtifactLogMb", "qwenCaptionMaxFailures"]) {
+            const element = document.getElementById(id);
+            if (element?.type === "checkbox") element.checked = false;
+            hide(id, true);
+        }
+        // Dataset construction/export is an administrator workspace operation.
+        // Keep the actual per-image caption and QA model controls below.
+        for (const id of ["qwenCaptionRunKind", "qwenCaptionWritePolicy", "qwenCaptionCompletionMode", "qwenCaptionRunMaxImages",
+            "qwenCaptionCoverageStatus", "qwenCaptionTargetBaseCaptions", "qwenCaptionTargetGeneratedQa", "qwenCaptionIncrementBaseCaptions",
+            "qwenCaptionIncrementGeneratedQa", "qwenCaptionTestOutputsCount", "qwenCaptionIncludeDeterministicMetadataQa", "qwenCaptionRequireReadyInstructionExport"]) hide(id, true);
+        for (const id of ["qwenCaptionDownloadJsonl", "qwenCaptionDownloadGroupedJson", "qwenCaptionDownloadVlmJsonl",
+            "qwenCaptionDownloadInstructionBundle", "qwenCaptionInstructionAdvanced", "qwenCaptionExportHealth"]) hide(id);
+        for (const selector of [".qwen-caption-remote-spend-panel", ".qwen-caption-artifact-store-panel", ".qwen-caption-step-list"]) {
+            document.querySelectorAll(selector).forEach((element) => { element.hidden = true; });
+        }
+        const setText = (id, text) => { const element = document.getElementById(id); if (element) element.textContent = text; };
+        setText("sam3AddClassButton", admin ? "Manage classes in workspace" : "Request this class");
+        hide("sam3SaveLabelmapButton");
+        if (sam3TextElements.newClassInput) sam3TextElements.newClassInput.hidden = admin;
+        setSam3LabelmapStatus(admin ? "Classes are managed in the dataset workspace." : "New classes require administrator approval. Request one without changing the current class list.", "info");
+        setText("detectorBatchAllButton", admin ? "Run detector on loaded images" : "Run detector on my loaded work");
+        setText("qwenCaptionInstructionTitle", "Image caption and Q&A");
+        setText("qwenCaptionBuildInstructionDataset", "Caption image + Q&A");
+        setText("qwenCaptionPreviewInstructionProcess", "Preview image prompts");
+        const datasetLabel = document.querySelector('label[for="qwenCaptionDataset"]');
+        if (datasetLabel) datasetLabel.textContent = "Current dataset";
+        const instructionHelp = document.querySelector(".qwen-caption-instruction-panel .qwen-caption-flow-section__header .training-help");
+        if (instructionHelp) instructionHelp.textContent = "Generate image-specific caption and Q&A proposals for review.";
+        const archiveHelp = document.getElementById("qwenCaptionExportHealth")?.nextElementSibling;
+        if (archiveHelp?.classList.contains("training-help")) {
+            archiveHelp.textContent = "Caption proposals and alternates stay with the image. Review generated content before applying it; dataset exports are administrator-only.";
+            const recoveryHelp = archiveHelp.nextElementSibling;
+            if (recoveryHelp?.classList.contains("training-help")) recoveryHelp.textContent = "Caption jobs retain progress and results on the server. Manual edits remain available while automation is suspended. Cancelled jobs need an explicit resume.";
+        }
+        const detector = catalog.models.find((model) => model.model_id === catalog.detector?.model_id);
+        if (detector) detectorState.mode = detector.kind;
+        const selected = detector ? `Dataset detector: ${detector.name || detector.model_id}` : "No detector selected for this dataset. Ask the administrator to select one in Tools & models.";
+        if (detectorElements.labelingStatus) detectorElements.labelingStatus.textContent = selected;
+        updateCaptionGlossaryControls();
+    }
+    if (hostedMode) window.TatorHostedCanvas = {
+        imageName() { return currentImage?.name; },
+        imageNameFor(id) { return Object.values(images).find((image) => image.annotationRelpath === id)?.name || null; },
+        configureTools(catalog, state) {
+            configureHostedRoles(catalog);
+            window.TatorHosted.setToolsState(state);
+            const paidModels = catalog.paid_caption?.models || [];
+            const paidIdentity = JSON.stringify([paidModels, catalog.caption_job_capabilities?.openai_batch_transport]);
+            if (paidIdentity !== this.paidIdentity) {
+                this.paidIdentity = paidIdentity;
+                qwenCaptionOpenAiMetadata = {models: paidModels.map(model => ({...model, supports_original_image_detail: model.image_details.includes("original")}))};
+                const previous = qwenElements.captionOpenAiModel?.value;
+                if (qwenElements.captionOpenAiModel) {
+                    qwenElements.captionOpenAiModel.replaceChildren(...paidModels.map(model => new Option(model.id, model.id)));
+                    if (paidModels.some(model => model.id === previous)) qwenElements.captionOpenAiModel.value = previous;
+                }
+                const paidOption = qwenElements.captionProvider?.querySelector('option[value="openai"]');
+                if (paidOption) paidOption.disabled = !paidModels.length;
+                if (!paidModels.length && qwenElements.captionProvider) qwenElements.captionProvider.value = "local_qwen";
+                const batch = qwenElements.captionOpenAiServiceTier?.querySelector('option[value="batch"]');
+                if (batch) batch.disabled = !catalog.caption_job_capabilities?.openai_batch_transport;
+                if (batch?.disabled && qwenElements.captionOpenAiServiceTier?.value === "batch") qwenElements.captionOpenAiServiceTier.value = "standard";
+                if (qwenElements.captionOpenAiKeyPath) {
+                    qwenElements.captionOpenAiKeyPath.value = "managed-on-server";
+                    qwenElements.captionOpenAiKeyPath.closest(".qwen-caption-settings__field").hidden = true;
+                }
+                enforceOpenAiCaptionDetailCompatibility(); updateQwenCaptionWorkflow();
+            }
+            // Apply server guidance to untouched controls; polling must never
+            // overwrite a user's prompt edits or intentional empty override.
+            this.guidanceFields ||= new WeakMap();
+            for (const [input, value, prompt] of [
+                [qwenElements.extraContextInput, catalog.guidance?.context || "", false],
+                [qwenElements.captionGlossary, catalog.guidance?.labelmap_glossary || "", false],
+                [qwenElements.captionPromptUser, catalog.guidance?.context || "", true],
+            ]) {
+                if (!input) continue;
+                let tracked = this.guidanceFields.get(input);
+                if (!tracked) {
+                    tracked = { edited: prompt ? Boolean(qwenCaptionPromptStackState.dirty.user) : Boolean(input.value), last: null };
+                    this.guidanceFields.set(input, tracked);
+                    input.addEventListener("input", () => { tracked.edited = true; });
+                }
+                if (tracked.edited || (tracked.last !== null && input.value !== tracked.last)) continue;
+                if (prompt) {
+                    const composed = [buildCaptionCombinedUserPrompt(), value ? `Dataset context: ${value}` : ""].filter(Boolean).join("\n\n");
+                    setCaptionPromptEditorValue("user", composed);
+                } else input.value = value;
+                tracked.last = input.value;
+            }
+            if (qwenElements.prepassRecipeSelect) {
+                const modelId = catalog.edr?.model_id || "";
+                qwenElements.prepassRecipeSelect.replaceChildren(new Option(modelId || "No dataset recipe selected", modelId));
+                qwenElements.prepassRecipeSelect.disabled = true;
+                qwenElements.prepassRecipeSelect.title = "The administrator selects the dataset's detection recipe in Tools & models.";
+                if (qwenElements.prepassRecipeRefresh) qwenElements.prepassRecipeRefresh.hidden = true;
+            }
+            updateQwenAgentButtons();
+            const sam = catalog.models.find((model) => model.model_id === catalog.sam?.model_id);
+            const identity = sam ? `${sam.model_id}:${sam.checkpoint_sha256}` : null;
+            if (identity !== this.samIdentity) {
+                cancelAllSamJobs({ reason: "Your SAM selection changed", announce: false });
+                cancelSamPreload(); samPreloadLastKey = null; samTokenCache.clear();
+                this.samIdentity = identity; if (sam) samVariant = sam.kind;
+                updateSam3TextButtons(); refreshSam3SimilarityVisibility();
+            }
+            if (samVariantSelect) {
+                samVariantSelect.value = sam?.kind || "sam3"; samVariantSelect.disabled = true;
+                samVariantSelect.title = "Select your model in Tools & models above.";
+            }
+            if (regionDetectorSelect) {
+                const detector = catalog.models.find((model) => model.model_id === catalog.detector?.model_id);
+                regionDetectorSelect.value = detector?.kind || "yolo"; regionDetectorSelect.disabled = true;
+                regionDetectorSelect.title = "The administrator selects one detector for this dataset.";
+                syncRegionDetectorInputs();
+            }
+            document.getElementById("sam3RuntimeField")?.setAttribute("hidden", "");
+            const qwenModels = catalog.models.filter((model) => model.kind === "qwen" && catalog.qwen?.allowed_model_ids?.includes(model.model_id));
+            const qwenIdentity = JSON.stringify([qwenModels, catalog.qwen]);
+            if (qwenIdentity !== this.qwenIdentity) {
+                this.qwenIdentity = qwenIdentity;
+                for (const select of [qwenElements.captionModel, qwenElements.captionRefinementModel, qwenElements.captionFallbackModel]) {
+                    if (!select) continue;
+                    const selected = select.value; select.replaceChildren(new Option("Server default", "active"));
+                    for (const model of qwenModels) select.append(new Option(model.model_id, model.model_id));
+                    select.value = qwenModels.some((model) => model.model_id === selected) ? selected : "active";
+                }
+                refreshQwenStatus({ silent: true }).catch(() => {});
+            }
+            // Whole-server unload controls do not apply to private workers.
+            for (const id of ["qwenUnloadOthers", "qwenCaptionUnloadOthers"]) {
+                const input = document.getElementById(id);
+                if (input) { input.checked = false; input.closest("label")?.setAttribute("hidden", ""); }
+            }
+        },
+        async open(record, dataset, readOnly, neighbors = []) {
+            hostedCanvasRecord = structuredClone(record);
+            hostedCanvasDataset = structuredClone(dataset);
+            const ordered = neighbors.length ? neighbors : [record];
+            if (!ordered.some((item) => item.id === record.id)) ordered.unshift(record);
+            await openDatasetInAnnotationMode({ mode: "linked", datasetId: dataset.id,
+                datasetLabel: dataset.name, preparedSource: {
+                    lockSessionId: window.TatorHosted.editorId, lock: { holder: "the assigned annotator" }, readOnly,
+                    base: `${location.origin}/api/hosted/images/${record.id}/canvas`,
+                    apiRoot: location.origin, backendId: window.TatorHosted.instanceId,
+                    manifest: { dataset_label: dataset.name, labelmap: dataset.classes.map((item) => item.name),
+                        cursor: { split: record.split || "train", image_relpath: record.id },
+                        images: ordered.map((item) => ({ split: item.split || "train", image_name: item.filename || item.id, image_relpath: item.id,
+                            image_width: item.id === record.id ? record.width : 0, image_height: item.id === record.id ? record.height : 0,
+                            label_lines: [], text_label: item.id === record.id ? record.annotations.caption || "" : "" })) }
+                } });
+        },
+        activate(record, dataset) {
+            const image = Object.values(images).find((item) => item.annotationRelpath === record.id);
+            if (!image) throw new Error("This image is no longer in the open work list. Refresh the workspace.");
+            hostedCanvasRecord = structuredClone(record); hostedCanvasDataset = structuredClone(dataset);
+            annotationSourceState.hydratedKeys.delete(image.name);
+            textLabels[image.name] = record.annotations.caption || "";
+            setCurrentImage(image);
+        },
+        ready() { return Boolean(currentImage?.object && currentImage.annotationRelpath === hostedCanvasRecord?.id && annotationSourceState.hydratedKeys.has(currentImage.name)); },
+        snapshot() {
+            if (!this.ready()) throw new Error("Wait for the image and its annotations to load.");
+            const result = structuredClone(hostedCanvasRecord.annotations);
+            const previous = new Map((result.objects || []).map((item) => [item.id, item]));
+            result.objects = [];
+            for (const [name, boxes] of Object.entries(bboxes[currentImage.name] || {})) {
+                const cls = hostedCanvasDataset.classes.find((item) => item.name === name);
+                if (!cls && boxes.length) throw new Error("Request a class from the administrator before using it.");
+                for (const box of boxes) {
+                    box.uuid ||= generateUUID();
+                    const id = box._hostedId || box.uuid;
+                    if (box._hostedPending && pendingApiBboxes[box.uuid]) {
+                        if (previous.has(id)) result.objects.push(structuredClone(previous.get(id)));
+                        continue;
+                    }
+                    const object = { ...(previous.get(id) || {}), id, class_id: cls.id,
+                        bbox: [box.x, box.y, box.width, box.height] };
+                    if (Array.isArray(box.points) && box.points.length >= 3) {
+                        object.polygon = box.points.map((point) => [point.x, point.y]);
+                    } else delete object.polygon;
+                    result.objects.push(object);
+                }
+            }
+            result.caption = textLabels[currentImage.name] || "";
+            result.alternate_captions = captionRecordsForImage(currentImage.name);
+            return result;
+        },
+        acknowledge(record) { hostedCanvasRecord = structuredClone(record); },
+        hasPendingTools() {
+            return Object.values(bboxes[currentImage?.name] || {}).some((boxes) => boxes.some((box) => box._hostedPending && pendingApiBboxes[box.uuid]));
+        },
+        restoreDraft(annotations) {
+            if (!currentImage?.object) throw new Error("Load the image before restoring a draft.");
+            hostedCanvasRecord.annotations = structuredClone(annotations);
+            annotationSourceState.hydratedKeys.delete(currentImage.name);
+            hydrateHostedImage(currentImage);
+            textLabels[currentImage.name] = annotations.caption || "";
+            setCaptionOutputValue(textLabels[currentImage.name]);
+            renderCaptionAlternatesForCurrentImage();
+        },
+        freeze(value = true) { annotationSourceState.readOnly = value; syncLabelingSourceControls(); },
+    };
 
     async function loadSam3ClipClassifiers() {
         if (sam3CascadeState.clipClassifierRefreshInFlight) {

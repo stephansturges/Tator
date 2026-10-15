@@ -1,0 +1,15 @@
+.hosted-canvas .tab-bar,.hosted-canvas #imagesSelect,.hosted-canvas label[for=images],.hosted-canvas #cropImages,.hosted-canvas #classesSelect,.hosted-canvas #saveBboxes,.hosted-canvas #annotationTakeoverBtn,.hosted-canvas #annotationReloadBtn,.hosted-canvas #annotationCloseBtn{display:none!important}
+.hosted-canvas [data-tab-panel]:not([data-tab-panel=labeling]){display:none!important}
+.hosted-canvas #annotationSourcePanel{display:none!important}
+.hosted-canvas-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--border-color,#738299);background:var(--panel-bg,#142331);color:var(--text-color,#f1f5f9);position:sticky;top:0;z-index:5000;font:14px/1.4 system-ui}
+.hosted-canvas-bar button,.hosted-canvas-feedback button{border:1px solid #788d9f;border-radius:6px;background:#eef6fc;color:#182c3d;padding:7px 10px;cursor:pointer;font:inherit}.hosted-canvas-bar button:disabled{opacity:.45;cursor:default}
+.hosted-canvas-title{display:flex;flex-direction:column;min-width:120px;max-width:280px;overflow-wrap:anywhere}.hosted-canvas-title small{font-size:12px;opacity:.8}.hosted-canvas-bar label{display:flex;align-items:center;gap:4px;font-size:12px}.hosted-canvas-bar [role=status]{font-size:12px;max-width:290px}.hosted-canvas-bar [data-error=true]{color:#ffb9a6}
+.hosted-canvas-feedback{display:flex;gap:8px;align-items:center;padding:6px 16px;background:var(--panel-bg,#142331);font:13px system-ui}.hosted-canvas-feedback textarea{flex:1;max-width:600px;padding:6px}.hosted-review-note{margin:0;padding:8px 16px;background:#fff1be;color:#352a0e;font:14px system-ui}
+.hosted-canvas #hostedClassDialog{max-width:460px;border:1px solid #768697;border-radius:10px;padding:24px}.hosted-canvas #hostedClassDialog form{display:grid;gap:12px}.hosted-canvas #hostedClassDialog input,.hosted-canvas #hostedClassDialog textarea{padding:8px}
+.hosted-canvas #hostedSubmit,.hosted-canvas #hostedApprove{background:#c9f6dc;color:#153a26;font-weight:700}
+.hosted-canvas #hostedToolsDialog{width:min(640px,90vw);max-height:85vh;overflow:auto;border:1px solid #788d9f;border-radius:12px;padding:24px;background:var(--panel-bg,#fff);color:var(--text-color,#182c3d);font:14px/1.5 system-ui}
+#hostedToolsDialog section{border-top:1px solid #788d9f;padding:12px 0}#hostedToolsDialog label{display:grid;gap:5px;margin:8px 0}#hostedToolsDialog select{max-width:100%;padding:7px}#hostedToolsDialog button{padding:7px 12px;border:1px solid #788d9f;border-radius:6px;cursor:pointer}#hostedToolsState{font:12px/1.4 system-ui;max-width:360px}#hostedToolsDialog [role=alert]{color:#d64c36}
+.hosted-model-mapping{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px}
+
+.hosted-canvas .active-fallback{display:none!important}
+.hosted-caption-review{margin:12px;padding:16px;border:1px solid var(--border,#bcc6cf);border-radius:10px;background:var(--surface,#fff);color:var(--text,#152536);max-height:35vh;overflow:auto}.hosted-caption-review h2{font-size:1rem;margin:0 0 8px}.hosted-caption-review label{display:block;margin:8px 0}.hosted-caption-review p{white-space:pre-wrap}

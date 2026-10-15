@@ -16728,17 +16728,9 @@ CLASS_ANALYSIS_REFINEMENT_V33_CAPTURE_GROUP_CONTRACT = (
 CLASS_ANALYSIS_REFINEMENT_V33_FREQUENT_OVERLAP_FIT_ELIGIBILITY_CONTRACT = (
     "exclude-stage1-rough-labels-both-directed-roles-v1"
 )
-CLASS_ANALYSIS_CAPTURE_METADATA_FIELDS = (
-    "capture_group_id",
-    "sequence_id",
-    "video_id",
-    "flight_id",
-    "camera_id",
-    "frame_index",
-    "capture_timestamp",
-    "capture_perceptual_hash",
-    "capture_perceptual_image_sha256",
-)
+from utils.capture_metadata import CAPTURE_METADATA_FIELDS, portable_capture_metadata
+
+CLASS_ANALYSIS_CAPTURE_METADATA_FIELDS = CAPTURE_METADATA_FIELDS
 
 
 def _class_analysis_capture_metadata(
@@ -16746,21 +16738,7 @@ def _class_analysis_capture_metadata(
 ) -> Dict[str, Any]:
     """Copy only portable, scalar capture-provenance metadata."""
 
-    result: Dict[str, Any] = {}
-    for field in CLASS_ANALYSIS_CAPTURE_METADATA_FIELDS:
-        value = row.get(field)
-        if isinstance(value, bool) or not isinstance(
-            value, (str, int, float)
-        ):
-            continue
-        if isinstance(value, float) and not math.isfinite(value):
-            continue
-        if isinstance(value, str):
-            value = value.strip()
-            if not value:
-                continue
-        result[field] = value
-    return result
+    return portable_capture_metadata(row)
 
 
 CLASS_ANALYSIS_REFINEMENT_V31_PAIR_PROBE_CONTRACT = (
@@ -17067,7 +17045,7 @@ SAM3_REPO_ROOT = Path(__file__).resolve().parent.resolve()
 SAM3_VENDOR_ROOT = SAM3_REPO_ROOT / "sam3"
 SAM3_PACKAGE_ROOT = SAM3_VENDOR_ROOT / "sam3"
 SAM3_CONFIG_TEMPLATE = SAM3_REPO_ROOT / "sam3_local" / "local_yolo_ft.yaml"
-SAM3_GENERATED_CONFIG_DIR = SAM3_PACKAGE_ROOT / "train/configs/generated"
+SAM3_GENERATED_CONFIG_DIR = Path(os.environ.get("TATOR_SAM3_GENERATED_CONFIG_ROOT", str(SAM3_PACKAGE_ROOT / "train/configs/generated")))
 _init_storage_root(SAM3_GENERATED_CONFIG_DIR)
 
 
@@ -43927,63 +43905,8 @@ def _class_analysis_parse_yolo_geometry(
     image_width: int,
     image_height: int,
 ) -> Optional[Dict[str, Any]]:
-    parts = str(line or "").strip().split()
-    if len(parts) < 5:
-        return None
-    if re.fullmatch(r"[0-9]+", parts[0]) is None:
-        return None
-    try:
-        class_id = int(parts[0])
-    except Exception:
-        return None
-    if len(parts) >= 7:
-        points: List[Tuple[float, float]] = []
-        for idx in range(1, len(parts) - 1, 2):
-            try:
-                nx = float(parts[idx])
-                ny = float(parts[idx + 1])
-            except Exception:
-                return None
-            if not math.isfinite(nx) or not math.isfinite(ny):
-                return None
-            points.append(
-                (
-                    max(0.0, min(float(image_width), nx * float(image_width))),
-                    max(0.0, min(float(image_height), ny * float(image_height))),
-                )
-            )
-        if len(points) < 3:
-            return None
-        xs = [pt[0] for pt in points]
-        ys = [pt[1] for pt in points]
-        x1, x2 = max(0.0, min(xs)), min(float(image_width), max(xs))
-        y1, y2 = max(0.0, min(ys)), min(float(image_height), max(ys))
-        if x2 <= x1 or y2 <= y1:
-            return None
-        return {
-            "class_id": class_id,
-            "kind": "polygon",
-            "bbox_xyxy": [x1, y1, x2, y2],
-            "points": [[float(x), float(y)] for x, y in points],
-        }
-    try:
-        cx = float(parts[1]) * float(image_width)
-        cy = float(parts[2]) * float(image_height)
-        bw = float(parts[3]) * float(image_width)
-        bh = float(parts[4]) * float(image_height)
-    except Exception:
-        return None
-    if not all(math.isfinite(value) for value in (cx, cy, bw, bh)):
-        return None
-    if bw <= 0 or bh <= 0:
-        return None
-    x1 = max(0.0, min(float(image_width), cx - (bw / 2.0)))
-    y1 = max(0.0, min(float(image_height), cy - (bh / 2.0)))
-    x2 = max(0.0, min(float(image_width), cx + (bw / 2.0)))
-    y2 = max(0.0, min(float(image_height), cy + (bh / 2.0)))
-    if x2 <= x1 or y2 <= y1:
-        return None
-    return {"class_id": class_id, "kind": "bbox", "bbox_xyxy": [x1, y1, x2, y2]}
+    from utils.embedding_recipe import parse_yolo_geometry
+    return parse_yolo_geometry(line, image_width=image_width, image_height=image_height)
 
 
 def _class_analysis_parse_yolo_geometry_for_identity(
@@ -59776,30 +59699,8 @@ def _class_analysis_replay_fitted_embedding_adjustment(
     records: Sequence[Dict[str, Any]],
     transform: Mapping[str, Any],
 ) -> np.ndarray:
-    """Apply saved independent size coefficients to selected rows; never fit."""
-    raw = np.asarray(raw_embeddings, dtype=np.float32)
-    if raw.ndim != 2 or len(raw) != len(records):
-        raise ValueError('Saved adjustment rows do not match the requested records')
-    if not transform.get('applied'):
-        return raw / np.maximum(np.linalg.norm(raw, axis=1, keepdims=True), 1e-12)
-    fitted = transform.get('fitted_transform') or {}
-    if fitted.get('schema') != 'independent_size_residualization_v1' or fitted.get('normalization') != 'subtract_design_then_l2':
-        raise ValueError('The exact saved size transform is unavailable; recompute this analysis')
-    covariates, names = _class_analysis_record_covariates(records)
-    selected_names = transform.get('covariates') or []
-    if not selected_names or any(name not in names for name in selected_names):
-        raise ValueError('Saved size covariates are incompatible')
-    selected = covariates[:, [names.index(name) for name in selected_names]]
-    mean = np.asarray(fitted.get('covariate_mean'), np.float32)
-    std = np.asarray(fitted.get('covariate_std'), np.float32)
-    beta = np.asarray(fitted.get('coefficients'), np.float32)
-    if mean.shape != (len(selected_names),) or std.shape != mean.shape or beta.shape != (len(selected_names)+1, raw.shape[1]):
-        raise ValueError('Saved size coefficients are incompatible')
-    if not np.all(np.isfinite(mean)) or not np.all(np.isfinite(std)) or not np.all(std > 0) or not np.all(np.isfinite(beta)):
-        raise ValueError('Saved size coefficients are invalid')
-    design = np.concatenate([np.ones((len(raw), 1), np.float32), (selected-mean)/std], axis=1)
-    adjusted = raw-design@beta
-    return adjusted / np.maximum(np.linalg.norm(adjusted, axis=1, keepdims=True), 1e-12)
+    from utils.embedding_recipe import replay_fitted_embedding_adjustment
+    return replay_fitted_embedding_adjustment(raw_embeddings, records, transform)
 
 
 def _class_analysis_pearson(x: np.ndarray, y: np.ndarray) -> float:

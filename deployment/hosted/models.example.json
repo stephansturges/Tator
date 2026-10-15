@@ -1,0 +1,17 @@
+{
+  "allowed_model_roots": ["/srv/tator-models"],
+  "models": {},
+  "user_sam": {
+    "allowed_model_ids": [],
+    "default_model_id": null,
+    "device": "cuda:0",
+    "capacity": 3
+  },
+  "user_qwen": {
+    "allowed_model_ids": [],
+    "default_model_id": null,
+    "device": "cuda:1"
+  },
+  "detector_device": "cuda:0",
+  "heavy_jobs": {}
+}

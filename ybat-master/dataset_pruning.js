@@ -439,7 +439,7 @@
         async function request(path, options = {}, context = state.context) {
             if (!context?.apiRoot) throw new Error("Connect a backend first.");
             const signal = state.controller?.signal;
-            const response = await fetch(`${context.apiRoot}/dataset_pruning${path}`, { ...options, signal, headers: { ...(options.headers || {}), ...(context.backendId ? { "X-Tator-Backend-Id": context.backendId } : {}) } });
+            const response = await (adapters.fetch || fetch)(`${context.apiRoot}/dataset_pruning${path}`, { ...options, signal, headers: { ...(options.headers || {}), ...(context.backendId ? { "X-Tator-Backend-Id": context.backendId } : {}) } });
             const body = await response.json().catch(() => ({}));
             if (!current(context)) throw new DOMException("The dataset or backend changed.", "AbortError");
             if (!response.ok) { const error = new Error(typeof body.detail === "string" ? body.detail : body.detail?.message || body.message || `Pruning request failed (${response.status}).`); error.status = response.status; error.detail = body.detail; throw error; }
@@ -1411,7 +1411,7 @@
                 state.savedLab = saved?.recipeLab || null;
                 if (saved?.pending) { state.pending = saved.pending; remember(); }
                 state.pending = unresolved(context)[0] || null;
-                state.jobId = (state.pending?.kind !== "profile" && state.pending?.annotation_scope === sourceKey(context) ? state.pending?.jobId : "") || saved?.jobId || ""; state.removed = saved?.removed || 0; state.lastBatch = saved?.lastBatch || "";
+                state.jobId = (state.pending?.kind !== "profile" && state.pending?.annotation_scope === sourceKey(context) ? state.pending?.jobId : "") || saved?.jobId || adapters.initialJobId || ""; state.removed = saved?.removed || 0; state.lastBatch = saved?.lastBatch || "";
                 state.exportId = saved?.exportId || ""; state.exportBinding = saved?.exportBinding || null;
                 state.planning.view = saved?.reviewView === "family" ? "family" : "impact";
                 el.filter.value = saved?.filter || "all"; el.search.value = saved?.query || ""; el.sort.value = saved?.sort || "stable";

@@ -5544,6 +5544,9 @@ def test_active_workspace_capture_metadata_is_allowlisted_and_preserved():
                     "label_lines": ["0 0.5 0.5 0.2 0.2"],
                     "capture_group_id": "capture-17",
                     "sequence_id": "sequence-a",
+                    "video_group": "video-17",
+                    "source_group": "source-17",
+                    "duplicate_group": 0,
                     "camera_id": "left",
                     "frame_index": 42,
                     "capture_perceptual_hash": "a" * 32,
@@ -5560,6 +5563,9 @@ def test_active_workspace_capture_metadata_is_allowlisted_and_preserved():
     row = rows[0]
     assert row["capture_group_id"] == "capture-17"
     assert row["sequence_id"] == "sequence-a"
+    assert row["video_group"] == "video-17"
+    assert row["source_group"] == "source-17"
+    assert row["duplicate_group"] == 0
     assert row["camera_id"] == "left"
     assert row["frame_index"] == 42
     assert row["capture_perceptual_hash"] == "a" * 32

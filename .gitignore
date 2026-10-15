@@ -278,6 +278,7 @@ sahi/
 
 # Root-level scratch artifacts (do not track)
 /*.txt
+!/requirements-hosted.txt
 !/requirements-macos-mtplx.txt
 !/requirements-qwen36-swir.txt
 !requirements.txt

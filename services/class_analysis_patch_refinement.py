@@ -2554,13 +2554,10 @@ class CaptureGroupIndex:
 
 
 def _capture_explicit_group_hint(record: Mapping[str, Any]) -> str:
-    for field in (
-        "capture_group_id",
-        "sequence_id",
-        "video_id",
-        "flight_id",
-    ):
-        value = str(record.get(field) or "").strip()
+    from utils.capture_metadata import CAPTURE_GROUP_FIELDS, portable_capture_metadata
+    metadata = portable_capture_metadata(record)
+    for field in CAPTURE_GROUP_FIELDS:
+        value = str(metadata[field]) if field in metadata else ""
         if value:
             # A declared capture/sequence is the independence boundary. Do not
             # split it by camera: synchronized or adjacent multi-camera views

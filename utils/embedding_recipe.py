@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
@@ -475,3 +476,99 @@ def apply_size_bias_residualizer(
         return normalize_rows(adjusted.astype(np.float32, copy=False)) if normalize else adjusted.astype(np.float32, copy=False)
     except Exception:
         return normalize_rows(emb) if normalize else emb
+
+
+def parse_yolo_geometry(
+    line: str,
+    *,
+    image_width: int,
+    image_height: int,
+) -> Optional[Dict[str, Any]]:
+    parts = str(line or "").strip().split()
+    if len(parts) < 5:
+        return None
+    if re.fullmatch(r"[0-9]+", parts[0]) is None:
+        return None
+    try:
+        class_id = int(parts[0])
+    except Exception:
+        return None
+    if len(parts) >= 7:
+        points: List[Tuple[float, float]] = []
+        for idx in range(1, len(parts) - 1, 2):
+            try:
+                nx = float(parts[idx])
+                ny = float(parts[idx + 1])
+            except Exception:
+                return None
+            if not math.isfinite(nx) or not math.isfinite(ny):
+                return None
+            points.append(
+                (
+                    max(0.0, min(float(image_width), nx * float(image_width))),
+                    max(0.0, min(float(image_height), ny * float(image_height))),
+                )
+            )
+        if len(points) < 3:
+            return None
+        xs = [pt[0] for pt in points]
+        ys = [pt[1] for pt in points]
+        x1, x2 = max(0.0, min(xs)), min(float(image_width), max(xs))
+        y1, y2 = max(0.0, min(ys)), min(float(image_height), max(ys))
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return {
+            "class_id": class_id,
+            "kind": "polygon",
+            "bbox_xyxy": [x1, y1, x2, y2],
+            "points": [[float(x), float(y)] for x, y in points],
+        }
+    try:
+        cx = float(parts[1]) * float(image_width)
+        cy = float(parts[2]) * float(image_height)
+        bw = float(parts[3]) * float(image_width)
+        bh = float(parts[4]) * float(image_height)
+    except Exception:
+        return None
+    if not all(math.isfinite(value) for value in (cx, cy, bw, bh)):
+        return None
+    if bw <= 0 or bh <= 0:
+        return None
+    x1 = max(0.0, min(float(image_width), cx - (bw / 2.0)))
+    y1 = max(0.0, min(float(image_height), cy - (bh / 2.0)))
+    x2 = max(0.0, min(float(image_width), cx + (bw / 2.0)))
+    y2 = max(0.0, min(float(image_height), cy + (bh / 2.0)))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return {"class_id": class_id, "kind": "bbox", "bbox_xyxy": [x1, y1, x2, y2]}
+
+
+def replay_fitted_embedding_adjustment(
+    raw_embeddings: np.ndarray,
+    records: Sequence[Dict[str, Any]],
+    transform: Mapping[str, Any],
+) -> np.ndarray:
+    """Apply saved independent size coefficients to selected rows; never fit."""
+    raw = np.asarray(raw_embeddings, dtype=np.float32)
+    if raw.ndim != 2 or len(raw) != len(records):
+        raise ValueError('Saved adjustment rows do not match the requested records')
+    if not transform.get('applied'):
+        return raw / np.maximum(np.linalg.norm(raw, axis=1, keepdims=True), 1e-12)
+    fitted = transform.get('fitted_transform') or {}
+    if fitted.get('schema') != 'independent_size_residualization_v1' or fitted.get('normalization') != 'subtract_design_then_l2':
+        raise ValueError('The exact saved size transform is unavailable; recompute this analysis')
+    covariates, names = covariates_from_records(records)
+    selected_names = transform.get('covariates') or []
+    if not selected_names or any(name not in names for name in selected_names):
+        raise ValueError('Saved size covariates are incompatible')
+    selected = covariates[:, [names.index(name) for name in selected_names]]
+    mean = np.asarray(fitted.get('covariate_mean'), np.float32)
+    std = np.asarray(fitted.get('covariate_std'), np.float32)
+    beta = np.asarray(fitted.get('coefficients'), np.float32)
+    if mean.shape != (len(selected_names),) or std.shape != mean.shape or beta.shape != (len(selected_names)+1, raw.shape[1]):
+        raise ValueError('Saved size coefficients are incompatible')
+    if not np.all(np.isfinite(mean)) or not np.all(np.isfinite(std)) or not np.all(std > 0) or not np.all(np.isfinite(beta)):
+        raise ValueError('Saved size coefficients are invalid')
+    design = np.concatenate([np.ones((len(raw), 1), np.float32), (selected-mean)/std], axis=1)
+    adjusted = raw-design@beta
+    return adjusted / np.maximum(np.linalg.norm(adjusted, axis=1, keepdims=True), 1e-12)

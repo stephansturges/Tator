@@ -17,14 +17,17 @@ from typing import Any
 
 from .artifacts import ArtifactStore, open_regular
 from .errors import DomainError
+from .caption_semantics import caption_lifecycle, caption_text
+from .class_names import parse_class_lines
 from .media import HostedMedia, inspect_media, prepare_yolo_objects
 from .operations import HostedOperations
 from .store import HostedStore, _json
 from .types import Actor, MutationContext
 
 
-FORMAT = "tator-hosted-migration-v2"
+FORMAT = "tator-hosted-migration-v3"
 LEGACY_FORMAT = "tator-hosted-migration-v1"
+LEGACY_FORMATS = {LEGACY_FORMAT, "tator-hosted-migration-v2"}
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 ROLES = {"metadata", "groups", "recipe", "salad_weights", "salad_metadata", "caption_records"}
 
@@ -184,7 +187,7 @@ def inventory(source_root: str | Path, *, mapping: dict | None = None, clip_boxe
     labelmaps = [name for name in ("labelmap.txt", "classes.txt", "labels.txt") if name in files]
     if not labelmaps:
         raise DomainError("migration_labelmap_missing", 422)
-    lists = [[line.strip() for line in _read(paths[name]).splitlines() if line.strip()] for name in labelmaps]
+    lists = [parse_class_lines(_read(paths[name])) for name in labelmaps]
     classes = lists[0]
     if any(value != classes for value in lists) or len({name.casefold() for name in classes}) != len(classes):
         raise DomainError("migration_labelmap_ambiguous", 422)
@@ -317,8 +320,7 @@ def inventory(source_root: str | Path, *, mapping: dict | None = None, clip_boxe
             # Match the native _caption_lifecycle_status normalizer, including
             # null/empty/unknown values defaulting to active. An explicit
             # deletion tombstone must remain inactive rather than be revived.
-            lifecycle = re.sub(r"[\s-]+", "_", str(record.get("lifecycle_status") or "").strip().lower())
-            record["lifecycle_status"] = lifecycle if lifecycle in {"active", "superseded", "overflow", "rejected", "deleted"} else "active"
+            record["lifecycle_status"] = caption_lifecycle(record)
             key = record.get("image_key") or record.get("image_name") or record.get("image")
             aliases = {key} if key in keys else set()
             if flat and isinstance(key, str) and key.startswith("train/") and key[6:] in keys:
@@ -377,13 +379,15 @@ class HostedMigrator:
             self.store._actor(con, actor, admin=True)
         if mode not in {"incoming", "approved-baseline"} or (mode == "approved-baseline" and not accept_existing_labels):
             raise DomainError("migration_baseline_attestation_required", 422)
-        if plan.get("format") not in {FORMAT, LEGACY_FORMAT} or plan.get("plan_sha256") != digest({key: value for key, value in plan.items() if key != "plan_sha256"}):
+        if plan.get("format") not in {FORMAT, *LEGACY_FORMATS} or plan.get("plan_sha256") != digest({key: value for key, value in plan.items() if key != "plan_sha256"}):
             raise DomainError("migration_plan_invalid", 422)
         run_id = "migration-" + digest({"plan": plan["plan_sha256"], "actor": actor.user_id, "name": name, "mode": mode})[:40]
         payload = {"run_id": run_id, "plan_sha256": plan["plan_sha256"], "name": name, "mode": mode, "accept_existing_labels": bool(accept_existing_labels)}
-        if plan["format"] == LEGACY_FORMAT:
-            if self.store.raw_receipt(actor, run_id + "-finish"):
-                return self.store._command(actor, run_id + "-finish", "finish_migration", payload, lambda con: None, admin=True)
+        # Completed migrations are immutable receipts, including when a newer
+        # caption/media interpretation would produce a different inventory.
+        if self.store.raw_receipt(actor, run_id + "-finish"):
+            return self.store._command(actor, run_id + "-finish", "finish_migration", payload, lambda con: None, admin=True)
+        if plan["format"] in LEGACY_FORMATS:
             raise DomainError("migration_plan_requires_review", 409)
         fresh = inventory(plan["source_root"], mapping=plan["mapping"], clip_boxes=plan["clip_boxes"])
         if fresh != plan:
@@ -419,7 +423,7 @@ class HostedMigrator:
                 annotations["caption"] = row["effective_caption"]
             elif active_captions:
                 primary = next((record for record in active_captions if record.get("is_primary")), active_captions[0])
-                annotations["caption"] = primary.get("caption", "")
+                annotations["caption"] = caption_text(primary)
             source = plan["files"][row["file"]]
             with self.artifacts.exclusive():
                 view = self.media.stage(_safe_path(source["path"]))

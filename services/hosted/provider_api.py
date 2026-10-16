@@ -73,8 +73,8 @@ def install_provider_api(app, store, artifacts, actor_dependency, admin_dependen
         return accounts.configure(actor, name, **body.model_dump())
 
     @router.get("/calls")
-    def calls(limit: int = 100, offset: int = 0, actor=Depends(admin_dependency)):
-        return {"calls": accounts.calls(actor, limit=limit, offset=offset)}
+    def calls(limit: int = 100, offset: int = 0, unresolved_only: bool = False, actor=Depends(admin_dependency)):
+        return {"calls": accounts.calls(actor, limit=limit, offset=offset, unresolved_only=unresolved_only)}
 
     @router.post("/calls/{call_id}/reconcile")
     def reconcile(call_id: str, body: Reconciliation, actor=Depends(admin_dependency)):

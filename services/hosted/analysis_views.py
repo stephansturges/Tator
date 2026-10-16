@@ -8,6 +8,7 @@ import io
 import json
 from pathlib import Path
 import tempfile
+from PIL import Image
 
 from .artifacts import ArtifactRef
 from .errors import DomainError
@@ -95,7 +96,7 @@ class AnalysisViews:
         return self._call_session(actor, job_id, get_class_analysis_point_evidence_payload, point_id)
 
     def thumbnail(self, actor, job_id, point_id, *, context=False, size=256):
-        from .media import decode_encoded
+        from .media import decode_encoded, HostedMedia, LEGACY_MEDIA_VIEW_POLICY
         if type(size) is not int or not 32 <= size <= 1024:
             raise DomainError("analysis_thumbnail_size_invalid", 422)
         identity = self.point(actor, job_id, point_id)["hosted_identity"]
@@ -103,8 +104,15 @@ class AnalysisViews:
             self.store._actor(con, actor, admin=True)
             _, manifest, _ = self.analysis._job(con, job_id)
         image = next(row for row in manifest["images"] if row["id"] == identity["image_id"])
-        with self.artifacts.open(ArtifactRef(image["media_hash"], image["size_bytes"])) as stream:
-            view, _ = decode_encoded(stream)
+        frozen = self.analysis.image_view(actor, job_id, image['id'])
+        with self.artifacts.open(HostedMedia.reference(frozen)) as stream:
+            if frozen['policy'] == LEGACY_MEDIA_VIEW_POLICY:
+                # Historical thumbnail only: preserve the native pixels of the
+                # old completed run. This decoder never admits new execution.
+                with Image.open(stream) as opened:
+                    view = opened.convert('RGB')
+            else:
+                view, _ = decode_encoded(stream)
         try:
             if not context:
                 x, y, w, h = identity["bbox"]

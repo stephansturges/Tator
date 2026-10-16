@@ -90722,6 +90722,84 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
     // YOLO text is an export representation, never the editable source of truth.
     let hostedCanvasRecord = null;
     let hostedCanvasDataset = null;
+    const hostedCaptionOrigins = new Map();
+    function hostedCaptionText(raw) {
+        if (typeof raw === "string") return raw.trim();
+        const value = Object.hasOwn(raw, "caption") ? raw.caption : raw.text;
+        return String(value || "").trim();
+    }
+    function hostedCaptionActive(raw) {
+        const status = String(raw?.lifecycle_status || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+        return !["superseded", "overflow", "rejected", "deleted"].includes(status);
+    }
+    function hydrateHostedCaptions(imageName) {
+        const entries = [];
+        for (const collection of ["captions", "alternate_captions"]) {
+            for (const [index, raw] of (hostedCanvasRecord.annotations[collection] || []).entries()) {
+                entries.push({ collection, index, raw: structuredClone(raw),
+                    id: `hosted-caption:${hostedCanvasRecord.id}:${collection}:${index}`,
+                    active: hostedCaptionActive(raw), text: hostedCaptionText(raw) });
+            }
+        }
+        const primary = String(hostedCanvasRecord.annotations.caption || "").trim();
+        const ordinal = raw => {
+            const value = raw?.caption_index || 0;
+            // Match the native integer conversion: a fractional number can be
+            // truncated, but a fractional string is not an integer ordinal.
+            if (typeof value === "string" && !/^[+-]?\d+$/.test(value.trim())) return 0;
+            const number = Number(value);
+            return Number.isFinite(number) ? Math.max(0, Math.trunc(number)) : 0;
+        };
+        const matching = entries.filter(entry => entry.active && primary && entry.text === primary);
+        matching.sort((a, b) => Number(Boolean(b.raw?.is_primary)) - Number(Boolean(a.raw?.is_primary))
+            || ordinal(a.raw) - ordinal(b.raw)
+            || (String(a.raw?.created_at || "") < String(b.raw?.created_at || "") ? -1 : String(a.raw?.created_at || "") > String(b.raw?.created_at || "") ? 1 : 0)
+            || entries.indexOf(a) - entries.indexOf(b));
+        const selected = matching[0];
+        const displayed = [];
+        for (const entry of entries) {
+            // History and QA-only/blank entries are retained outside the caption
+            // buttons. Display normalization is never the stored representation.
+            if (!entry.active || !entry.text) continue;
+            const raw = typeof entry.raw === "string" ? {} : entry.raw;
+            const projected = normalizeCaptionRecord({ ...raw, id: entry.id, caption: entry.text,
+                image_name: imageName, image: imageName, image_key: imageName, is_primary: entry === selected });
+            entry.initial = structuredClone(projected);
+            displayed.push(projected);
+        }
+        hostedCaptionOrigins.set(imageName, entries);
+        captionRecordsByImage[imageName] = displayed;
+    }
+    function serializeHostedCaptions(result, imageName) {
+        const origins = hostedCaptionOrigins.get(imageName) || [];
+        const current = captionRecordsForImage(imageName);
+        const byId = new Map(current.map(record => [record.id, record]));
+        const originalIds = new Set(origins.map(entry => entry.id));
+        const collections = { captions: [], alternate_captions: [] };
+        for (const entry of origins) {
+            if (!entry.initial) { collections[entry.collection].push(structuredClone(entry.raw)); continue; }
+            const edited = byId.get(entry.id);
+            if (!edited) continue; // An explicit remove action, not a display filter.
+            let raw = structuredClone(entry.raw);
+            for (const field of ["caption", "title", "is_primary", "updated_at"]) {
+                if (edited[field] === entry.initial[field]) continue;
+                if (typeof raw === "string") {
+                    if (field === "caption") { raw = edited.caption; continue; }
+                    raw = { caption: raw };
+                }
+                const target = field === "caption" && !Object.hasOwn(raw, "caption") && Object.hasOwn(raw, "text") ? "text" : field;
+                raw[target] = edited[field];
+            }
+            collections[entry.collection].push(raw);
+        }
+        for (const record of current) {
+            if (!originalIds.has(record.id)) collections.alternate_captions.push(structuredClone(record));
+        }
+        for (const name of ["captions", "alternate_captions"]) {
+            // Keep absent and null collections unchanged unless a user adds data.
+            if (collections[name].length || Array.isArray(result[name])) result[name] = collections[name];
+        }
+    }
     function hydrateHostedImage(imageRecord, options = {}) {
         if (!hostedCanvasRecord || !imageRecord || (options.allowApply && !options.allowApply())) return false;
         if (imageRecord.annotationRelpath !== hostedCanvasRecord.id) return false;
@@ -90739,11 +90817,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         }
         bboxes[key] = buckets;
         textLabels[key] = hostedCanvasRecord.annotations.caption || "";
-        captionRecordsByImage[key] = (hostedCanvasRecord.annotations.alternate_captions || []).map((item, index) => {
-            const saved = typeof item === "string" ? { caption: item } : item;
-            return normalizeCaptionRecord({ ...saved, id: saved.id || `imported:${hostedCanvasRecord.id}:${index}`,
-                image_name: key, image: key, image_key: key });
-        });
+        hydrateHostedCaptions(key);
         annotationSourceState.hydratedKeys.add(key);
         setAnnotationHydrationState(key, "ready");
         return true;
@@ -90965,7 +91039,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                 }
             }
             result.caption = textLabels[currentImage.name] || "";
-            result.alternate_captions = captionRecordsForImage(currentImage.name);
+            serializeHostedCaptions(result, currentImage.name);
             return result;
         },
         acknowledge(record) { hostedCanvasRecord = structuredClone(record); },

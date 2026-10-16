@@ -34,7 +34,8 @@ def _box(payload, width, height):
 
 
 def _image(payload, config):
-    from .media import MAX_MEDIA_BYTES, decode_encoded
+    from .media import MAX_MEDIA_BYTES, decode_encoded, validate_working_view
+    from .errors import DomainError
     root = Path(config["media_root"]).resolve(strict=True)
     candidate = Path(payload["media_path"])
     resolved = candidate.resolve(strict=True)
@@ -54,7 +55,16 @@ def _image(payload, config):
     digest = hashlib.sha256(raw).hexdigest()
     if digest != payload.get("media_sha256"):
         raise ValueError("hosted_media_identity_changed")
-    image, _ = decode_encoded(raw)
+    image, info = decode_encoded(raw)
+    try:
+        if payload.get('working_media'):
+            validate_working_view(raw, payload['working_media'],
+                source_sha256=payload.get('source_media_hash'), require_current_compatible=True)
+        elif info.needs_working_view:
+            raise DomainError('media_policy_upgrade_required', 409)
+    except BaseException:
+        image.close()
+        raise
     return image, digest
 
 

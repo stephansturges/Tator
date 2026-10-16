@@ -86,26 +86,55 @@ class PaidCaptionGateway:
             reference = ArtifactRef(image['media_hash'], media['size_bytes'])
         identity = {'model': model, 'prompt': prompt, 'max_output_tokens': max_output_tokens,
                     'detail': detail, 'media_hash': reference.sha256, 'pricing': price}
-        fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-        call = self.accounts.reserve(actor, context, provider='openai', model=model,
-                                     maximum_microdollars=reservation, request_fingerprint=fingerprint)
+        legacy_fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         with self.store.read_connection() as con:
-            prior = con.execute('SELECT result_json FROM hosted_provider_results WHERE call_id=?', (call['id'],)).fetchone()
-        if prior:
-            return self._current_result(actor, context, json.loads(prior[0]))
-        if call['state'] != 'reserved':
-            raise DomainError('paid_call_outcome_unresolved', 409)
-        try:
-            # Source-format policy is independent of the browser/worker view.
-            from .media import HostedMedia, inspect_media
+            previous = con.execute('SELECT * FROM hosted_provider_calls WHERE actor_id=? AND operation_id=?',
+                                   (actor.user_id, context.operation_id)).fetchone()
+            prepared = (con.execute("SELECT data_json FROM hosted_provider_audit WHERE kind='media_prepared' AND json_extract(data_json,'$.call_id')=? ORDER BY id LIMIT 1", (previous['id'],)).fetchone()
+                        if previous is not None else None)
+        from .media import HostedMedia, inspect_media, validate_working_view
+        media_views = HostedMedia(self.store, self.artifacts)
+        legacy = previous is not None and previous['request_hash'] == legacy_fingerprint and prepared is None
+        if legacy:
+            # Exact old receipt identity is checked before the new pixel policy.
+            fingerprint, view = legacy_fingerprint, None
+        elif prepared is not None:
+            view = json.loads(prepared[0])['input_identity']
+            identity['working_media'] = view
+            fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        elif previous is not None:
+            raise DomainError('operation_id_reused', 409)
+        else:
             with self.artifacts.open(reference) as stream:
                 info = inspect_media(stream)
             if info.format not in {'JPEG', 'PNG', 'WEBP'}:
                 raise DomainError('paid_caption_image_format_unsupported', 422)
-            media_views = HostedMedia(self.store, self.artifacts)
             view = media_views.resolve(reference)
+            identity['working_media'] = view
+            fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        call = self.accounts.reserve(actor, context, provider='openai', model=model,
+                                     maximum_microdollars=reservation, request_fingerprint=fingerprint,
+                                     input_identity=view)
+        with self.store.read_connection() as con:
+            prior = con.execute('SELECT result_json FROM hosted_provider_results WHERE call_id=?', (call['id'],)).fetchone()
+        if prior:
+            return self._current_result(actor, context, json.loads(prior[0]))
+        if legacy:
+            if self.accounts.release_reserved(call['id'], 'media_policy_upgrade_required'):
+                raise DomainError('media_policy_upgrade_required', 409, 'Start a new operation; this legacy call was never dispatched.')
+            with self.store.read_connection() as con:
+                current = con.execute('SELECT state FROM hosted_provider_calls WHERE id=?', (call['id'],)).fetchone()
+                released = con.execute("SELECT 1 FROM hosted_provider_audit WHERE kind='not_dispatched' AND json_extract(data_json,'$.call_id')=? AND json_extract(data_json,'$.reason')='media_policy_upgrade_required'", (call['id'],)).fetchone()
+            if current[0] == 'reconciled' and released:
+                raise DomainError('media_policy_upgrade_required', 409, 'Start a new operation; this legacy call was never dispatched.')
+            raise DomainError('paid_call_outcome_unresolved', 409)
+        if call['state'] != 'reserved':
+            raise DomainError('paid_call_outcome_unresolved', 409)
+        try:
             with self.artifacts.open(media_views.reference(view)) as stream:
                 pixels = stream.read()
+            validate_working_view(pixels, view, source_sha256=reference.sha256,
+                                  source_size_bytes=reference.size_bytes, require_current_compatible=True)
             mime = view['content_type']
             payload = {'model': model, 'store': False, 'service_tier': 'default',
                        'max_output_tokens': max_output_tokens,

@@ -12,6 +12,8 @@ from pathlib import Path
 import re
 import shutil
 
+from .caption_semantics import caption_lifecycle, caption_text, primary_caption_index
+
 
 def _native_caption_source(record):
     """Expose hosted model output to native provenance rules without relabeling history."""
@@ -23,11 +25,8 @@ def _native_caption_source(record):
 
 def _native_lifecycle(record, parent=None):
     """Preserve inactivity despite the native reader's smaller vocabulary."""
-    def status(value):
-        name = re.sub(r'[\s-]+', '_', str(value or '').strip().lower())
-        return 'superseded' if name == 'deleted' else name if name in {'superseded', 'overflow', 'rejected'} else 'active'
-    parent_status = status(parent.get('lifecycle_status')) if parent else 'active'
-    return parent_status if parent_status != 'active' else status(record.get('lifecycle_status'))
+    status = caption_lifecycle(record, parent)
+    return 'superseded' if status == 'deleted' else status
 
 
 def _effective_review(record, kind):
@@ -90,10 +89,12 @@ def export_native_instructions(api, manifest, source, directory, options):
         records = [dict(value) if isinstance(value, dict) else {'caption': value}
                    for value in row.get('caption_records', []) if isinstance(value, (str, dict))]
         primary = str(row.get('text_label') or '').strip()
-        if primary and not any(str(record.get('caption') or '').strip() == primary for record in records):
-            records.insert(0, {'caption': primary, 'source': 'manual'})
+        selected = primary_caption_index(records, primary)
+        if primary and selected is None:
+            records.insert(0, {'caption': primary, 'source': 'manual', 'lifecycle_status': 'active', 'is_primary': True})
+            selected = 0
         for index, record in enumerate(records):
-            text = str(record.get('caption') or '').strip()
+            text = caption_text(record)
             identifier = 'hosted-caption-' + hashlib.sha256(f"{image_key}:{index}:{text}".encode()).hexdigest()
             recorded_metadata = record.get('metadata') if isinstance(record.get('metadata'), dict) else {}
             metadata = {**recorded_metadata, 'hosted_source': dict(record), 'hosted_identity': identity}
@@ -106,7 +107,7 @@ def export_native_instructions(api, manifest, source, directory, options):
                 captions.append(_effective_review({**record, 'id': identifier, 'image_name': row['image_relpath'], 'image_key': image_key,
                     'split': row['split'], 'caption': text, 'source': _native_caption_source(record),
                     'lifecycle_status': _native_lifecycle(record),
-                    'is_primary': text == primary and _native_lifecycle(record) == 'active', 'metadata': metadata}, 'caption0'))
+                    'is_primary': index == selected, 'metadata': metadata}, 'caption0'))
             pairs = record.get('generated_qa_pairs') or recorded_metadata.get('generated_qa_pairs') or []
             for number, pair in enumerate(pairs):
                 if not isinstance(pair, dict):

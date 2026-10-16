@@ -9,6 +9,131 @@ import pytest
 from test_hosted_api import application, login, dataset, upload, acquire, context, op, provision
 
 
+@pytest.mark.parametrize("raw,expected", [
+    (" Plain text ", "Plain text"), ({"text": " Alias "}, "Alias"),
+    ({"caption": " Current ", "text": "Stale"}, "Current"),
+    ({"caption": None, "text": "Stale"}, ""),
+    ({"caption": "", "text": "Stale"}, ""),
+    ({"caption": "  ", "text": "Stale"}, ""),
+])
+def test_caption_projection_precedence_keeps_existing_review_digest(raw, expected):
+    from services.hosted.caption_semantics import caption_text
+    from services.hosted.instruction_review import review_content_digest
+    before = copy.deepcopy(raw)
+    assert caption_text(raw) == expected
+    digest = hashlib.sha256(json.dumps({"kind": "caption0", "question": "Describe this image in detail.",
+        "answer": expected}, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    assert review_content_digest(raw, "caption0") == digest
+    assert raw == before
+
+
+def test_legacy_review_binds_alias_and_old_empty_digest_does_not_qualify(application):
+    from services.hosted.errors import DomainError
+    from services.hosted.instruction_review import review_content_digest
+    store = application.state.store
+    previous = {"captions": [{"id": "legacy", "text": "Reviewed wording", "metadata": {"review_decision": "accepted"}}]}
+    changed = copy.deepcopy(previous); changed["captions"][0]["text"] = "Changed wording"
+    with pytest.raises(DomainError, match="instruction_review_requires_admin"):
+        store._preserve_instruction_reviews(previous, changed)
+    # Merely changing representation does not change the review's bound content.
+    canonical = copy.deepcopy(previous); canonical["captions"][0]["caption"] = "Reviewed wording"
+    store._preserve_instruction_reviews(previous, canonical)
+    admin = login(application); ds = dataset(admin); image = acquire(admin, upload(admin, ds['id']))
+    annotations = {"objects": [], "captions": [{"text": "Newly visible alias", "metadata": {
+        "review_recorded_via": "hosted_instruction_review", "review_decision": "accepted",
+        "review_content_sha256": review_content_digest({"caption": ""}, "caption0")}}]}
+    response = admin.post(f"/api/hosted/images/{image['id']}/save", json={**context(image), "annotations": annotations, "negative": True})
+    assert response.status_code == 200
+    review = admin.get(f"/api/hosted/tools/images/{image['id']}/instruction-review").json()
+    assert review['rows'][0]['decision'] == 'unreviewed' and review['rows'][0]['text_changed_since_review']
+
+
+def _native_export_snapshot(application, snapshot, tmp_path):
+    from services.hosted.native_analysis import NativeAnalysisAdapter
+    manifest = copy.deepcopy(snapshot['manifest']) | {'snapshot_id': snapshot['snapshot_id']}
+    frozen = tmp_path / 'frozen'; frozen.mkdir()
+    with application.state.artifacts.exclusive():
+        for member in manifest['images']:
+            ref = application.state.artifacts.pin(member['media_hash'], frozen)
+            member['media_path'] = str(frozen / ref.sha256)
+    path = frozen / 'manifest.json'; path.write_text(json.dumps(manifest))
+    ref = {key: manifest[key] for key in ('snapshot_id', 'dataset_id', 'revision', 'class_version', 'settings_version')}
+    ref.update(manifest_path=str(path), manifest_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+    adapter = NativeAnalysisAdapter(config={'canonical_root': str(frozen), 'native_root': str(tmp_path / 'native')}, device='cpu')
+    result = adapter.execute('caption_export', {'canonical_snapshot': ref}, {'dataset_id': manifest['dataset_id'], 'annotation_version': manifest['snapshot_id']})
+    directory = Path(result['native_directory']) / 'caption_export'
+    return json.loads((directory / 'captions-export.json').read_text()), directory
+
+
+@pytest.mark.parametrize('case', ['captions_alias', 'alternates_alias', 'current_over_tombstone', 'duplicate_active', 'reserved_metadata'])
+def test_effective_language_review_exports_with_preserved_raw_history(application, tmp_path, case):
+    admin = login(application); ds = dataset(admin)
+    user = provision(admin, 'alice'); alice = login(application, 'alice')
+    image = upload(admin, ds['id'])
+    assigned = admin.post(f"/api/hosted/datasets/{ds['id']}/assignments", json={'operation_id': op(),
+        'image_ids': [image['id']], 'annotator_id': user['id'], 'expected': {image['id']: context(image)}})
+    assert assigned.status_code == 200
+    image = acquire(alice, assigned.json()['images'][0]); base = f"/api/hosted/images/{image['id']}"
+    wording = 'A quiet orange scene.'
+    annotations = {'objects': []}
+    if case in {'captions_alias', 'alternates_alias'}:
+        collection = 'captions' if case == 'captions_alias' else 'alternate_captions'
+        annotations[collection] = [{'text': wording, 'custom': {'original': True}}]
+        target = 'captions:caption:0' if collection == 'captions' else 'caption:0'
+    elif case == 'current_over_tombstone':
+        annotations.update(caption=wording, alternate_captions=[{'id': 'old', 'caption': wording, 'lifecycle_status': 'deleted',
+            'generated_qa_pairs': [{'question': 'Old question?', 'answer': 'Old answer.'}]}])
+        target = 'primary'
+    elif case == 'duplicate_active':
+        annotations.update(caption=wording, captions=[{'id': 'other', 'caption': wording, 'custom': 'first'},
+            {'id': 'selected', 'text': wording, 'is_primary': True, 'custom': 'selected'}])
+        target = 'captions:caption:1'
+    else:
+        annotations['alternate_captions'] = [{'caption': '', 'generated_qa_pairs': [{
+            'question': 'Describe the texture.', 'answer': 'Smooth.', 'metadata': {
+                'qa_id': 'extension-id', 'row_type': 'deterministic_spoof', 'answer_source': 'extension-source',
+                'caption_id': 'extension-caption', 'source_archive': 'extension-archive', 'split': 'extension-split',
+                'hosted_identity': {'image_id': 'extension-image'}}}]}]
+        target = 'qa:0:top:0'
+    saved = alice.post(base + '/save', json={**context(image), 'annotations': annotations, 'negative': True})
+    assert saved.status_code == 200, saved.text
+    submitted = alice.post(base + '/submit', json=context(saved.json())); assert submitted.status_code == 200
+    image = acquire(admin, submitted.json()); review_path = f"/api/hosted/tools/images/{image['id']}/instruction-review"
+    review = admin.get(review_path).json()
+    assert target in {row['target_id'] for row in review['rows']}
+    if case == 'current_over_tombstone':
+        assert [row['target_id'] for row in review['rows']] == ['primary']
+    if case == 'duplicate_active':
+        assert [row['target_id'] for row in review['rows'] if row['is_primary']] == [target]
+    command = {**context(image), 'source_sha256': review['source_sha256'], 'decisions': [{'target_id': target, 'decision': 'accepted'}]}
+    reviewed = admin.post(review_path, json=command); assert reviewed.status_code == 200, reviewed.text
+    assert admin.post(review_path, json=command).json() == reviewed.json()
+    assert admin.post(base + '/approve', json=context(reviewed.json())).status_code == 200
+    current = admin.get(base).json()['annotations']
+    if case in {'captions_alias', 'alternates_alias'}:
+        assert 'caption' not in current[collection][0] and current[collection][0]['text'] == wording
+    elif case == 'current_over_tombstone':
+        assert current['alternate_captions'][0] == annotations['alternate_captions'][0]
+        assert current['alternate_captions'][1]['lifecycle_status'] == 'active'
+    snapshot = admin.post(f"/api/hosted/datasets/{ds['id']}/snapshots", json={'operation_id': op()}).json()
+    exported, directory = _native_export_snapshot(application, snapshot, tmp_path)
+    readiness = exported['instruction_report']['training_readiness']
+    assert readiness['ready_for_training'] is True, readiness
+    assert readiness['instruction_artifact_consistency_error_count'] == 0
+    assert (directory / 'caption-training.zip').is_file()
+    training = exported['instruction_training_rows']; assert len(training) == 1
+    assert training[0]['answer'] == ('Smooth.' if case == 'reserved_metadata' else wording)
+    if case == 'reserved_metadata':
+        row = training[0]['metadata']; candidate = exported['instruction_review_rows'][0]
+        assert row['qa_id'] == candidate['qa_id'] != 'extension-id'
+        assert row['row_type'] == 'generated_qa' and row['answer_source'] == 'vlm_generated'
+        assert row['caption_id'] != 'extension-caption' and row['source_archive'] == 'tator_caption_instruction_archive_v1'
+        assert row['hosted_identity']['image_id'] == image['id']
+        assert row['hosted_source']['metadata']['qa_id'] == 'extension-id'
+    history = admin.get(base + '/history').json()['versions']
+    assert next(row for row in history if row['id'] == saved.json()['current_version'])['annotations'] == annotations
+
+
 def test_nested_qa_shapes_reject_without_versions_and_preserve_legacy_extensions(application):
     admin = login(application)
     ds = dataset(admin)

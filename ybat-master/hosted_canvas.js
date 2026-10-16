@@ -358,13 +358,27 @@
         try { sessionStorage.setItem(key, JSON.stringify({ schema: 2, state: value.pending ? "pending" : value.rejected ? "rejected" : "unsent", ...value })); storageFailed = false; }
         catch (_) { storageFailed = true; throw new Error("This browser cannot retain unsent edits. Keep this tab open and free browser storage before continuing."); }
     }
-    function clearJournal() { sessionStorage.removeItem(key); retentionCommand = null; rejected = null; storageFailed = false; }
+    function clearJournal() {
+        try { sessionStorage.removeItem(key); }
+        catch (_) {
+            storageFailed = true;
+            throw new Error("This browser could not clear its earlier draft. Keep this tab open and restore browser storage before leaving.");
+        }
+        retentionCommand = null; rejected = null; storageFailed = false;
+    }
+    function reconcileCleanDraft(latest) {
+        // Only the live, acknowledged canvas can supersede an obsolete draft.
+        // A server canvas loaded during recovery says nothing about that draft.
+        if (!ready || !record || recoveryRequired || pending || saving || JSON.stringify(latest) !== lastSaved) return false;
+        clearJournal();
+        return true;
+    }
     function retainDraft() {
         // During recovery the canvas initially shows the server version, not the
         // retained draft. Do not overwrite that journal before explicit restore.
         if (!ready || !record || recoveryRequired) return;
         const latest = draft();
-        if (!pending && JSON.stringify(latest) === lastSaved) return;
+        if (!pending && JSON.stringify(latest) === lastSaved) { reconcileCleanDraft(latest); return; }
         if (!pending && (!retentionCommand || retentionCommand.path !== `${base}/save`
             || retentionCommand.body.expected_version !== record.current_version || retentionCommand.body.generation !== record.generation)) {
             retentionCommand = { path: `${base}/save`, body: { ...context(), ...latest } };
@@ -387,7 +401,10 @@
         if (!ready || !editable || handoff) return false;
         if (pending && !pending.path.endsWith("/save")) throw new Error("Resolve the earlier handoff before saving again.");
         const current = draft();
-        if (!pending && JSON.stringify(current) === lastSaved) { if (manual) status("All changes saved"); return true; }
+        if (!pending && JSON.stringify(current) === lastSaved) {
+            try { reconcileCleanDraft(current); } catch (error) { report(error); throw error; }
+            if (manual) status("All changes saved"); return true;
+        }
         if (!pending && rejected && JSON.stringify(current) === rejected.draft) {
             if (manual) throw new Error(rejected.message);
             return false;
@@ -749,8 +766,10 @@
         catch (error) { report(error); }
     }, 30000);
     window.addEventListener("beforeunload", (event) => {
+        // Undo may reach the saved baseline before the next autosave tick.
+        // Reconcile that transition even when there is nothing left to send.
+        try { retainDraft(); } catch (error) { status(error.message, true); }
         if (storageFailed || pending || (ready && JSON.stringify(draft()) !== lastSaved)) {
-            try { retainDraft(); } catch (error) { status(error.message, true); }
             event.preventDefault(); event.returnValue = "";
         }
     });

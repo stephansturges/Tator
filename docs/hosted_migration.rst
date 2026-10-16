@@ -25,6 +25,10 @@ inventory. Pixel extents are calculated from converted endpoints so a valid box
 touching an image edge remains inside the strict hosted bounds despite floating
 point roundoff. Out-of-bounds geometry is rejected unless ``--clip-boxes``
 explicitly authorizes clipping. Source labels are retained unchanged as artifacts.
+Class names must fit on one line. Internal Unicode line separators and control
+characters that split lines are rejected as well as embedded CR/LF, so a name
+cannot become two export indices. Physical CR/LF delimiters separate labelmap
+entries; other line separators inside an entry are errors.
 
 The selected overlay takes precedence over base labels and caption text. It is
 the explicitly supplied external overlay, or otherwise the local
@@ -139,7 +143,8 @@ registry state is not discovered automatically and must be supplied explicitly.
 Apply and resume
 ----------------
 
-Apply rehashes the full inventory before creating or resuming the dataset::
+Apply rehashes the full inventory before creating or resuming an unfinished
+current-format migration::
 
     python tools/hosted_migrate.py apply \
       --plan /review/migration-plan.json --state-dir /srv/tator \
@@ -157,18 +162,22 @@ not invent earlier review history.
 
 Run records, source hashes, per-image progress and operation receipts live in the
 hosted database. Repeating the same plan, administrator, name and mode resumes
-that run. An interruption can leave a partially imported dataset; it does not
+an unfinished current-format run or returns a completed run's receipt. An
+interruption can leave a partially imported dataset; it does not
 delete completed work. Changed source inputs or concurrently edited image
 versions stop continuation rather than overwrite them. Keep the exact reviewed
 plan and source tree until migration and recovery acceptance are complete.
 After upgrading the importer, regenerate and review an inventory before starting
 a new migration; an older inventory with different resolved annotations is
 rejected instead of silently being reinterpreted.
-The current inventory format is ``tator-hosted-migration-v2``. Unfinished v1
+The current inventory format is ``tator-hosted-migration-v3``. Unfinished v1/v2
 plans return ``migration_plan_requires_review``; regenerate and review their
-resolved captions and coordinate decisions before starting a new run. Completed
-v1 runs retain their exact finish receipt and can replay it without rereading or
-changing their original source tree.
+resolved captions, class names and media/coordinate decisions before starting a
+new run. Existing partial memberships and history remain in their original run;
+the regenerated plan creates a separate dataset and does not adopt or replace
+those memberships. Completed v1/v2/v3 runs retain their exact finish receipt and
+can replay it without rereading or changing their original source tree. A
+different command still requires a fresh inventory.
 
 The local fixture tests exercise filesystem preservation, overlay labels,
 caption alternatives, custom artifacts and restart recovery. Importing WALDO40

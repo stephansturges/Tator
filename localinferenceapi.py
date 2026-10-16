@@ -26360,11 +26360,15 @@ def _caption_instruction_training_row(
     metadata: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     row_metadata = {
+        **(dict(metadata) if isinstance(metadata, Mapping) else {}),
         "qa_id": qa_id,
         "row_type": row_type,
         "answer_source": answer_source,
-        **(dict(metadata) if isinstance(metadata, Mapping) else {}),
     }
+    # These fields describe the derived training row. Retained extension
+    # metadata cannot replace them, including when a derived value is empty.
+    for key in ("split", "answer_format", "validation_status", "review_status", "source_fields", "validated_against"):
+        row_metadata.pop(key, None)
     if split:
         row_metadata["split"] = split
     if answer_format:
@@ -26373,9 +26377,9 @@ def _caption_instruction_training_row(
         row_metadata["validation_status"] = validation_status
     if review_status:
         row_metadata["review_status"] = review_status
-    if source_fields:
+    if source_fields is not None:
         row_metadata["source_fields"] = [str(field) for field in source_fields if str(field).strip()]
-    if validated_against:
+    if validated_against is not None:
         row_metadata["validated_against"] = [str(field) for field in validated_against if str(field).strip()]
     return {
         "image_path": image_name,
@@ -28224,9 +28228,9 @@ def _dataset_caption_instruction_archive(
                         source_fields=list(pair.get("source_fields") or []),
                         validated_against=list(pair.get("validated_against") or []),
                         metadata={
+                            **(dict(pair.get("metadata")) if isinstance(pair.get("metadata"), Mapping) else {}),
                             "caption_id": str(pair.get("caption_id") or "").strip(),
                             "source_archive": CAPTION_INSTRUCTION_ARCHIVE_FORMAT,
-                            **(dict(pair.get("metadata")) if isinstance(pair.get("metadata"), Mapping) else {}),
                         },
                     )
                 )

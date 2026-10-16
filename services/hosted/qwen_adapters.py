@@ -280,7 +280,7 @@ class QwenRuntime:
         fields = set(schema.model_fields)
         # The controller supplies provenance beside the verified working hash.
         # It is never a model request field and browser parameters cannot set it.
-        server_fields = {"media_path", "media_sha256", "source_media_hash", "request_id"}
+        server_fields = {"media_path", "media_sha256", "source_media_hash", "working_media", "request_id"}
         if 'source_media_hash' in payload:
             from services.hosted.artifacts import validate_digest
             validate_digest(payload['source_media_hash'])

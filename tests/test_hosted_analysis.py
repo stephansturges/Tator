@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+from pathlib import Path
 
 from PIL import Image
 import pytest
@@ -67,7 +68,7 @@ def test_native_dqe_input_keeps_identity_and_frozen_population(setup):
     assert service.dqe_request(actor, job["job_id"]) == request
 
 
-def test_job_media_keeps_archived_frozen_references_and_rejects_unrelated_images(setup):
+def test_job_media_keeps_archived_frozen_references_and_rejects_unrelated_images(setup, monkeypatch):
     from fastapi import FastAPI
     from fastapi.responses import JSONResponse
     from fastapi.testclient import TestClient
@@ -95,10 +96,58 @@ def test_job_media_keeps_archived_frozen_references_and_rejects_unrelated_images
         assert response.status_code == 200 and response.headers["content-type"] == "image/png"
         assert response.content == original[image["id"]]
     assert service.status(actor, job["job_id"])["stale"]
+    # Completed pre-upgrade jobs have no request media maps. Both canonical
+    # and candidate images retain their own v1 view; unrelated sources are not
+    # resolved while serving a single historical image.
+    from services.hosted.media import HostedMedia, LEGACY_MEDIA_VIEW_POLICY
+    media = HostedMedia(store, artifacts)
+    for image in (images[0], images[2]):
+        view = media.resolve(image['media_hash']); view['policy'] = LEGACY_MEDIA_VIEW_POLICY
+        with artifacts.open(media.reference(view)) as stream:
+            media._retain(stream.read(), view)
+    with store.transaction() as con:
+        request = json.loads(con.execute('SELECT request_json FROM hosted_analysis_jobs WHERE id=?', (job['job_id'],)).fetchone()[0])
+        for field in ('working_media', 'candidate_working_media', 'media_policy'):
+            request.pop(field, None)
+        con.execute("UPDATE hosted_analysis_jobs SET request_json=?,state='complete' WHERE id=?", (json.dumps(request), job['job_id']))
+    resolve = HostedMedia.resolve
+    def only_requested(instance, source, **options):
+        assert getattr(source, 'sha256', source) != images[1]['media_hash']
+        return resolve(instance, source, **options)
+    monkeypatch.setattr(HostedMedia, 'resolve', only_requested)
+    for image in (images[0], images[2]):
+        response = client.get(f"{base}/{image['id']}/media")
+        assert response.status_code == 200 and response.content == original[image['id']]
     with pytest.raises(DomainError, match="admin_required"):
         with store.transaction() as con:
             con.execute("UPDATE hosted_users SET role='annotator' WHERE id=?", (actor.user_id,))
         service.image_reference(Actor(actor.user_id, "annotator", actor.username), job["job_id"], images[0]["id"])
+
+
+@pytest.mark.parametrize('registered_legacy', [False, True])
+def test_pending_legacy_analysis_requires_known_compatible_policy(setup, registered_legacy):
+    from services.hosted.media import HostedMedia, LEGACY_MEDIA_VIEW_POLICY
+    store, artifacts, service, actor, ds, images = setup
+    job = service.capture(actor, ds['id'], 'statistics', {}, 'legacy-policy-job')
+    if registered_legacy:
+        media = HostedMedia(store, artifacts)
+        for image in images[:2]:
+            view = media.resolve(image['media_hash']); view['policy'] = LEGACY_MEDIA_VIEW_POLICY
+            with artifacts.open(media.reference(view)) as stream:
+                media._retain(stream.read(), view)
+    with store.transaction() as con:
+        request = json.loads(con.execute('SELECT request_json FROM hosted_analysis_jobs WHERE id=?', (job['job_id'],)).fetchone()[0])
+        for field in ('working_media', 'candidate_working_media', 'media_policy'):
+            request.pop(field, None)
+        con.execute('UPDATE hosted_analysis_jobs SET request_json=? WHERE id=?', (json.dumps(request), job['job_id']))
+    if registered_legacy:
+        prepared = service.prepare(actor, job['job_id'])
+        mapping = json.loads((Path(prepared['dataset_root']) / 'hosted-media.json').read_text())
+        assert mapping['policy'] == LEGACY_MEDIA_VIEW_POLICY
+    else:
+        with pytest.raises(DomainError, match='media_policy_upgrade_required'):
+            service.prepare(actor, job['job_id'])
+        assert service.status(actor, job['job_id'])['state'] == 'interrupted'
 
 
 def test_existing_yolo_dataset_resolver_uses_only_exact_snapshot(setup):

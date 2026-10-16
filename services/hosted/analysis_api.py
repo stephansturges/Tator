@@ -78,10 +78,8 @@ def install_analysis_api(app, store, artifacts, actor_dependency, admin_dependen
     @router.get("/jobs/{job_id}/images/{image_id}/media")
     def frozen_image(job_id: str, image_id: str, identity=Depends(admin_dependency)):
         from .media import HostedMedia
-        reference = analysis.image_reference(identity, job_id, image_id)
-        media = HostedMedia(store, artifacts)
-        view = media.resolve(reference)
-        reference = media.reference(view)
+        view = analysis.image_view(identity, job_id, image_id)
+        reference = HostedMedia.reference(view)
         def chunks():
             with artifacts.open(reference) as source:
                 while chunk := source.read(1024 * 1024):

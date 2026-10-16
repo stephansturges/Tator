@@ -34,7 +34,7 @@ def hosted_origin(tmp_path, request, monkeypatch):
         sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]
     origin = f'http://127.0.0.1:{port}'
     batch_fixture = getattr(request, "param", None) == "caption_batch"
-    paid_batch_fixture = getattr(request, "param", None) == "paid_batch"
+    paid_batch_fixture = getattr(request, "param", None) in {"paid_batch", "paid_batch_billing"}
     caption_fixture = getattr(request, "param", None) == "caption" or batch_fixture
     analysis_fixture = getattr(request, "param", None) == "analysis"
     restore_fixture = getattr(request, "param", None) == "restore"
@@ -78,7 +78,17 @@ def hosted_origin(tmp_path, request, monkeypatch):
     for number in range(4):
         data = io.BytesIO(); Image.new('RGB', (640, 480), (50+number*30, 70, 90)).save(data, format='PNG')
         ref = app.state.artifacts.put_bytes(data.getvalue())
-        image = store.import_image(admin, ds['id'], ref.sha256, f'frame-{number}.png', {'objects': []}, str(uuid.uuid4()), width=640, height=480, size_bytes=ref.size_bytes)
+        annotations = {'objects': []}
+        if getattr(request, 'param', None) == 'caption_records' and number == 1:
+            annotations.update(caption='Same wording from history.', captions=[
+                {'id': 'shared-id', 'text': 'Alias from imported captions.', 'source': 'manual', 'metadata': {'opaque': {'ids': [1, 2]}}},
+                {'caption': 'Same wording from history.', 'lifecycle_status': 'deleted', 'generated_qa_pairs': [{'question': 'Old question?', 'answer': 'Old answer.'}]},
+                {'caption': None, 'text': 'Do not resurrect this alias.', 'opaque': 9},
+                {'caption': '', 'generated_qa_pairs': [{'question': 'What is present?', 'answer': 'A car.'}]}],
+                alternate_captions=[{'id': 'shared-id', 'text': 'Another alias.', 'model': 'legacy'},
+                    'Plain string alternate.', {'caption': 'Retained inactive.', 'lifecycle_status': 'superseded'},
+                    {'caption': 'Conflicting caption.', 'text': 'Ignored alias.'}, ''])
+        image = store.import_image(admin, ds['id'], ref.sha256, f'frame-{number}.png', annotations, str(uuid.uuid4()), width=640, height=480, size_bytes=ref.size_bytes)
         if number == 0:
             store.assign(admin, ds['id'], [image['id']], users['alice']['id'], str(uuid.uuid4()), expected={image['id']: {'expected_version': image['current_version'], 'generation': image['generation']}})
             first_image = image['id']
@@ -153,6 +163,18 @@ app = create_app(os.environ['HOSTED_TEST_ROOT'], testing=True, origin=os.environ
 app.state.tools.paid_batches.transport = Transport()
 uvicorn.run(app, host='127.0.0.1', port=int(os.environ['HOSTED_TEST_PORT']), log_level='warning')
 """
+        if getattr(request, 'param', None) == 'paid_batch_billing':
+            # Only the external transport is doubled: duplicate provider output
+            # IDs exercise the real terminal-status, collector and ledger path.
+            code = code.replace('app.state.tools.paid_batches.transport = Transport()', '''
+class DuplicateOutput(Transport):
+    def request(self, *args, **kwargs):
+        value = super().request(*args, **kwargs)
+        if args[2].endswith('/content'):
+            return value + value
+        return value
+app.state.tools.paid_batches.transport = DuplicateOutput()
+''')
     if caption_fixture:
         code = """
 import os, json, uvicorn
@@ -466,6 +488,50 @@ async def _paid_batch_review(origin):
         await browser.close()
 
 
+@pytest.mark.parametrize('hosted_origin', ['paid_batch_billing'], indirect=True)
+def test_admin_can_reconcile_terminal_batch_after_output_failure(hosted_origin):
+    asyncio.run(_terminal_batch_billing(hosted_origin))
+
+
+async def _terminal_batch_billing(origin):
+    from playwright.async_api import async_playwright, expect
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page(viewport={'width': 1440, 'height': 1000})
+        errors = []; page.on('pageerror', lambda error: errors.append(str(error)))
+        await sign_in(page, origin, 'admin')
+        await page.locator('#hostedPaidBatchJobs').click()
+        batch = page.locator('#hostedPaidBatchDialog')
+        await batch.get_by_role('button', name='Freeze inputs and preview cost limit', exact=True).click()
+        async with page.expect_response(lambda r: r.request.method == 'POST' and r.url.endswith('/paid-batches')) as submitted:
+            await batch.get_by_role('button', name='Submit this frozen batch', exact=True).click()
+        job_id = (await (await submitted.value).json())['job_id']
+        for _ in range(100):
+            job = await (await page.request.get(origin + '/api/hosted/tools/paid-batches/' + job_id)).json()
+            if job['status'] == 'failed': break
+            await asyncio.sleep(.1)
+        assert job['status'] == 'failed', job
+        calls = (await (await page.request.get(origin + '/api/hosted/providers/calls?unresolved_only=true')).json())['calls']
+        assert len(calls) == 1 and calls[0]['state'] == 'unknown' and calls[0]['can_reconcile']
+        assert calls[0]['batch_job_id'] == job_id
+        call_id = calls[0]['id']
+        await batch.get_by_role('button', name='Close', exact=True).click()
+        await page.locator('#hostedProviders').click()
+        billing = page.locator('#hostedProvidersDialog')
+        row = billing.locator(f'[data-provider-call="{call_id}"]')
+        await expect(row).to_contain_text('The batch has finished; its bill still needs confirmation.')
+        await expect(row.get_by_role('button', name='Record confirmed charge')).to_be_enabled()
+        replies = iter(['0.002345', 'Checked the retained provider bill in this fixture'])
+        page.on('dialog', lambda prompt: prompt.accept(next(replies)))
+        await row.get_by_role('button', name='Record confirmed charge').click()
+        await expect(row).to_have_count(0)
+        calls = (await (await page.request.get(origin + '/api/hosted/providers/calls')).json())['calls']
+        assert len(calls) == 1 and calls[0]['state'] == 'reconciled' and calls[0]['charged'] == 2345
+        assert not (await (await page.request.get(origin + '/api/hosted/providers/calls?unresolved_only=true')).json())['calls']
+        assert not errors
+        await browser.close()
+
+
 @pytest.mark.parametrize('hosted_origin', ['multi_dataset'], indirect=True)
 def test_real_canvas_three_users_and_review(hosted_origin):
     asyncio.run(_three_users(hosted_origin))
@@ -698,7 +764,6 @@ async def _encoded_media(origin, source):
     from playwright.async_api import async_playwright, expect
     from services.hosted.adapters import _image
     original_hash = hashlib.sha256(source.read_bytes()).hexdigest()
-    native, _ = _image({'media_path': str(source), 'media_sha256': original_hash}, {'media_root': str(source.parent)})
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page(viewport={'width': 1440, 'height': 1000})
@@ -711,6 +776,12 @@ async def _encoded_media(origin, source):
         assert record['media_hash'] == original_hash
         await page.goto(f"{origin}/annotate?image={record['id']}")
         await expect(page.locator('#hostedSave')).to_be_enabled()
+        working = await page.context.request.get(f"{origin}/api/hosted/images/{record['id']}/media")
+        assert working.status == 200
+        raw = await working.body()
+        working_path = source.parent / 'native-working.png'; working_path.write_bytes(raw)
+        native, _ = _image({'media_path': str(working_path), 'media_sha256': hashlib.sha256(raw).hexdigest()},
+                           {'media_root': str(source.parent)})
         await page.clock.install(); await page.clock.pause_at(datetime.now() + timedelta(milliseconds=50))
         await draw(page, .5, .16, .57, .25)
         draft = await page.evaluate('window.TatorHostedCanvas.snapshot()')
@@ -729,6 +800,161 @@ async def _encoded_media(origin, source):
         original = await page.context.request.get(f"{origin}/api/hosted/images/{record['id']}/original")
         assert original.status == 200 and hashlib.sha256(await original.body()).hexdigest() == original_hash
         assert hashlib.sha256(source.read_bytes()).hexdigest() == original_hash
+        native.close()
+        await browser.close()
+
+
+@pytest.mark.parametrize('mode', ['transparent', '16bit'])
+def test_special_pixel_modes_match_browser_and_native(hosted_origin, tmp_path, mode):
+    source = tmp_path / (mode + '.png')
+    if mode == 'transparent':
+        picture = Image.new('RGBA', (640, 480), (255, 0, 0, 0))
+        picture.paste((0, 0, 255, 255), (320, 0, 640, 480))
+    else:
+        picture = Image.new('I;16', (640, 480), 1000)
+    picture.save(source)
+    asyncio.run(_special_pixel_modes(hosted_origin, source, mode))
+
+
+async def _special_pixel_modes(origin, source, mode):
+    from playwright.async_api import async_playwright, expect
+    from services.hosted.adapters import _image
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page(viewport={'width': 1440, 'height': 1000})
+        await sign_in(page, origin, 'admin')
+        await page.get_by_role('button', name='Incoming', exact=True).click()
+        await page.locator('#uploadInput').set_input_files(str(source))
+        await expect(page.locator('#notice')).to_contain_text('1 new images added')
+        rows = await page.evaluate("window.TatorHostedDashboard.api('/images?dataset_id='+document.getElementById('datasetChoice').value)")
+        image = next(row for row in rows['images'] if row['filename'] == source.name)
+        await page.goto(origin + '/annotate?image=' + image['id'])
+        await expect(page.locator('#hostedSave')).to_be_enabled()
+        # Native consumers receive the captured working bytes, not an unsafe
+        # original without a pixel-policy descriptor. Use the real served view.
+        working = await page.context.request.get(origin + '/api/hosted/images/' + image['id'] + '/media')
+        assert working.status == 200
+        raw = await working.body()
+        working_path = source.parent / 'native-working.png'
+        working_path.write_bytes(raw)
+        native, _ = _image({'media_path': str(working_path), 'media_sha256': hashlib.sha256(raw).hexdigest()},
+                           {'media_root': str(source.parent)})
+        samples = await page.evaluate("""async id => {
+            const im = new Image(); im.src='/api/hosted/images/'+id+'/media'; await im.decode();
+            const c = document.createElement('canvas'); c.width=im.naturalWidth;c.height=im.naturalHeight;
+            const ctx=c.getContext('2d');ctx.drawImage(im,0,0);
+            return [160,480].map(x=>[...ctx.getImageData(x,240,1,1).data]);
+        }""", image['id'])
+        assert samples == [list(native.getpixel((x, 240))) + [255] for x in (160, 480)]
+        assert samples[0] == ([255, 255, 255, 255] if mode == 'transparent' else [3, 3, 3, 255])
+        original = await page.context.request.get(origin + '/api/hosted/images/' + image['id'] + '/original')
+        assert original.status == 200 and hashlib.sha256(await original.body()).hexdigest() == digest
+        native.close()
+        await page.screenshot(path=str(source.parent / (mode + '-canvas.png')))
+        await browser.close()
+
+
+@pytest.mark.parametrize('case', ['unsent_save', 'rejected_save', 'unsent_reload', 'rejected_reload', 'clear_failure'])
+def test_undo_to_saved_canvas_retires_only_obsolete_draft(hosted_origin, case):
+    asyncio.run(_undo_obsolete_draft(hosted_origin, case))
+
+
+async def _undo_obsolete_draft(origin, case):
+    from playwright.async_api import async_playwright, expect
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page(viewport={'width': 1440, 'height': 1000})
+        page.on('dialog', lambda dialog: dialog.accept())
+        await sign_in(page, origin, 'alice')
+        await page.locator('.hosted-card a').first.click()
+        await expect(page.locator('#hostedSave')).to_be_enabled()
+        await page.clock.install(); await page.clock.pause_at(datetime.now() + timedelta(milliseconds=50))
+        original = await page.evaluate('window.TatorHostedCanvas.snapshot()')
+        await draw(page, .2, .2, .45, .45)
+        if case.startswith('rejected'):
+            await page.locator('#hostedNegative').check()
+            code = await page.evaluate("async()=>{try{await window.TatorHosted.save({manual:true});}catch(e){return e.code;}}")
+            assert code == 'negative_has_objects'
+            await page.locator('#hostedNegative').uncheck()
+        else:
+            await page.evaluate("window.dispatchEvent(new Event('beforeunload'))")
+        await page.evaluate('document.activeElement.blur()')
+        await page.keyboard.press('q')
+        assert await page.evaluate('window.TatorHostedCanvas.snapshot()') == original
+        if case == 'clear_failure':
+            await page.evaluate("""() => {
+                const remove = Storage.prototype.removeItem;
+                window.failDraftClear = true;
+                Storage.prototype.removeItem = function(key) {
+                    if (window.failDraftClear && key.startsWith('tator.hosted.draft:')) throw new Error('fixture storage failure');
+                    return remove.call(this, key);
+                };
+            }""")
+            message = await page.evaluate("async()=>{try{await window.TatorHosted.save({manual:true});}catch(e){return e.message;}}")
+            assert 'could not clear' in message
+            await expect(page.locator('#hostedSaveState')).not_to_have_text('All changes saved')
+            assert await page.evaluate("Object.keys(sessionStorage).some(k=>k.startsWith('tator.hosted.draft:'))")
+            await page.evaluate('window.failDraftClear = false')
+        if not case.endswith('reload'):
+            assert await page.evaluate('window.TatorHosted.save({manual:true})')
+            await expect(page.locator('#hostedSaveState')).to_have_text('All changes saved')
+            assert not await page.evaluate("Object.keys(sessionStorage).some(k=>k.startsWith('tator.hosted.draft:'))")
+        await page.clock.resume(); await page.reload()
+        await page.wait_for_function("window.TatorHostedCanvas?.ready() && (document.getElementById('hostedResolve') || window.TatorHosted?.editable)")
+        assert await page.locator('#hostedResolve').count() == 0
+        await expect(page.locator('#hostedSave')).to_be_enabled()
+        assert await page.evaluate('window.TatorHostedCanvas.snapshot()') == original
+        await browser.close()
+
+
+@pytest.mark.parametrize('hosted_origin', ['caption_records'], indirect=True)
+def test_hosted_caption_projection_preserves_original_records(hosted_origin):
+    asyncio.run(_caption_projection(hosted_origin))
+
+
+async def _caption_projection(origin):
+    from playwright.async_api import async_playwright, expect
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page(viewport={'width': 1440, 'height': 1000})
+        await sign_in(page, origin, 'admin')
+        datasets = (await (await page.context.request.get(origin + '/api/hosted/datasets')).json())['datasets']
+        images = (await (await page.context.request.get(origin + '/api/hosted/images?dataset_id=' + datasets[0]['id'])).json())['images']
+        target = next(row for row in images if row['filename'] == 'frame-1.png')
+        url = origin + '/api/hosted/images/' + target['id']
+        before = await (await page.context.request.get(url)).json()
+        await page.goto(origin + '/annotate?image=' + target['id'])
+        await expect(page.locator('#hostedSave')).to_be_enabled()
+        await page.wait_for_function('window.TatorHostedCanvas.ready()')
+        assert await page.evaluate('window.TatorHostedCanvas.snapshot()') == before['annotations']
+        assert await page.evaluate('window.TatorHosted.save({manual:true})')
+        unchanged = await (await page.context.request.get(url)).json()
+        assert unchanged['current_version'] == before['current_version']
+        await page.locator('#qwenCaptionOutput').evaluate("e => { for(let p=e.parentElement;p;p=p.parentElement) if(p.tagName==='DETAILS') p.open=true; }")
+        buttons = page.locator('#qwenCaptionAlternates button')
+        await expect(page.locator('#qwenCaptionAlternates')).not_to_contain_text('Retained inactive.')
+        await expect(page.locator('#qwenCaptionAlternates')).not_to_contain_text('Do not resurrect')
+        await buttons.filter(has_text='Alias from imported captions.').click()
+        await page.locator('#qwenCaptionOutput').fill('Edited alias from imported captions.')
+        await page.locator('#qwenCaptionUpdateSelected').click()
+        await expect(page.locator('#hostedSaveState')).to_have_text('All changes saved')
+        saved = await (await page.context.request.get(url)).json()
+        edited = saved['annotations']['captions'][0]
+        assert edited['text'] == 'Edited alias from imported captions.' and 'caption' not in edited
+        assert edited['id'] == 'shared-id' and edited['metadata'] == before['annotations']['captions'][0]['metadata']
+        assert saved['annotations']['captions'][1:] == before['annotations']['captions'][1:]
+        assert saved['annotations']['alternate_captions'] == before['annotations']['alternate_captions']
+        await page.reload(); await expect(page.locator('#hostedSave')).to_be_enabled()
+        await page.wait_for_function('window.TatorHostedCanvas.ready()')
+        assert await page.evaluate('window.TatorHostedCanvas.snapshot()') == saved['annotations']
+        await page.locator('#qwenCaptionOutput').evaluate("e => { for(let p=e.parentElement;p;p=p.parentElement) if(p.tagName==='DETAILS') p.open=true; }")
+        await page.locator('#qwenCaptionAlternates button').filter(has_text='Another alias.').click()
+        await page.locator('#qwenCaptionDeleteSelected').click()
+        await expect(page.locator('#hostedSaveState')).to_have_text('All changes saved')
+        after = await (await page.context.request.get(url)).json()
+        assert after['annotations']['captions'] == saved['annotations']['captions']
+        assert after['annotations']['alternate_captions'] == saved['annotations']['alternate_captions'][1:]
         await browser.close()
 
 
@@ -990,12 +1216,19 @@ async def _dqe_corrections(origin):
         await expect(page.get_by_role('button', name='Save class correction')).to_be_visible()
         await page.get_by_label('Correct class', exact=True).select_option(label='Person')
         sent = []
+        request_seen, release_reply = asyncio.Event(), asyncio.Event()
         async def lose_correction_reply(route):
             sent.append(route.request.post_data_json['context']['operation_id'])
+            if len(sent) == 1:
+                request_seen.set()
+                await release_reply.wait()
             response = await route.fetch(); assert response.status == 200
             await route.abort('failed')
         await page.route('**/api/hosted/analysis/jobs/*/dqe/actions', lose_correction_reply)
         await page.get_by_role('button', name='Save class correction').click()
+        await asyncio.wait_for(request_seen.wait(), 10)
+        await expect(page.get_by_role('button', name='Check correction result')).to_be_disabled()
+        release_reply.set()
         await expect(page.get_by_role('button', name='Check correction result')).to_be_enabled()
         await page.get_by_role('button', name='Check correction result').click()
         try:

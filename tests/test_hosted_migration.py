@@ -118,11 +118,12 @@ def test_migration_requires_oriented_label_frame_and_rejects_full_decode_failure
         inventory(root, mapping={"label_coordinate_space": "encoded"})
 
 
-def test_legacy_inventory_completed_receipt_survives_policy_upgrade_and_unfinished_requires_review(tmp_path):
-    from services.hosted.migration import digest, LEGACY_FORMAT
+@pytest.mark.parametrize("format", ["tator-hosted-migration-v1", "tator-hosted-migration-v2"])
+def test_legacy_inventory_completed_receipt_survives_policy_upgrade_and_unfinished_requires_review(tmp_path, format):
+    from services.hosted.migration import digest
     root, mapping = source(tmp_path)
     plan = inventory(root, mapping=mapping)
-    plan["format"] = LEGACY_FORMAT
+    plan["format"] = format
     plan["plan_sha256"] = digest({key: value for key, value in plan.items() if key != "plan_sha256"})
     store, artifacts, admin = authority(tmp_path)
     migration = HostedMigrator(store, artifacts)
@@ -134,6 +135,32 @@ def test_legacy_inventory_completed_receipt_survives_policy_upgrade_and_unfinish
     store._command(admin, run_id + "-finish", "finish_migration", payload, lambda con: historical, admin=True)
     (root / "classes.txt").unlink()
     assert migration.apply(admin, plan, name="Old") == historical
+
+
+def test_migration_alias_text_and_delimiter_inventory_preserve_sources(tmp_path):
+    root, mapping = source(tmp_path)
+    (root / "classes.txt").write_text("Road\u2028Vehicle\nPerson\n")
+    with pytest.raises(DomainError, match="invalid_class_name"):
+        inventory(root, mapping=mapping)
+    (root / "classes.txt").write_text("Véhicule\n")
+    records = root / ".annotation_overlay/captions/captions.jsonl"
+    alias = {"id": "current", "image_key": "train/red.png", "text": "Alias wording", "is_primary": True}
+    tombstone = {"id": "removed", "image_key": "train/red.png", "text": "Deleted wording", "lifecycle_status": "deleted"}
+    records.write_text("\n".join(json.dumps(row) for row in (alias, tombstone)) + "\n")
+    before = hashes(root)
+    plan = inventory(root, mapping=mapping)
+    store, artifacts, admin = authority(tmp_path)
+    migration = HostedMigrator(store, artifacts)
+    result = migration.apply(admin, plan, name="Alias")
+    image = next(row for row in store.list_images(admin) if row["filename"] == "train/red.png")
+    annotations = store.image(admin, image["id"])["annotations"]
+    assert annotations["caption"] == "Alias wording"
+    assert "caption" not in annotations["captions"][0]
+    assert annotations["captions"][1]["lifecycle_status"] == "deleted"
+    assert hashes(root) == before
+    # All completed formats replay without reinterpreting or reopening sources.
+    records.unlink()
+    assert migration.apply(admin, plan, name="Alias") == result
 
 
 def test_reviewed_baseline_preserves_effective_labels_metadata_and_resumes_after_commit(tmp_path):
@@ -205,8 +232,9 @@ def test_incoming_default_unknown_metadata_and_source_hash_guard(tmp_path):
     assert not store.snapshot(admin, result["dataset_id"])["images"]
     assert len(store.list_images(admin, result["dataset_id"], state="incoming")) == 2
     (root / "train/labels/red.txt").write_text("0 0.5 0.5 0.3 0.3\n")
+    assert migration.apply(admin, plan, name="Incoming") == result
     with pytest.raises(DomainError, match="migration_source_changed"):
-        migration.apply(admin, plan, name="Incoming")
+        migration.apply(admin, plan, name="Different command")
 
 
 def test_inventory_rejects_symlinks_duplicate_pixels_and_runs_without_hosted_state(tmp_path):

@@ -5,6 +5,8 @@ uvicorn[standard]>=0.24,<1
 python-multipart>=0.0.18,<1
 argon2-cffi>=23.1,<26
 Pillow>=10
+# Exact 16-bit PNG transparency keys before RGB8 conversion.
+pypng==0.20220715.0
 httpx>=0.27,<1
 # Retained DQE/pruning review calculations run in the control process.
 numpy>=1.24,<3

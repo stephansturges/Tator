@@ -210,8 +210,11 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
             except BlockingIOError as error:
                 raise RuntimeError("Another hosted control process owns this state directory. Use exactly one Uvicorn worker.") from error
             # Only the one live control process may reconcile interrupted calls.
+            app.state.providers.normalize_terminal_batches()
             with store.transaction() as con:
-                con.execute("UPDATE hosted_provider_calls SET state='unknown' WHERE state='dispatched'")
+                # Remote Batch work outlives this process. Its reservations
+                # become reconcilable only with verified terminal evidence.
+                con.execute("UPDATE hosted_provider_calls SET state='unknown' WHERE state='dispatched' AND NOT EXISTS (SELECT 1 FROM hosted_paid_batch_rows r WHERE r.call_id=hosted_provider_calls.id)")
             yield
         finally:
             os.close(descriptor)

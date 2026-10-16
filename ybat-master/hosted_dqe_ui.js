@@ -74,7 +74,7 @@
         function showPending() {
             recovery.replaceChildren(); if (!pending) return;
             recovery.append(node("p", "A correction was sent without a confirmed reply. Check its saved result before making another change."));
-            action(recovery, "Check correction result", async () => {
+            const check = action(recovery, "Check correction result", async () => {
                 const command = pending;
                 const receipt = await api(`/receipts/${encodeURIComponent(command.context.operation_id)}`);
                 if (receipt?.operation_id === command.context.operation_id && receipt.commit_outcome === "committed" && receipt.result_restricted === true) {
@@ -96,6 +96,10 @@
                 await releaseAll();
                 if (valid()) { await refresh(); detail.replaceChildren(node("p", "The previous correction was saved.")); message.textContent = "Correction confirmed. You can continue reviewing."; }
             });
+            // The pending journal exists before dispatch. Recovery is available
+            // only after that request has returned or failed, not while busy
+            // would silently ignore the click.
+            check.disabled = busy;
         }
         async function inspect(id) {
             const turn = ++pointRequest;
@@ -247,7 +251,7 @@
                     if (!outcome || outcome.state !== "complete") return;
                 }
                 if (valid()) { await refresh(); detail.replaceChildren(node("p", "Correction saved. Select an object to continue reviewing.")); message.textContent = "Corrections saved as new annotation versions. Original images are unchanged."; }
-            } finally { await releaseAll(); busy = false; if (valid()) await loadBatches(); }
+            } finally { await releaseAll(); busy = false; if (valid()) { showPending(); await loadBatches(); } }
         }
         await draw(initial);
         showPending();

@@ -206,7 +206,7 @@ def test_batch_restart_collects_already_terminal_remote_without_resubmitting(sys
     job_id = response.json()["job_id"]
     eventually(lambda: controller.stop.is_set() and not controller.threads)
     assert controller._row(None, job_id)["state"] == "completed"
-    assert gateway.accounts.calls(system["admin"])[0]["state"] == "dispatched"
+    assert gateway.accounts.calls(system["admin"])[0]["state"] == "unknown"
     monkeypatch.setattr(controller, "_collect", native_collect)
     controller.stop.clear()
     controller.recovered = False
@@ -343,8 +343,8 @@ def test_paid_batch_uploads_encoded_working_view_and_keeps_source_identity(syste
     assert len([request for request in transport.requests if request[3] and request[3][2] == 'vision']) == 1
 
 
-def test_paid_batch_replaces_unsent_legacy_oriented_upload_without_new_reservation(system, monkeypatch):
-    """An old original-byte upload and JSONL must not survive into a new dispatch."""
+def test_paid_batch_refuses_unsafe_legacy_upload_without_rewriting_identity(system, monkeypatch):
+    """An old frozen request cannot acquire different pixels under its old bill."""
     from dataclasses import replace
     from services.hosted.paid_batches import PaidBatchRequest, _digest, _json
     gateway, transport = configure(system)
@@ -375,15 +375,175 @@ def test_paid_batch_replaces_unsent_legacy_oriented_upload_without_new_reservati
     monkeypatch.setattr(ctl, '_launch', launch)
     ctl._launch(job_id)
     done = eventually(lambda: row if (row := system['client'].get('/api/hosted/tools/paid-batches/' + job_id).json()).get('status') in {'collected', 'failed'} else None)
-    assert done['status'] == 'collected', done
+    assert done['status'] == 'failed' and done['error'] == 'media_policy_upgrade_required', done
     retained = ctl._rows(job_id)[0]
-    assert retained['upload_id'] != old_file and retained['upload_sha256'] == view['sha256']
-    remote = next(iter(transport.batches.values()))
-    assert remote['input_file_id'] != old_input
-    line = json.loads(transport.files[remote['input_file_id']].splitlines()[0])
-    assert line['body']['input'][0]['content'][1]['file_id'] == retained['upload_id']
+    assert retained['upload_id'] == old_file and retained['upload_sha256'] is None
+    assert ctl._row(None,job_id)['input_file_id'] == old_input
+    assert not transport.batches and len(transport.files) == 2
     assert len(gateway.accounts.calls(system['admin'])) == 1
     with system['store'].read_connection() as con:
         final = con.execute('SELECT request_hash,state FROM hosted_provider_calls WHERE id=?', (call['id'],)).fetchone()
-        assert final['request_hash'] == fingerprint and final['state'] == 'settled'
+        assert final['request_hash'] == fingerprint and final['state'] == 'reconciled'
     assert json.loads(retained['request_json']) == prepared
+
+
+def _billing_http(system):
+    from fastapi import Depends, Request
+    from services.hosted.provider_api import install_provider_api
+    def actor(request: Request):
+        return system['auth'].authenticate(request.headers['authorization'],csrf=request.headers.get('x-tator-csrf') if request.method != 'GET' else None)
+    def admin(identity=Depends(actor)):
+        system['auth'].require_admin(identity)
+        return identity
+    install_provider_api(system['app'],system['store'],system['artifacts'],actor,admin)
+
+
+def _wait_batch(system, job_id, states=('collected','failed')):
+    batches = system['controller'].paid_batches
+    return eventually(lambda: row if (row:=batches._row(None,job_id))['state'] in states and job_id not in batches.threads else None)
+
+
+@pytest.mark.parametrize('failure', ['duplicate','invalid_json','download'])
+def test_terminal_collection_failure_is_reconcilable_and_does_not_repeat_submission(system,failure):
+    gateway,transport = configure(system); _billing_http(system)
+    original = transport.request
+    bad = [True]
+    def request(*args,**kwargs):
+        if args[2].endswith('/content') and bad[0]:
+            if failure=='download':
+                raise DomainError('paid_batch_provider_request_failed',502)
+            value = original(*args,**kwargs)
+            return value*2 if failure=='duplicate' else b'{'
+        return original(*args,**kwargs)
+    transport.request = request
+    image = acquire(system,system['images'][0]);base='/api/hosted/tools/paid-batches'
+    started = system['client'].post(base,json=body_for(image));assert started.status_code==202
+    job_id=started.json()['job_id'];failed=_wait_batch(system,job_id)
+    assert failed['state']=='failed'
+    call = gateway.accounts.calls(system['admin'])[0]
+    assert call['state']=='unknown' and call['charged'] is None and call['can_reconcile']
+    listed = system['admin_client'].get('/api/hosted/providers/calls?unresolved_only=true').json()['calls']
+    assert listed[0]['id']==call['id'] and listed[0]['reason']=='batch_usage_unresolved'
+    command={'operation_id':op(),'charged':1,'note':'Confirmed provider bill'}
+    url='/api/hosted/providers/calls/'+call['id']+'/reconcile'
+    assert system['admin_client'].post(url,json=command).status_code==200
+    assert system['admin_client'].post(url,json=command).status_code==200
+    bad[0]=False
+    assert system['client'].post(base+'/'+job_id+'/collect',json={}).status_code==200
+    assert _wait_batch(system,job_id)['state']=='collected'
+    assert len(transport.batches)==1
+    assert gateway.accounts.calls(system['admin'])[0]['state']=='reconciled'
+    # Historical confirmed charge frees capacity; new work fits exactly.
+    gateway.accounts.configure(system['admin'],'openai',expected_revision=1,operation_id=op(),enabled=True,
+        monthly_limit=3,request_limit=2,allowed_datasets=[image['dataset_id']],models=['test-paid-model'])
+    second=acquire(system,system['images'][1]);response=system['client'].post(base,json=body_for(second))
+    assert _wait_batch(system,response.json()['job_id'])['state']=='collected'
+    assert len(transport.batches)==2
+
+
+@pytest.mark.parametrize('manual_first',[True,False])
+def test_collection_and_manual_bill_serialize_without_losing_proposals(system,monkeypatch,manual_first):
+    gateway,transport=configure(system);_billing_http(system)
+    entered,release=threading.Event(),threading.Event()
+    settle=gateway.accounts.settle_batch_row
+    def held(*args,**kwargs):
+        entered.set();assert release.wait(10)
+        return settle(*args,**kwargs)
+    monkeypatch.setattr(gateway.accounts,'settle_batch_row',held)
+    image=acquire(system,system['images'][0]);base='/api/hosted/tools/paid-batches'
+    response=system['client'].post(base,json=body_for(image));job_id=response.json()['job_id']
+    assert entered.wait(10)
+    call=gateway.accounts.calls(system['admin'])[0]
+    assert call['state']=='unknown' and call['can_reconcile']
+    url='/api/hosted/providers/calls/'+call['id']+'/reconcile'
+    command={'operation_id':op(),'charged':0,'note':'Provider confirmed invoice credit'}
+    if manual_first:
+        assert system['admin_client'].post(url,json=command).status_code==200
+    release.set();assert _wait_batch(system,job_id)['state']=='collected'
+    if not manual_first:
+        assert system['admin_client'].post(url,json=command).status_code==409
+    final=gateway.accounts.calls(system['admin'])[0]
+    assert (final['state'],final['charged']) == (('reconciled',0) if manual_first else ('settled',1))
+    proposal=system['client'].get(base+'/'+job_id+'/captions').json()['captions'][0]
+    assert proposal['caption'] and proposal['billing']['resolved']
+    assert proposal['billing']['charged']==final['charged']
+    from services.hosted.paid_batches import _digest
+    assert proposal['proposal_sha256']==_digest({k:v for k,v in proposal.items() if k not in {'proposal_sha256','billing'}})
+    system['client'].post(base+'/'+job_id+'/collect',json={})
+    system['client'].post(base+'/'+job_id+'/cancel',json={'operation_id':op()})
+    _wait_batch(system,job_id)
+    assert len(transport.batches)==1
+    with system['store'].read_connection() as con:
+        assert con.execute("SELECT COUNT(*) FROM hosted_provider_audit WHERE kind='batch_usage_after_billing'").fetchone()[0] == int(manual_first)
+
+
+def test_partial_collection_preserves_settled_rows_and_retries_only_accounting(system,monkeypatch):
+    from services.hosted.types import MutationContext
+    gateway,transport=configure(system);store=system['store'];admin=system['admin']
+    for source in system['images']:
+        image=acquire(system,source)
+        def context(editor='alice-editor'):
+            return MutationContext(image['id'],image['current_version'],image['generation'],editor,op())
+        image=store.save(system['alice'],context(),{'objects':[]},complete=True,negative=True)
+        image=store.submit(system['alice'],context())
+        image=store.acquire_editor(admin,image['id'],'admin-editor',expected_version=image['current_version'],generation=image['generation'])
+        store.approve(admin,context('admin-editor'))
+    snapshot=store.create_snapshot(admin,system['dataset']['id'],op())
+    original=gateway.accounts.settle_batch_row;seen=[]
+    def partial(*args,**kwargs):
+        seen.append(args[1])
+        if len(seen)==2:raise DomainError('fixture_collection_interrupted',409)
+        return original(*args,**kwargs)
+    monkeypatch.setattr(gateway.accounts,'settle_batch_row',partial)
+    base='/api/hosted/tools/paid-batches'
+    response=system['admin_client'].post(base,json={'dataset_id':system['dataset']['id'],'snapshot_id':snapshot['snapshot_id'],
+        'operation_id':op(),'provider_options':{'model':'test-paid-model','max_output_tokens':4096}})
+    job_id=response.json()['job_id'];assert _wait_batch(system,job_id)['state']=='failed'
+    calls=gateway.accounts.calls(admin)
+    assert sorted(c['state'] for c in calls)==['settled','unknown']
+    settled=next(c for c in calls if c['state']=='settled')
+    monkeypatch.setattr(gateway.accounts,'settle_batch_row',original)
+    system['admin_client'].post(base+'/'+job_id+'/collect',json={})
+    assert _wait_batch(system,job_id)['state']=='collected'
+    assert all(c['state']=='settled' for c in gateway.accounts.calls(admin))
+    assert next(c for c in gateway.accounts.calls(admin) if c['id']==settled['id'])['charged']==settled['charged']
+    assert len(transport.batches)==1
+
+
+@pytest.mark.parametrize('remote_state',['completed','in_progress','mismatched'])
+def test_startup_backfill_and_restore_require_terminal_batch_proof(system,monkeypatch,remote_state):
+    from hosted_app import create_app
+    from fastapi.testclient import TestClient
+    gateway,transport=configure(system)
+    ctl=system['controller'].paid_batches
+    def stop_before_collection(job_id):ctl.stop.set()
+    monkeypatch.setattr(ctl,'_collect',stop_before_collection)
+    image=acquire(system,system['images'][0]);base='/api/hosted/tools/paid-batches'
+    job_id=system['client'].post(base,json=body_for(image)).json()['job_id']
+    eventually(lambda:ctl.stop.is_set() and not ctl.threads)
+    call=gateway.accounts.calls(system['admin'])[0]
+    # Exact old schema state, representing pre-upgrade stranded accounting.
+    with system['store'].transaction() as con:
+        remote=json.loads(con.execute('SELECT remote_json FROM hosted_paid_batches WHERE id=?',(job_id,)).fetchone()[0])
+        if remote_state=='mismatched':remote['id']='wrong-batch'
+        else:remote['status']=remote_state
+        con.execute("UPDATE hosted_paid_batches SET state='failed',remote_json=? WHERE id=?",(json.dumps(remote),job_id))
+        con.execute("UPDATE hosted_provider_calls SET state='dispatched' WHERE id=?",(call['id'],))
+        con.execute("DELETE FROM hosted_provider_audit WHERE kind='batch_billing_unresolved'")
+    system['controller'].close()
+    app=create_app(system['root'],testing=True)
+    with TestClient(app):
+        # The actual application lifespan upgrades before any billing page read.
+        rows=app.state.providers.calls(system['admin'])
+        assert rows[0]['state']==('unknown' if remote_state=='completed' else 'dispatched')
+        assert rows[0]['can_reconcile']==(remote_state=='completed')
+        app.state.providers.normalize_terminal_batches()
+        with system['store'].read_connection() as con:
+            assert con.execute("SELECT COUNT(*) FROM hosted_provider_audit WHERE kind='batch_billing_unresolved'").fetchone()[0] == int(remote_state=='completed')
+        with system['store'].transaction() as con:app.state.providers.after_restore(con)
+        assert app.state.providers.calls(system['admin'])[0]['state']=='unknown'
+        if remote_state!='completed':
+            with pytest.raises(DomainError,match='paid_batch_terminal_not_verified'):
+                app.state.providers.reconcile(system['admin'],call['id'],charged=0,note='Bill not yet final',operation_id=op())
+        assert app.state.providers.calls(system['admin'])[0]['can_reconcile']==(remote_state=='completed')
+    assert len(transport.batches)==1

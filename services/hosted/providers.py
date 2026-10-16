@@ -55,6 +55,70 @@ class ProviderAccounts:
             con.execute("""CREATE TABLE IF NOT EXISTS hosted_provider_audit (
                 id INTEGER PRIMARY KEY, actor_id TEXT NOT NULL, provider TEXT NOT NULL,
                 kind TEXT NOT NULL, data_json TEXT NOT NULL, created_at REAL NOT NULL)""")
+            con.execute("CREATE INDEX IF NOT EXISTS hosted_provider_audit_call ON hosted_provider_audit(json_extract(data_json,'$.call_id'),kind)")
+
+    @staticmethod
+    def terminal_batch(row, remote=None):
+        """Local failure alone never proves that remote spending has finished."""
+        if not row or not row['remote_id'] or not row['input_file_id']:
+            return False
+        try:
+            remote = json.loads(row['remote_json'] or '{}') if remote is None else remote
+            return (isinstance(remote, dict) and remote.get('id') == row['remote_id']
+                    and remote.get('input_file_id') == row['input_file_id']
+                    and remote.get('status') in {'completed', 'failed', 'expired', 'cancelled'}
+                    and remote.get('endpoint', '/v1/responses') == '/v1/responses'
+                    and isinstance(remote.get('metadata', {}), dict)
+                    and remote.get('metadata', {}).get('hosted_job_id', row['id']) == row['id'])
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _has_batches(con):
+        return con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='hosted_paid_batch_rows'").fetchone() is not None
+
+    def mark_batch_terminal(self, con, batch, *, reason='remote_terminal_awaiting_usage'):
+        """Called in the transaction retaining the verified terminal response."""
+        if not self.terminal_batch(batch):
+            return
+        rows = con.execute("SELECT c.* FROM hosted_provider_calls c JOIN hosted_paid_batch_rows r ON r.call_id=c.id WHERE r.job_id=? AND c.state='dispatched' AND c.actor_id=? AND c.image_id=r.image_id AND c.provider='openai'", (batch['id'], batch['actor_id'])).fetchall()
+        remote = json.loads(batch['remote_json'])
+        for call in rows:
+            con.execute("UPDATE hosted_provider_calls SET state='unknown' WHERE id=? AND state='dispatched'", (call['id'],))
+            con.execute("INSERT INTO hosted_provider_audit(actor_id,provider,kind,data_json,created_at) VALUES (?,?,?,?,?)",
+                (call['actor_id'], call['provider'], 'batch_billing_unresolved', json.dumps({'call_id':call['id'], 'job_id':batch['id'],
+                    'remote_id':batch['remote_id'], 'remote_status':remote['status'], 'reason':reason}), self.store.clock()))
+
+    def normalize_terminal_batches(self):
+        """Idempotent, paged upgrade of historical stranded bills; no network."""
+        cursor = ''
+        while True:
+            with self.store.transaction() as con:
+                if not self._has_batches(con):
+                    return
+                rows = con.execute("SELECT * FROM hosted_paid_batches WHERE id>? AND remote_id IS NOT NULL ORDER BY id LIMIT 100", (cursor,)).fetchall()
+                for row in rows:
+                    self.mark_batch_terminal(con, row, reason='retained_terminal_response')
+            if not rows:
+                return
+            cursor = rows[-1]['id']
+
+    def billing(self, con, call):
+        """Live billing metadata, deliberately separate from proposal identity."""
+        batch = None
+        if self._has_batches(con):
+            linked = con.execute("SELECT b.* FROM hosted_paid_batches b JOIN hosted_paid_batch_rows r ON r.job_id=b.id WHERE r.call_id=?", (call['id'],)).fetchall()
+            batch = linked[0] if len(linked) == 1 else None
+            bound = bool(linked)
+        else:
+            bound = False
+        eligible = call['state'] in {'reserved','unknown'} and (not bound or self.terminal_batch(batch))
+        resolved = call['state'] in {'settled','reconciled'}
+        return {'state':call['state'], 'charged':call['charged'], 'reserved':call['reserved'], 'resolved':resolved,
+            'can_reconcile':eligible,
+            'reason': 'batch_terminal_not_verified' if bound and not resolved and not self.terminal_batch(batch)
+                else 'batch_usage_unresolved' if bound and not resolved else 'billing_resolved' if resolved else 'provider_usage_unresolved',
+            'batch_job_id':batch['id'] if batch else None, 'remote_batch_id':batch['remote_id'] if batch else None}
 
     @staticmethod
     def _money(value):
@@ -132,7 +196,7 @@ class ProviderAccounts:
         return image
 
     def reserve(self, actor, context, *, provider, model, maximum_microdollars, request_fingerprint,
-                replay_settled_stage=False):
+                replay_settled_stage=False, input_identity=None):
         """Trusted gateway only: fingerprint includes the complete immutable model input."""
         maximum = self._money(maximum_microdollars)
         if not maximum or not re.fullmatch(r"[0-9a-f]{64}", request_fingerprint):
@@ -181,6 +245,9 @@ class ProviderAccounts:
             con.execute("INSERT INTO hosted_provider_calls VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,'reserved',?,NULL,NULL)",
                         (call_id, actor.user_id, context.operation_id, provider, row["revision"], image["dataset_id"], context.image_id,
                          context.expected_version, context.generation, context.editor_id, model, request_fingerprint, period, maximum, self.store.clock()))
+            if input_identity is not None:
+                con.execute("INSERT INTO hosted_provider_audit(actor_id,provider,kind,data_json,created_at) VALUES (?,?,?,?,?)",
+                    (actor.user_id, provider, 'media_prepared', json.dumps({'call_id':call_id,'input_identity':input_identity}, allow_nan=False), self.store.clock()))
             return {"id": call_id, "state": "reserved"}
 
     def dispatch(self, actor, context, call_id, *, guard=None):
@@ -206,10 +273,11 @@ class ProviderAccounts:
         with self.store.transaction() as con:
             call = con.execute("SELECT * FROM hosted_provider_calls WHERE id=?", (call_id,)).fetchone()
             if not call or call['state'] != 'reserved':
-                return
+                return False
             con.execute("UPDATE hosted_provider_calls SET state='reconciled',charged=0,settled_at=? WHERE id=?", (self.store.clock(), call_id))
             con.execute("INSERT INTO hosted_provider_audit(actor_id,provider,kind,data_json,created_at) VALUES (?,?,?,?,?)",
                         (call['actor_id'], call['provider'], 'not_dispatched', json.dumps({'call_id': call_id, 'reason': str(reason)[:200]}), self.store.clock()))
+            return True
 
     def settle(self, call_id, *, actual_microdollars=None, provider_request_id="", result=None):
         """Trusted transport reports usage even after logout; no annotation authority is granted."""
@@ -229,12 +297,43 @@ class ProviderAccounts:
                 # never hidden by clamping the observed charge to our estimate.
                 con.execute("UPDATE hosted_providers SET enabled=0,revision=revision+1 WHERE name=?", (call["provider"],))
 
-    def calls(self, actor, *, limit=100, offset=0):
+    def settle_batch_row(self, job_id, image_id, call_id, *, actual_microdollars, provider_request_id, output):
+        """Serialize collection with manual billing; retain output in the same commit."""
+        charged = None if actual_microdollars is None else self._money(actual_microdollars)
+        if not isinstance(provider_request_id, str) or len(provider_request_id) > 200:
+            raise DomainError('paid_batch_request_id_invalid', 502)
+        with self.store.transaction() as con:
+            batch = con.execute('SELECT * FROM hosted_paid_batches WHERE id=?', (job_id,)).fetchone()
+            row = con.execute('SELECT call_id FROM hosted_paid_batch_rows WHERE job_id=? AND image_id=?', (job_id,image_id)).fetchone()
+            call = con.execute('SELECT * FROM hosted_provider_calls WHERE id=?', (call_id,)).fetchone()
+            if (not self.terminal_batch(batch) or not row or row['call_id'] != call_id or not call
+                    or (call['actor_id'],call['image_id'],call['provider']) != (batch['actor_id'],image_id,'openai')):
+                raise DomainError('paid_batch_billing_identity_invalid', 409)
+            if call['state'] in {'dispatched','unknown'}:
+                con.execute("UPDATE hosted_provider_calls SET charged=?,state=?,settled_at=?,provider_request_id=? WHERE id=?",
+                    (charged, 'settled' if charged is not None else 'unknown', self.store.clock(), provider_request_id, call_id))
+                if charged is not None and charged > call['reserved']:
+                    con.execute('UPDATE hosted_providers SET enabled=0,revision=revision+1 WHERE name=?', (call['provider'],))
+            elif call['state'] not in {'settled','reconciled'}:
+                raise DomainError('provider_call_not_dispatched', 409)
+            if call['state'] in {'settled','reconciled'} and charged is not None and charged != call['charged']:
+                audit = {'call_id':call_id, 'job_id':job_id, 'remote_id':batch['remote_id'],
+                    'confirmed_charge':call['charged'], 'confirmed_state':call['state'], 'reported_charge':charged,
+                    'provider_request_id':provider_request_id}
+                encoded = json.dumps(audit, sort_keys=True, allow_nan=False)
+                if not con.execute("SELECT 1 FROM hosted_provider_audit WHERE kind='batch_usage_after_billing' AND data_json=?", (encoded,)).fetchone():
+                    con.execute('INSERT INTO hosted_provider_audit(actor_id,provider,kind,data_json,created_at) VALUES (?,?,?,?,?)',
+                        (call['actor_id'],call['provider'],'batch_usage_after_billing',encoded,self.store.clock()))
+            con.execute('UPDATE hosted_paid_batch_rows SET output_json=? WHERE job_id=? AND image_id=?',
+                (json.dumps(output, sort_keys=True, allow_nan=False),job_id,image_id))
+
+    def calls(self, actor, *, limit=100, offset=0, unresolved_only=False):
         if type(limit) is not int or type(offset) is not int or not 1 <= limit <= 500 or offset < 0:
             raise DomainError("invalid_pagination", 422)
         with self.store.read_connection() as con:
             self.store._actor(con, actor, admin=True)
-            return [dict(row) for row in con.execute("SELECT id,actor_id,provider,dataset_id,image_id,model,period,reserved,charged,state,created_at,provider_request_id FROM hosted_provider_calls ORDER BY created_at DESC,id LIMIT ? OFFSET ?", (limit, offset))]
+            rows = con.execute("SELECT id,actor_id,provider,dataset_id,image_id,model,period,reserved,charged,state,created_at,provider_request_id FROM hosted_provider_calls WHERE (?=0 OR state IN ('reserved','dispatched','unknown')) ORDER BY created_at DESC,id LIMIT ? OFFSET ?", (int(unresolved_only),limit,offset)).fetchall()
+            return [{**dict(row), **self.billing(con,row)} for row in rows]
 
     def reconcile(self, actor, call_id, *, charged, note, operation_id):
         charged = self._money(charged)
@@ -244,6 +343,8 @@ class ProviderAccounts:
             call = con.execute("SELECT * FROM hosted_provider_calls WHERE id=?", (call_id,)).fetchone()
             if not call or call["state"] not in {"reserved", "unknown"}:
                 raise DomainError("provider_call_not_unresolved", 409)
+            if not self.billing(con,call)['can_reconcile']:
+                raise DomainError('paid_batch_terminal_not_verified', 409)
             con.execute("UPDATE hosted_provider_calls SET charged=?,state='reconciled',settled_at=? WHERE id=?", (charged, self.store.clock(), call_id))
             con.execute("INSERT INTO hosted_provider_audit(actor_id,provider,kind,data_json,created_at) VALUES (?,?,?,?,?)",
                         (actor.user_id, call["provider"], "billing_reconciled", json.dumps({"call_id": call_id, "charged": charged, "note": note}), self.store.clock()))

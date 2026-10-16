@@ -23,7 +23,9 @@ from .errors import DomainError
 
 MAX_MEDIA_BYTES = 256 * 1024 * 1024
 MAX_MEDIA_PIXELS = 64_000_000
-MEDIA_VIEW_POLICY = "encoded-rgb-v1"
+MEDIA_VIEW_POLICY = "encoded-rgb8-white-v2"
+LEGACY_MEDIA_VIEW_POLICY = "encoded-rgb-v1"
+COORDINATE_POLICY = "encoded-coordinates-v1"
 FORMATS = {"JPEG": ("image/jpeg", ".jpg"), "PNG": ("image/png", ".png"),
            "WEBP": ("image/webp", ".webp"), "TIFF": ("image/tiff", ".tif"),
            "BMP": ("image/bmp", ".bmp")}
@@ -59,6 +61,38 @@ def _read(source: bytes | BinaryIO | str | Path) -> bytes:
     return data
 
 
+def _png16_transparent(data, width, height):
+    """Match tRNS in original sample precision before high-byte reduction."""
+    import numpy as np
+    try:
+        import png
+    except ImportError as exc:
+        raise DomainError('media_decoder_unavailable', 503, 'Install requirements-hosted.txt for 16-bit PNG transparency.') from exc
+    try:
+        actual_width, actual_height, rows, metadata = png.Reader(bytes=data).read()
+        if (actual_width, actual_height, metadata['bitdepth']) != (width, height, 16):
+            raise ValueError('PNG dimensions or bit depth changed')
+        planes = metadata['planes']
+        if planes not in (1, 3) or 'transparent' not in metadata:
+            raise ValueError('PNG transparency changed')
+        pixels = np.empty((height, width, 3), dtype=np.uint8)
+        key = np.asarray(metadata['transparent'], dtype=np.uint16)
+        count = 0
+        for index, row in enumerate(rows):
+            if index >= height:
+                raise ValueError('PNG row count changed')
+            samples = np.asarray(row, dtype=np.uint16).reshape(width, planes)
+            reduced = (samples >> 8).astype(np.uint8)
+            reduced[np.all(samples == key, axis=1)] = 255
+            pixels[index] = reduced
+            count += 1
+        if count != height:
+            raise ValueError('PNG row count changed')
+        return Image.fromarray(pixels, mode='RGB')
+    except (png.Error, ValueError, KeyError) as exc:
+        raise DomainError('invalid_image_import', 422, 'The image cannot be fully decoded.') from exc
+
+
 def decode_encoded(source: bytes | BinaryIO | str | Path) -> tuple[Image.Image, MediaInfo]:
     """Fully decode the first encoded image grid, ignoring display orientation.
 
@@ -79,6 +113,14 @@ def decode_encoded(source: bytes | BinaryIO | str | Path) -> tuple[Image.Image, 
             if type(orientation) is not int or orientation not in range(1, 9):
                 raise DomainError("image_orientation_invalid", 422)
             frames = getattr(opened, "n_frames", 1)
+            mode = opened.mode
+            # Pillow exposes 16-bit truecolour PNG as RGB after decoding.
+            depth = data[24] if encoding == "PNG" and len(data) > 25 else 8
+            unsigned16 = mode.startswith("I;16") or (encoding == "PNG" and mode == "I" and depth == 16)
+            transforms = any(key in opened.info for key in (
+                "transparency", "icc_profile", "gamma", "chromaticity", "srgb", "xmp", "XML:com.adobe.xmp"))
+            compatible = (encoding in {"JPEG", "PNG", "WEBP"} and mode in {"RGB", "L"}
+                          and depth == 8 and orientation == 1 and frames == 1 and not transforms)
         # PNG EXIF access may load metadata/pixels. Its verify() requires a
         # pristine parser, so verify a separate open before the full decode.
         with Image.open(io.BytesIO(data)) as verifier:
@@ -92,12 +134,37 @@ def decode_encoded(source: bytes | BinaryIO | str | Path) -> tuple[Image.Image, 
             opened.load()
             if opened.size != (width, height):
                 raise DomainError("image_encoded_dimensions_changed", 422)
-            pixels = opened.convert("RGB")
+            if encoding == 'PNG' and depth == 16 and 'transparency' in opened.info:
+                pixels = _png16_transparent(data, width, height)
+            elif unsigned16:
+                import numpy as np
+                # Fixed source-range conversion, never contrast normalization.
+                samples = np.asarray(opened).astype(np.uint32)
+                reduced = (samples >> 8).astype(np.uint8)
+                if 'transparency' in opened.info:
+                    reduced[samples == opened.info['transparency']] = 255
+                pixels = Image.fromarray(reduced, mode="L").convert("RGB")
+            elif "A" in opened.getbands() or "transparency" in opened.info:
+                rgba = opened.convert("RGBA")
+                try:
+                    matte = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+                    try:
+                        composited = Image.alpha_composite(matte, rgba)
+                        try:
+                            pixels = composited.convert("RGB")
+                        finally:
+                            composited.close()
+                    finally:
+                        matte.close()
+                finally:
+                    rgba.close()
+            else:
+                pixels = opened.convert("RGB")
             pixels.load()
             pixels.info.clear()
         info = MediaInfo(hashlib.sha256(data).hexdigest(), len(data), width, height,
                          encoding, orientation,
-                         orientation != 1 or encoding in {"TIFF", "BMP"} or frames != 1,
+                         not compatible,
                          frames)
         return pixels, info
     except DomainError:
@@ -133,6 +200,30 @@ def working_media_bytes(source: bytes | BinaryIO | str | Path) -> tuple[bytes, d
                       "content_type": mime, "suffix": suffix}
     finally:
         pixels.close()
+
+
+def validate_working_view(source, view: dict, *, source_sha256=None,
+                          source_size_bytes=None, require_current_compatible=False) -> MediaInfo:
+    """Verify exact captured working bytes; never replace them with today's view.
+
+    Old opaque, neutral inputs remain executable. Unsafe or unidentified legacy
+    captures remain readable evidence but cannot silently start new inference.
+    """
+    data = _read(source)
+    info = inspect_media(data)
+    if not isinstance(view, dict) or view.get("policy") not in {MEDIA_VIEW_POLICY, LEGACY_MEDIA_VIEW_POLICY}:
+        raise DomainError("media_policy_upgrade_required", 409)
+    expected = (view.get("sha256"), view.get("size_bytes"), view.get("width"), view.get("height"))
+    if expected != (info.source_sha256, info.size_bytes, info.width, info.height):
+        raise DomainError("snapshot_media_mismatch", 409)
+    if (view.get("coordinate_space") != "encoded"
+            or source_sha256 is not None and view.get("source_sha256") != source_sha256
+            or source_size_bytes is not None and view.get("source_size_bytes") != source_size_bytes
+            or (view.get("content_type"), view.get("suffix")) != FORMATS[info.format]):
+        raise DomainError("snapshot_media_mismatch", 409)
+    if (view["policy"] == MEDIA_VIEW_POLICY or require_current_compatible) and info.needs_working_view:
+        raise DomainError("media_policy_upgrade_required", 409)
+    return info
 
 
 def _info(value):
@@ -196,7 +287,7 @@ def prepare_annotations(annotations: dict | None, info: MediaInfo | dict,
             except (TypeError, ValueError, KeyError) as error:
                 raise DomainError("invalid_bbox", 422) from error
     result["media_coordinate_provenance"] = {
-        "policy": MEDIA_VIEW_POLICY, "source_sha256": details["source_sha256"],
+        "policy": COORDINATE_POLICY, "source_sha256": details["source_sha256"],
         "source_coordinate_space": label_coordinate_space or "encoded",
         "coordinate_space": "encoded", "source_orientation": orientation,
         "encoded_width": width, "encoded_height": height,
@@ -256,13 +347,13 @@ class HostedMedia:
         encoded = json.dumps(view, sort_keys=True, separators=(",", ":"), allow_nan=False)
         with self.store.transaction() as con:
             existing = con.execute("SELECT view_json FROM hosted_media_views WHERE source_sha256=? AND policy=?",
-                                   (view["source_sha256"], MEDIA_VIEW_POLICY)).fetchone()
+                                   (view["source_sha256"], view["policy"])).fetchone()
             if existing:
                 old = json.loads(existing[0])
                 self.artifacts.verify(self.reference(old))
                 return old
-            con.execute("INSERT INTO hosted_media_views VALUES(?,?,?)", (view["source_sha256"], MEDIA_VIEW_POLICY, encoded))
-            owner = view["source_sha256"] + ":" + MEDIA_VIEW_POLICY
+            con.execute("INSERT INTO hosted_media_views VALUES(?,?,?)", (view["source_sha256"], view["policy"], encoded))
+            owner = view["source_sha256"] + ":" + view["policy"]
             for ref in (ArtifactRef(view["source_sha256"], view["source_size_bytes"]), reference):
                 con.execute("INSERT OR IGNORE INTO hosted_artifact_references VALUES('media_view',?,?,?,?)",
                             (owner, ref.sha256, ref.size_bytes, self.store.clock()))
@@ -270,19 +361,36 @@ class HostedMedia:
                     con.execute("DELETE FROM hosted_orphan_observations WHERE sha256=?", (ref.sha256,))
         return view
 
-    def resolve(self, source: ArtifactRef | str) -> dict:
+    def resolve(self, source: ArtifactRef | str, *, policy=MEDIA_VIEW_POLICY) -> dict:
         digest = source.sha256 if isinstance(source, ArtifactRef) else source
         with self.artifacts.exclusive():
             self.artifacts.verify(source)
             with self.store.read_connection() as con:
-                row = con.execute("SELECT view_json FROM hosted_media_views WHERE source_sha256=? AND policy=?", (digest, MEDIA_VIEW_POLICY)).fetchone()
+                row = con.execute("SELECT view_json FROM hosted_media_views WHERE source_sha256=? AND policy=?", (digest, policy)).fetchone()
             if row:
                 view = json.loads(row[0])
                 self.artifacts.verify(self.reference(view))
                 return view
+            if policy != MEDIA_VIEW_POLICY:
+                raise DomainError("media_policy_upgrade_required", 409)
             with self.artifacts.open(source) as stream:
                 working, view = working_media_bytes(stream)
             return self._retain(working, view)
+
+    def capture_views(self, images) -> dict:
+        """Read immutable descriptors cheaply; pin/open verifies their bytes."""
+        result, missing = {}, []
+        with self.store.read_connection() as con:
+            for image in images:
+                row = con.execute("SELECT view_json FROM hosted_media_views WHERE source_sha256=? AND policy=?",
+                                  (image['media_hash'], MEDIA_VIEW_POLICY)).fetchone()
+                if row:
+                    result[image['id']] = json.loads(row[0])
+                else:
+                    missing.append(image)
+        for image in missing:
+            result[image['id']] = self.resolve(image['media_hash'])
+        return result
 
     def audit(self) -> list[dict]:
         """Read-only historical audit; never changes media or annotation state."""

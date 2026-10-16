@@ -238,7 +238,7 @@ class CaptionBatches:
         with self.store.transaction() as con:
             con.execute("UPDATE hosted_caption_batches SET " + ",".join(key + "=?" for key in values) + " WHERE id=?", (*values.values(), job_id))
 
-    def _validate(self, actor, body):
+    def _validate(self, actor, body, *, include_media=True):
         self.tools.auth.require_admin(actor)
         manifest = self.store.get_snapshot(actor, body.snapshot_id)["manifest"]
         if manifest["dataset_id"] != body.dataset_id:
@@ -248,6 +248,7 @@ class CaptionBatches:
             raise DomainError("tool_parameter_not_allowed", 422)
         from models.schemas import QwenCaptionRequest
         QwenCaptionRequest(**body.caption_request, image_token="canonical-snapshot")
+        media_identity = {"working_media": self.tools.media.capture_views(manifest['images'])} if include_media else {}
         if body.provider == "openai":
             from services.hosted.paid_caption import validate_paid_request
             if body.provider_options is None:
@@ -255,7 +256,7 @@ class CaptionBatches:
             provider_identity = validate_paid_request(self.tools.provider_gateway, actor, body.dataset_id,
                 body.caption_request, body.provider_options)
             identity = hashlib.sha256(_json({"provider_identity": provider_identity, "snapshot_id": body.snapshot_id,
-                "caption_request": body.caption_request, "settings": body.settings.model_dump()}).encode()).hexdigest()
+                "caption_request": body.caption_request, "settings": body.settings.model_dump(), **media_identity}).encode()).hexdigest()
             return manifest, None, identity
         if body.provider_options is not None:
             raise DomainError("paid_caption_provider_required", 422)
@@ -267,7 +268,7 @@ class CaptionBatches:
         # Paths may change during a restore; immutable model content may not.
         model_ids = {key: self.tools.registry.model_identity(key) for key in qwen["models"]}
         identity = hashlib.sha256(_json({"models": model_ids, "qwen": {key: value for key, value in qwen.items() if key not in {"models", "actor_id"}},
-            "snapshot_id": body.snapshot_id, "caption_request": body.caption_request, "settings": body.settings.model_dump()}).encode()).hexdigest()
+            "snapshot_id": body.snapshot_id, "caption_request": body.caption_request, "settings": body.settings.model_dump(), **media_identity}).encode()).hexdigest()
         return manifest, qwen, identity
 
     def _recover(self):
@@ -361,14 +362,38 @@ class CaptionBatches:
         return AdapterSpec("services.hosted.caption_batch:CaptionBatchAdapter", {"qwen": qwen,
             "canonical_root": str(self.root), "output_directory": str(directory)}, qwen.get("device", "cpu"))
 
+    def _execution_input(self, actor, body, row):
+        manifest, qwen, identity = self._validate(actor, body)
+        if identity == row['identity']:
+            return manifest, qwen, identity, None
+        if self._validate(actor, body, include_media=False)[2] != row['identity']:
+            raise DomainError('caption_batch_configuration_changed', 409)
+        # A pre-upgrade run may continue only from its actual compatible frozen
+        # bytes. A source-only identity cannot authorize a new interpretation.
+        path = self.root / row['id'] / 'canonical-snapshot.json'
+        if not path.is_file():
+            raise DomainError('media_policy_upgrade_required', 409)
+        from .analysis import read_canonical_snapshot, _hash_file
+        reference = {key: manifest[key] for key in ('dataset_id', 'revision', 'class_version', 'settings_version')}
+        reference.update(snapshot_id=body.snapshot_id, manifest_path=str(path), manifest_sha256=_hash_file(path)[0])
+        frozen = read_canonical_snapshot(reference, allowed_root=path.parent)
+        if any(not image.get('working_media') for image in frozen['images']):
+            raise DomainError('media_policy_upgrade_required', 409)
+        selected = set(json.loads(row['selection_json'])['image_ids'])
+        expected = {**manifest, 'snapshot_id': body.snapshot_id,
+                    'images': [image for image in manifest['images'] if image['id'] in selected]}
+        source_only = {**frozen, 'images': [{key: value for key, value in image.items()
+            if key not in {'working_media', 'media_path'}} for image in frozen['images']]}
+        if _json(source_only) != _json(expected):
+            raise DomainError('caption_batch_configuration_changed', 409)
+        return manifest, qwen, row['identity'], frozen
+
     def _run(self, job_id):
         worker_id, directory, actor = None, None, None
         try:
             row = self._row(None, job_id)
             actor, body = Actor(**json.loads(row["actor_json"])), CaptionBatchRequest(**json.loads(row["request_json"]))
-            manifest, qwen, identity = self._validate(actor, body)
-            if identity != row["identity"]:
-                raise DomainError("caption_batch_configuration_changed", 409)
+            manifest, qwen, identity, frozen = self._execution_input(actor, body, row)
             selection = json.loads(row["selection_json"])
             image_ids = selection["image_ids"]
             directory = self.root / job_id
@@ -384,18 +409,24 @@ class CaptionBatches:
             # Capture only the selected confirmed members. The original snapshot
             # ID/revisions remain unchanged and source membership is checked.
             selected_ids = set(image_ids)
-            content = json.loads(_json({**manifest, "snapshot_id": body.snapshot_id,
+            content = frozen or json.loads(_json({**manifest, "snapshot_id": body.snapshot_id,
                 "images": [image for image in manifest["images"] if image["id"] in selected_ids]}))
             with self.tools.artifacts.exclusive():
                 for image in content["images"]:
-                    view = self.tools.media.resolve(image["media_hash"])
+                    view = image.get('working_media') if frozen else self.tools.media.resolve(image["media_hash"])
                     ref = self.tools.artifacts.pin(self.tools.media.reference(view), directory)
                     image["working_media"] = view
                     image["media_path"] = str(directory / ref.sha256)
-                _atomic(directory / "canonical-snapshot.json", content)
+                captured_path = directory / 'canonical-snapshot.json'
+                if captured_path.exists():
+                    old = _read(captured_path, 512 * 1024 * 1024)
+                    if _json(old) != _json(content):
+                        raise DomainError('media_policy_upgrade_required', 409)
+                else:
+                    _atomic(captured_path, content)
             if body.provider == "openai":
                 self._run_paid(actor, job_id, body, identity, content, image_ids, history, directory, known)
-                if self._validate(actor, body)[2] != identity:
+                if self._execution_input(actor, body, row)[2] != identity:
                     raise DomainError("caption_batch_configuration_changed", 409)
                 self._finish(actor, job_id, body, identity, manifest, selection)
                 shutil.rmtree(directory)
@@ -439,14 +470,14 @@ class CaptionBatches:
                     self._record_interruption(actor, job_id, directory, _read(directory / "progress.json", 8192), state.get("error") or "worker_failed")
                 raise RuntimeRejected(state.get("error") or "worker_failed")
             runtime.result(worker_id, actor_id=actor.user_id)
-            if self._validate(actor, body)[2] != identity:
+            if self._execution_input(actor, body, row)[2] != identity:
                 raise DomainError("caption_batch_configuration_changed", 409)
             self._finish(actor, job_id, body, identity, manifest, selection)
             shutil.rmtree(directory)
             directory = None
         except Exception as exc:
             code = exc.code if isinstance(exc, (DomainError, RuntimeRejected)) else "caption_batch_failed"
-            state = "cancelled" if code == "caption_batch_cancelled" else "interrupted" if code == "caption_control_stopped" else "failed"
+            state = "cancelled" if code == "caption_batch_cancelled" else "interrupted" if code in {"caption_control_stopped", "media_policy_upgrade_required"} else "failed"
             if worker_id and actor:
                 try:
                     self.tools._runtime.cancel(worker_id, actor_id=actor.user_id)
@@ -705,8 +736,8 @@ class CaptionBatches:
         self._recover()
         row = self._row(actor, job_id)
         body = CaptionBatchRequest(**json.loads(row["request_json"]))
-        if not self.store.raw_receipt(actor, operation_id) and self._validate(actor, body)[2] != row["identity"]:
-            raise DomainError("caption_batch_configuration_changed", 409)
+        if not self.store.raw_receipt(actor, operation_id):
+            self._execution_input(actor, body, row)
         changed = False
         def change(con):
             nonlocal changed

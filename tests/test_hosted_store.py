@@ -66,6 +66,29 @@ def error(code, callback):
     assert exc.value.code == code
 
 
+@pytest.mark.parametrize("separator", list("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"))
+def test_class_line_delimiters_reject_at_every_mutation(store, separator):
+    ds = dataset(store)
+    invalid = "Road" + separator + "Vehicle"
+    error("invalid_class_name", lambda: store.create_dataset(ADMIN, "bad", [invalid], "bad-create"))
+    error("invalid_class_name", lambda: store.add_class(ADMIN, ds["id"], invalid, "bad-add", ds["class_version"]))
+    error("invalid_class_name", lambda: store.rename_class(ADMIN, ds["id"], ds["classes"][0]["id"], invalid, "bad-rename", ds["class_version"]))
+    error("invalid_class_name", lambda: store.request_class(ADMIN, ds["id"], invalid, "Requested class", "bad-request"))
+    error("invalid_class_name", lambda: store.import_yolo_image(ADMIN, ds["id"], sha256(b"new").hexdigest(), "new.png", "0 .5 .5 .2 .2", [invalid], ds["class_version"], "bad-import", width=100, height=80, size_bytes=100))
+    assert store.get_dataset(ADMIN, ds["id"])["classes"] == ds["classes"]
+    assert store.receipt(ADMIN, "bad-create") is None
+
+
+def test_old_class_command_replay_precedes_new_delimiter_validation(store):
+    ds = dataset(store)
+    payload = {"dataset_id": ds["id"], "name": "Old\u2028Name", "expected_class_version": ds["class_version"]}
+    historical = {"class": {"id": "historic", "name": payload["name"], "position": 1}, "class_version": 1}
+    store._command(ADMIN, "old-add", "add_class", payload, lambda con: historical, admin=True)
+    assert store.add_class(ADMIN, ds["id"], payload["name"], "old-add", ds["class_version"]) == historical
+    changed = store.add_class(ADMIN, ds["id"], "Véhicule", "unicode-add", ds["class_version"])
+    assert changed["class"]["name"] == "Véhicule"
+
+
 def test_direct_approval_negative_and_canonical_snapshot_survive_lost_reply(store):
     ds = dataset(store)
     image = imported(store, ds)

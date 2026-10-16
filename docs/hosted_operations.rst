@@ -167,11 +167,23 @@ a full decode, and do not resize. EXIF orientation is suppressed before loading
 pixels, including TIFF's implicit rotation. Multi-frame inputs use their first
 frame as a static image. Source artifacts are never rewritten.
 
-JPEG, PNG and WebP without display transforms retain their original working
-bytes. Oriented images, TIFF/BMP and multi-frame sources receive an RGB,
-metadata-free, lossless PNG working view. ``hosted_media_views`` permanently maps
-the original source digest and ``encoded-rgb-v1`` policy to the actual view
-digest, dimensions and format. Both original and working artifacts are
+The current working-pixel policy is ``encoded-rgb8-white-v2``. Opaque, single-frame
+8-bit RGB or grayscale JPEG, PNG and WebP retain their source bytes when they have
+no orientation or color-display transforms. Other inputs receive a metadata-free
+RGB PNG: transparency is composited onto white, and unsigned 16-bit samples use
+their high byte (divide by 256 and round down), without contrast stretching.
+PNG sample depth is checked in the encoded header, because a decoder can expose
+16-bit RGB as ordinary RGB. No conversion changes the encoded dimensions.
+For a 16-bit PNG with a transparent-color key, the small ``pypng`` dependency
+compares the original samples before conversion. Adjacent colors that reduce to
+the same 8-bit value are not incorrectly treated as transparent. A missing
+decoder returns ``media_decoder_unavailable`` (503); it never substitutes a
+different conversion or changes the original file.
+
+``hosted_media_views`` permanently maps each source digest and policy to its
+working digest, dimensions and format. Existing ``encoded-rgb-v1`` views remain
+immutable alongside v2 views; the coordinate-provenance policy is separate from
+this pixel-conversion policy. Both original and working artifacts are
 registered for backup, restore validation and orphan-retention protection.
 Authenticated original downloads continue to return the original bytes.
 Admission verifies that the working representation can be encoded, but registers
@@ -188,6 +200,18 @@ Native analyses validate the working hash and retain the source hash separately;
 cache identity therefore describes the bytes actually consumed. Existing
 snapshots and committed export receipts are not rewritten. An export retry
 continues to deliver its already retained ZIP.
+
+New analysis and caption work captures its working descriptor before execution.
+Materialization verifies and copies those exact bytes; it does not decode them
+again under a newer conversion policy. Historical analysis media and thumbnails
+use that analysis's retained inputs. A new analysis of an older source snapshot
+can capture v2 views without changing the old analysis.
+
+Unfinished local work with an incompatible or unidentified older pixel policy
+stops with ``media_policy_upgrade_required``. Retained evidence remains available;
+start a new operation to use current views. Compatible, explicitly captured old
+bytes can continue unchanged. Paid requests already sent retain their original
+inputs and accounting and are never resent merely to upgrade their pixels.
 
 Verification boundaries
 -----------------------

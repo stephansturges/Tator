@@ -84,7 +84,7 @@ class CaptionJobs:
         return ToolRequest(**{key: getattr(body, key) for key in ("dataset_id", "image_id", "expected_version", "generation", "editor_id", "workspace_id")},
             operation="qwen_caption_case", parameters={"caption_request": body.caption_request, "settings": body.settings.model_dump()})
 
-    def _validate(self, actor, body):
+    def _validate(self, actor, body, *, include_media=True):
         from services.hosted.tool_api import _parameters_for
         if set(body.caption_request) - _parameters_for("qwen_caption"):
             raise DomainError("tool_parameter_not_allowed", 422)
@@ -102,7 +102,10 @@ class CaptionJobs:
             identity = validate_paid_request(self.tools.provider_gateway, actor, body.dataset_id,
                 body.caption_request, body.provider_options)
             classes = self.store.get_dataset(actor, body.dataset_id)["class_version"]
-            return hashlib.sha256(f"{identity}:{classes}".encode()).hexdigest()
+            value = f"{identity}:{classes}"
+            if include_media:
+                value += ':' + json.dumps(self.tools.media.capture_views([image]), sort_keys=True, separators=(',', ':'))
+            return hashlib.sha256(value.encode()).hexdigest()
         if body.provider_options is not None:
             raise DomainError("paid_caption_provider_required", 422)
         tool_request = self._tool_request(body)
@@ -118,7 +121,11 @@ class CaptionJobs:
         # Class names feed canonical label hints even when no classifier is
         # selected. Changing that map must not silently change a retry's input.
         classes = self.store.get_dataset(actor, body.dataset_id)["class_version"]
-        return hashlib.sha256(f"{spec.identity}:{classes}".encode()).hexdigest()
+        value = f"{spec.identity}:{classes}"
+        if include_media:
+            image = self.store.image(actor, body.image_id)
+            value += ':' + json.dumps(self.tools.media.capture_views([image]), sort_keys=True, separators=(',', ':'))
+        return hashlib.sha256(value.encode()).hexdigest()
 
     def start(self, actor, body):
         self._recover()
@@ -165,6 +172,8 @@ class CaptionJobs:
         if row["cancel_requested"]:
             raise RuntimeRejected("caption_job_cancelled")
         if self._validate(actor, body) != identity:
+            if self._validate(actor, body, include_media=False) == identity:
+                raise RuntimeRejected("media_policy_upgrade_required")
             raise RuntimeRejected("runtime_configuration_changed")
 
     def _wait(self, job_id, actor, body, identity, seconds):
@@ -345,7 +354,7 @@ class CaptionJobs:
                     con.execute("UPDATE hosted_caption_jobs SET state=?,result_json=?,error=?,updated_at=? WHERE id=?", (state, json.dumps(result, allow_nan=False), error, self.store.clock(), job_id))
         except Exception as exc:
             code = exc.code if isinstance(exc, (DomainError, RuntimeRejected)) else "caption_job_failed"
-            state = "cancelled" if code == "caption_job_cancelled" else "interrupted" if code == "caption_control_stopped" else "failed"
+            state = "cancelled" if code == "caption_job_cancelled" else "interrupted" if code in {"caption_control_stopped", "media_policy_upgrade_required"} else "failed"
             self._update(job_id, state=state, error=code)
             if worker_id:
                 try:
@@ -372,7 +381,12 @@ class CaptionJobs:
         body = CaptionJobRequest(**json.loads(row["request_json"]))
         result = json.loads(row["result_json"]) if row["result_json"] else {"total_cases": 1, "processed": 0, "attempts_seen": len(json.loads(row["attempts_json"]))}
         if row["result_json"]:
-            if self._validate(actor, body) != row["runtime_identity"] or self._validate(Actor(**json.loads(row["actor_json"])), body) != row["runtime_identity"]:
+            # Result disclosure validates today's authority/model fence while
+            # retaining the exact pre-upgrade result, without executing again.
+            def matches(caller):
+                return (self._validate(caller, body, include_media=False) == row['runtime_identity']
+                        or self._validate(caller, body) == row['runtime_identity'])
+            if not matches(actor) or not matches(Actor(**json.loads(row["actor_json"]))):
                 raise DomainError("caption_result_context_changed", 409)
         return {"job_id": job_id, "status": row["state"], "error": row["error"], "result": result,
             "auto_resume_count": row["auto_resumes"], "max_auto_resumes": body.settings.max_auto_resumes,
@@ -424,6 +438,8 @@ class CaptionJobs:
             if row["state"] not in {"failed", "interrupted", "cancelled", "waiting_for_editor"}:
                 raise DomainError("caption_job_not_resumable", 409)
             if self._validate(actor, body) != row["runtime_identity"]:
+                if self._validate(actor, body, include_media=False) == row['runtime_identity']:
+                    raise DomainError('media_policy_upgrade_required', 409)
                 raise DomainError("caption_resume_model_changed", 409)
         changed = False
         def change(con):

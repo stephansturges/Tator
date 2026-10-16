@@ -295,7 +295,7 @@ def test_paid_caption_predispatch_failures_release_budget_but_pause_keeps_exact_
         caption(source('TIFF'))
     assert not sends
     calls = app.state.providers.calls(actor)
-    assert calls[0]['state'] == 'reconciled' and calls[0]['charged'] == 0
+    assert calls == []  # Source preflight now precedes frozen-input reservation.
     assert app.state.providers.list(actor)[0]['spent_or_reserved'] == 0
     ctx = source('PNG')
     def paused(con):
@@ -309,6 +309,8 @@ def test_paid_caption_predispatch_failures_release_budget_but_pause_keeps_exact_
     assert caption(ctx) == result and len(sends) == 1
     # A read/normalization failure after reserve also cannot strand allowance.
     ctx2 = source('WEBP')
+    with pytest.raises(DomainError, match='runtime_automation_paused'):
+        caption(ctx2, dispatch_guard=paused)
     original_open = app.state.artifacts.open
     def broken_open(reference):
         raise OSError('fixture read failure before dispatch')
@@ -319,3 +321,46 @@ def test_paid_caption_predispatch_failures_release_budget_but_pause_keeps_exact_
     assert len(sends) == 1
     assert app.state.providers.list(actor)[0]['spent_or_reserved'] == 40
     assert sum(row['state'] == 'reserved' for row in app.state.providers.calls(actor)) == 0
+
+
+@pytest.mark.parametrize('outcome', ['reserved','settled','dispatch_wins'])
+def test_direct_legacy_media_call_keeps_old_identity_and_dispatch_outcome(configured, monkeypatch, outcome):
+    import io
+    import json
+    from PIL import Image
+    from services.hosted.provider_gateway import PaidCaptionGateway
+    app, actor, parent = configured
+    pixels = io.BytesIO(); Image.new('RGB',(32,24),'blue').save(pixels,format='PNG')
+    ref = app.state.artifacts.put_bytes(pixels.getvalue())
+    image = app.state.store.import_image(actor,parent['dataset_id'],ref.sha256,'legacy.png',None,uid(),width=32,height=24,size_bytes=ref.size_bytes)
+    image = app.state.store.acquire_editor(actor,image['id'],'provider-fixture',expected_version=image['current_version'],generation=image['generation'])
+    context = MutationContext(image['id'],image['current_version'],image['generation'],'provider-fixture',uid())
+    price = {'input_microdollars_per_million':1000000,'cached_input_microdollars_per_million':500000,
+        'output_microdollars_per_million':2000000,'input_token_ceiling':100,'max_output_tokens':100}
+    identity = {'model':'fixture-model','prompt':'Describe.','max_output_tokens':32,'detail':'high','media_hash':ref.sha256,'pricing':price}
+    fingerprint = hashlib.sha256(json.dumps(identity,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    account = app.state.providers
+    call = account.reserve(actor,context,provider='openai',model='fixture-model',maximum_microdollars=164,request_fingerprint=fingerprint)
+    sends = []
+    gateway = PaidCaptionGateway(account,app.state.artifacts,pricing={'fixture-model':price},transport=lambda *args:sends.append(args))
+    if outcome == 'settled':
+        account.dispatch(actor,context,call['id'])
+        account.settle(call['id'],actual_microdollars=35,result={'caption':'Retained legacy result'})
+        assert gateway.caption(actor,context,model='fixture-model',prompt='Describe.',max_output_tokens=32)['caption'] == 'Retained legacy result'
+    else:
+        original = account.release_reserved
+        if outcome == 'dispatch_wins':
+            def competing_dispatch(call_id,reason):
+                account.dispatch(actor,context,call_id)
+                return original(call_id,reason)
+            monkeypatch.setattr(account,'release_reserved',competing_dispatch)
+        with pytest.raises(DomainError,match='media_policy_upgrade_required' if outcome=='reserved' else 'paid_call_outcome_unresolved'):
+            gateway.caption(actor,context,model='fixture-model',prompt='Describe.',max_output_tokens=32)
+    assert not sends
+    with app.state.store.read_connection() as con:
+        row = con.execute('SELECT * FROM hosted_provider_calls WHERE id=?',(call['id'],)).fetchone()
+        assert row['request_hash'] == fingerprint
+        assert row['state'] == {'reserved':'reconciled','settled':'settled','dispatch_wins':'dispatched'}[outcome]
+        assert not con.execute("SELECT 1 FROM hosted_provider_audit WHERE kind='media_prepared'").fetchone()
+        releases = con.execute("SELECT COUNT(*) FROM hosted_provider_audit WHERE kind='not_dispatched'").fetchone()[0]
+        assert releases == (1 if outcome=='reserved' else 0)

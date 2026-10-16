@@ -583,6 +583,14 @@ def test_caption_jobs_retry_quality_preserve_evidence_and_never_save_annotations
     retry = system["client"].post(url, json=body)
     assert retry.status_code == 202 and retry.json()["job_id"] == job_id
     assert retry.json()["result"]["attempts_seen"] == 2
+    # Existing completed legacy results remain visible without executing again.
+    from services.hosted.caption_jobs import CaptionJobRequest
+    jobs = system['controller'].caption_jobs
+    captured = CaptionJobRequest(**json.loads(jobs._row(job_id)['request_json']))
+    legacy_identity = jobs._validate(system['alice'], captured, include_media=False)
+    with system['store'].transaction() as con:
+        con.execute('UPDATE hosted_caption_jobs SET runtime_identity=? WHERE id=?', (legacy_identity, job_id))
+    assert system['client'].get(url + '/' + job_id).json()['result'] == retry.json()['result']
     assert system["admin_client"].get(url + "/" + job_id).status_code == 404
     mutation = MutationContext(image["id"], image["current_version"], image["generation"], "alice-editor", op())
     system["store"].save(system["alice"], mutation, {"objects": []}, complete=True, negative=True)
@@ -1154,3 +1162,50 @@ def test_qwen_preview_controller_payload_runs_actual_adapter_and_pipeline(system
         body['parameters'] = {'source_media_hash': 'a' * 64}
         denied = system['client'].post('/api/hosted/tools/request', json=body)
         assert denied.status_code == 422 and denied.json()['error'] == 'tool_parameter_not_allowed'
+
+
+@pytest.mark.parametrize('legacy_input', ['compatible', 'unsafe', 'missing_policy', 'missing_capture'])
+def test_caption_batch_legacy_media_resume_preserves_exact_capture(system, monkeypatch, legacy_input):
+    from services.hosted.caption_batch import CaptionBatchRequest
+    from services.hosted.media import LEGACY_MEDIA_VIEW_POLICY
+    store, admin, controller = system['store'], system['admin'], system['controller']
+    install(system, 'qwen')
+    stream = io.BytesIO()
+    Image.new('RGBA' if legacy_input == 'unsafe' else 'RGB', (20, 20), (255, 0, 0, 0) if legacy_input == 'unsafe' else 'red').save(stream, format='PNG')
+    source = system['artifacts'].put_bytes(stream.getvalue())
+    image = store.import_image(admin, system['dataset']['id'], source.sha256, 'legacy.png', {}, op(), width=20, height=20, size_bytes=source.size_bytes)
+    image = store.acquire_editor(admin, image['id'], 'admin-editor')
+    image = store.save(admin, MutationContext(image['id'], image['current_version'], image['generation'], 'admin-editor', op()), {'objects': []}, complete=True, negative=True)
+    store.approve(admin, MutationContext(image['id'], image['current_version'], image['generation'], 'admin-editor', op()))
+    snapshot = store.create_snapshot(admin, system['dataset']['id'], op())
+    batches = controller.caption_batches
+    monkeypatch.setattr(batches, '_launch', lambda _: None)
+    body = CaptionBatchRequest(dataset_id=system['dataset']['id'], snapshot_id=snapshot['snapshot_id'], operation_id=op(), sample_size=0, pilot=None)
+    job = batches.start(admin, body)
+    row = batches._row(admin, job['job_id']); captured_body = CaptionBatchRequest(**json.loads(row['request_json']))
+    manifest, _, legacy_identity = batches._validate(admin, captured_body, include_media=False)
+    directory = batches.root / job['job_id']; directory.mkdir()
+    view = {'policy': LEGACY_MEDIA_VIEW_POLICY, 'coordinate_space': 'encoded', 'source_sha256': source.sha256,
+        'source_size_bytes': source.size_bytes, 'source_format': 'PNG', 'orientation': 1, 'frame_index': 0, 'frame_count': 1,
+        'sha256': source.sha256, 'size_bytes': source.size_bytes, 'width': 20, 'height': 20, 'content_type': 'image/png', 'suffix': '.png'}
+    controller.media._retain(stream.getvalue(), view)
+    system['artifacts'].pin(source, directory)
+    content = {**manifest, 'snapshot_id': snapshot['snapshot_id']}
+    content['images'][0].update(media_path=str(directory / source.sha256))
+    if legacy_input != 'missing_policy':
+        content['images'][0]['working_media'] = view
+    path = directory / 'canonical-snapshot.json'
+    before = json.dumps(content)
+    if legacy_input != 'missing_capture':
+        path.write_text(before)
+    with store.transaction() as con:
+        con.execute("UPDATE hosted_caption_batches SET identity=?,state='interrupted' WHERE id=?", (legacy_identity, job['job_id']))
+    if legacy_input == 'compatible':
+        assert batches.resume(admin, job['job_id'], op())['status'] == 'queued'
+        admitted = batches._execution_input(admin, captured_body, batches._row(admin, job['job_id']))
+        assert admitted[2] == legacy_identity and admitted[3]['images'][0]['working_media'] == view
+    else:
+        with pytest.raises(DomainError, match='media_policy_upgrade_required'):
+            batches.resume(admin, job['job_id'], op())
+    if path.exists():
+        assert path.read_text() == before

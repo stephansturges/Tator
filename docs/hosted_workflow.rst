@@ -90,6 +90,10 @@ The version 2 recovery journal records pending, unsent and rejected drafts
 separately. Older journals remain conservatively unresolved until the original
 receipt and current version can be checked. A storage failure retains the draft
 in memory and keeps the unsaved-work warning active.
+If you undo all changes back to the last acknowledged version, saving or leaving
+the page clears an obsolete unsent or rejected draft. An unresolved server
+command is still checked first, even when the canvas looks unchanged. Failure to
+clear browser storage shows an error and keeps the unsaved-work warning active.
 If no receipt exists after reload, recovery first retries the exact original
 command. Another unknown response leaves it intact. If a replaced or expired
 editing lease rejects that retry, explicit draft restoration requires an
@@ -117,6 +121,12 @@ Classes and repeated imports
 Class IDs remain stable when their names change. Annotators request additions;
 administrators manage the class list. Each frozen dataset snapshot records the
 class names and export indices used with its annotations.
+Names cannot contain internal line separators, including Unicode separators.
+This keeps one class name equal to one line in exported labelmaps. Older invalid
+names remain readable and can be renamed by an administrator; new exports of an
+invalid frozen map report the class that needs correction. Existing completed
+export receipts still return their original files. After renaming, capture a new
+snapshot for export; the old snapshot retains its original class map.
 
 Importing the same bytes into the same dataset finds the existing image. It does
 not replace saved annotations. Select images and their same-stem YOLO ``.txt``

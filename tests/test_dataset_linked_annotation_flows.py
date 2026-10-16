@@ -4718,6 +4718,20 @@ def test_text_label_routes_accept_encoded_split_prefixed_image_names(
     ).read_text(encoding="utf-8") == "new val caption"
 
 
+def test_caption_training_row_derived_metadata_overrides_retained_extensions() -> None:
+    extensions = {"qa_id": "stale", "row_type": "stale", "answer_source": "stale", "split": "stale",
+                  "answer_format": "json", "validation_status": "machine_validated", "review_status": "accepted",
+                  "source_fields": ["stale"], "validated_against": ["stale"], "review_notes": "Keep evidence",
+                  "hosted_source": {"metadata": {"qa_id": "stale"}}}
+    row = api._caption_instruction_training_row(image_name="image.png", question="Texture?", answer="Smooth.",
+        row_type="generated_qa", answer_source="vlm_generated", qa_id="derived", metadata=extensions,
+        source_fields=[], validated_against=[])
+    assert row["metadata"] == {"qa_id": "derived", "row_type": "generated_qa", "answer_source": "vlm_generated",
+                               "source_fields": [], "validated_against": [], "review_notes": "Keep evidence",
+                               "hosted_source": extensions["hosted_source"]}
+    assert extensions["qa_id"] == "stale" and extensions["source_fields"] == ["stale"]
+
+
 def test_caption_alternate_routes_append_update_export_and_delete(
     tmp_path, monkeypatch
 ) -> None:

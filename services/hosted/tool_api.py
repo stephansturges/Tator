@@ -684,7 +684,7 @@ class ToolController:
                 view = self.media.resolve(image['media_hash'])
                 reference = self.artifacts.pin(self.media.reference(view), directory)
                 payload = {**body.parameters, "media_path": str(directory / reference.sha256), "media_sha256": reference.sha256,
-                           "source_media_hash": image['media_hash']}
+                           "source_media_hash": image['media_hash'], "working_media": view}
                 spec, owner = self._spec(actor, body.dataset_id, body.operation)
                 if body.operation in EDR_OPERATIONS:
                     recipe_id = spec.config["edr"]["model"]["model_id"]

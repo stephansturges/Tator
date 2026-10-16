@@ -362,14 +362,15 @@ class HostedOperations:
                         "logical_bytes_removed": sum(row["size_bytes"] for row in rows if row["state"] == "deleted")}
             return self.store._command(actor, operation_id, "purge_orphans", payload, finish, admin=True)
 
-    def _snapshot_entries(self, manifest: dict[str, Any], *, unsplit_as_train=False) -> Iterator[ExportEntry]:
-        from .media import HostedMedia, MEDIA_VIEW_POLICY, working_media_bytes
+    def _snapshot_entries(self, manifest: dict[str, Any], *, unsplit_as_train=False, media_views=None) -> Iterator[ExportEntry]:
+        from .media import HostedMedia, MEDIA_VIEW_POLICY, working_media_bytes, validate_working_view
+        from .class_names import validate_snapshot_classes
+
+        validate_snapshot_classes(manifest)
 
         classes = sorted(manifest["classes"], key=lambda item: item["position"])
         mapping = {item["id"]: index for index, item in enumerate(classes)}
         names = [item["name"] for item in classes]
-        if any(not isinstance(name, str) or "\n" in name or "\r" in name for name in names):
-            raise DomainError("invalid_snapshot_class_names", 409)
         yield ExportEntry("classes.txt", data=("\n".join(names) + ("\n" if names else "")).encode())
         yield ExportEntry("labelmap.txt", data=("\n".join(names) + ("\n" if names else "")).encode())
         yield ExportEntry("labelmap.json", data=_json({"class_version": manifest["class_version"], "classes": classes}).encode())
@@ -388,7 +389,15 @@ class HostedOperations:
             if width <= 0 or height <= 0:
                 raise DomainError("invalid_snapshot_dimensions", 409)
             reference = ArtifactRef(image["media_hash"], image["size_bytes"])
-            if media is not None:
+            frozen = (media_views or {}).get(image_id) or image.get("working_media")
+            if frozen is not None:
+                view = frozen
+                working_ref = HostedMedia.reference(view) if media is not None else reference
+                with self.artifacts.open(working_ref) as stream:
+                    working = stream.read()
+                validate_working_view(working, view, source_sha256=reference.sha256,
+                                      source_size_bytes=reference.size_bytes)
+            elif media is not None:
                 view = media.resolve(reference)
                 working = None
             else:
@@ -397,7 +406,7 @@ class HostedOperations:
                 # snapshot rather than replacing its provenance identity.
                 with self.artifacts.open(reference) as stream:
                     working, decoded_view = working_media_bytes(stream)
-                view = image.get("working_media", decoded_view)
+                view = decoded_view
                 if (view["source_sha256"] != reference.sha256
                         or view["source_size_bytes"] != reference.size_bytes
                         or view["sha256"] != decoded_view["sha256"]
@@ -442,11 +451,13 @@ class HostedOperations:
             # Preserve unsplit provenance; never manufacture a validation split.
             config["train"] = ([splits["train"], splits["unsplit"]]
                                if "train" in splits else splits["unsplit"])
+        policies = {view["policy"] for view in media_map["images"].values()}
+        media_map["policy"] = next(iter(policies)) if len(policies) == 1 else "mixed" if policies else MEDIA_VIEW_POLICY
         yield ExportEntry("hosted-media.json", data=_json(media_map).encode())
         yield ExportEntry("data.yaml", data=(_json(config) + "\n").encode())  # JSON is valid YAML.
         yield ExportEntry("captions.jsonl", data=("\n".join(_json(row) for row in caption_rows) + ("\n" if caption_rows else "")).encode())
 
-    def materialize_snapshot(self, actor: Actor, snapshot_id: str, destination: str | Path, *, unsplit_as_train=False) -> dict[str, Any]:
+    def materialize_snapshot(self, actor: Actor, snapshot_id: str, destination: str | Path, *, unsplit_as_train=False, media_views=None) -> dict[str, Any]:
         """Publish an isolated read-only view for a legacy canonical consumer."""
         manifest = self.store.get_snapshot(actor, snapshot_id)["manifest"]
         destination = Path(destination).absolute()
@@ -457,7 +468,7 @@ class HostedOperations:
         published = False
         try:
             with self.artifacts.exclusive():
-                for entry in self._snapshot_entries(manifest, unsplit_as_train=unsplit_as_train):
+                for entry in self._snapshot_entries(manifest, unsplit_as_train=unsplit_as_train, media_views=media_views):
                     target = stage / entry.path
                     target.parent.mkdir(parents=True, exist_ok=True)
                     with target.open("xb") as output:

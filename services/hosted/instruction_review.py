@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from services.hosted.errors import DomainError
 from services.hosted.types import MutationContext
+from .caption_semantics import caption_lifecycle, caption_records, caption_text, primary_caption_index
 
 
 class InstructionDecision(BaseModel):
@@ -44,7 +45,7 @@ def review_content_digest(record, kind):
     """Bind human judgment to the text consumed by the native exporter."""
     text = {"kind": kind,
         "question": "Describe this image in detail." if kind == "caption0" else str(record.get("question") or "").strip(),
-        "answer": str((record.get("caption") if kind == "caption0" else record.get("answer")) or "").strip()}
+        "answer": caption_text(record) if kind == "caption0" else str(record.get("answer") or "").strip()}
     return hashlib.sha256(json.dumps(text, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
@@ -71,29 +72,24 @@ def bind_machine_validated_pairs(pairs):
 def _targets(annotations):
     """Yield server-derived addresses; the client cannot choose arbitrary keys."""
     primary = str(annotations.get("caption") or "").strip()
-    found_primary = False
-    for collection in ("captions", "alternate_captions"):
-        records = annotations.get(collection) or []
-        if not isinstance(records, list):
-            raise DomainError("caption_alternates_format_invalid", 409)
+    projections = list(caption_records(annotations))
+    selected = primary_caption_index([value.raw for value in projections], primary)
+    for position, projected in enumerate(projections):
+        collection, index, record = projected.collection, projected.index, projected.record
+        if projected.lifecycle != "active":
+            continue
         prefix = "captions:" if collection == "captions" else ""
-        for index, raw in enumerate(records):
-            record = {"caption": raw, "source": "manual"} if isinstance(raw, str) else raw
-            if not isinstance(record, dict):
-                continue
-            text = str(record.get("caption") or "").strip()
-            if text:
-                found_primary |= text == primary
-                yield f"{prefix}caption:{index}", "caption0", record, (collection, index, None, None), text == primary
-            metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
-            location = "top" if record.get("generated_qa_pairs") else "metadata"
-            pairs = record.get("generated_qa_pairs") or metadata.get("generated_qa_pairs") or []
-            if isinstance(pairs, list):
-                for number, pair in enumerate(pairs):
-                    if isinstance(pair, dict):
-                        yield f"{prefix}qa:{index}:{location}:{number}", "generated_qa", pair, (collection, index, location, number), False
-    if primary and not found_primary:
-        yield "primary", "caption0", {"caption": primary, "source": "manual"}, ("alternate_captions", None, None, None), True
+        if projected.text:
+            yield f"{prefix}caption:{index}", "caption0", record, (collection, index, None, None), position == selected
+        metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+        location = "top" if record.get("generated_qa_pairs") else "metadata"
+        pairs = record.get("generated_qa_pairs") or metadata.get("generated_qa_pairs") or []
+        if isinstance(pairs, list):
+            for number, pair in enumerate(pairs):
+                if isinstance(pair, dict) and caption_lifecycle(pair, record) == "active":
+                    yield f"{prefix}qa:{index}:{location}:{number}", "generated_qa", pair, (collection, index, location, number), False
+    if primary and selected is None:
+        yield "primary", "caption0", {"caption": primary, "source": "manual", "lifecycle_status": "active", "is_primary": True}, ("alternate_captions", None, None, None), True
 
 
 
@@ -113,7 +109,7 @@ class InstructionReviews:
             machine_changed = kind == "generated_qa" and meta.get("machine_validation_recorded_via") == "hosted_caption_result" and meta.get("machine_validation_content_sha256") != review_content_digest(value, kind)
             rows.append({"target_id": identifier, "kind": kind,
                 "question": value.get("question", "Describe this image in detail."),
-                "answer": value.get("answer", value.get("caption", "")), "is_primary": primary,
+                "answer": caption_text(value) if kind == "caption0" else value.get("answer", ""), "is_primary": primary,
                 "decision": "unreviewed" if changed else meta.get("review_decision", value.get("review_status", "unreviewed")),
                 "text_changed_since_review": changed,
                 "text_changed_since_machine_validation": machine_changed,

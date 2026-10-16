@@ -146,6 +146,8 @@ class NativeAnalysisAdapter:
         if operation not in OPERATIONS:
             raise DomainError("native_operation_unknown", 422)
         manifest = read_canonical_snapshot(payload["canonical_snapshot"], allowed_root=self.config["canonical_root"])
+        from .class_names import validate_snapshot_classes
+        validate_snapshot_classes(manifest)
         if context.get("dataset_id") != manifest["dataset_id"] or context.get("annotation_version") != manifest["snapshot_id"]:
             raise DomainError("native_snapshot_context_changed", 409)
         if operation == "caption_export":

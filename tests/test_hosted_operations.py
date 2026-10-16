@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
@@ -76,6 +77,93 @@ def assert_error(code, callback):
     with pytest.raises(DomainError) as exc:
         callback()
     assert exc.value.code == code
+
+
+@pytest.mark.parametrize('mode', ['RGB', 'L', 'RGBA', 'LA', 'palette', 'uint16', 'gamma'])
+def test_media_v2_pixels_passthrough_and_native_identity(tmp_path, mode):
+    import numpy as np
+    import struct
+    from PIL.PngImagePlugin import PngInfo
+    from services.hosted.media import working_media_bytes, MEDIA_VIEW_POLICY
+    from services.hosted.adapters import _image
+    expected, passthrough, options = (20, 40, 60), mode in {'RGB', 'L'}, {}
+    if mode == 'RGBA':
+        picture = Image.new('RGBA', (4, 2), (255, 0, 0, 0)); picture.putpixel((1, 0), (255, 0, 0, 128)); expected = (255, 255, 255)
+    elif mode == 'LA':
+        picture = Image.new('LA', (4, 2), (0, 0)); expected = (255, 255, 255)
+    elif mode == 'palette':
+        picture = Image.new('P', (4, 2), 0); picture.putpalette([255, 0, 0] + [0, 0, 0] * 255); options['transparency'] = 0; expected = (255, 255, 255)
+    elif mode == 'uint16':
+        picture = Image.fromarray(np.array([[1000, 0, 32768, 65535]] * 2, dtype=np.uint16)); expected = (3, 3, 3)
+    elif mode == 'L':
+        picture = Image.new('L', (4, 2), 20); expected = (20, 20, 20)
+    else:
+        picture = Image.new('RGB', (4, 2), expected)
+        if mode == 'gamma':
+            metadata = PngInfo(); metadata.add(b'gAMA', struct.pack('>I', 45455)); options['pnginfo'] = metadata
+    buffer = io.BytesIO(); picture.save(buffer, format='PNG', **options); original = buffer.getvalue()
+    working, view = working_media_bytes(original)
+    assert (working == original) is passthrough
+    assert view['policy'] == MEDIA_VIEW_POLICY and view['source_sha256'] == hashlib.sha256(original).hexdigest()
+    path = tmp_path / 'working.png'; path.write_bytes(working)
+    native, _ = _image({'media_path': str(path), 'media_sha256': view['sha256'], 'source_media_hash': view['source_sha256'], 'working_media': view}, {'media_root': str(tmp_path)})
+    with Image.open(io.BytesIO(working)) as browser_input:
+        assert browser_input.convert('RGB').getpixel((0, 0)) == native.getpixel((0, 0)) == expected
+        assert browser_input.mode in {'RGB', 'L'} and 'transparency' not in browser_input.info and 'gamma' not in browser_input.info
+    if mode == 'uint16':
+        assert [native.getpixel((x, 0))[0] for x in range(4)] == [3, 0, 128, 255]
+    if mode == 'RGBA':
+        assert native.getpixel((1, 0)) == (255, 127, 127)
+    native.close()
+
+
+def test_media_v2_retains_legacy_views_and_frozen_jobs_without_reinterpreting_pixels(workspace, tmp_path):
+    from services.hosted.media import HostedMedia, MEDIA_VIEW_POLICY, LEGACY_MEDIA_VIEW_POLICY, validate_working_view
+    from services.hosted.analysis import CanonicalAnalysis
+    from services.hosted.native_analysis import NativeAnalysisAdapter
+    store, _, artifacts, ops, actor, _, ds, _ = workspace
+    media = HostedMedia(store, artifacts)
+    buffer = io.BytesIO(); Image.new('RGBA', (32, 24), (255, 0, 0, 0)).save(buffer, format='PNG'); original = buffer.getvalue()
+    source = artifacts.put_bytes(original)
+    legacy = {'policy': LEGACY_MEDIA_VIEW_POLICY, 'coordinate_space': 'encoded', 'source_sha256': source.sha256,
+        'source_size_bytes': source.size_bytes, 'source_format': 'PNG', 'orientation': 1, 'frame_index': 0, 'frame_count': 1,
+        'sha256': source.sha256, 'size_bytes': source.size_bytes, 'width': 32, 'height': 24, 'content_type': 'image/png', 'suffix': '.png'}
+    media._retain(original, legacy)
+    current = media.resolve(source)
+    assert current['policy'] == MEDIA_VIEW_POLICY and current['sha256'] != legacy['sha256']
+    assert media.resolve(source, policy=LEGACY_MEDIA_VIEW_POLICY) == legacy
+    with artifacts.open(source) as stream: assert stream.read() == original
+    image = store.import_image(actor, ds['id'], source.sha256, 'transparent.png', {}, 'transparent-import', width=32, height=24, size_bytes=source.size_bytes)
+    image = store.acquire_editor(actor, image['id'], 'tab'); image = store.save(actor, context(image, 'transparent-save'), {'objects': []}, complete=True, negative=True); store.approve(actor, context(image, 'transparent-approve'))
+    analysis = CanonicalAnalysis(store, artifacts, tmp_path / 'analysis')
+    new = analysis.capture(actor, ds['id'], 'statistics', {}, 'current-capture')
+    prepared = analysis.prepare(actor, new['job_id'])
+    with Image.open(prepared['manifest']['images'][0]['image_path']) as pixels: assert pixels.getpixel((0, 0)) == (255, 255, 255)
+    old = analysis.capture(actor, ds['id'], 'statistics', {}, 'legacy-capture')
+    with store.transaction() as con:
+        request = json.loads(con.execute('SELECT request_json FROM hosted_analysis_jobs WHERE id=?', (old['job_id'],)).fetchone()[0]); request.pop('working_media'); request.pop('media_policy'); con.execute('UPDATE hosted_analysis_jobs SET request_json=? WHERE id=?', (json.dumps(request), old['job_id']))
+    assert_error('media_policy_upgrade_required', lambda: analysis.prepare(actor, old['job_id']))
+    assert analysis.status(actor, old['job_id'])['state'] == 'interrupted'
+    historical = analysis.capture(actor, ds['id'], 'statistics', {}, 'historical-capture')
+    with store.transaction() as con:
+        request = json.loads(con.execute('SELECT request_json FROM hosted_analysis_jobs WHERE id=?', (historical['job_id'],)).fetchone()[0]); request['working_media'] = {image['id']: legacy}; request['media_policy'] = LEGACY_MEDIA_VIEW_POLICY; con.execute('UPDATE hosted_analysis_jobs SET request_json=? WHERE id=?', (json.dumps(request), historical['job_id']))
+    analysis.publish_result(actor, historical['job_id'], {'count': 1}, 'historical-result')
+    retained = analysis.prepare(actor, historical['job_id'])
+    assert Path(retained['manifest']['images'][0]['image_path']).read_bytes() == original
+    assert analysis.image_view(actor, historical['job_id'], image['id']) == legacy
+    with artifacts.open(source) as stream:
+        assert_error('media_policy_upgrade_required', lambda: validate_working_view(stream, legacy, require_current_compatible=True))
+    # A real CPU child consumes the newly captured v2 view and keeps source identity.
+    snapshot = store.get_snapshot(actor, new['snapshot_id']); manifest = {**snapshot['manifest'], 'snapshot_id': new['snapshot_id']}
+    capture = tmp_path / 'capture'; capture.mkdir()
+    for item in manifest['images']:
+        ref = artifacts.pin(media.reference(current), capture); item.update(media_path=str(capture / ref.sha256), working_media=current)
+    path = capture / 'manifest.json'; path.write_text(json.dumps(manifest)); reference = {key: manifest[key] for key in ('snapshot_id', 'dataset_id', 'revision', 'class_version', 'settings_version')}; reference.update(manifest_path=str(path), manifest_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+    adapter = NativeAnalysisAdapter(config={'canonical_root': str(capture), 'native_root': str(tmp_path / 'native')}, device='cpu')
+    result = adapter.execute('statistics', {'canonical_snapshot': reference}, {'dataset_id': ds['id'], 'annotation_version': new['snapshot_id']})
+    output = Path(result['native_directory']); exported = json.loads((output / 'class_analysis/input/hosted-media.json').read_text())
+    assert exported['images'][image['id']]['sha256'] == current['sha256']
+    assert exported['images'][image['id']]['source_sha256'] == source.sha256
 
 
 def test_encoded_media_export_native_map_and_recovery_retain_original_identity(workspace, tmp_path):
@@ -325,6 +413,57 @@ def test_materializer_and_zip_use_frozen_approved_versions_and_preserve_pixels(w
         assert hashlib.sha256(source.read()).hexdigest() == approved["media_hash"]
 
 
+def test_unicode_class_zip_indices_and_invalid_historical_snapshot_replay(workspace, tmp_path):
+    from services.detectors import _yolo_load_labelmap_impl
+    store, _, _, ops, admin, _, _, _ = workspace
+    names = ['Véhicule', '自転車', 'Καράβι']
+    dataset = store.create_dataset(admin, 'Unicode map', names, 'unicode-dataset')
+    image, _ = import_image(workspace, ds=dataset)
+    image = store.acquire_editor(admin, image['id'], 'tab')
+    annotations = store.image(admin, image['id'])['annotations']
+    annotations['objects'][0]['class_id'] = dataset['classes'][2]['id']
+    image = store.save(admin, context(image, 'unicode-save'), annotations, complete=True)
+    frozen = store.create_snapshot(admin, dataset['id'], 'unicode-snapshot')
+    destination = tmp_path / 'unicode.zip'
+    exported = ops.export_canonical(admin, dataset['id'], destination, 'unicode-export', frozen['snapshot_id'])
+    original = destination.read_bytes()
+    with zipfile.ZipFile(destination) as archive:
+        labelmap = tmp_path / 'labelmap.txt'; labelmap.write_bytes(archive.read('labelmap.txt'))
+        assert _yolo_load_labelmap_impl(labelmap) == names
+        assert archive.read('train/labels/' + image['id'] + '.txt').split()[0] == b'2'
+    # Emulate a pre-validator snapshot without mutating any current class map.
+    manifest = frozen['manifest']; invalid = manifest['classes'][1]
+    invalid['name'] = 'Car\u2028Boat'
+    with store.transaction() as con:
+        con.execute('DROP TRIGGER hosted_snapshots_immutable_update')
+        con.execute('UPDATE hosted_snapshots SET manifest_json=? WHERE id=?', (json.dumps(manifest), frozen['snapshot_id']))
+    with pytest.raises(DomainError) as failure:
+        ops.export_canonical(admin, dataset['id'], tmp_path / 'new.zip', 'new-unicode-export', frozen['snapshot_id'])
+    assert failure.value.code == 'invalid_snapshot_class_names'
+    assert failure.value.detail == {'class_id': invalid['id'], 'name': invalid['name']}
+    assert_error('invalid_snapshot_class_names', lambda: ops.materialize_snapshot(admin, frozen['snapshot_id'], tmp_path / 'invalid'))
+    assert ops.export_canonical(admin, dataset['id'], destination, 'unicode-export', frozen['snapshot_id']) == exported
+    assert destination.read_bytes() == original
+
+
+@pytest.mark.parametrize('grayscale,interlace', [(True, False), (False, False), (False, True)])
+def test_media_v2_matches_16bit_transparency_before_reducing_samples(grayscale, interlace, monkeypatch):
+    import png
+    from services.hosted.media import working_media_bytes
+    key = (1000,) if grayscale else (1000, 2000, 3000)
+    adjacent = (1001,) if grayscale else (1001, 2000, 3000)
+    stream = io.BytesIO()
+    png.Writer(2, 1, greyscale=grayscale, bitdepth=16, transparent=key, interlace=interlace).write(stream, [key + adjacent])
+    source = stream.getvalue()
+    working, view = working_media_bytes(source)
+    with Image.open(io.BytesIO(working)) as image:
+        assert image.getpixel((0, 0)) == (255, 255, 255)
+        assert image.getpixel((1, 0)) == ((3, 3, 3) if grayscale else (3, 7, 11))
+    assert view['source_sha256'] == hashlib.sha256(source).hexdigest()
+    monkeypatch.setitem(__import__('sys').modules, 'png', None)
+    assert_error('media_decoder_unavailable', lambda: working_media_bytes(source))
+
+
 def test_real_orphan_purge_retention_reference_fencing_and_interrupted_unlink_recovery(workspace):
     store, _, artifacts, ops, admin, _, _, now = workspace
     image, original = import_image(workspace)
@@ -359,7 +498,7 @@ def test_real_orphan_purge_retention_reference_fencing_and_interrupted_unlink_re
 
 
 def test_real_encrypted_restore_checks_blob_closure_and_preserves_continued_work(workspace, tmp_path):
-    from services.hosted.media import HostedMedia
+    from services.hosted.media import HostedMedia, LEGACY_MEDIA_VIEW_POLICY
     if not shutil.which("age") or not shutil.which("age-keygen"):
         pytest.skip("actual age executable required for composed encrypted recovery proof")
     store, auth, artifacts, ops, admin, alice, ds, now = workspace
@@ -367,6 +506,8 @@ def test_real_encrypted_restore_checks_blob_closure_and_preserves_continued_work
     oriented = io.BytesIO(); exif = Image.Exif(); exif[274] = 6
     Image.new("RGB", (24, 16), "orange").save(oriented, format="JPEG", exif=exif)
     view = HostedMedia(store, artifacts).ingest(oriented.getvalue())
+    with artifacts.open(HostedMedia.reference(view)) as stream:
+        legacy_view = HostedMedia(store, artifacts)._retain(stream.read(), {**view, 'policy': LEGACY_MEDIA_VIEW_POLICY})
     pending, _ = import_image(workspace, "blue", approved=False)
     store.assign(admin, ds["id"], [pending["id"]], alice.user_id, "assignment", {pending["id"]: expected(pending)})
     login = auth.login("alice", PASSWORD, address="127.0.0.1")
@@ -399,6 +540,7 @@ def test_real_encrypted_restore_checks_blob_closure_and_preserves_continued_work
         assert stream.read() == b"registered custom model weights"
     restored_media = HostedMedia(other, ArtifactStore(restored.artifacts_root))
     assert restored_media.resolve(view["source_sha256"]) == view
+    assert restored_media.resolve(view['source_sha256'], policy=LEGACY_MEDIA_VIEW_POLICY) == legacy_view
     with restored_media.artifacts.open(view["source_sha256"]) as stream:
         assert stream.read() == oriented.getvalue()
     with restored_media.artifacts.open(restored_media.reference(view)) as stream, Image.open(stream) as pixels:

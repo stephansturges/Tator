@@ -85,6 +85,12 @@ def read_canonical_snapshot(reference: dict, *, allowed_root: str | Path) -> dic
             raise DomainError('analysis_media_changed', 409)
         if actual != working.get('sha256', image["media_hash"]) or size != working.get('size_bytes', image["size_bytes"]):
             raise DomainError("analysis_media_changed", 409, {"image_id": image["id"]})
+        from .media import inspect_media, validate_working_view
+        if working:
+            validate_working_view(media, working, source_sha256=image['media_hash'],
+                source_size_bytes=image['size_bytes'], require_current_compatible=True)
+        elif inspect_media(media).needs_working_view:
+            raise DomainError('media_policy_upgrade_required', 409)
     if _hash_file(path)[0] != checksum:
         raise DomainError("analysis_manifest_changed", 409)
     return manifest
@@ -119,6 +125,12 @@ def read_candidate_set(reference: dict, *, allowed_root: str | Path) -> dict:
             raise DomainError('ingestion_candidate_media_changed', 409)
         if _hash_file(media) != (working.get('sha256', image['media_hash']), working.get('size_bytes', image['size_bytes'])):
             raise DomainError('ingestion_candidate_media_changed', 409)
+        from .media import inspect_media, validate_working_view
+        if working:
+            validate_working_view(media, working, source_sha256=image['media_hash'],
+                source_size_bytes=image['size_bytes'], require_current_compatible=True)
+        elif inspect_media(media).needs_working_view:
+            raise DomainError('media_policy_upgrade_required', 409)
     if _hash_file(path)[0] != checksum:
         raise DomainError('ingestion_candidates_changed', 409)
     return manifest
@@ -241,6 +253,22 @@ class CanonicalAnalysis:
         if consumer not in CONSUMERS or not isinstance(parameters, dict) or len(_json(parameters).encode()) > 1024 * 1024:
             raise DomainError("analysis_request_invalid", 422)
         payload = {"dataset_id": dataset_id, "consumer": consumer, "parameters": parameters, "snapshot_id": snapshot_id}
+        from .media import HostedMedia, MEDIA_VIEW_POLICY
+        # Materialize descriptors before the capture write transaction. The
+        # immutable source set is rechecked inside it; no nested writer locks.
+        if not self.store.raw_receipt(actor, operation_id):
+            preview = (self.store.get_snapshot(actor, snapshot_id)['manifest'] if snapshot_id
+                       else self.store.snapshot(actor, dataset_id))
+            views = HostedMedia(self.store, self.artifacts).capture_views(preview['images'])
+            candidate_views = {}
+            candidate_id = parameters.get('candidate_set_id')
+            if consumer == 'ingestion' and isinstance(candidate_id, str):
+                candidate = self.get_candidate_set(actor, candidate_id)
+                if candidate['dataset_id'] != dataset_id:
+                    raise DomainError('ingestion_candidate_dataset_changed', 409)
+                candidate_views = HostedMedia(self.store, self.artifacts).capture_views(candidate['manifest']['images'])
+        else:
+            views, candidate_views = {}, {}
         def run(con):
             if snapshot_id is None:
                 manifest = self.store._snapshot(con, dataset_id)
@@ -252,14 +280,75 @@ class CanonicalAnalysis:
                     raise DomainError("snapshot_not_found", 404)
                 captured_id, manifest = snapshot_id, json.loads(row["manifest_json"])
             job_id, now = _id("analysis"), self.store.clock()
+            if any(image['id'] not in views or views[image['id']]['source_sha256'] != image['media_hash']
+                   for image in manifest['images']):
+                raise DomainError('analysis_media_capture_changed', 409)
             request = {**payload, "snapshot_id": captured_id, "dataset_revision": manifest["revision"], "class_version": manifest["class_version"], "settings_version": manifest.get("settings_version", 0),
-                       "snapshot_sha256": hashlib.sha256(_json(manifest).encode()).hexdigest(), "settings": manifest.get("settings", {})}
+                       "snapshot_sha256": hashlib.sha256(_json(manifest).encode()).hexdigest(), "settings": manifest.get("settings", {}),
+                       "media_policy": MEDIA_VIEW_POLICY, "working_media": {image['id']: views[image['id']] for image in manifest['images']},
+                       "candidate_working_media": candidate_views}
             con.execute("INSERT INTO hosted_analysis_jobs(id,snapshot_id,actor_id,consumer,request_json,state,result_sha256,created_at,updated_at) VALUES (?,?,?,?,?,'captured',NULL,?,?)", (job_id, captured_id, actor.user_id, consumer, _json(request), now, now))
             result = {"job_id": job_id, "snapshot_id": captured_id, "consumer": consumer, "dataset_id": dataset_id, "dataset_revision": manifest["revision"], "state": "captured"}
             if _bind_job is not None:
                 _bind_job(con, result)
             return result
         return self.store._command(actor, operation_id, "capture_analysis", payload, run, admin=True)
+
+    def _bound_media(self, job, manifest, request, *, image_id=None):
+        """Recover an execution's recorded media map, never today's substitute."""
+        from .media import HostedMedia, LEGACY_MEDIA_VIEW_POLICY, inspect_media
+        if isinstance(request.get('working_media'), dict):
+            return request['working_media']
+        with self.store.read_connection() as con:
+            retained = con.execute("SELECT sha256,size_bytes FROM hosted_analysis_artifacts WHERE job_id=? AND relative_path='class_analysis/input/hosted-media.json'", (job['id'],)).fetchone()
+        if retained:
+            with self.artifacts.open(ArtifactRef(*retained)) as stream:
+                return json.load(stream)['images']
+        local = self.root / job['id'] / 'dataset' / 'hosted-media.json'
+        if local.is_file():
+            with open_regular(local) as stream:
+                return json.load(stream)['images']
+        media = HostedMedia(self.store, self.artifacts)
+        views = {}
+        for image in manifest['images']:
+            if image_id is not None and image['id'] != image_id:
+                continue
+            try:
+                views[image['id']] = media.resolve(image['media_hash'], policy=LEGACY_MEDIA_VIEW_POLICY)
+            except DomainError as exc:
+                if exc.code != 'media_policy_upgrade_required':
+                    raise
+                if job['state'] != 'complete':
+                    raise DomainError('media_policy_upgrade_required', 409)
+                with self.artifacts.open(image['media_hash']) as stream:
+                    if inspect_media(stream).needs_working_view:
+                        raise DomainError('media_policy_upgrade_required', 409)
+                views[image['id']] = media.resolve(image['media_hash'])
+        return views
+
+    def image_view(self, actor, job_id, image_id):
+        from .media import validate_working_view, HostedMedia
+        original = self.image_reference(actor, job_id, image_id)
+        with self.store.read_connection() as con:
+            job, manifest, request = self._job(con, job_id)
+        view = self._bound_media(job, manifest, request, image_id=image_id).get(image_id) or request.get('candidate_working_media', {}).get(image_id)
+        if view is None:
+            # Candidate membership was already authorized against its frozen
+            # manifest by image_reference. Old jobs predate a separate map.
+            from .media import LEGACY_MEDIA_VIEW_POLICY, inspect_media
+            media = HostedMedia(self.store, self.artifacts)
+            try:
+                view = media.resolve(original, policy=LEGACY_MEDIA_VIEW_POLICY)
+            except DomainError as exc:
+                if exc.code != 'media_policy_upgrade_required':
+                    raise
+                with self.artifacts.open(original) as stream:
+                    if inspect_media(stream).needs_working_view:
+                        raise DomainError('analysis_media_identity_unavailable', 409)
+                view = media.resolve(original)
+        with self.artifacts.open(HostedMedia.reference(view)) as stream:
+            validate_working_view(stream, view, source_sha256=original.sha256, source_size_bytes=original.size_bytes)
+        return view
 
     def _job(self, con: sqlite3.Connection, job_id: str) -> tuple[dict, dict, dict]:
         row = con.execute("SELECT j.*,s.manifest_json FROM hosted_analysis_jobs j JOIN hosted_snapshots s ON s.id=j.snapshot_id WHERE j.id=?", (job_id,)).fetchone()
@@ -315,11 +404,23 @@ class CanonicalAnalysis:
         directory = self.root / job_id
         destination = directory / "dataset"
         directory.mkdir(exist_ok=True)
+        from .media import HostedMedia, validate_working_view
+        try:
+            views = self._bound_media(job, manifest, request)
+            for image in manifest['images']:
+                view = views[image['id']]
+                with self.artifacts.open(HostedMedia.reference(view)) as stream:
+                    validate_working_view(stream, view, source_sha256=image['media_hash'],
+                        source_size_bytes=image['size_bytes'], require_current_compatible=job['state'] != 'complete')
+        except DomainError as exc:
+            if exc.code == 'media_policy_upgrade_required' and job['state'] == 'captured':
+                self.mark_terminal(actor, job_id, 'interrupted', exc.code, job_id + '-media-upgrade')
+            raise
         if not destination.exists():
-            self.operations.materialize_snapshot(actor, job["snapshot_id"], destination, unsplit_as_train=True)
+            self.operations.materialize_snapshot(actor, job["snapshot_id"], destination, unsplit_as_train=True, media_views=views)
         # Verify against the frozen manifest even when a preparation is resumed.
         expected_files = set()
-        for entry in self.operations._snapshot_entries(manifest, unsplit_as_train=True):
+        for entry in self.operations._snapshot_entries(manifest, unsplit_as_train=True, media_views=views):
             expected_files.add(entry.path)
             path = _inside(destination / entry.path, destination.resolve())
             wanted = ((entry.artifact.sha256, entry.artifact.size_bytes) if entry.artifact is not None

@@ -344,6 +344,7 @@ class PaidBatches:
             if self.recovered:
                 return
             self.tools._ensure_runtime()
+            self.gateway.accounts.normalize_terminal_batches()
             with self.store.transaction() as con:
                 con.execute("UPDATE hosted_paid_batches SET state='submission_unknown',error='control_restarted_during_submission' WHERE state='creating'")
                 con.execute("UPDATE hosted_paid_batches SET state='queued' WHERE state IN ('uploading','paused') AND remote_id IS NULL")
@@ -392,12 +393,15 @@ class PaidBatches:
     def _run(self, job_id):
         try:
             row = self._row(None, job_id, monitoring=True)
+            if row['state'] == 'collected':
+                return
             if row["remote_id"] is None:
                 if row["state"] == "submission_unknown":
                     return
                 self._submit(job_id)
             while not self.stop.is_set():
-                status = self._poll(job_id)
+                row = self._row(None,job_id,monitoring=True)
+                status = json.loads(row['remote_json'])['status'] if self.gateway.accounts.terminal_batch(row) else self._poll(job_id)
                 if status in {"completed", "failed", "expired", "cancelled"}:
                     self._collect(job_id)
                     return
@@ -426,6 +430,24 @@ class PaidBatches:
                 self._update(job_id, state="uploading", error=None)
                 prepared = json.loads(item["request_json"])
                 image = images[item["image_id"]]
+                if item['call_id']:
+                    with self.store.read_connection() as con:
+                        previous = con.execute('SELECT state,charged FROM hosted_provider_calls WHERE id=?', (item['call_id'],)).fetchone()
+                    if previous and (previous['state'] in {'dispatched','unknown','settled'} or previous['charged']):
+                        raise DomainError('paid_batch_row_outcome_unresolved',409)
+                # A queued request may use compatible frozen bytes, never a new
+                # conversion under an existing request/reservation fingerprint.
+                view = prepared.get('working_media')
+                if not view:
+                    raise DomainError('media_policy_upgrade_required',409)
+                from .media import validate_working_view
+                if (view['source_sha256'] != image['media_hash'] or view['source_size_bytes'] != image['size_bytes']):
+                    raise DomainError('paid_batch_source_changed',409)
+                with self.tools.artifacts.open(self.tools.media.reference(view)) as stream:
+                    validate_working_view(stream,view,source_sha256=image['media_hash'],source_size_bytes=image['size_bytes'],require_current_compatible=True)
+                uploaded_hash = item['upload_sha256'] or image['media_hash']
+                if item['upload_id'] and uploaded_hash != view['sha256']:
+                    raise DomainError('media_policy_upgrade_required',409)
                 authority = self._authority(body, image)
                 from dataclasses import replace
                 authority = replace(authority, operation_id="batch-row-" + _digest([job_id, image["id"]]))
@@ -436,15 +458,7 @@ class PaidBatches:
                     raise DomainError("paid_batch_row_outcome_unresolved", 409)
                 with self.store.transaction() as con:
                     con.execute("UPDATE hosted_paid_batch_rows SET call_id=? WHERE job_id=? AND image_id=?", (call["id"], job_id, item["image_id"]))
-                view = prepared.get('working_media') or self.tools.media.resolve(image['media_hash'])
-                if (view['source_sha256'] != image['media_hash'] or view['source_size_bytes'] != image['size_bytes']):
-                    raise DomainError('paid_batch_source_changed', 409)
                 file_id = item["upload_id"]
-                # Legacy uploads were original bytes. Reuse only a matching
-                # grid; an unsent row can replace its upload without rebilling.
-                uploaded_hash = item['upload_sha256'] or image['media_hash']
-                if file_id and uploaded_hash != view['sha256']:
-                    file_id = None
                 if not file_id:
                     with self.tools.artifacts.open(self.tools.media.reference(view)) as stream:
                         data = stream.read(40 * 1024 * 1024 + 1)
@@ -508,7 +522,27 @@ class PaidBatches:
             "metadata": {"hosted_job_id": job_id, "input_sha256": input_ref["sha256"]}})
         remote_id = self._remote_id(response.get("id"))
         self._retain(job_id, _json(response).encode())
-        self._update(job_id, remote_id=remote_id, remote_json=_json(response), state=str(response.get("status") or "submitted"))
+        self._record_remote(job_id,response,remote_id=remote_id)
+
+    def _record_remote(self, job_id, response, *, remote_id=None):
+        """Remote completion and unresolved billing commit before collection."""
+        if response.get('status') not in {'validating','in_progress','finalizing','completed','failed','expired','cancelling','cancelled'}:
+            raise DomainError('paid_batch_remote_state_invalid',502)
+        with self.store.transaction() as con:
+            row = dict(con.execute('SELECT * FROM hosted_paid_batches WHERE id=?',(job_id,)).fetchone())
+            bound = row['remote_id'] or remote_id
+            if (not bound or response.get('id') != bound or response.get('input_file_id') != row['input_file_id']
+                    or response.get('endpoint','/v1/responses') != '/v1/responses'
+                    or not isinstance(response.get('metadata',{}),dict)
+                    or response.get('metadata',{}).get('hosted_job_id',job_id) != job_id):
+                raise DomainError('paid_batch_remote_identity_changed',502)
+            if self.gateway.accounts.terminal_batch(row):
+                # A terminal response remains authoritative across poll retries.
+                return
+            con.execute('UPDATE hosted_paid_batches SET remote_id=?,remote_json=?,state=?,error=NULL,updated_at=? WHERE id=?',
+                (bound,_json(response),response['status'],self.store.clock(),job_id))
+            row.update(remote_id=bound,remote_json=_json(response))
+            self.gateway.accounts.mark_batch_terminal(con,row)
 
     @staticmethod
     def _remote_id(value):
@@ -530,13 +564,13 @@ class PaidBatches:
         if state not in {"validating", "in_progress", "finalizing", "completed", "failed", "expired", "cancelling", "cancelled"}:
             raise DomainError("paid_batch_remote_state_invalid", 502)
         self._retain(job_id, _json(response).encode())
-        self._update(job_id, state=state, remote_json=_json(response), error=None)
+        self._record_remote(job_id,response)
         return state
 
     def _collect(self, job_id):
         row = self._row(None, job_id)
         body, remote, price = PaidBatchRequest(**json.loads(row["request_json"])), json.loads(row["remote_json"]), json.loads(row["pricing_json"])
-        if remote.get("status") not in {"completed", "failed", "expired", "cancelled"}:
+        if not self.gateway.accounts.terminal_batch(row):
             raise DomainError("paid_batch_not_finished", 409)
         secret, rows = self._key(job_id, admission=False), self._rows(job_id)
         by_id = {item["image_id"]: item for item in rows}
@@ -581,17 +615,12 @@ class PaidBatches:
                 inputs, outputs, cached = usage.get("input_tokens"), usage.get("output_tokens"), (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
                 valid = all(type(number) is int and number >= 0 for number in (inputs, outputs, cached)) and cached <= inputs
                 charge = ((inputs - cached) * price["input_microdollars_per_million"] + cached * price["cached_input_microdollars_per_million"] + outputs * price["output_microdollars_per_million"] + 999999) // 1000000 if valid else None
-                with self.store.read_connection() as con:
-                    call = con.execute("SELECT state FROM hosted_provider_calls WHERE id=?", (item["call_id"],)).fetchone()
-                if call["state"] in {"dispatched", "unknown"}:
-                    self.gateway.accounts.settle(item["call_id"], actual_microdollars=charge,
-                        provider_request_id=str((response.get("body") or {}).get("id") or ""))
                 value = collected.get(item["image_id"], {"case_id": item["image_id"], "final_status": "failed", "failure_reason": "missing_batch_result"})
                 value["call_id"] = item["call_id"]
                 value["billing_resolved"] = valid
                 value["evidence"] = raw_evidence
-                with self.store.transaction() as con:
-                    con.execute("UPDATE hosted_paid_batch_rows SET output_json=? WHERE job_id=? AND image_id=?", (_json(value), job_id, item["image_id"]))
+                self.gateway.accounts.settle_batch_row(job_id,item['image_id'],item['call_id'],actual_microdollars=charge,
+                    provider_request_id=str((response.get('body') or {}).get('id') or ''),output=value)
         summary.update(saved_text_labels=0, transport="openai_batch", recipe="native_combined_caption_qa", raw_evidence=raw_evidence)
         evidence = self._retain(job_id, _json(summary).encode())
         self._update(job_id, state="collected", result_json=_json({**summary, "evidence": evidence}), error=None)
@@ -713,10 +742,12 @@ class PaidBatches:
         if row["state"] != "submission_unknown" or not row["input_file_id"]:
             raise DomainError("paid_batch_recovery_not_needed", 409)
         response = self.transport.request(self._key(job_id, admission=False), "GET", "/batches/" + self._remote_id(remote_id))
-        if response.get("input_file_id") != row["input_file_id"] or (response.get("metadata") or {}).get("hosted_job_id") != job_id or response.get("endpoint") != "/v1/responses":
+        if response.get('id') != remote_id or response.get("input_file_id") != row["input_file_id"] or (response.get("metadata") or {}).get("hosted_job_id") != job_id or response.get("endpoint") != "/v1/responses":
             raise DomainError("paid_batch_recovery_identity_mismatch", 409)
         def change(con):
             con.execute("UPDATE hosted_paid_batches SET remote_id=?,remote_json=?,state='submitted',error=NULL WHERE id=?", (remote_id, _json(response), job_id))
+            current = con.execute('SELECT * FROM hosted_paid_batches WHERE id=?',(job_id,)).fetchone()
+            self.gateway.accounts.mark_batch_terminal(con,current)
             return {"job_id": job_id}
         self.store._command(actor, operation_id, "paid_batch_recover", {"job_id": job_id, "remote_id": remote_id}, change)
         self._launch(job_id)
@@ -737,6 +768,9 @@ class PaidBatches:
                 "class_version": manifest["class_version"], "caption": data.get("caption"),
                 "generated_qa_pairs": bind_machine_validated_pairs(data.get("generated_qa_pairs", [])), "quality": data}
             value["proposal_sha256"] = _digest(value)
+            with self.store.read_connection() as con:
+                call = con.execute('SELECT * FROM hosted_provider_calls WHERE id=?',(item['call_id'],)).fetchone()
+                value['billing'] = self.gateway.accounts.billing(con,call) if call else None
             result.append(value)
         return {"total": len(records), "offset": offset, "captions": result}
 

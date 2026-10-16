@@ -481,9 +481,10 @@ view, followed by the frozen JSONL. New prepared rows freeze both original
 source identity and working-view identity in the reservation fingerprint. Upload
 audit records retain both hashes, and filenames match the actual image encoding.
 An older unsent reservation keeps its original immutable request and fingerprint;
-if its saved upload contains different bytes, only that definitely unsent row
-replaces the image upload and invalidates its pre-create JSONL. Dispatched or
-unknown submissions are never rewritten or resent. Batch creation
+missing or incompatible working-media descriptors, or a different saved upload
+hash, stop it with ``media_policy_upgrade_required``. Review the current image
+and start a new operation; the old upload and JSONL are not rewritten. Dispatched
+or unknown submissions are never rewritten or resent. Batch creation
 uses ``/v1/responses`` and the documented 24-hour completion window
 (https://developers.openai.com/api/docs/guides/batch). Every image has a stable
 ledger entry. One transaction checks every source version, current authority,
@@ -505,6 +506,27 @@ becomes ``submission_unknown`` and is never resubmitted automatically. Recovery
 requires the provider Batch ID to match the recorded input file and job metadata.
 Restart recovery also finishes collection after provider completion, including
 the interval before local results and usage were committed.
+
+Recording a verified terminal provider response also makes its outstanding
+ledger rows unresolved in the same transaction, before downloading or parsing
+output. Malformed output therefore cannot strand a dispatched reservation.
+A local transport error alone does not prove that a remote Batch has finished.
+Startup repairs older stranded rows only from retained terminal evidence bound
+to the same remote Batch and input file; this repair makes no provider calls.
+
+In **Paid services**, unresolved calls show whether billing can be reconciled.
+After checking the provider's records, an administrator can **Record confirmed
+charge**, including zero, with an explanation. Linked Batch calls require verified
+terminal evidence, including after backup restoration. Active batches remain
+unavailable for this action. The list pages unresolved calls so older unfinished
+bills are not hidden behind completed calls.
+
+Collection and manual reconciliation serialize in the ledger. Later collection
+retains captions and usage without overwriting an already confirmed charge; a
+different reported charge is retained as an audit discrepancy. Repeated
+collection cannot bill the same row twice. Billing status is returned separately
+from the immutable proposal digest, so confirming a bill does not invalidate a
+caption awaiting review.
 
 Outputs remain proposals. ``/captions`` pages them; ``/verify`` checks captured
 image versions and classes; ``/apply`` requires the normal current editor and
@@ -654,6 +676,11 @@ dialog shows the saved primary/alternate captions and each question and answer,
 including migrated ``captions`` records. Each entry can be accepted, rejected,
 marked for correction, or returned to unreviewed, with an optional note.
 Proposal dialogs also disclose generated QA before it is saved.
+Inactive historical records do not suppress the current primary or expose their
+questions as active review targets. Imported ``text`` aliases are displayed and
+hashed using the same effective wording as export; an empty legacy hash does not
+qualify nonempty alias text. Untouched raw aliases and metadata survive canvas
+saves and reloads.
 
 Review uses the same editor lease, image version, generation and durable command
 receipt as annotation saves. The server records the reviewer and time; the

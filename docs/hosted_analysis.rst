@@ -88,6 +88,20 @@ record maps to the native ``superseded`` state; its original state remains in
 ``metadata.hosted_source``. Questions attached to an inactive caption cannot
 become training examples independently of that caption.
 
+An active current primary is matched only to active records. If the same text
+exists solely in inactive history, review and export represent the current text
+separately; accepting it adds a new active record without reviving a tombstone.
+For imported dictionaries, a present ``caption`` field takes precedence, even
+when null or empty. ``text`` is used only when ``caption`` is absent. Effective
+text is trimmed for display, review and export while the original record remains
+unchanged. The editor preserves both caption collections and writes an explicit
+edit back to the record and text field it came from.
+
+Exported image, caption and QA identities come from the server's current export
+context. Extra metadata cannot replace those structural fields. The original
+metadata remains available under ``hosted_source`` or ``hosted_caption_source``;
+review and validation requirements still apply.
+
 Import and annotation saves validate the known caption and question/answer
 structures before recording a version. Optional null fields and legacy
 string-only captions are supported; extra metadata and evidence are preserved
@@ -213,6 +227,9 @@ canonical change stops further corrections against that analysis. Graph
 coordinates and measured features remain the original frozen measurements.
 Point responses distinguish the original version from this review's current
 object class, box and version.
+The correction recovery button stays disabled while the original request is in
+flight. After a lost reply, it checks the same saved command before allowing a
+new correction.
 
 Bulk corrections group actions by image. Each image commits atomically with
 an exact operation receipt; the batch records successful and conflicting
@@ -321,5 +338,11 @@ cleanup boundary. Any definite preparation refusal releases only an unsent
 reservation with a zero-charge audit entry. Automation pause keeps the same
 reservation for an exact retry; completed results replay without another send.
 Dispatched and unknown outcomes are never refunded or resent by this cleanup.
-The per-image caption pipeline keeps its existing image conversion and session
-policy. These rules do not retroactively refund historical reservations.
+New reservations capture the exact working-media descriptor in their audit
+record and fingerprint. An exact completed older request replays before current
+media preparation, subject to current session, image-version and editor
+authority. An older unsent reservation without a frozen descriptor is
+released only if it is still reserved, then returns ``media_policy_upgrade_required``:
+start a new operation after reviewing the new pixels. If dispatch won that race,
+the old request remains unresolved. These rules do not refund requests already
+sent or silently change their inputs.

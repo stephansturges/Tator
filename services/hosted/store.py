@@ -25,6 +25,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator
 
 from .errors import DomainError
+from .caption_semantics import caption_text
+from .class_names import validate_class_name
 from .language_schema import validate_language_annotations
 from .preconditions import validate_precondition
 from .receipt_policy import can_disclose
@@ -430,9 +432,7 @@ class HostedStore:
         return version
 
     def _add_class(self, con: sqlite3.Connection, actor: Actor, dataset_id: str, name: str) -> dict[str, Any]:
-        name = _text(name, "class_name", 200)
-        if "\n" in name or "\r" in name:
-            raise DomainError("invalid_class_name", 422)
+        name = validate_class_name(name)
         if con.execute("SELECT 1 FROM hosted_classes WHERE dataset_id=? AND name_key=?", (dataset_id, name.casefold())).fetchone():
             raise DomainError("class_name_exists", 409)
         position = con.execute("SELECT COALESCE(MAX(position),-1)+1 FROM hosted_classes WHERE dataset_id=?", (dataset_id,)).fetchone()[0]
@@ -723,9 +723,9 @@ class HostedStore:
                 raise DomainError('class_version_changed', 409)
             if (not isinstance(label_text, str) or len(label_text.encode()) > 8 * 1024 * 1024
                     or not isinstance(class_names, list) or len(class_names) > 10000
-                    or any(not isinstance(name, str) or not name.strip() or '\n' in name or '\r' in name for name in class_names)):
+                    or any(not isinstance(name, str) or not name.strip() for name in class_names)):
                 raise DomainError('invalid_yolo_import', 422)
-            names = [name.strip() for name in class_names]
+            names = [validate_class_name(name) for name in class_names]
             if len({name.casefold() for name in names}) != len(names):
                 raise DomainError('ambiguous_import_labelmap', 422)
             known = {row['name'].casefold(): row['id'] for row in self._classes(con, dataset_id) if not row['retired']}
@@ -1052,8 +1052,8 @@ class HostedStore:
                     and isinstance(metadata.get('review_content_sha256'), str)
                     and re.fullmatch(r'[0-9a-f]{64}', metadata['review_content_sha256']))
             if not bound:
-                payload['text'] = {key: str(record.get(key) or '').strip()
-                                   for key in (('caption',) if kind == 'caption0' else ('question', 'answer'))}
+                payload['text'] = ({'caption': caption_text(record)} if kind == 'caption0' else
+                                   {key: str(record.get(key) or '').strip() for key in ('question', 'answer')})
             return _json([kind, payload])
 
         available = {}
@@ -1446,9 +1446,7 @@ class HostedStore:
             row = con.execute("SELECT * FROM hosted_classes WHERE id=? AND dataset_id=?", (class_id, dataset_id)).fetchone()
             if not row:
                 raise DomainError("class_not_found", 404)
-            value = _text(name, "class_name", 200)
-            if "\n" in value or "\r" in value:
-                raise DomainError("invalid_class_name", 422)
+            value = validate_class_name(name)
             if con.execute("SELECT 1 FROM hosted_classes WHERE dataset_id=? AND name_key=? AND id!=?", (dataset_id, value.casefold(), class_id)).fetchone():
                 raise DomainError("class_name_exists", 409)
             con.execute("UPDATE hosted_classes SET name=?,name_key=? WHERE id=?", (value, value.casefold(), class_id))
@@ -1460,14 +1458,13 @@ class HostedStore:
     def request_class(self, actor: Actor, dataset_id: str, name: str, reason: str,
                       operation_id: str) -> dict[str, Any]:
         def run(con: sqlite3.Connection) -> dict[str, Any]:
-            if not isinstance(name, str) or "\n" in name or "\r" in name:
-                raise DomainError("invalid_class_name", 422)
+            value = validate_class_name(name)
             self._dataset(con, dataset_id)
             if actor.role != "admin" and not con.execute("SELECT 1 FROM hosted_images WHERE dataset_id=? AND assignee_id=? AND state IN ('assigned','returned') LIMIT 1", (dataset_id, actor.user_id)).fetchone():
                 raise DomainError("dataset_not_found", 404)
             request_id = _id("classrequest")
             con.execute("INSERT INTO hosted_class_requests(id,dataset_id,actor_id,name,reason,created_at) VALUES (?,?,?,?,?,?)",
-                        (request_id, dataset_id, actor.user_id, _text(name,"class_name",200), _text(reason,"reason",5000), self.clock()))
+                        (request_id, dataset_id, actor.user_id, value, _text(reason,"reason",5000), self.clock()))
             self._event(con, actor, dataset_id, None, "class_requested", {"request_id": request_id})
             return dict(con.execute("SELECT * FROM hosted_class_requests WHERE id=?", (request_id,)).fetchone())
         return self._command(actor, operation_id, "request_class", dict(dataset_id=dataset_id,name=name,reason=reason), run)
@@ -1498,6 +1495,7 @@ class HostedStore:
                 raise DomainError("class_version_changed", 409)
             class_id = None
             if approved:
+                validate_class_name(row["name"])
                 existing = con.execute("SELECT id FROM hosted_classes WHERE dataset_id=? AND name_key=? AND retired=0", (row["dataset_id"], row["name"].casefold())).fetchone()
                 if existing:
                     class_id = existing[0]

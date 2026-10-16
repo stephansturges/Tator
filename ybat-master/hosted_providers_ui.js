@@ -11,7 +11,7 @@
     async function open() {
         const generation = ++epoch;
         dialog.replaceChildren(node("h2", "Paid caption services")); dialog.showModal();
-        const [result, datasets, activity] = await Promise.all([app.api("/providers"), app.api("/datasets"), app.api("/providers/calls")]);
+        const [result, datasets, activity] = await Promise.all([app.api("/providers"), app.api("/datasets"), app.api("/providers/calls?unresolved_only=true&limit=100")]);
         if (generation !== epoch || !dialog.open) return;
         const current = result.providers.find((item) => item.name === "openai") || { revision: 0, enabled: false, monthly_limit: 0, request_limit: 0, allowed_datasets: [], models: [] };
         dialog.append(node("p", "Local Qwen runs on your server. OpenAI uses a paid account. Keep its key on the server and choose which datasets and models may use it."));
@@ -38,21 +38,42 @@
             finally { key.value = ""; }
             await open(); app.notice("Paid-service settings saved.");
         }); };
-        const unknown = activity.calls.filter((call) => ["reserved", "unknown"].includes(call.state));
-        if (unknown.length) {
-            dialog.append(node("h3", "Unresolved calls"), node("p", "Check the provider's usage before releasing a reservation. Active requests cannot be reconciled here."));
-            for (const call of unknown) {
+        const billing = node("section"); billing.id = "hostedProviderBilling";
+        dialog.append(billing);
+        let offset = 0;
+        const more = node("button", "Load more unresolved calls"); more.type = "button"; more.id = "hostedProviderBillingMore";
+        function renderCalls(calls) {
+            if (!offset && calls.length) billing.append(node("h3", "Unresolved calls"), node("p", "Check the provider's usage before recording a bill. Batch billing is available after the provider confirms the batch has finished."));
+            for (const call of calls) {
                 const row = node("div"), reconcile = node("button", "Record confirmed charge"); reconcile.type = "button";
-                row.append(node("p", `${call.model} · ${new Date(call.created_at * 1000).toLocaleString()} · ${dollars(call.reserved)} reserved`), reconcile);
+                row.dataset.providerCall = call.id; row.dataset.billingState = call.state;
+                reconcile.disabled = !call.can_reconcile;
+                const explanation = call.reason === "batch_terminal_not_verified"
+                    ? "Confirm this batch's final status before recording its bill."
+                    : call.reason === "batch_usage_unresolved" ? "The batch has finished; its bill still needs confirmation."
+                    : call.state === "dispatched" ? "This request is still active." : "Confirm the charge using the provider's records.";
+                row.append(node("p", `${call.model} · ${new Date(call.created_at * 1000).toLocaleString()} · ${dollars(call.reserved)} reserved`), node("p", explanation), reconcile);
                 reconcile.onclick = () => app.action(reconcile, async () => {
                     const amount = prompt("Confirmed provider charge in USD (0 if the request was never sent):"); if (amount === null) return;
                     if (!/^\d+(\.\d{1,6})?$/.test(amount)) throw new Error("Enter a nonnegative dollar amount, with up to six decimals.");
                     const note = prompt("How did you confirm this charge?"); if (!note) return;
-                    await app.api(`/providers/calls/${call.id}/reconcile`, { method: "POST", body: { operation_id: crypto.randomUUID(), charged: Math.round(Number(amount) * 1000000), note } });
+                    try {
+                        await app.api(`/providers/calls/${call.id}/reconcile`, { method: "POST", body: { operation_id: crypto.randomUUID(), charged: Math.round(Number(amount) * 1000000), note } });
+                    } catch (error) {
+                        if (error.status !== 409) throw error;
+                        await open(); app.notice("Billing changed while you were confirming it. The current state is shown."); return;
+                    }
                     await open();
-                }); dialog.append(row);
+                }); billing.append(row);
             }
+            offset += calls.length;
+            more.hidden = calls.length < 100;
         }
+        renderCalls(activity.calls);
+        more.onclick = () => app.action(more, async () => {
+            const next = await app.api(`/providers/calls?unresolved_only=true&limit=100&offset=${offset}`);
+            if (generation === epoch && dialog.open) renderCalls(next.calls);
+        }); dialog.append(more);
         const close = node("button", "Close"); close.type = "button"; close.onclick = () => dialog.close(); dialog.append(close);
     }
     dialog.addEventListener("close", () => { epoch++; dialog.querySelectorAll('input[type="password"]').forEach((field) => { field.value = ""; }); });

@@ -140,7 +140,7 @@
         const result = await api("/datasets");
         if (sequence !== state.workspaceSequence) return;
         state.datasets = result.datasets;
-        const previous = $("datasetChoice").value; $("datasetChoice").replaceChildren();
+        const previous = $("datasetChoice").value || new URLSearchParams(location.search).get("dataset"); $("datasetChoice").replaceChildren();
         for (const dataset of state.datasets) { const option = node("option", dataset.name); option.value = dataset.id; $("datasetChoice").append(option); }
         if (state.datasets.some((row) => row.id === previous)) $("datasetChoice").value = previous;
         if (isAdmin) await refreshUsers();

@@ -24,6 +24,29 @@ Annotators use **My work** to open their own assigned or returned images.
 datasets where they have finished every assignment. That progress list does not
 grant access to the submitted pixels or annotations.
 
+While annotating, save and review controls sit in a floating panel at the bottom
+right. Use the minus button to minimize it; save status and the workspace button
+remain visible. Workflow messages no longer push the canvas down. **Admin workspace**
+saves your edits and returns to the selected dataset. There, **Quality & compute**
+opens dataset analysis and training tasks, **Feature recipes** manages saved
+descriptors, and **Tools & models**, **People**, **Classes**, and **Export & recovery**
+provide the other administration controls. Compute tasks appear only after their
+recipes and models have been configured on the hosted server.
+
+Large work lists load compact image identifiers and filenames in bounded parallel
+requests. Annotation versions and editing ownership are checked again when an
+image is opened; faster navigation does not reuse an old permission to edit.
+SAM preloading runs only when a SAM model is configured for the hosted account.
+Image switching loads the latest review feedback with the image instead of
+downloading every past annotation version. Account checks can run alongside the
+image lookup; saving and the transfer of editing ownership still happen in order.
+
+The hosted server compresses public JavaScript and CSS for browsers that support
+gzip and lets browsers revalidate those files when reopening a page. Updated
+files receive new content validators. Dataset responses and authenticated pages
+remain uncached. The annotation page loads its labeling tools; the larger graph
+library loads separately when an administrator opens an analysis graph.
+
 The normal route through the workspace is::
 
     Administrator: Add images -> Incoming (not assigned)

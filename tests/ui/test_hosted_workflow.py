@@ -1142,7 +1142,7 @@ async def _navigation_and_captions(origin):
         other = await (await context.request.get(origin + '/api/hosted/images/' + second['id'])).json()
         assert len(other['annotations']['objects']) == 1
         assert other['annotations']['objects'] != current['objects']
-        await page.locator('#hostedBack').click(); await expect(page).to_have_url(origin + '/')
+        await page.locator('#hostedBack').click(); await expect(page).to_have_url(origin + '/?dataset=' + datasets[0]['id'])
         await page.goto(origin + '/annotate?image=' + first['id'])
         await expect(page.locator('#hostedSave')).to_be_enabled()
         assert (await page.evaluate('window.TatorHostedCanvas.snapshot()'))['alternate_captions'] == saved['annotations']['alternate_captions']

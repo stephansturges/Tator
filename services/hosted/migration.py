@@ -6,6 +6,7 @@ Unknown sidecars must be mapped for preservation before any dataset is created.
 """
 from __future__ import annotations
 
+from collections import Counter
 import hashlib
 import json
 import math
@@ -211,6 +212,16 @@ def inventory(source_root: str | Path, *, mapping: dict | None = None, clip_boxe
     image_names = [name for name in files if PurePosixPath(name).suffix.lower() in IMAGE_SUFFIXES
                    and (name.startswith("images/") if flat else
                         any(name.startswith(split + "/images/") for split in ("train", "val", "test")))]
+    # Count both global and split-local associations once. Caption aliases must
+    # use the same ambiguity rules without rescanning every image per candidate.
+    caption_relative_counts = {scope: Counter() for scope in ("", "train", "val", "test")}
+    caption_stem_counts = {scope: Counter() for scope in caption_relative_counts}
+    for image_name in image_names:
+        image_path = PurePosixPath(image_name)
+        relative_label = PurePosixPath(*image_path.parts[1 if flat else 2:]).with_suffix(".txt")
+        for scope in (("",) if flat else ("", image_path.parts[0])):
+            caption_relative_counts[scope][relative_label] += 1
+            caption_stem_counts[scope][image_path.stem] += 1
     consumed_labels = set()
     for name, entry in files.items():
         parts = PurePosixPath(name).parts
@@ -249,6 +260,7 @@ def inventory(source_root: str | Path, *, mapping: dict | None = None, clip_boxe
                 key=key, label_coordinate_space=coordinate_space, clip=clip_boxes)
         captions = []
         caption_paths = []
+        relative_label = relative.with_suffix(".txt")
         # Only the selected overlay is current. Keep other overlay bytes as
         # history, but do not resurrect them when the selected one has no text.
         for prefix in (active_overlay, "", *(p for p in ("@overlay/", ".annotation_overlay/") if p != active_overlay)):
@@ -258,13 +270,12 @@ def inventory(source_root: str | Path, *, mapping: dict | None = None, clip_boxe
                 # All qualified candidates beat a basename fallback, within
                 # each alias. Source split roots use split-local uniqueness.
                 for scope in scopes:
-                    scoped_names = [n for n in image_names if n.startswith(split_name + "/images/")] if (not flat and (scope.startswith(split_name + "/") or f"/{split_name}/" in scope)) else image_names
-                    unique_relative = sum(PurePosixPath(*PurePosixPath(n).parts[1 if flat else 2:]).with_suffix(".txt") == relative.with_suffix(".txt") for n in scoped_names) == 1
-                    if unique_relative:
-                        caption_paths.append(scope + relative.with_suffix(".txt").as_posix())
+                    count_scope = split_name if (not flat and (scope.startswith(split_name + "/") or f"/{split_name}/" in scope)) else ""
+                    if caption_relative_counts[count_scope][relative_label] == 1:
+                        caption_paths.append(scope + relative_label.as_posix())
                 for scope in scopes:
-                    scoped_names = [n for n in image_names if n.startswith(split_name + "/images/")] if (not flat and (scope.startswith(split_name + "/") or f"/{split_name}/" in scope)) else image_names
-                    if sum(PurePosixPath(n).stem == relative.stem for n in scoped_names) == 1:
+                    count_scope = split_name if (not flat and (scope.startswith(split_name + "/") or f"/{split_name}/" in scope)) else ""
+                    if caption_stem_counts[count_scope][relative.stem] == 1:
                         caption_paths.append(scope + relative.stem + ".txt")
         effective_caption = None
         effective_caption_file = None
@@ -453,8 +464,27 @@ class HostedMigrator:
         # pretend that its model has passed hosted-runtime qualification.
         settings_operation = run_id + "-settings"
         if not self.store.raw_receipt(actor, settings_operation):
+            migration_settings = {"run_id": run_id, "plan_sha256": plan["plan_sha256"], "mode": mode, "artifacts": associations}
+            # Per-image labels and captions can exceed the settings limit.
+            # Keep the complete provenance in registered immutable storage and
+            # leave runtime-discoverable recipe/head associations inline.
+            if len(_json(migration_settings).encode()) > 512 * 1024:
+                manifest_format = "tator-hosted-migration-artifacts-v1"
+                # Plan hashes ignore dictionary ordering, so equivalent plan
+                # JSON must also reproduce identical manifest bytes on resume.
+                manifest_artifacts = sorted(associations, key=lambda item: item["source_file"])
+                manifest_bytes = _json({"format": manifest_format, **migration_settings, "artifacts": manifest_artifacts}).encode()
+                with self.artifacts.exclusive():
+                    manifest = self.artifacts.put_bytes(manifest_bytes)
+                    self.operations.register_artifact(actor, manifest, "migration_artifact_manifest", ds["id"], run_id + "-artifact-manifest")
+                migration_settings = {
+                    **migration_settings,
+                    "artifacts": [item for item in manifest_artifacts if item["role"] in {"recipe", "salad_weights", "salad_metadata"}],
+                    "artifact_count": len(associations),
+                    "artifacts_manifest": {"format": manifest_format, **manifest.as_dict()},
+                }
             current = self.store.get_dataset(actor, ds["id"])
-            self.store.patch_dataset_settings(actor, ds["id"], {"migration": {"run_id": run_id, "plan_sha256": plan["plan_sha256"], "mode": mode, "artifacts": associations}}, current["revision"], settings_operation)
+            self.store.patch_dataset_settings(actor, ds["id"], {"migration": migration_settings}, current["revision"], settings_operation)
         def finish(con):
             con.execute("UPDATE hosted_migration_runs SET state='complete' WHERE id=?", (run_id,))
             return {"run_id": run_id, "dataset_id": ds["id"], "mode": mode, "image_count": len(plan["images"]), "artifact_count": len(associations), "plan_sha256": plan["plan_sha256"], "state": "complete"}

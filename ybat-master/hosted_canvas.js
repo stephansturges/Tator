@@ -452,10 +452,12 @@
             const error = new Error("Your login changed. Reopen the workspace to continue with the correct account."); error.status = 401; throw error;
         }
     }
-    async function acquire(takeover = false, recovering = false) {
+    async function acquire(takeover = false, recovering = false, preparedRecord = null, sessionCheck = null) {
         if (recoveryRequired && !recovering) throw new Error("Recover the retained draft before reconnecting editing.");
-        await verifySession();
-        const fresh = await api(base);
+        // Startup/navigation can overlap their session check with independent
+        // reads. Only that in-flight transition reuses it; reconnects check anew.
+        // The editor request still verifies auth and version/generation itself.
+        const [, fresh] = await Promise.all([sessionCheck || verifySession(), preparedRecord ? Promise.resolve(preparedRecord) : api(`${base}?include_review=true`)]);
         if (record && (record.current_version !== fresh.current_version || record.generation !== fresh.generation)) {
             const error = new Error("The server image changed. Reopen it to review the latest version before editing."); error.status = 409; throw error;
         }
@@ -463,14 +465,14 @@
         record = { ...fresh, ...lease }; editable = true;
         window.TatorHostedCanvas?.freeze(false); status("Connected · edits save automatically"); update();
     }
-    async function leave(next = false) {
+    async function leave(next = false, destination = "/") {
         if (editable && !handoff) { if (!await save({ manual: true })) throw new Error("Save your work before leaving."); await api(`${base}/release`, context()); editable = false; }
         if (next && dataset) {
             const result = await api(`/api/hosted/images?dataset_id=${encodeURIComponent(dataset.id)}&limit=100${boot.user.role === "admin" ? "&state=submitted" : ""}`);
             const image = result.images.find((item) => item.id !== imageId && (boot.user.role === "admin" || ["assigned", "returned"].includes(item.state)));
             if (image) { location.assign(`/annotate?image=${encodeURIComponent(image.id)}`); return; }
         }
-        location.assign("/");
+        location.assign(destination);
     }
     async function navigate(targetId) {
         if (busy || handoff) throw new Error("Wait for the current save or handoff before changing images.");
@@ -478,7 +480,8 @@
         if ([...activeTools.values()].some((item) => !["sam_preload", "sam_state"].includes(item.operation))) throw new Error("Wait for the current annotation tool, or cancel it before changing images.");
         busy = true; update();
         try {
-            const target = await api(`/api/hosted/images/${encodeURIComponent(targetId)}`);
+            const sessionCheck = verifySession();
+            const [, target] = await Promise.all([sessionCheck, api(`/api/hosted/images/${encodeURIComponent(targetId)}?include_review=true`)]);
             if (target.dataset_id !== dataset.id) throw new Error("Open the other dataset from the workspace.");
             if (editable) {
                 if (!await save({ manual: true })) throw new Error("Save your current image before changing images.");
@@ -489,7 +492,7 @@
             ready = false; editable = false; pending = null; rejected = null; retentionCommand = null;
             imageId = targetId; base = `/api/hosted/images/${encodeURIComponent(imageId)}`; key = targetKey; record = target;
             let accessError = null;
-            try { await acquire(); } catch (error) { accessError = error; editable = false; }
+            try { await acquire(false, false, target, sessionCheck); } catch (error) { accessError = error; editable = false; }
             history.replaceState(null, "", `/annotate?image=${encodeURIComponent(imageId)}`);
             $("hostedComplete").checked = record.complete; $("hostedNegative").checked = record.negative;
             document.querySelector(".hosted-canvas-title strong").textContent = record.filename;
@@ -498,15 +501,13 @@
             const began = Date.now();
             while (!window.TatorHostedCanvas.ready()) {
                 if (Date.now() - began > 30000) throw new Error("This image did not finish loading. Reopen it to retry.");
-                await new Promise((resolve) => setTimeout(resolve, 50));
+                await new Promise((resolve) => setTimeout(resolve, 16));
             }
             ready = true; lastSaved = JSON.stringify(draft());
             window.TatorHostedCanvas.freeze(!editable);
             window.dispatchEvent(new Event("tator:hosted-image"));
             history.replaceState(null, "", `/annotate?image=${encodeURIComponent(imageId)}`);
-            const reviewHistory = await api(`${base}/history`);
-            const feedback = (reviewHistory.reviews || []).filter((item) => item.feedback).at(-1);
-            if (feedback) { const note = node("p", `Administrator feedback: ${feedback.feedback}`); note.className = "hosted-review-note"; $("hostedSaveState").parentElement.after(note); }
+            await refreshFeedback();
             if (accessError) report(accessError);
             else status("Connected · edits save automatically");
         } catch (error) { report(error); throw error; }
@@ -539,12 +540,38 @@
         }
     }
     function addButton(parent, id, label, callback) { const button = node("button", label); button.type = "button"; button.id = id; button.onclick = () => run(button, callback); parent.append(button); return button; }
+    function showFeedback(feedback) {
+        const notes = $("hostedReviewNotes"); notes.replaceChildren();
+        if (feedback) { const note = node("p", `Administrator feedback: ${feedback.feedback}`); note.className = "hosted-review-note"; notes.append(note); }
+    }
+    async function refreshFeedback() {
+        if (Object.prototype.hasOwnProperty.call(record, "review_feedback")) {
+            showFeedback(record.review_feedback); return;
+        }
+        // Public assets can update before the backend restarts. Older servers
+        // need the history fallback, but never overwrite a later image/lease.
+        const origin = {imageId, generation: record.generation};
+        const isCurrent = () => imageId === origin.imageId && record.generation === origin.generation;
+        try {
+            const history = await api(`${base}/history`);
+            if (isCurrent()) showFeedback((history.reviews || []).filter(item => item.feedback).at(-1));
+        } catch (error) { if (isCurrent()) throw error; }
+    }
     function buildUi() {
         document.body.classList.add("hosted-canvas");
-        const bar = node("section"); bar.className = "hosted-canvas-bar"; bar.setAttribute("aria-label", "Annotation workflow");
-        addButton(bar, "hostedBack", "← Workspace", () => leave());
-        const title = node("div"); title.className = "hosted-canvas-title"; title.append(node("strong", record.filename), node("small", `${dataset.name} · ${record.state === "confirmed" ? "Confirmed" : record.state === "submitted" ? "Submitted for review" : "Incoming"} · ${boot.user.username}`)); bar.append(title);
-        const state = node("span", "Loading…"); state.id = "hostedSaveState"; state.setAttribute("role", "status"); bar.append(state);
+        const panel = node("aside"); panel.className = "hosted-canvas-panel"; panel.setAttribute("aria-label", "Annotation workflow");
+        const header = node("div"); header.className = "hosted-canvas-header";
+        const back = addButton(header, "hostedBack", boot.user.role === "admin" ? "← Admin workspace" : "← Workspace", () => leave(false, `/?dataset=${encodeURIComponent(dataset.id)}`));
+        back.title = boot.user.role === "admin" ? "Save and return to datasets, quality analysis, compute, people and settings" : "Save and return to your assigned work";
+        const toggle = node("button", "−"); toggle.type = "button"; toggle.id = "hostedPanelToggle"; toggle.setAttribute("aria-controls", "hostedWorkflowControls");
+        toggle.setAttribute("aria-expanded", "true"); toggle.setAttribute("aria-label", "Minimize annotation controls"); header.append(toggle);
+        const title = node("div"); title.className = "hosted-canvas-title"; title.append(node("strong", record.filename), node("small", `${dataset.name} · ${record.state === "confirmed" ? "Confirmed" : record.state === "submitted" ? "Submitted for review" : "Incoming"} · ${boot.user.username}`));
+        const statusPanel = node("div"); statusPanel.className = "hosted-canvas-status";
+        const state = node("span", "Loading…"); state.id = "hostedSaveState"; state.setAttribute("role", "status"); statusPanel.append(state);
+        const content = node("div"); content.id = "hostedWorkflowControls";
+        toggle.onclick = () => { content.hidden = !content.hidden; toggle.textContent = content.hidden ? "+" : "−"; toggle.setAttribute("aria-expanded", String(!content.hidden)); toggle.setAttribute("aria-label", content.hidden ? "Show annotation controls" : "Minimize annotation controls"); };
+        const notes = node("div"); notes.id = "hostedReviewNotes"; content.append(notes);
+        const bar = node("div"); bar.className = "hosted-canvas-bar"; content.append(bar);
         addButton(bar, "hostedSave", "Save now", () => save({ manual: true }));
         addButton(bar, "hostedReconnect", "Reconnect editing", () => acquire());
         const check = (id, label, checked) => { const wrap = node("label"), input = node("input"); input.type = "checkbox"; input.id = id; input.checked = checked; wrap.append(input, document.createTextNode(label)); bar.append(wrap); };
@@ -577,13 +604,15 @@
         form.append(node("h2", "Request a dataset class"), name, reason);
         addButton(form, "hostedSendClass", "Send request", async () => { if (!form.reportValidity()) return; await api(`/api/hosted/datasets/${dataset.id}/class-requests`, { name: name.value, reason: reason.value, operation_id: uuid() }); dialog.close(); status("Class request sent. Existing classes remain available."); });
         addButton(form, "hostedCancelClass", "Cancel", () => dialog.close()); form.onsubmit = (e) => e.preventDefault(); dialog.append(form);
-        document.body.prepend(bar, feedbackPanel, dialog);
+        content.append(feedbackPanel); panel.append(header, title, statusPanel, content);
+        document.body.append(panel, dialog);
         window.dispatchEvent(new Event("tator:hosted-canvas"));
         update();
     }
     async function start() {
         try {
-            await verifySession();
+            const sessionCheck = verifySession();
+            await sessionCheck;
             const retained = sessionStorage.getItem(key);
             const recovery = retained ? JSON.parse(retained) : null;
             if (recovery?.state === "committed_restricted") throw new Error("Your earlier change was saved, but its result is no longer available to this account. A later draft is retained in this tab. Ask an administrator to help recover it.");
@@ -591,18 +620,25 @@
             if (recoveredReceipt && !recovery.pending.path.endsWith("/save")) {
                 clearJournal(); location.assign("/"); return;
             }
-            record = await api(base); dataset = await api(`/api/hosted/datasets/${record.dataset_id}`);
+            record = await api(`${base}?include_review=true`); dataset = await api(`/api/hosted/datasets/${record.dataset_id}`);
             buildUi();
-            try { await acquire(); } catch (error) { report(error); }
+            try { await acquire(false, false, record, sessionCheck); } catch (error) { report(error); }
             const neighbors = [];
-            for (let offset = 0; ; offset += 500) {
-                const filter = boot.user.role === "admin" ? `&state=${encodeURIComponent(record.state)}` : "";
-                const result = await api(`/api/hosted/images?dataset_id=${dataset.id}&limit=500&offset=${offset}${filter}`);
-                neighbors.push(...result.images); if (result.images.length < 500) break;
+            const filter = boot.user.role === "admin" ? `&state=${encodeURIComponent(record.state)}` : "";
+            const page = offset => api(`/api/hosted/images?dataset_id=${dataset.id}&limit=500&compact=true&offset=${offset}${filter}`);
+            const firstPage = await page(0); neighbors.push(...firstPage.images);
+            if (firstPage.images.length === 500) {
+                for (let offset = 500; ; offset += 2000) {
+                    // Bounded parallel reads retain server order and the full
+                    // work list without one network round trip per page.
+                    const pages = await Promise.all([0, 500, 1000, 1500].map(step => page(offset + step)));
+                    for (const result of pages) neighbors.push(...result.images);
+                    if (pages.some(result => result.images.length < 500)) break;
+                }
             }
             await window.TatorHostedCanvas.open(record, dataset, !editable, neighbors);
             const start = Date.now();
-            while (!window.TatorHostedCanvas.ready()) { if (Date.now() - start > 30000) throw new Error("Image loading did not finish. Reopen it to retry."); await new Promise((resolve) => setTimeout(resolve, 50)); }
+            while (!window.TatorHostedCanvas.ready()) { if (Date.now() - start > 30000) throw new Error("Image loading did not finish. Reopen it to retry."); await new Promise((resolve) => setTimeout(resolve, 16)); }
             ready = true; lastSaved = JSON.stringify(draft()); window.TatorHostedCanvas.freeze(!editable); update();
             if (retained) {
                 recoveryRequired = true;
@@ -643,10 +679,7 @@
                     pending = null; await save({ manual: true });
                 });
             } else if (editable) status("Connected · edits save automatically");
-            const history = await api(`${base}/history`);
-            const reviews = history.reviews || [];
-            const feedback = reviews.filter((item) => item.feedback).at(-1);
-            if (feedback) { const note = node("p", `Administrator feedback: ${feedback.feedback}`); note.className = "hosted-review-note"; $("hostedSaveState").parentElement.after(note); }
+            await refreshFeedback();
         } catch (error) { if (!$("hostedSaveState")) { document.body.replaceChildren(node("p", error.message)); const back = node("a", "Return to sign in"); back.href = "/"; document.body.append(back); } else report(error); }
     }
     async function applyVersionedProposal(path, fields, expectedVersion, message, eventName, retryId) {
@@ -727,6 +760,7 @@
                 "Caption saved · earlier captions preserved", "tator:caption-applied", "hostedCaptionRetry");
         },
         setToolsState(value) { toolState = value; },
+        get samConfigured() { return Boolean(toolState?.capabilities?.sam_point?.configured); },
         get edrReady() { return Boolean(toolState?.capabilities?.edr_prepass?.configured) && toolState?.phase === "available"; },
         get automationPauseReason() { return toolState && toolState.phase !== "available" ? "Annotation assistance is paused while server compute changes. You can still annotate and save manually." : null; },
         async fetch(url, options = {}) {

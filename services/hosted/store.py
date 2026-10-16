@@ -227,7 +227,10 @@ class HostedStore:
                     archive_id TEXT NOT NULL REFERENCES hosted_archives(id));
                 CREATE INDEX IF NOT EXISTS hosted_images_work ON hosted_images(assignee_id,state,dataset_id,id);
                 CREATE INDEX IF NOT EXISTS hosted_images_dataset ON hosted_images(dataset_id,state,id);
+                CREATE INDEX IF NOT EXISTS hosted_images_dataset_order ON hosted_images(dataset_id,state,created_at,id);
+                CREATE INDEX IF NOT EXISTS hosted_images_annotator_order ON hosted_images(assignee_id,created_at,id);
                 CREATE INDEX IF NOT EXISTS hosted_versions_image ON hosted_annotation_versions(image_id,created_at,id);
+                CREATE INDEX IF NOT EXISTS hosted_reviews_image ON hosted_reviews(image_id);
                 CREATE INDEX IF NOT EXISTS hosted_events_image ON hosted_events(image_id,id);
                 COMMIT;
             """)
@@ -608,11 +611,19 @@ class HostedStore:
             image.update(dict(media))
         return image
 
-    def image(self, actor: Actor, image_id: str) -> dict[str, Any]:
+    def image(self, actor: Actor, image_id: str, *, include_review: bool = False) -> dict[str, Any]:
         with self.read_connection() as con:
             self._actor(con, actor)
             self._can_view(actor, self._image(con, image_id))
-            return self._image_result(con, image_id, content=True)
+            result = self._image_result(con, image_id, content=True)
+            if include_review:
+                # Match the history view's last nonempty feedback, without
+                # transferring every past annotation version to the canvas.
+                review = con.execute(
+                    "SELECT id,version_id,action,feedback,created_at FROM hosted_reviews "
+                    "WHERE image_id=? AND feedback!='' ORDER BY rowid DESC LIMIT 1", (image_id,)).fetchone()
+                result["review_feedback"] = dict(review) if review else None
+            return result
 
     def list_images(self, actor: Actor, dataset_id: str | None = None, state: str | None = None,
                     *, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
@@ -621,22 +632,42 @@ class HostedStore:
             raise DomainError("invalid_state", 422)
         with self.read_connection() as con:
             self._actor(con, actor)
-            conditions, args = ["id NOT IN (SELECT image_id FROM hosted_archived_images)",
-                                "dataset_id NOT IN (SELECT dataset_id FROM hosted_archived_datasets)"], []
+            conditions, args = ["i.id NOT IN (SELECT image_id FROM hosted_archived_images)",
+                                "i.dataset_id NOT IN (SELECT dataset_id FROM hosted_archived_datasets)"], []
             if dataset_id:
-                conditions.append("dataset_id=?")
+                conditions.append("i.dataset_id=?")
                 args.append(dataset_id)
             if state == "incoming":
-                conditions.append("state!='confirmed'")
+                conditions.append("i.state!='confirmed'")
             elif state:
-                conditions.append("state=?")
+                conditions.append("i.state=?")
                 args.append(state)
             if actor.role != "admin":
-                conditions.extend(["assignee_id=?", "state IN ('assigned','returned')"])
+                conditions.extend(["i.assignee_id=?", "i.state IN ('assigned','returned')"])
                 args.append(actor.user_id)
             where = " WHERE " + " AND ".join(conditions) if conditions else ""
-            rows = con.execute("SELECT id FROM hosted_images" + where + " ORDER BY created_at,id LIMIT ? OFFSET ?", [*args, limit, offset])
-            return [self._image_result(con, row[0]) for row in rows]
+            # List metadata only: the canvas fetches annotations for its active
+            # image. Join the bounded page without reading every annotation JSON
+            # or repeating image, dataset and lease lookups for each row.
+            rows = con.execute(
+                "SELECT page.*,v.id AS version_id,v.complete,v.negative,v.class_version,"
+                "d.revision AS dataset_revision,l.actor_id AS lease_actor_id,"
+                "l.editor_id AS lease_editor_id,l.generation AS lease_generation,"
+                "l.expires_at AS lease_expires_at FROM (SELECT i.* FROM hosted_images i" + where +
+                " ORDER BY i.created_at,i.id LIMIT ? OFFSET ?) page "
+                "JOIN hosted_annotation_versions v ON v.id=page.current_version "
+                "JOIN hosted_datasets d ON d.id=page.dataset_id "
+                "LEFT JOIN hosted_editor_leases l ON l.image_id=page.id "
+                "ORDER BY page.created_at,page.id", [*args, limit, offset])
+            result = []
+            for row in rows:
+                image = dict(row)
+                image["complete"], image["negative"] = bool(image["complete"]), bool(image["negative"])
+                lease = {field: image.pop("lease_" + field)
+                         for field in ("actor_id", "editor_id", "generation", "expires_at")}
+                image["editor_lease"] = lease if lease["actor_id"] is not None and lease["expires_at"] > self.clock() else None
+                result.append(image)
+            return result
 
     def import_image(self, actor: Actor, dataset_id: str, media_hash: str, filename: str,
                      annotations: dict[str, Any] | None = None, operation_id: str = "", *,

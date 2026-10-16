@@ -148,6 +148,15 @@ with the dataset settings. This preserves provenance; it does not automatically
 activate a legacy recipe or assert hosted-runtime compatibility. External global
 registry state is not discovered automatically and must be supplied explicitly.
 
+When migration provenance exceeds 512 KiB, its complete artifact association list
+is stored as an immutable JSON artifact registered for backup. Dataset settings
+retain its SHA-256, byte size and format in ``migration.artifacts_manifest``,
+the full source-artifact count in ``migration.artifact_count``, and recipe/SALAD
+associations in ``migration.artifacts`` for runtime discovery. Smaller imports
+keep the complete association list inline. The manifest and every source
+artifact remain independently registered; interruption and resume reuse the same
+manifest bytes and operation receipt.
+
 Apply and resume
 ----------------
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from contextlib import asynccontextmanager
 import fcntl
@@ -17,7 +18,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.exceptions import RequestValidationError
 from PIL import Image
 from pydantic import BaseModel, Field
@@ -36,6 +37,7 @@ from services.hosted.analysis_api import install_analysis_api
 from services.hosted.types import Actor, MutationContext
 from services.hosted.preconditions import ImagePrecondition, precondition_payload
 from services.hosted.media import HostedMedia, inspect_media
+from services.hosted.static_assets import PublicStaticAssets
 
 WEB_ROOT = Path(__file__).resolve().parent / "ybat-master"
 COOKIE = "tator_session"
@@ -223,6 +225,7 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
     app.state.store, app.state.auth, app.state.artifacts = store, auth, artifacts
     app.state.media = media_store
     app.state.root = root
+    public_assets = PublicStaticAssets(WEB_ROOT)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[parsed.hostname])
     app.add_middleware(BodyLimitMiddleware)
 
@@ -245,30 +248,35 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
 
     @app.middleware("http")
     async def boundary(request: Request, call_next):
+        def finish(response):
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            response.headers["Referrer-Policy"] = "same-origin"
+            response.headers["X-Frame-Options"] = "SAMEORIGIN"
+            if not (getattr(request.state, "public_static_response", False)
+                    and response.status_code in {200, 304}):
+                response.headers["Cache-Control"] = "no-store"
+            return response
+
         # Same-origin is enforced even for pre-login requests. No CORS wildcard
         # or caller-supplied editor identity grants a server permission.
         request_origin = request.headers.get("origin")
         if request_origin and request_origin != origin:
-            return JSONResponse({"error": "origin_rejected"}, status_code=403)
+            return finish(JSONResponse({"error": "origin_rejected"}, status_code=403))
         try:
             length = int(request.headers.get("content-length", "0"))
         except ValueError:
-            return JSONResponse({"error": "invalid_content_length"}, status_code=400)
+            return finish(JSONResponse({"error": "invalid_content_length"}, status_code=400))
         if length > 260 * 1024 * 1024:
-            return JSONResponse({"error": "request_too_large"}, status_code=413)
+            return finish(JSONResponse({"error": "request_too_large"}, status_code=413))
         if request.url.path.startswith("/api/hosted/") and request.url.path not in {"/api/hosted/login", "/api/hosted/redeem"}:
             # Authenticate before multipart/JSON parsers consume the request.
             # Domain mutations repeat the captured proof inside their transaction.
             try:
                 request.state.hosted_actor = await run_in_threadpool(actor, request)
             except DomainError as error:
-                return JSONResponse({"error": error.code, "detail": error.detail}, status_code=error.status)
+                return finish(JSONResponse({"error": error.code, "detail": error.detail}, status_code=error.status))
         response = await call_next(request)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Referrer-Policy"] = "same-origin"
-        response.headers["X-Frame-Options"] = "SAMEORIGIN"
-        response.headers["Cache-Control"] = "no-store"
-        return response
+        return finish(response)
 
     def actor(request: Request) -> Actor:
         if hasattr(request.state, "hosted_actor"):
@@ -372,10 +380,15 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
         return {"submissions": store.own_submission_status(identity, dataset_id, limit=limit, offset=offset)}
 
     @app.get("/api/hosted/images")
-    def images(dataset_id: str | None = None, state: str | None = None, offset: int = 0, limit: int = 100, identity: Actor = Depends(actor)):
+    def images(dataset_id: str | None = None, state: str | None = None, offset: int = 0, limit: int = 100, compact: bool = False, identity: Actor = Depends(actor)):
         if not 1 <= limit <= 500 or offset < 0:
             raise DomainError("invalid_pagination", 422)
-        return {"images": store.list_images(identity, dataset_id=dataset_id, state=state, limit=limit, offset=offset)}
+        rows = store.list_images(identity, dataset_id=dataset_id, state=state, limit=limit, offset=offset)
+        if compact:
+            # Navigation needs identity and display labels, not editing leases
+            # or version metadata. Opening an image still fetches fresh authority.
+            rows = [{key: row[key] for key in ("id", "filename", "split")} for row in rows]
+        return {"images": rows}
 
     @app.post("/api/hosted/datasets/{dataset_id}/incoming")
     def upload(dataset_id: str, file: UploadFile = File(...), annotations: str | None = Form(None),
@@ -442,8 +455,8 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
         return {"images": results}
 
     @app.get("/api/hosted/images/{image_id}")
-    def image_record(image_id: str, identity: Actor = Depends(actor)):
-        return store.image(identity, image_id)
+    def image_record(image_id: str, include_review: bool = False, identity: Actor = Depends(actor)):
+        return store.image(identity, image_id, include_review=include_review)
 
     @app.get("/api/hosted/images/{image_id}/media")
     def media(image_id: str, identity: Actor = Depends(actor)):
@@ -559,14 +572,14 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
             "username": identity.username, "role": identity.role},
             "csrf": auth.session_csrf(request.cookies[COOKIE]), "instance_id": auth.instance_id}).replace("<", "\\u003c")
         html = (WEB_ROOT / "tator.html").read_text()
+        # Hosted annotation exposes only the labeling pane. Workspace graphs
+        # load Plotly separately; keep the legacy page's graph dependency intact.
+        html = re.sub(r'<script src="plotly-[^"\n]+"></script>', '', html, count=1)
         html = html.replace('<script src="canvas.min.js', '<script>window.TatorHostedBoot=' + bootstrap + ';</script>\n<script src="/hosted_canvas.js"></script>\n<script src="/hosted_tools_ui.js"></script>\n<script src="canvas.min.js', 1)
         return html.replace("</head>", '<link rel="stylesheet" href="/hosted_canvas.css"><script src="/hosted_caption_review.js" defer></script><script src="/hosted_paid_batches_ui.js" defer></script><script src="/hosted_import_conflicts_ui.js" defer></script><script src="/hosted_instruction_review.js" defer></script></head>', 1)
 
-    @app.get("/{asset_name}")
-    def asset(asset_name: str):
-        path = WEB_ROOT / asset_name
-        if path.suffix not in {".js", ".css"} or not path.is_file() or path.resolve().parent != WEB_ROOT:
-            raise DomainError("not_found", 404)
-        return FileResponse(path)
+    @app.api_route("/{asset_name}", methods=["GET", "HEAD"])
+    def asset(asset_name: str, request: Request):
+        return public_assets.response(asset_name, request)
 
     return app

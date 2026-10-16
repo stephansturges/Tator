@@ -1,10 +1,29 @@
 .hosted-canvas .tab-bar,.hosted-canvas #imagesSelect,.hosted-canvas label[for=images],.hosted-canvas #cropImages,.hosted-canvas #classesSelect,.hosted-canvas #saveBboxes,.hosted-canvas #annotationTakeoverBtn,.hosted-canvas #annotationReloadBtn,.hosted-canvas #annotationCloseBtn{display:none!important}
 .hosted-canvas [data-tab-panel]:not([data-tab-panel=labeling]){display:none!important}
 .hosted-canvas #annotationSourcePanel{display:none!important}
-.hosted-canvas-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--border-color,#738299);background:var(--panel-bg,#142331);color:var(--text-color,#f1f5f9);position:sticky;top:0;z-index:5000;font:14px/1.4 system-ui}
-.hosted-canvas-bar button,.hosted-canvas-feedback button{border:1px solid #788d9f;border-radius:6px;background:#eef6fc;color:#182c3d;padding:7px 10px;cursor:pointer;font:inherit}.hosted-canvas-bar button:disabled{opacity:.45;cursor:default}
-.hosted-canvas-title{display:flex;flex-direction:column;min-width:120px;max-width:280px;overflow-wrap:anywhere}.hosted-canvas-title small{font-size:12px;opacity:.8}.hosted-canvas-bar label{display:flex;align-items:center;gap:4px;font-size:12px}.hosted-canvas-bar [role=status]{font-size:12px;max-width:290px}.hosted-canvas-bar [data-error=true]{color:#ffb9a6}
-.hosted-canvas-feedback{display:flex;gap:8px;align-items:center;padding:6px 16px;background:var(--panel-bg,#142331);font:13px system-ui}.hosted-canvas-feedback textarea{flex:1;max-width:600px;padding:6px}.hosted-review-note{margin:0;padding:8px 16px;background:#fff1be;color:#352a0e;font:14px system-ui}
+.hosted-canvas-panel{position:fixed;right:max(16px,env(safe-area-inset-right));bottom:max(16px,env(safe-area-inset-bottom));z-index:1040;width:348px;max-width:calc(100vw - 32px);max-height:calc(100dvh - 32px);box-sizing:border-box;display:flex;flex-direction:column;gap:10px;padding:12px;border:1px solid var(--border-color,#738299);border-radius:12px;background:var(--panel-bg,#142331);color:var(--text-color,#f1f5f9);box-shadow:0 8px 32px #0005;font:13px/1.4 system-ui}
+.hosted-canvas-panel [hidden]{display:none!important}
+.hosted-canvas-panel button{border:1px solid #788d9f;border-radius:6px;background:#eef6fc;color:#182c3d;padding:7px 10px;cursor:pointer;font:inherit;white-space:normal}
+.hosted-canvas-panel button:disabled{opacity:.45;cursor:default}
+.hosted-canvas-panel button:focus-visible{outline:2px solid #48b8ec;outline-offset:2px}
+.hosted-canvas-header{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-shrink:0}
+.hosted-canvas-header #hostedBack{font-weight:650}
+#hostedPanelToggle{width:32px;height:32px;padding:0;font-size:20px;flex-shrink:0}
+.hosted-canvas-title{display:flex;flex-direction:column;min-width:0;flex-shrink:0}
+.hosted-canvas-title strong{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.hosted-canvas-title small{font-size:12px;opacity:.8;overflow-wrap:anywhere}
+.hosted-canvas-status{display:grid;gap:6px;font-size:12px;flex-shrink:0;overflow-wrap:anywhere}
+.hosted-canvas-status [data-error=true]{color:#ffb9a6}
+#hostedWorkflowControls{min-height:0;overflow:auto;overscroll-behavior:contain}
+.hosted-canvas-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;border-top:1px solid var(--border-color,#738299);padding-top:10px}
+.hosted-canvas-bar label{display:flex;align-items:center;gap:6px;flex-basis:100%;margin:0;font-size:13px}
+.hosted-canvas-bar input[type=checkbox]{margin:0}
+.hosted-canvas-feedback{display:flex;flex-wrap:wrap;gap:8px;align-items:center;border-top:1px solid var(--border-color,#738299);margin-top:10px;padding-top:10px}
+.hosted-canvas-feedback textarea{width:100%;box-sizing:border-box;padding:7px;resize:vertical;min-height:60px}
+.hosted-review-note{margin:0 0 10px;padding:8px;border-radius:6px;background:#fff1be;color:#352a0e;overflow-wrap:anywhere}
+.hosted-canvas-panel #hostedToolsState{flex-basis:100%;font-size:12px}
+.hosted-canvas-panel .hosted-caption-review{margin:10px 0 0;padding:10px;max-height:none}
+@media(max-height:500px){.hosted-canvas-panel{bottom:8px;max-height:calc(100dvh - 16px);gap:6px}.hosted-canvas-title small{display:none}}
 .hosted-canvas #hostedClassDialog{max-width:460px;border:1px solid #768697;border-radius:10px;padding:24px}.hosted-canvas #hostedClassDialog form{display:grid;gap:12px}.hosted-canvas #hostedClassDialog input,.hosted-canvas #hostedClassDialog textarea{padding:8px}
 .hosted-canvas #hostedSubmit,.hosted-canvas #hostedApprove{background:#c9f6dc;color:#153a26;font-weight:700}
 .hosted-canvas #hostedToolsDialog{width:min(640px,90vw);max-height:85vh;overflow:auto;border:1px solid #788d9f;border-radius:12px;padding:24px;background:var(--panel-bg,#fff);color:var(--text-color,#182c3d);font:14px/1.5 system-ui}

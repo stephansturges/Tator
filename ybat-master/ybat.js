@@ -24006,10 +24006,11 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         const releaseLock = lockImageSelection();
-        opts.forEach((opt, idx) => {
-            opt.selected = idx === targetIndex;
-        });
-        listEl.selectedIndex = targetIndex;
+        // selectedIndex also clears other selections in a multiple select.
+        // Avoid thousands of redundant DOM writes on every image switch.
+        if (listEl.selectedIndex !== targetIndex || listEl.selectedOptions.length !== 1) {
+            listEl.selectedIndex = targetIndex;
+        }
         imageListIndex = targetIndex;
         if (options.ensureVisible) {
             ensureImageListVisibility(targetIndex);
@@ -24108,7 +24109,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function prepareSamForCurrentImage(options = {}) {
-        if (!samPreloadEnabled || !currentImage || !currentImage.name) {
+        if (!samPreloadEnabled || !currentImage || !currentImage.name || (hostedMode && !window.TatorHosted?.samConfigured)) {
             return;
         }
         const targetName = currentImage.name;
@@ -24472,7 +24473,7 @@ async function cancelRfDetrTrainingJobRequest() {
         const optionsArray = Array.from(imageList.options);
         let needsSelectionFix = false;
         optionsArray.forEach((option) => {
-            option.classList.remove(
+            if (option.classList.length) option.classList.remove(
                 "sam-slot-current",
                 "sam-slot-next",
                 "sam-slot-previous",
@@ -47221,7 +47222,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function scheduleSamPreload(options = {}) {
-        if (!samPreloadEnabled || !currentImage || !currentImage.object) {
+        if (!samPreloadEnabled || !currentImage || !currentImage.object || (hostedMode && !window.TatorHosted?.samConfigured)) {
             hideSamPreloadProgress();
             return;
         }
@@ -87670,7 +87671,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                 || isImageCurrentlyLoading(pendingImageName)
             )
             : false;
-        if (samPreloadEnabled && pendingImageName) {
+        if (samPreloadEnabled && pendingImageName && (!hostedMode || window.TatorHosted?.samConfigured)) {
             const statusLabel = hasActivePreload ? "Continuing SAM preload" : "Preparing SAM preload";
             setSamStatus(`${statusLabel}: ${pendingImageName}`, { variant: "info", duration: 0 });
             showSamPreloadProgress();
@@ -88063,9 +88064,6 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             nextIndex = Math.max(0, Math.min(total - 1, nextIndex));
         }
         const releaseLock = lockImageSelection();
-        Array.from(imageList.options).forEach((option, idx) => {
-            option.selected = idx === nextIndex;
-        });
         imageList.selectedIndex = nextIndex;
         imageListIndex = nextIndex;
         releaseLock();
@@ -90898,8 +90896,11 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         imageName() { return currentImage?.name; },
         imageNameFor(id) { return Object.values(images).find((image) => image.annotationRelpath === id)?.name || null; },
         configureTools(catalog, state) {
-            configureHostedRoles(catalog);
             window.TatorHosted.setToolsState(state);
+            updateQwenAgentButtons();
+            const catalogIdentity = JSON.stringify(catalog);
+            if (this.catalogIdentity === catalogIdentity) return;
+            configureHostedRoles(catalog);
             const paidModels = catalog.paid_caption?.models || [];
             const paidIdentity = JSON.stringify([paidModels, catalog.caption_job_capabilities?.openai_batch_transport]);
             if (paidIdentity !== this.paidIdentity) {
@@ -90959,6 +90960,9 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                 cancelSamPreload(); samPreloadLastKey = null; samTokenCache.clear();
                 this.samIdentity = identity; if (sam) samVariant = sam.kind;
                 updateSam3TextButtons(); refreshSam3SimilarityVisibility();
+                if (sam && window.TatorHosted.samConfigured && currentImage?.object) {
+                    prepareSamForCurrentImage({ immediate: true }).catch(error => console.debug("SAM preload after configuration failed", error));
+                }
             }
             if (samVariantSelect) {
                 samVariantSelect.value = sam?.kind || "sam3"; samVariantSelect.disabled = true;
@@ -90988,6 +90992,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                 const input = document.getElementById(id);
                 if (input) { input.checked = false; input.closest("label")?.setAttribute("hidden", ""); }
             }
+            this.catalogIdentity = catalogIdentity;
         },
         async open(record, dataset, readOnly, neighbors = []) {
             hostedCanvasRecord = structuredClone(record);

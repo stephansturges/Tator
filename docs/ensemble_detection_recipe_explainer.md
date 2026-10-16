@@ -1,5 +1,10 @@
 # Ensemble Detection Recipe (EDR) Explainer
 
+This explains the recipe built in the local workbench. Hosted annotation can
+apply compatible administrator-installed recipes through the
+[hosted assistance adapter](hosted_assistance.rst); model installation and dataset
+attachments are described in [hosted runtime](hosted_runtime.rst).
+
 ## What an EDR is
 
 An **Ensemble Detection Recipe (EDR)** is the full reusable detection workflow in Tator.

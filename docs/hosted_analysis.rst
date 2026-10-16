@@ -1,13 +1,35 @@
-Canonical inputs for analysis and training
-==========================================
+Hosted analysis and training
+============================
+
+Administrators start analysis from a selected dataset's **Quality & compute**
+dialog. Choose a server-configured **Compute task**, review its parameters, and
+select **Start task**. The same dialog lists saved analyses and their results.
+If no compute recipes are configured, saved results remain readable; an operator
+must configure the available tasks before a new run can start.
+
+For Incoming diversity analysis, first select unassigned images in **Incoming**
+and attach a whole-image SALAD descriptor in **Feature recipes**. For pruning,
+start a configured pruning task here, then open its completed review page.
+Changing that hosted review's producer recipe requires a new analysis.
+
+See `Hosted workflow <hosted_workflow.rst>`_ for dataset approval and review,
+`SALAD profiles <hosted_salad_profiles.rst>`_ for descriptor management, and
+`Hosted inference runtime <hosted_runtime.rst>`_ for task configuration and
+scheduling. All guides are listed in the `documentation index <index.rst>`_.
+
+Canonical inputs
+----------------
 
 Hosted analysis starts from a saved, approved-only snapshot. The snapshot fixes
 image membership, annotation versions, stable class IDs, split membership and
 dataset settings. Incoming drafts and submitted work are never discovered by a
-folder scan. Administrators alone can capture, inspect, export or apply results.
+folder scan. Incoming diversity analysis adds a separately captured candidate
+population; it does not promote those images into the confirmed snapshot.
+Administrators alone can capture, inspect, export or apply results.
 
-``CanonicalAnalysis.capture`` creates the job and snapshot in one SQLite
-transaction. Its receipt identifies that exact capture. ``prepare`` materializes
+``CanonicalAnalysis.capture`` creates the job and, when needed, a new snapshot
+in one SQLite transaction; it can also bind an existing immutable snapshot.
+Its receipt identifies that exact capture. ``prepare`` materializes
 the snapshot in a private directory and verifies every file before reuse.
 ``dqe_request`` translates this into the existing DQE active-workspace request;
 client-supplied source paths and dataset IDs cannot override its binding.
@@ -27,7 +49,7 @@ Polygon training needs a dedicated polygon view because canonical exports retain
 bounding boxes and polygon labels separately.
 
 Recipes, caches and results
---------------------------
+---------------------------
 
 This boundary does not change DINOv3, SAM3, C-RADIO, SALAD, correction strengths or
 fusion weights. Request parameters and frozen dataset model/recipe settings are
@@ -124,6 +146,8 @@ Reports, bundles and frozen source identities are part of server recovery.
 Saved analysis history is paginated. An administrator can reopen a task they
 started to follow its progress or request cancellation after navigating away.
 Completed results remain available when their originating snapshot becomes old.
+Other administrators can inspect the retained analysis history; control of the
+underlying runtime request remains with its initiating administrator.
 
 Native execution
 ----------------
@@ -297,10 +321,11 @@ deployed browser workflow require separate qualification on the intended runtime
 
 
 Durable heavy-job publication
-----------------------------
+-----------------------------
 
 Administrator-admitted heavy analyses use the scoped job authority described in
-``hosted_runtime.rst``. Canonical capture, its job grant and request binding commit
+`Hosted inference runtime <hosted_runtime.rst>`_. Canonical capture, its job
+grant and request binding commit
 in one authenticated admission transaction. A crash before dispatch leaves a
 recoverable binding; failed binding creation rolls back the capture. Logging out
 after that admission commit does not cancel the job, including before the initial
@@ -329,7 +354,7 @@ input manifests use the actual bytes for ``image_sha256`` and retain original
 provenance in ``source_image_sha256``. Snapshot source identities never change.
 
 Direct paid-caption preparation
-------------------------------
+-------------------------------
 
 The direct paid-caption endpoint accepts JPEG, PNG and WebP sources; a TIFF
 working PNG does not change that source-format policy. Source inspection,

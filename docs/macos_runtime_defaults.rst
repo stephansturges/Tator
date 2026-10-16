@@ -7,7 +7,7 @@ The defaults below apply when starting Tator with
 The launcher reads ``.env.macos`` before applying its defaults.
 
 CLIP loads when requested
-------------------------
+-------------------------
 
 The launcher defaults ``TATOR_SKIP_CLIP_LOAD`` to ``1``. This avoids loading
 the optional CLIP backbone during backend startup. It does not remove CLIP

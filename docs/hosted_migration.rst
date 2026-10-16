@@ -1,9 +1,15 @@
 Migrating a legacy YOLO dataset
-==============================
+===============================
 
 This operator tool copies a reviewed source inventory into a new hosted dataset.
 It never moves, deletes or rewrites source files. It does not discover the live
 WALDO installation, stop a server or perform a production cutover.
+
+Prepare the destination using `Hosted deployment <hosted_deployment.rst>`_ first.
+After import, follow the `administrator workflow <hosted_workflow.rst>`_ for
+annotation and approval. Full backup and rollback are described in
+`Hosted operations <hosted_operations.rst>`_. See the
+`documentation index <index.rst>`_ for related guides.
 
 Inventory first
 ---------------
@@ -50,7 +56,9 @@ pixels; images are never silently resized. Canonical dimensions and annotations
 use the encoded pixel grid. EXIF display orientation is ignored, including TIFF
 decoder rotation. Original source bytes and their SHA-256 remain unchanged.
 Browsers, exported datasets and native consumers use an immutable neutral
-working representation when required; see ``hosted_operations.rst``.
+working representation when required; see
+`Encoded media and immutable working views
+<hosted_operations.rst#encoded-media-and-immutable-working-views>`_.
 
 Labeled images with EXIF orientation other than 1 require a declared source
 coordinate frame. Add ``"label_coordinate_space": "encoded"`` or

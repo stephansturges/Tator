@@ -3,6 +3,12 @@
 This document describes how caption dataset runs decide which images to process
 and which generated rows become active training data.
 
+The storage paths and run controls below belong to the local workbench. Hosted
+caption jobs reuse native generation recipes through their own authenticated
+proposal and review flow; see [hosted workflow](hosted_workflow.rst) and
+[hosted runtime](hosted_runtime.rst). The local overlay is not the authority for
+the hosted confirmed dataset.
+
 ## User Story
 
 Dataset creation runs can take a long time and may be run repeatedly. Users need

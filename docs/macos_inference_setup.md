@@ -4,6 +4,10 @@ Tator supports interactive inference on Apple Silicon. Detector and segmentation
 training remain CUDA-first; local Qwen adapter training is available for models
 that fit the machine.
 
+This guide starts the single-user local workbench. For server-owned datasets,
+accounts and review queues, use [hosted deployment](hosted_deployment.rst).
+See the [documentation index](index.rst) for both modes.
+
 ## Install
 
 Use Python 3.11.

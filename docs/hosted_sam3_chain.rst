@@ -1,5 +1,12 @@
 Hosted saved SAM3 recipes
-========================
+=========================
+
+This is the execution reference for installed recipe packages. See
+`Installed SAM3 recipes and private presets
+<hosted_runtime.rst#installed-sam3-recipes-and-private-presets>`_ for configuration
+and the current UI boundary. The visible text-prompt **Start cascade** control
+is a separate workflow. See the `documentation index <index.rst>`_ for everyday
+annotation and deployment guides.
 
 ``services.hosted.sam3_chain.Sam3ChainRuntime`` executes an administrator's
 installed recipe package in the user's sequential private worker. The request

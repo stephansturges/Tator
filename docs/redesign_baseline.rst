@@ -1,7 +1,10 @@
 Baseline before the interface redesign
 ======================================
 
-This inventory records the source consolidation on 15 October 2026. It
+This is a historical inventory of the local-workbench source consolidation on
+15 October 2026, before the subsequent hosted deliveries. For current entry
+points, use the `documentation index <index.rst>`_; hosted users should begin
+with `Hosted workflow <hosted_workflow.rst>`_. This page
 distinguishes delivered functionality from experiments and deployment tasks,
 so the redesign can preserve useful work without inheriting stale plans.
 
@@ -25,7 +28,7 @@ process. An updated backend and a browser reload are required to use the new
 library interface with the current pruning code.
 
 Known limits and further work
-----------------------------
+-----------------------------
 
 **Pruning performance.** The latest full API measurement was about 2.25–2.27
 seconds after warm-up, above the two-second target. The live coverage-index
@@ -68,7 +71,7 @@ local agent state and historical working notes remain excluded. A clean Git
 working tree does not mean those local assets have been deleted or backed up
 to the source remote.
 
-The consolidation audit found one local worktree on ``main``, no stashes,
-only ``main`` on the remote, and no open pull requests. No branch deletion
-or unrelated merge was needed. Functional cleanup should start as a new
-change against this consolidated baseline.
+At that dated checkpoint, the consolidation audit found one local worktree on
+``main``, no stashes, only ``main`` on the remote, and no open pull requests. No branch deletion
+or unrelated merge was needed. These observations describe that checkpoint,
+not the current state of a contributor's checkout or deployment.

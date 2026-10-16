@@ -1,5 +1,13 @@
 Datasets and saved review sessions
-=================================
+==================================
+
+This guide covers the local workbench's storage library, served by the local
+backend. Hosted accounts use the dataset workspace, assignment/review flow and
+administrator archive controls described in
+`Hosted workflow <hosted_workflow.rst>`_ and
+`Hosted operations <hosted_operations.rst>`_. The two applications have separate
+storage and recovery interfaces. See the `documentation index <index.rst>`_ to
+choose the appropriate guide.
 
 Open **Data Quality Explorer → Datasets & sessions** to find datasets and
 saved reviews on the connected backend. The library also shows browser
@@ -61,7 +69,7 @@ files. Files in trash or quarantine still consume disk space; the filesystem's
 free-space reading is shown separately.
 
 Preview cleanup before confirming
---------------------------------
+---------------------------------
 
 Choose **Manage storage**, or select entries in **Cleanup**. Only actions
 supported by every selected entry are available. **Preview selected cleanup**

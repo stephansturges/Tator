@@ -2,8 +2,16 @@ Dataset pruning
 ===============
 
 Dataset pruning proposes a smaller dataset, shows what would be lost, and
-exports the removals you approve as a new dataset variant. It does not delete
-source images or edit their annotations.
+exports the images remaining after approved removals as a new dataset variant.
+It does not delete source images or edit their annotations.
+
+The planning and review rules below apply to both applications. The getting
+started steps and unprefixed API routes describe the local workbench. Hosted
+administrators start a pruning task from **Quality & compute**, then open its
+completed result for review; inputs are frozen confirmed annotations and their
+captured working media. See
+`Hosted analysis and training <hosted_analysis.rst>`_ for that entry point and
+the `documentation index <index.rst>`_ for other workflows.
 
 Getting started
 ---------------
@@ -92,7 +100,7 @@ class uses percentile one. Class frequency is measured in appearance groups,
 so repeated frames do not each add a separate rarity unit.
 
 Reviewing and changing a plan
-----------------------------
+-----------------------------
 
 The graph and counts describe the current ready preview. **Apply** captures
 that exact proposal. **Discard** returns to the applied settings. Superseded
@@ -120,16 +128,20 @@ Exporting a variant
 -------------------
 
 Export removes only approved images. The loss report is recomputed for that
-actual subset, which can differ from the complete proposal. The export includes
-the retained original image bytes and current saved labels/captions. It checks
-the source and review generation again before publishing the download.
+actual subset, which can differ from the complete proposal. Local exports include
+retained source image bytes and saved labels/captions. Hosted exports use the
+analysis's frozen working-image bytes and confirmed annotation versions; those
+working images can differ from original uploads when pixel conversion was
+required. Original uploaded bytes and provenance remain in hosted storage.
+The export checks the source and review generation again before publishing
+the download.
 
 The grouped split option keeps duplicate/video groups together when rebuilding
 train/validation splits. The preserve option keeps existing split membership.
 Neither option alters the source dataset.
 
 Reusing DQE and SALAD
---------------------
+---------------------
 
 Pruning shares DQE's object-feature producer and ingestion's whole-image
 descriptor machinery. Recipes can combine multiple backbones, their existing
@@ -181,6 +193,12 @@ The main sequence is::
     POST /dataset_pruning/jobs/{job_id}/review
     POST /dataset_pruning/jobs/{job_id}/exports
 
+Hosted review mounts these routes beneath
+``/api/hosted/analysis/jobs/{hosted_job_id}``. Creating a new hosted analysis
+uses the configured ``/api/hosted/tools/heavy`` task; the mounted pruning
+creation route cannot start a new producer run. Hosted session and snapshot
+checks apply in addition to the shared review ledger.
+
 Settings previews use ``kind=settings`` and the five fields in ``PlanSettings``:
 ``policy``, ``object_weight``, ``max_removed_images``,
 ``max_affected_appearance_groups`` and
@@ -212,12 +230,15 @@ Undo, inherited Keep decisions and approved-subset export::
     python -m pytest -q tests/test_dataset_pruning_coverage.py \
       tests/test_dataset_pruning_planning.py tests/test_dataset_pruning_cache_replay.py
 
-The final repair review passed 102 tests. A separate isolated browser run used
-47 copied WALDO40 images and exercised preview, lost-response recovery, Keep,
+The local pruning repair review recorded 102 passing tests. A separate isolated
+browser run used 47 copied WALDO40 images and exercised preview,
+lost-response recovery, Keep,
 approval, reload and a 46-image export. Eighteen cached full-dataset plans were
 checked on 11,572 images and 259,461 objects without modifying the originals.
-These checks establish the exercised behavior, not an accuracy estimate or a
-detector-training benefit.
+These local-workbench checks establish the exercised behavior, not an accuracy
+estimate, a detector-training benefit or hosted GPU qualification. Hosted
+verification boundaries are described in
+`Hosted analysis and training <hosted_analysis.rst>`_.
 
 The planner is greedy and does not promise a globally optimal retained set.
 Initial accounting can be expensive. Warm planning on the measured WALDO40

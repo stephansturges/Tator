@@ -1,6 +1,12 @@
 Hosted SALAD profiles
 =====================
 
+For the user-facing **Feature recipes** controls, see
+`Hosted workflow <hosted_workflow.rst>`_. This reference describes how trained
+heads and their settings are retained for
+`hosted analysis <hosted_analysis.rst>`_. All guides are listed in the
+`documentation index <index.rst>`_.
+
 Administrators manage trained SALAD heads from dataset settings. The retained
 artifact picker identifies the original name, trained backbone/model and whole
 image or bounding-box role. Its sources are completed native analyses and

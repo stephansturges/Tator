@@ -1,168 +1,253 @@
-Hosted deployment and cutover
-============================
+Deploying and updating a hosted server
+======================================
 
-Deployment status
+Hosted Tator is a self-hosted service: users sign in to a server-owned dataset,
+annotators submit work, and administrators approve the canonical versions used
+by analysis, training and export. Read the `workspace workflow
+<hosted_workflow.rst>`_ for those roles and the `storage and recovery guide
+<hosted_operations.rst>`_ before importing existing data.
+
+Deployment acceptance remains open for the planned dual-A6000 host: actual GPU
+model behavior, WALDO40 migration, live provider execution and final cutover
+have not been qualified on that target. The steps below describe deployment;
+local implementation and test results do not establish that it has happened.
+
+Prepare the runtime
+-------------------
+
+Use Python 3.11–3.13, one control process, supervised model subprocesses and a
+private state directory on local disk. Production startup enforces SQLite
+**3.51.3 or newer**, including its WAL fix. Check the library linked to the
+service's Python interpreter, not just the system ``sqlite3`` executable.
+Keep the live database off NFS, SMB and synchronized folders.
+
+The Linux/systemd example uses these paths; adapt all references together if
+choosing another layout:
+
+* ``/opt/tator``: reviewed source checkout, with its environment at ``.venv``.
+* ``/var/lib/tator-hosted``: new writable state, owned by the service user,
+  mode 0700. Never point this at an original dataset directory.
+* ``/etc/tator``: operator-owned environment and model configuration.
+* ``/srv/tator-models``: trusted, readable model sources; installed copies and
+  caches are stored inside the state directory.
+
+From the source checkout, create the environment and install the control
+requirements::
+
+    cd /opt/tator
+    python3.11 -m venv .venv
+    .venv/bin/python -m pip install -r requirements-hosted.txt
+    .venv/bin/python -c 'import sqlite3; print(sqlite3.sqlite_version); assert sqlite3.sqlite_version_info >= (3, 51, 3)'
+    .venv/bin/python -m pip check
+
+Choose a Python build linked to a sufficiently recent SQLite if this check
+fails. Installing Python packages does not upgrade its linked SQLite library.
+The `hosted requirements <../requirements-hosted.txt>`_ include Pydantic 2,
+HTTPX, Pillow, PyPNG and NumPy/SciPy. PyPNG preserves exact 16-bit PNG
+transparency during working-image conversion.
+
+These requirements cover the control process. Before enabling neural tools,
+native analyses or the multistage paid-caption pipeline, install the selected
+platform's full inference dependencies into that same environment. The
+`general runtime requirements <../requirements.txt>`_ and `hosted model/runtime
+guide <hosted_runtime.rst>`_ describe the model stacks and configuration; choose
+Torch/CUDA builds for the actual host. Starting the control process does not
+load models or prove that they can run.
+
+Install ``age`` separately with the operating system's package manager and
+check it with the service environment::
+
+    .venv/bin/python -m tools.hosted_recovery check-age
+
+Configure the service
+---------------------
+
+Create a dedicated non-login ``tator`` service user and group using the host's
+account-management tools. With the example layout, install private state and
+configuration files from the checkout::
+
+    sudo install -d -o tator -g tator -m 0700 /var/lib/tator-hosted
+    sudo install -d -o root -g tator -m 0750 /etc/tator
+    sudo install -o root -g tator -m 0640 deployment/hosted/hosted.env.example /etc/tator/hosted.env
+    sudo install -o root -g tator -m 0640 deployment/hosted/models.example.json /etc/tator/models.json
+
+Use these copy commands for a new installation, not over an existing operator
+configuration. Edit the installed files before starting the service:
+
+* ``TATOR_HOSTED_STATE_DIR`` names the private state root.
+* ``TATOR_HOSTED_ORIGIN`` is the exact browser HTTPS origin, for example
+  ``https://tator.example.net``. It must have no path, query or credentials.
+* ``TATOR_HOSTED_MODEL_CONFIG`` names the model-policy JSON file. The shipped
+  example has no installed models and example ``cuda:0``/``cuda:1`` assignments;
+  replace them with the devices and model definitions available on this host.
+* Optional ``TATOR_HOSTED_PROVIDER_PRICING`` names a JSON file of verified
+  provider prices and token limits; see `Paid providers`_ below.
+
+The `environment example <../deployment/hosted/hosted.env.example>`_,
+`model example <../deployment/hosted/models.example.json>`_ and
+`systemd unit <../deployment/hosted/tator-hosted.service>`_ must agree on paths.
+The unit sets ``HF_HOME`` and ``TORCH_HOME`` below the state root, hides home
+directories, and makes the filesystem read-only except for that root. If moving
+state, also update those cache variables and ``ReadWritePaths``. The service
+must be able to read its source, environment and trusted model files. Original
+datasets do not need service write access.
+
+Bootstrap the first administrator as the service user, from the checkout::
+
+    sudo -u tator /opt/tator/.venv/bin/python -m tools.hosted_admin \
+      --state-dir /var/lib/tator-hosted administrator
+
+This creates the initial account and prompts twice for a password of at least
+12 characters. It is a first-account bootstrap, not a password-reset command.
+Keep passwords out of shell arguments and configuration examples. Later,
+invite users through **People** and deliver their invitation links yourself.
+
+HTTPS and startup
 -----------------
 
-The hosted implementation is being qualified locally. These files prepare a
-Linux deployment; they do not establish that a GPU server has been deployed.
-The dual-A6000 host details, real model tests, WALDO40 migration and final
-cutover remain pending. Existing dataset directories and services must stay
-intact until their replacements pass the migration and acceptance checks.
+Production requires HTTPS. The supplied unit binds Uvicorn only to
+``127.0.0.1:8010`` and trusts forwarded proxy headers only from loopback. Use a
+local HTTPS reverse proxy; set ``TATOR_HOSTED_ORIGIN`` to its exact browser
+origin. Keep authentication and application authorization enabled behind it.
 
-Runtime layout
---------------
-
-Use one control process, a private local-disk state directory, and supervised
-model subprocesses. The control process uses Python 3.11–3.13 and SQLite
-3.51.3 or later. Check the SQLite library used by that exact Python interpreter;
-the system ``sqlite3`` executable may use a different library. Do not place
-the live database on NFS, SMB or a synchronized folder.
-
-Install the repository's existing Linux/GPU dependencies in the service's
-virtual environment, followed by ``requirements-hosted.txt``. The hosted-only
-requirements cover the control process; they do not install the model stacks.
-They include Pydantic 2, HTTPX and the NumPy/SciPy routines used to review
-retained analysis results. A control-process startup does not load Torch,
-Transformers or the legacy API application. Paid caption orchestration and
-native model execution still require the repository's full runtime dependencies.
-Install ``age`` separately for encrypted recovery downloads. Register existing
-weights in the trusted model configuration and install them through Tools &
-models. Their registered copies are included in recovery backups.
-
-The provided systemd unit assumes ``/opt/tator`` for source and its virtual
-environment, ``/var/lib/tator-hosted`` for writable state, and
-``/etc/tator/hosted.env`` for configuration. Create a dedicated ``tator`` user
-and a state directory owned by that user with mode 0700. Copy and customize
-``deployment/hosted/hosted.env.example`` and ``models.example.json``. The empty
-model registry deliberately makes no claim about installed server weights.
-See ``hosted_runtime.rst`` for the exact model definitions and class mapping.
-
-The unit's read-only filesystem policy allows model sources under
-``/srv/tator-models``. Its cache, generated jobs and installed model copies
-must remain under the writable state directory. Home directories are hidden
-from the service. Adjust trusted source paths when preparing the server;
-never widen write permissions to original datasets to make an analysis work.
-
-Bootstrap the first administrator from the service environment with
-``python -m tools.hosted_admin --state-dir /var/lib/tator-hosted administrator``. That command prompts for the password. Do not
-put passwords in shell arguments, environment examples or service files.
-Subsequent accounts are invited through People. Send invitation links yourself.
-
-Private HTTPS
--------------
-
-Bind Uvicorn only to ``127.0.0.1:8010``. After setting the exact HTTPS origin,
-configure Tailscale Serve on the target server::
+For a private Tailscale deployment, with Tailscale already installed and joined
+to the intended tailnet, configure Serve and use its reported HTTPS address::
 
     tailscale serve --bg http://127.0.0.1:8010
     tailscale serve status
 
-Use the HTTPS address reported by Serve as ``TATOR_HOSTED_ORIGIN``. Restrict
-tailnet access to the intended users. Serve provides tailnet access; do not
-enable public Funnel for this deployment. The application still requires its
-own username/password and checks role, dataset membership, editing ownership,
-CSRF and installation identity for every protected operation.
+Restrict tailnet access to intended users; public Funnel is unnecessary for
+this private setup. See `Tailscale Serve
+<https://tailscale.com/docs/reference/tailscale-cli/serve>`_. A different local
+HTTPS proxy can use the same loopback upstream and exact-origin contract.
 
-The service trusts forwarded proxy information only from loopback. Do not set
-``--forwarded-allow-ips '*'``. Do not start additional Uvicorn workers or enable
-development reload. The state-directory process lock rejects a second control
-process, and systemd stops the whole worker process group on service shutdown.
+Install and start the customized unit. In the loopback health check, replace
+``tator.example.net`` with the hostname from ``TATOR_HOSTED_ORIGIN``; the
+application rejects other Host headers::
 
-The proxy commands and forwarding policy follow `Tailscale Serve
-<https://tailscale.com/docs/reference/tailscale-cli/serve>`_ and `Uvicorn deployment
-<https://www.uvicorn.org/deployment/>`_. Recheck the installed versions before
-cutover. No proxy changes have been applied by the local implementation work.
+    sudo install -o root -g root -m 0644 deployment/hosted/tator-hosted.service /etc/systemd/system/tator-hosted.service
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now tator-hosted
+    sudo systemctl status tator-hosted
+    sudo journalctl -u tator-hosted -n 100 --no-pager
+    curl --fail -H 'Host: tator.example.net' http://127.0.0.1:8010/health
 
-Acceptance before changing the live entry point
-----------------------------------------------
+Do not enable development reload or additional Uvicorn workers. The state-root
+process lock rejects another live control process. ``KillMode=control-group``
+stops its model subprocesses during shutdown. Keep the unit's explicit
+``--forwarded-allow-ips 127.0.0.1``; a wildcard would trust arbitrary callers.
 
-1. Inventory the existing WALDO40 source, active annotation overlays, labelmap,
-   splits, recipe files, fitted corrections, SALAD descriptors and model paths.
-   Resolve discrepancies before creating a trusted migration baseline.
-2. Migrate into new hosted storage. Compare source and destination media hashes,
-   image/object counts, exact annotations, captions, stable class mapping,
-   split/group metadata and every registered model/recipe artifact. Keep the
-   source untouched. See ``hosted_migration.rst``.
-3. Run two annotators and an administrator against actual GPU weights. Check all
-   first-pane tools, isolation, idle unload, a heavy analysis interruption, and
-   automatic restoration. Check real latency and memory use; CPU doubles do
-   not qualify GPU model behavior.
-4. Submit, return and approve individual images; test a lost connection, stale
-   tab, administrator override and restart during active work. Confirm that
-   Incoming is absent from every analysis, training input and dataset export.
-5. Create an encrypted recovery backup, download it to another machine, restore
-   into a fresh private directory and continue an existing assignment. Old
-   cookies and editor leases must fail. Reconcile paid usage before enabling
-   provider calls on the restored installation.
-6. Complete independent data-preservation, authorization, inference lifecycle
-   and first-time-user reviews. Resolve findings before switching the live URL.
+Health and readiness
+--------------------
 
-Recovery and rollback
----------------------
+``GET /health`` is unauthenticated and returns
+``{"status":"ok","mode":"hosted"}``. Check it through both loopback and the
+configured HTTPS address; a loopback request needs the configured Host header
+as shown above. It proves the control application responds, not
+that models, encryption or a provider are usable. There is no ``/ready`` route.
 
-Archive images or datasets through the administrator workspace; this preserves
-media and annotation history. Physical reclamation is separate and must obey
-the retention and reference checks in ``hosted_operations.rst``. Never delete
-source directories to reclaim space during cutover.
+After signing in through HTTPS:
 
-A dataset ZIP is an interchange export. An encrypted server backup includes
-accounts, work in progress, confirmed versions and registered artifacts. Keep
-the private age identity on a separate computer, not on the server. The browser
-accepts only the public encryption recipient. Test decryption and continuation
-of work before treating a downloaded file as a usable recovery copy.
+* ``GET /api/hosted/session`` checks the authenticated session.
+* ``GET /api/hosted/tools/catalog?dataset_id=DATASET_ID`` and
+  ``GET /api/hosted/tools/state?dataset_id=DATASET_ID`` expose the caller's tools
+  and the chosen dataset's model selections. Substitute an accessible dataset
+  ID. The **Tools & models** workspace provides these controls and installs
+  registered model copies.
+* Administrator-only ``GET /api/hosted/tools/runtime`` reports the runtime
+  phase and owners. ``available`` with no owners can mean no model has loaded.
 
-To roll back an application release, stop the whole service before changing its
-source. Restore into a new state directory when a schema is incompatible; do
-not overwrite the current database or reuse old browser sessions. Preserve
-both states while reconciling any work performed after the backup. Do not
-resume editing the original dataset and hosted copy concurrently.
+Use a disposable dataset to verify upload, editing, submission, review and
+export, then invoke each enabled tool with its actual weights. Check the
+service logs and resource use. Run ``check-age`` as the service user and
+perform a recovery drill before relying on backups.
 
-Paid service secrets
--------------------
+Migrate and cut over
+--------------------
+
+1. Inventory the source dataset, active annotation overlays, labelmap, splits,
+   recipe files, fitted corrections, descriptors and model paths. Resolve
+   discrepancies before accepting a migration baseline.
+2. Follow the `migration guide <hosted_migration.rst>`_ to import into new hosted
+   storage. Compare source/destination hashes, image/object counts, exact
+   annotations, captions, class order, split/group metadata and registered
+   model/recipe artifacts. Keep sources unchanged.
+3. Exercise two annotators and an administrator with actual enabled model
+   weights: private tool isolation, idle unload, heavy-job interruption and
+   restoration, measured latency and memory use.
+4. Test submit, return, approve, lost replies, stale tabs, administrator override
+   and restart. Incoming work stays outside canonical analysis, training and
+   export; explicit ingestion analysis uses separately captured candidates.
+5. Download an encrypted backup, restore into a new private directory and
+   continue an assignment after signing in again. Old cookies and leases must
+   fail. Reconcile paid usage before enabling providers in the restored copy.
+6. Resolve data-preservation, authorization and usability findings before
+   switching the live entry point. Choose one writable installation; do not
+   edit original and migrated copies concurrently.
+
+Updates and rollback
+--------------------
+
+Before changing a live release, ask users to save or retain local drafts and
+record active jobs. Stop admitting new work, let wanted jobs finish, and record
+any unresolved paid requests; a server restart does not cancel remote Batch
+work or establish whether an unknown paid request was charged.
+
+Create a full encrypted backup and record its checksum, source revision and
+configuration. Keep the previous release/environment available. Back up the
+service unit, environment, external model-policy/pricing files and proxy setup
+separately: they are not automatically included in the database/artifact
+archive. Follow `backup and restore <hosted_operations.rst>`_ for the drill.
+
+Then stop the whole service before replacing source or dependencies::
+
+    sudo systemctl stop tator-hosted
+    sudo systemctl is-active tator-hosted
+
+Deploy the reviewed release, install its requirements (including changes to
+``requirements-hosted.txt``), and repeat the interpreter/SQLite and ``pip check``
+checks. Retain the same state root for a compatible upgrade. Compare shipped
+examples with operator configuration instead of overwriting it. Reload systemd
+if its unit changed, start the service, and repeat health, login, a small
+annotation/export workflow and the enabled tool checks before reopening work.
+
+Do not point older code at a database changed by an incompatible release. For
+rollback, stop the service and restore the matching backup into a new root
+with the matching release. Update all service state/cache paths, preserve the
+current root, and reconcile work performed since the backup. Restored sessions
+and leases are invalidated; paid providers remain paused pending reconciliation.
+Archive through the workspace and reclaim only eligible unused objects through
+its retention checks; never delete source directories to make room for cutover.
+
+Paid providers
+--------------
 
 Provider keys are write-only through the administrator API and stored in the
-private server database. They are not independently encrypted on disk: the
-service account and machine administrator can read them. Full recovery copies
-are age-encrypted. Protect the live volume and its access permissions accordingly.
-Browser error responses omit submitted values, and configuration responses never
-return a stored credential. Local Qwen does not consume a paid-provider budget.
+private database. They are not independently encrypted on disk: the service
+account and machine administrator can read them. Protect the live volume and
+permissions; full recovery archives are age-encrypted. Configuration responses
+never return stored credentials. Local Qwen does not use a provider budget.
 
-Reservations use integer millionths of USD and serialize against a UTC monthly
-budget. Unknown outcomes retain their reserved cost. An observed underestimate
-pauses further paid use rather than hiding the excess. Restoration disables paid
-providers because a backup can predate charges on the provider's bill. These
-controls include a fixed-endpoint Responses API transport, tested with a mocked
-provider only. They do not establish live provider execution acceptance.
+Set ``TATOR_HOSTED_PROVIDER_PRICING`` to the **path** of an operator-owned JSON
+file keyed by permitted model ID. Each entry requires integer
+``input_microdollars_per_million``, ``cached_input_microdollars_per_million``,
+``output_microdollars_per_million``, ``input_token_ceiling`` and
+``max_output_tokens``. Use current provider rates and actual model limits;
+unpriced models cannot dispatch. Remote Batch also requires a separate
+``batch`` object with those five verified Batch rate/limit fields. Optional
+``image_details`` lists allowed image-detail values; ``original`` must be
+explicitly included to be available.
 
-Set ``TATOR_HOSTED_PROVIDER_PRICING`` to an operator-owned JSON object keyed by
-permitted model ID. Each entry needs integer ``input_microdollars_per_million``,
-``cached_input_microdollars_per_million``, ``output_microdollars_per_million``,
-``input_token_ceiling`` and ``max_output_tokens``. Populate these from the current
-provider rates and actual model context limit before enabling calls; there are
-no baked-in price assumptions. An unpriced model cannot dispatch. The gateway
-reserves the configured full input ceiling plus maximum output cost, then uses
-reported token usage to calculate estimated spend. Reconcile it against provider
-billing. These are application reservations, not a provider-enforced hard cap.
-For asynchronous Batch jobs, add a ``batch`` object under that same model with
-its explicitly verified Batch rates and input/output limits using those five
-field names. A model without this separate record is unavailable in Remote
-Batch jobs. Optional ``image_details`` lists permitted image-detail values;
-``original`` is unavailable unless the operator explicitly includes it.
+Reservations serialize against a UTC monthly budget in millionths of USD.
+Unknown outcomes retain their reservation; underestimated usage pauses further
+paid calls. These are application reservations, not a provider-enforced cap.
+Review and reconcile bills in **Paid services**, including terminal Batch
+requests whose output collection failed. Restore pauses providers because a
+backup may predate external charges.
 
-The gateway takes the image from protected immutable storage, not a client URL
-or filesystem path. It disables provider storage, automatic transport retries,
-redirects and environment proxies. A lost reply retains its reservation and
-requires reconciliation; retrying the same operation never sends it twice.
-Late results are billed and retained but cannot modify an image after ownership
-or version changes. Billing and result retention commit in one transaction.
-
-Protocol references: `Responses API image inputs
-<https://developers.openai.com/api/docs/guides/images-vision>`_ and `text output
-<https://developers.openai.com/api/docs/guides/text>`_. Hosted caption jobs now
-reuse the native multistage caption/QA pipeline through the metered gateway;
-Remote Batch jobs use the separate native combined caption-and-QA recipe.
-Both retain results for explicit human approval. Local mocked-transport and
-browser checks cover these integrations; actual provider model behavior, billing
-and limits must be qualified separately before operational acceptance. See
-``hosted_runtime.rst`` for their distinct recovery and admission contracts.
+The gateway reads protected immutable images, disables automatic transport
+retries, redirects and environment proxies, and never resends an exact request
+with an unknown outcome. Local caption jobs use the metered multistage pipeline;
+Remote Batch uses a separate combined caption/QA recipe. Results require human
+application. See `provider admission, billing and recovery
+<hosted_runtime.rst>`_ for the detailed contracts.

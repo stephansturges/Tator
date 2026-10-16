@@ -1,44 +1,29 @@
-Hosted artifact storage and recovery
-===================================
+Hosted storage, backups and recovery
+====================================
 
-The hosted **Export & recovery** dialog creates confirmed-dataset exports and
-encrypted server backups, lists archives, and restores archived memberships.
-These operations do not migrate an existing dataset or establish that every
-legacy model/configuration file has already been registered for recovery.
-The application and recovery CLI use the schema-aware reference enumerator and
-restore hook described below by default.
+The administrator's **Export & recovery** workspace has three distinct uses:
 
-Immutable objects
------------------
+* **Dataset export** produces an interchange ZIP of confirmed canonical data.
+  It does not contain accounts, assignments or Incoming work.
+* **Full recovery backup** captures database state and referenced artifacts in
+  an encrypted archive, including work in progress and retained history.
+* **Archive/restore** changes image or dataset membership while preserving
+  media and annotation history. Physical deletion is a separate operation.
 
-``services.hosted.artifacts.ArtifactStore`` stores objects by their SHA-256
-digest under ``blobs/sha256/<first-two-characters>/<digest>``. Media and custom
-artifact bytes can share this store. Annotation versions may remain in SQLite.
-Public routes must authorize dataset-image membership before reading an object;
-knowing its digest does not grant access.
+Use the `deployment guide <hosted_deployment.rst>`_ for installation and release
+updates, and the `migration guide <hosted_migration.rst>`_ for importing an
+existing dataset. Backups cover registered artifacts; they do not automatically
+capture every external legacy model or configuration file. The application
+and recovery CLI use the schema-aware reference enumerator and restore hook
+below by default.
 
-``put_stream`` copies in bounded chunks to a private temporary file, checks any
-expected size/hash, flushes and fsyncs it, then publishes using an atomic hard
-link that cannot overwrite an existing object. Its directory entry is fsynced
-before returning. Existing matching objects are verified rather than replaced.
-``put_file`` is an administrative import interface: it reads the source without
-following a final symlink and never changes the original file. Remote clients
-must not be given arbitrary server-path access through this interface.
+Only server-acknowledged work is in the archive. Unsent edits and recovery
+journals stored in a user's browser are not part of a server backup; resolve or
+retain them separately before maintenance.
 
-Reference creation and removal have one lock order::
-
-    with artifacts.exclusive():
-        reference = artifacts.put_stream(upload)
-        with store.transaction() as connection:
-            # Record this exact reference in SQLite.
-            ...
-
-The lock is shared across threads and processes using this store root. Acquire
-it before beginning a SQLite write transaction. Garbage collection uses the
-same lock and checks references while holding it. The low-level
-``delete_unreferenced`` primitive does not implement administrator authorization,
-the minimum 30-day recovery period, or purge previews: those policies must be
-satisfied by the caller before using it. This is not a user-facing deletion API.
+Run the CLI examples from the matching source checkout with the service's
+Python environment (for example, ``/opt/tator/.venv/bin/python`` in place of
+``python``). They do not load the systemd environment file automatically.
 
 Encrypted full recovery backup
 ------------------------------
@@ -57,25 +42,51 @@ fsynced. Existing destination files are never overwritten.
 
 Encryption requires an installed ``age`` executable and an explicit public
 recipient. There is no plaintext full-backup fallback. Keep the private age
-identity independently on the Mac; it is not copied into the archive. The
-capture temporarily contains plaintext SQLite and hard-link pins inside private
+identity on a separate trusted recovery machine; it is not copied into the
+archive or submitted to the web application. The capture temporarily contains
+plaintext SQLite and hard-link pins inside private
 server staging. Normal completion/failure removes that staging; a process crash
 can leave private staging for operator inspection and cleanup. Disk encryption
 and access controls still apply to the running server and temporary capture.
 The command-line flags and streaming convention follow the
 `official age documentation <https://github.com/FiloSottile/age#usage>`_.
 
-Check the production dependency before enabling full-backup downloads::
+Before the first backup:
 
-    python tools/hosted_recovery.py check-age
+1. Install ``age`` and use ``age-keygen`` on the trusted recovery machine to
+   create an identity file. Keep that private file separate from the server
+   and backups. In a private directory, create the key once and print its public
+   recipient::
 
-The operator CLI accepts the same application-owned callbacks as the package::
+       age-keygen -o /secure/recovery/identity.txt
+       age-keygen -y /secure/recovery/identity.txt
 
-    python tools/hosted_recovery.py backup \
-      --database /srv/tator/hosted.sqlite3 \
-      --artifacts /srv/tator/artifacts \
-      --output /srv/recovery/tator-20261015.age \
+   Supply only the resulting public ``age1...`` recipient to the browser.
+2. Install the service release's `hosted requirements
+   <../requirements-hosted.txt>`_ and run the following checks from its checkout
+   with the service's Python environment and filesystem permissions::
+
+       python -m tools.hosted_recovery --help
+       python -m tools.hosted_recovery check-age
+
+3. In **Export & recovery**, create a full backup using the public recipient,
+   wait for completion, and download the encrypted file to separate storage.
+   Leave room for the temporary database snapshot and encrypted output.
+
+For operator automation, the equivalent CLI creates a new archive and prints
+its result as JSON. Choose a private existing output directory writable by the
+operator and a filename that does not already exist::
+
+    python -m tools.hosted_recovery backup \
+      --database /var/lib/tator-hosted/hosted.sqlite3 \
+      --artifacts /var/lib/tator-hosted/artifacts \
+      --output /var/backups/tator/tator-YYYYMMDD.age \
       --recipient AGE_PUBLIC_RECIPIENT
+
+The CLI can capture a consistent running installation using the same reference
+lock and SQLite backup operation as the web application. It does not stop the
+service or prevent later edits. Do not replace this with a plain copy of a
+live ``hosted.sqlite3`` file; committed data can also be in its WAL.
 
 The default ``recovery_artifact_references(connection)`` receives the captured SQLite
 connection. It must enumerate all durable media and registered custom-weight,
@@ -88,21 +99,29 @@ Trusted operators can override the callbacks with ``--references`` or
 ``--restore-hook`` using an importable ``module:function``. The normal hosted
 flow does not require an override.
 
-Download the completed encrypted file to the Mac manually. Record its SHA-256
-and retain the private identity separately. A successful download is not a
-restore qualification; exercise restoration and continued work.
+Record the archive's SHA-256, creation time, source revision and expected
+installation. Keep the previous known-good backup until a newer one has passed
+a restore drill. Back up the service unit, environment, external model/pricing
+JSON and proxy configuration separately; record how to reinstall the matching
+code and dependencies. Keep secrets in protected storage. A successful download
+alone does not prove recoverability: test decryption and continued work.
 
 Restore into an empty destination
---------------------------------
+---------------------------------
 
 Stop or isolate the destination application. The restore operation does not
 stop services or enter maintenance mode itself. Restore only into an absent or
-empty root, on a local filesystem::
+empty root, on a local filesystem. Use the matching code/dependencies on the
+trusted recovery machine where the private identity is available::
 
-    python tools/hosted_recovery.py restore \
-      --archive /recovery/tator-20261015.age \
-      --destination /srv/tator-restored \
-      --identity /private/recovery/identity.txt
+    python -m tools.hosted_recovery restore \
+      --archive /recovery/tator-YYYYMMDD.age \
+      --destination /recovery/tator-restored \
+      --identity /secure/recovery/identity.txt
+
+Use the default database filename when restoring for the hosted application.
+The optional ``--database-name`` is for package/operator integrations; the web
+service expects ``hosted.sqlite3`` under its configured state root.
 
 Decryption, archive member validation, SHA-256 verification and SQLite integrity
 checks complete in a private staging root. Traversal paths, symlinks, hard-link
@@ -129,6 +148,26 @@ default database filename is ``hosted.sqlite3`` and the artifact directory is
 ``artifacts``. No existing nonempty installation is overwritten. Hook or
 decryption failure leaves the destination unpublished. Back up the original
 installation and retain original source data until a separately approved cutover.
+
+After a successful restore:
+
+1. Keep the old installation stopped or isolated. Transfer the validated root
+   to the chosen host if needed, without copying the private age identity.
+   Ensure the restored tree is readable/writable by the service user and the
+   state root has mode 0700.
+2. Point the service at the new root. For the example systemd unit, update
+   ``TATOR_HOSTED_STATE_DIR``, ``ReadWritePaths``, ``HF_HOME`` and ``TORCH_HOME``
+   together. Restore external configuration and verify model-source paths.
+3. Start one control process, check ``/health``, sign in again and inspect
+   assignments, versions, archived membership and registered tools. Old
+   sessions and editor leases are intentionally invalid.
+4. Continue a small existing assignment, save it, submit/review it and export a
+   confirmed image. Verify any enabled model on that host. Inspect interrupted
+   jobs and paid calls before resuming them; never create a replacement paid
+   request merely because a reply was lost.
+5. Reconcile provider spending before enabling paid accounts. Keep the old root
+   and backups until any work newer than the recovered snapshot is accounted
+   for; do not operate both copies as writable production installations.
 
 Storage reclamation
 -------------------
@@ -159,7 +198,7 @@ An ordinary dataset ZIP excludes account state, Incoming work and server
 recovery history and cannot replace a full encrypted recovery backup.
 
 Encoded media and immutable working views
-----------------------------------------
+-----------------------------------------
 
 All hosted consumers use the original encoded pixel grid. Admission and native
 decoding share a 256 MiB input limit and a 64 million decoded-pixel limit, perform
@@ -212,6 +251,38 @@ stops with ``media_policy_upgrade_required``. Retained evidence remains availabl
 start a new operation to use current views. Compatible, explicitly captured old
 bytes can continue unchanged. Paid requests already sent retain their original
 inputs and accounting and are never resent merely to upgrade their pixels.
+
+Immutable objects
+-----------------
+
+``services.hosted.artifacts.ArtifactStore`` stores objects by their SHA-256
+digest under ``blobs/sha256/<first-two-characters>/<digest>``. Media and custom
+artifact bytes can share this store. Annotation versions may remain in SQLite.
+Public routes must authorize dataset-image membership before reading an object;
+knowing its digest does not grant access.
+
+``put_stream`` copies in bounded chunks to a private temporary file, checks any
+expected size/hash, flushes and fsyncs it, then publishes using an atomic hard
+link that cannot overwrite an existing object. Its directory entry is fsynced
+before returning. Existing matching objects are verified rather than replaced.
+``put_file`` is an administrative import interface: it reads the source without
+following a final symlink and never changes the original file. Remote clients
+must not be given arbitrary server-path access through this interface.
+
+Reference creation and removal have one lock order::
+
+    with artifacts.exclusive():
+        reference = artifacts.put_stream(upload)
+        with store.transaction() as connection:
+            # Record this exact reference in SQLite.
+            ...
+
+The lock is shared across threads and processes using this store root. Acquire
+it before beginning a SQLite write transaction. Garbage collection uses the
+same lock and checks references while holding it. The low-level
+``delete_unreferenced`` primitive does not implement administrator authorization,
+the minimum 30-day recovery period, or purge previews: those policies must be
+satisfied by the caller before using it. This is not a user-facing deletion API.
 
 Verification boundaries
 -----------------------

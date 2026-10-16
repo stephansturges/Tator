@@ -1,6 +1,13 @@
 Hosted inference runtime
 ========================
 
+This is the technical reference for the authenticated hosted application.
+For sign-in, annotation and review, start with the
+`Hosted workflow <hosted_workflow.rst>`_. Operators should read
+`Hosted deployment <hosted_deployment.rst>`_ before configuring models or
+workers. The `documentation index <index.rst>`_ separates hosted and local
+workflows.
+
 ``services.hosted.runtime`` supervises private child processes without loading
 models in the API process. A user owns one worker containing their SAM predictor
 pool and class predictor. A dataset owns a separate detector worker. Each worker
@@ -68,13 +75,19 @@ a disable/re-enable or demote/re-promote before the next worker poll. No-op acco
 updates and logout do not advance the authority epoch. Admission, dispatch,
 loading completion, computation completion and publication validate the grant;
 the reaper cancels workers whose grant was revoked. Restore changes the
-installation identity and interrupts unfinished grants. Status, cancellation and
-result reads still require a current login, original ownership and admin access.
-Completed retained results remain readable under that current access check.
+installation identity and interrupts unfinished grants. Runtime request status,
+cancellation and result reads require a current login, original ownership and
+admin access. Retained analyses are also available through the separate
+administrator analysis-history API described in
+`Hosted analysis and training <hosted_analysis.rst>`_.
 
-This authority applies only to the admin heavy-job endpoint. Interactive image
-assistance, per-image captions and caption batches retain their captured-session,
-image and editor fences, even when their coordinator uses the heavy scheduler.
+This durable grant applies only to the admin heavy-job endpoint. Interactive
+image assistance and per-image captions retain their captured-session, image
+version and editor fences. Confirmed-snapshot caption batches use their captured
+admin session and frozen membership; running a batch does not require an editor
+lease on every snapshot image. Applying a proposal still requires the current
+image editor and version. These caption coordinators do not gain a durable
+heavy-job grant merely by using the heavy scheduler.
 
 Keep these callbacks short and bound their database waits. They execute outside
 the scheduler lock. They cannot replace the final annotation compare-and-swap:
@@ -113,7 +126,8 @@ logic runs in dependency-light adapters. The native analysis adapter is a
 deliberate compatibility exception: it launches a fresh, isolated child that
 imports the legacy numerical engines with a private snapshot registry and
 private working directories. It does not start an HTTP service or relax the
-ordinary worker's import guard. See ``hosted_analysis.rst`` for that boundary.
+ordinary worker's import guard. See
+`Hosted analysis and training <hosted_analysis.rst>`_ for that boundary.
 Plugins are trusted server code, not a sandbox for arbitrary code.
 
 The supervisor never changes the parent's CUDA environment or invokes a global
@@ -158,9 +172,10 @@ unknown native outputs fail instead of guessing an index offset. Custom YOLO
 head-graft compatibility, segmentation detector modes and exact model versions
 still require qualification with the real selected artifacts.
 
-The API injects ``media_path`` and ``media_sha256`` after membership authorization.
+The API injects ``media_path``, ``media_sha256``, ``source_media_hash`` and the
+frozen ``working_media`` descriptor after membership authorization.
 Workers require a regular file under their configured media root, verify one
-immutable byte snapshot, then decode it without resizing. Limits are 64 MiB
+immutable byte snapshot, then decode it without resizing. Limits are 256 MiB
 compressed media, 64 million pixels and 1,024 tiles per detector request. A
 preload is read-only preparation of that exact image; the API must authorize a
 neighbor image separately without borrowing the current image's editing lease.
@@ -170,7 +185,8 @@ dataset. ``classify_bbox`` and the three ``sam_*_auto`` operations use
 ``ClassifierRuntime`` with the saved classifier head and mandatory recipe
 metadata. Automatic SAM classification crops the predicted mask's bounding box,
 preserves calibrated probabilities and applies the existing foreground guard.
-See ``hosted_assistance.rst`` for supported encoder and recipe details.
+See `Hosted annotation assistance <hosted_assistance.rst>`_ for supported encoder
+and recipe details.
 
 SAM3 text, windowed text and visual prompts reuse the current user's existing
 SAM3 network through a private ``Sam3PromptRuntime``. ``sam3_text_auto`` adds
@@ -191,7 +207,7 @@ it from the model request. Browser parameters cannot supply either identity.
 These CPU component proofs still require real-weight tool qualification.
 
 Authenticated API and model installation
----------------------------------------
+----------------------------------------
 
 ``install_tool_api`` adds the controller to the hosted application's lifespan.
 The supervisor starts lazily. API requests provide image/dataset IDs, expected
@@ -274,7 +290,8 @@ recovers its original request ID and never launches the computation twice. If
 the process dies between reservation and admission, the retry reports that the
 request is unavailable and requires a new explicit command. Heavy factories and
 parameter allowlists come exclusively from trusted server configuration. This
-dispatch seam connects the native adapter described in ``hosted_analysis.rst``.
+dispatch seam connects the native adapter described in
+`Hosted analysis and training <hosted_analysis.rst>`_.
 Admin catalogs expose each named job's operation, allowed parameters and public
 defaults; factories, devices and private roots remain server-owned.
 
@@ -365,7 +382,7 @@ apply. Legacy MLX-specific image-size retry policies are not applied to this
 registered Transformers runtime.
 
 Confirmed-snapshot caption batches
----------------------------------
+----------------------------------
 
 Administrators start ``POST /caption-batches`` with ``dataset_id``, an existing
 ``snapshot_id``, an operation ID, the same caption/settings dictionaries,
@@ -402,7 +419,7 @@ subsequent run only when the pilot passed for the same snapshot, recipe and
 immutable model identities. No synthetic generation result is GPU qualification.
 
 Metered provider caption recipes
--------------------------------
+--------------------------------
 
 Current-image jobs and confirmed-snapshot batches also accept
 ``provider="openai"`` with ``provider_options`` containing a permitted ``model``,
@@ -540,7 +557,7 @@ transport replaced by a test double. It does not qualify live provider limits,
 quality, latency, charging or remote service behavior.
 
 Applying a retained proposal
----------------------------
+----------------------------
 
 ``GET /{id}/images/{image_id}/proposal`` returns the caption, optional generated
 QA, original annotation version, evidence digest and quality findings.
@@ -603,7 +620,7 @@ The integrating event stream must filter private actor/owner details. Notificati
 delivery is not a prerequisite for the pause barrier or a proof of UI acceptance.
 
 Bounds, unloading and restart
-----------------------------
+-----------------------------
 
 Defaults are 32 queued requests per owner, 128 total pending requests, 128
 registered owners, 1,024 retained request records, 128 MiB of queued payloads and
@@ -635,15 +652,19 @@ Evidence and remaining acceptance
 ---------------------------------
 
 Installed SAM3 recipes and private presets
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 An administrator installs a ``sam3_recipe`` package with its recipe file,
 retained crops and classifier artifacts, then attaches exact model identities
 to a dataset. Its SAM3 and optional extra classifier are installed components.
-The existing first-pane cascade controls now read this registry and dispatch
-``sam3_recipe_chain`` to the user's private worker. The restored executor is
-described in ``hosted_sam3_chain.rst``; the old per-recipe executor was incomplete,
-so numerical GPU equivalence has not been established.
+The registry, preset endpoints and canvas bridge support dispatching
+``sam3_recipe_chain`` to the user's private worker. The default ``tator.html``
+does not include the saved-package ``sam3Cascade*`` controls. Its visible
+**Start cascade** control belongs to the separate SAM3 text-prompt workflow;
+it is not a saved-package selector. The installed recipe API and executor are
+described in `Hosted saved SAM3 recipes <hosted_sam3_chain.rst>`_. The old
+per-recipe executor was incomplete, so numerical GPU equivalence has not been
+established.
 
 Cascade presets are scoped to an account and dataset, with revision checks and
 idempotent save/delete receipts. Downloaded ZIPs contain settings and installed
@@ -669,7 +690,7 @@ with matching retained bytes. Native SALAD training uses the confirmed snapshot
 and does not consume Incoming candidates.
 
 Human review of saved captions and QA
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Administrators can open an image and choose ``Review captions and QA``. The
 dialog shows the saved primary/alternate captions and each question and answer,

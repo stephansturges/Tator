@@ -3,6 +3,11 @@
 Tator uses separate Python environments for Apple Silicon inference, general
 Linux use, and the pinned Falcon CUDA stack.
 
+These profiles install the local/model runtime. For a multi-user server, follow
+the [hosted deployment guide](hosted_deployment.rst) as well: its control process
+has additional dependencies, a minimum SQLite version and its own HTTPS/service
+configuration. The local backend launcher does not start the hosted workspace.
+
 ## Poetry setup
 
 Install the repository setup command:
@@ -30,6 +35,16 @@ poetry run tator-setup macos --recreate
 
 The macOS profile uses `.venv-macos`. Linux profiles use `.venv` unless
 `--venv-dir` is provided.
+
+The macOS and general Linux profiles default to `python3.11`, independently of
+the Python running Poetry. Select an installed interpreter with `--python`:
+
+```bash
+poetry run tator-setup macos --python /path/to/python3.11
+```
+
+An existing environment is reused. `--recreate` deletes and rebuilds the selected
+environment; use a new `--venv-dir` when you need to preserve the old one.
 
 Equivalent shell helpers are available:
 

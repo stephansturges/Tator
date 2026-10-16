@@ -1,6 +1,13 @@
 Hosted annotation assistance
 ============================
 
+This reference describes the model adapters available to the hosted canvas.
+An administrator must install and attach compatible models before the related
+tools become available. Start with the
+`Hosted workflow <hosted_workflow.rst>`_ for the user-facing annotation steps,
+or `Hosted inference runtime <hosted_runtime.rst>`_ for configuration and
+admission. See the `documentation index <index.rst>`_ for local-workbench guides.
+
 The hosted adapters return proposals for the existing annotation canvas. They
 do not save labels or captions. The control process and supervisor authorize
 the image, ownership generation, annotation version, editor lease, session and
@@ -8,7 +15,7 @@ installation before admission and again before delivering a result. Human
 annotation changes still pass through the ordinary versioned save operation.
 
 Private trained classifier
--------------------------
+--------------------------
 
 ``services.hosted.assistance_adapters.ClassifierRuntime`` loads one trained head
 and one backbone per user worker. It does not import the application monolith or
@@ -63,7 +70,7 @@ Missing metadata, incompatible feature dimensions and malformed fitted recipes
 also fail explicitly. The hosted path does not infer a substitute backbone.
 
 SAM3 text and visual prompts
----------------------------
+----------------------------
 
 ``Sam3PromptRuntime(network, device)`` wraps the user's already loaded SAM3
 network in a processor. It does not load a second copy of that network. Every
@@ -98,7 +105,7 @@ these limits. Tiled visual prompting is not an existing first-pane operation
 and is rejected.
 
 Local Qwen detection and captions
---------------------------------
+---------------------------------
 
 ``services.hosted.qwen_adapters.QwenRuntime`` runs in the same user worker and
 loads only registered local Transformers model snapshots. ``model_path`` plus
@@ -163,10 +170,14 @@ running a model. The admitted image supplies authoritative dimensions. This
 preview is not a substitute for the generated-dependent prompts recorded by an
 actual caption run.
 
-Paid OpenAI dataset-caption jobs are a separate existing workflow. This local
-Qwen adapter does not call a paid provider or accept an API key. Hosted provider
-credentials, spending reservations and asynchronous batch reconciliation require
-the separate provider gateway and canonical dataset-job integration.
+Paid OpenAI caption jobs use a separate hosted provider gateway. Current-image
+jobs and confirmed-snapshot jobs can run the native caption recipe through
+metered Responses calls; remote OpenAI Batch jobs use the separate asynchronous
+submission and collection path. Credentials, spending reservations and billing
+reconciliation are implemented in those paths. See
+`Metered provider caption recipes <hosted_runtime.rst#metered-provider-caption-recipes>`_
+and `Hosted workflow <hosted_workflow.rst>`_ for setup and use. This local Qwen
+adapter does not call a paid provider or accept an API key.
 
 Saved Detection Recipes
 -----------------------

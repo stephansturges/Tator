@@ -110,7 +110,9 @@ def test_full_incoming_review_admission_and_receipt_recovery(application):
     response = alice.post(f"/api/hosted/images/{image['id']}/submit", json=submission)
     assert response.status_code == 200, response.text
     submitted = response.json()
-    assert alice.post(f"/api/hosted/images/{image['id']}/submit", json=submission).json() == submitted
+    replay = alice.post(f"/api/hosted/images/{image['id']}/submit", json=submission)
+    assert replay.status_code == 403 and replay.json()["commit_outcome"] == "committed"
+    assert replay.json()["operation_id"] == submission["operation_id"] and replay.json()["result_restricted"] is True
     assert alice.get(f"/api/hosted/images/{image['id']}/media").status_code == 404
     image = acquire(admin, submitted, "administrator-tab")
     returned = admin.post(f"/api/hosted/images/{image['id']}/return", json={**context(image, "administrator-tab"), "feedback": "Please check the upper edge."})
@@ -131,6 +133,83 @@ def test_full_incoming_review_admission_and_receipt_recovery(application):
     assert snapshot["images"][0]["annotations"]["alternate_captions"] == ["Nothing to label"]
     assert snapshot["images"][0]["version_id"] == image["current_version"]
     assert again.get(f"/api/hosted/receipts/{approval['operation_id']}").json()["result"] == accepted.json()
+
+
+def test_save_rejection_certifies_only_rolled_back_validation(application):
+    admin = login(application)
+    ds = dataset(admin)
+    image = acquire(admin, upload(admin, ds["id"]))
+    base = f"/api/hosted/images/{image['id']}"
+    command = {**context(image), "annotations": {"objects": [], "alternate_captions": [{
+        "caption": "A scene", "generated_qa_pairs": [{"question": "Color?", "answer": "Orange", "metadata": {"validated_against": 17}}]}]}}
+    rejected = admin.post(base + "/save", json=command)
+    assert rejected.status_code == 422
+    assert rejected.json()["commit_outcome"] == "rejected"
+    assert rejected.json()["operation_id"] == command["operation_id"]
+    assert admin.get(f"/api/hosted/receipts/{command['operation_id']}").json() is None
+    assert admin.get(base).json()["current_version"] == image["current_version"]
+    corrected = {**command, "operation_id": op(), "annotations": {"objects": [], "caption": "Corrected"}}
+    saved = admin.post(base + "/save", json=corrected)
+    assert saved.status_code == 200
+    assert admin.post(base + "/save", json=corrected).json() == saved.json()
+    conflict = admin.post(base + "/save", json={**corrected, "operation_id": op()})
+    assert conflict.status_code == 409 and "commit_outcome" not in conflict.json()
+    reused = admin.post(base + "/save", json={**corrected, "annotations": {"objects": []}})
+    assert reused.status_code == 409 and "commit_outcome" not in reused.json()
+
+
+def test_nested_assignment_archive_requests_and_legacy_retry(application):
+    admin = login(application)
+    user = provision(admin, "alice")
+    ds = dataset(admin)
+    image = upload(admin, ds["id"])
+    base = f"/api/hosted/datasets/{ds['id']}"
+    for outer in (None, [], "oops", 17):
+        command = {"operation_id": op(), "image_ids": [image["id"]], "annotator_id": user["id"], "expected": outer}
+        assert admin.post(base + "/assignments", json=command).status_code == 422
+        assert admin.post(base + "/archive", json={"operation_id": op(), "expected_images": outer, "expected_revision": ds["revision"]}).status_code == 422
+    for bad in (None, 17, [], "oops", {}, {"version_id": image["current_version"], "generation": True}):
+        command = {"operation_id": op(), "image_ids": [image["id"]], "annotator_id": user["id"], "expected": {image["id"]: bad}}
+        assert admin.post(base + "/assignments", json=command).status_code == 422
+        archive = {"operation_id": op(), "expected_images": {image["id"]: bad}, "expected_revision": ds["revision"]}
+        assert admin.post(base + "/archive", json=archive).status_code == 422
+        assert admin.get(f"/api/hosted/receipts/{command['operation_id']}").json() is None
+    legacy = {"version_id": image["current_version"], "generation": image["generation"], "legacy_extra": "preserved"}
+    command = {"operation_id": op(), "image_ids": [image["id"]], "annotator_id": user["id"], "expected": {image["id"]: legacy}}
+    result = admin.post(base + "/assignments", json=command)
+    assert result.status_code == 200, result.text
+    assert admin.post(base + "/assignments", json=command).json() == result.json()
+    import hashlib
+    import json
+    payload = dict(dataset_id=ds["id"], image_ids=[image["id"]], annotator_id=user["id"], expected=command["expected"])
+    digest = hashlib.sha256(json.dumps({"operation": "assign", "payload": payload}, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    with application.state.store.read_connection() as con:
+        assert con.execute("SELECT request_hash FROM hosted_receipts WHERE operation_id=?", (command["operation_id"],)).fetchone()[0] == digest
+
+
+@pytest.mark.parametrize('old_extra', [{'editor_id': None}, {'editor_id': 17}, {'editor_id': []}, {'editor_id': ''}, {'version_id': 17}])
+def test_old_assignment_receipt_preserves_ignored_extra(application, monkeypatch, old_extra):
+    admin = login(application)
+    user = provision(admin, 'alice')
+    ds = dataset(admin)
+    image = upload(admin, ds['id'])
+    body = {'operation_id': op(), 'image_ids': [image['id']], 'annotator_id': user['id'],
+            'expected': {image['id']: {'expected_version': image['current_version'],
+                                     'generation': image['generation'], **old_extra}}}
+    route = f"/api/hosted/datasets/{ds['id']}/assignments"
+    if 'editor_id' in old_extra:
+        assert admin.post(route, json=body).status_code == 422
+    actor = application.state.auth.authenticate(admin.cookies.get('tator_session'))
+    # Only recreate the historical admission rule: old assignment did not
+    # consume editor_id. All authority, transaction and receipt code stays real.
+    with monkeypatch.context() as old:
+        old.setattr('services.hosted.store.validate_precondition', lambda value, **kwargs: value)
+        original = application.state.store.assign(actor, ds['id'], body['image_ids'], user['id'], body['operation_id'], body['expected'])
+    replay = admin.post(route, json=body)
+    assert replay.status_code == 200 and replay.json() == original
+    # A different command is not a replay: the already-assigned image now
+    # conflicts. Invalid editor fields on a new eligible image failed above.
+    assert admin.post(route, json={**body, 'operation_id': op()}).status_code == 409
 
 
 def test_login_link_is_single_use_and_passwords_are_argon2(application):

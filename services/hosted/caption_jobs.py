@@ -123,7 +123,7 @@ class CaptionJobs:
     def start(self, actor, body):
         self._recover()
         requested = body.model_dump()
-        previous = self.store.receipt(actor, body.operation_id)
+        previous = self.store.raw_receipt(actor, body.operation_id)
         if not previous:
             from services.hosted.tool_api import qwen_guidance
             settings = self.store.get_dataset(actor, body.dataset_id)["settings"]
@@ -226,10 +226,11 @@ class CaptionJobs:
         try:
             with TemporaryDirectory(prefix="paid-caption-", dir=self.tools.media_root) as temporary:
                 with self.tools.artifacts.exclusive():
-                    reference = self.tools.artifacts.pin(image["media_hash"], Path(temporary))
+                    view = self.tools.media.resolve(image["media_hash"])
+                    reference = self.tools.artifacts.pin(self.tools.media.reference(view), Path(temporary))
                 path = Path(temporary) / reference.sha256
-                with Image.open(path) as opened:
-                    pixels = opened.convert("RGB")
+                from .media import decode_encoded
+                pixels, _ = decode_encoded(path)
                 output = execute_caption_case(runtime, pixels, {"caption_request": body.caption_request,
                     "settings": body.settings.model_dump(), "case": canonical_case(image, dataset["classes"]),
                     "media_path": str(path)}, {"actor_id": actor.user_id})
@@ -410,7 +411,7 @@ class CaptionJobs:
         self._recover()
         row = self._row(job_id, actor)
         requested = body.model_dump()
-        previous = self.store.receipt(actor, body.operation_id)
+        previous = self.store.raw_receipt(actor, body.operation_id)
         if not previous:
             original = CaptionJobRequest(**json.loads(row["request_json"]))
             # Missing overrides retain this job's guidance across reconnects.

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from collections import OrderedDict
 import hashlib
-import io
 import json
 import math
 from pathlib import Path
@@ -35,7 +34,7 @@ def _box(payload, width, height):
 
 
 def _image(payload, config):
-    from PIL import Image
+    from .media import MAX_MEDIA_BYTES, decode_encoded
     root = Path(config["media_root"]).resolve(strict=True)
     candidate = Path(payload["media_path"])
     resolved = candidate.resolve(strict=True)
@@ -49,16 +48,13 @@ def _image(payload, config):
     # Read one immutable byte snapshot: verification and decoding must describe
     # the same file, even if an external process replaces its path.
     with resolved.open("rb") as stream:
-        raw = stream.read(64 * 1024 * 1024 + 1)
-    if len(raw) > 64 * 1024 * 1024:
+        raw = stream.read(MAX_MEDIA_BYTES + 1)
+    if len(raw) > MAX_MEDIA_BYTES:
         raise ValueError("hosted_image_bytes_exceeded")
     digest = hashlib.sha256(raw).hexdigest()
     if digest != payload.get("media_sha256"):
         raise ValueError("hosted_media_identity_changed")
-    with Image.open(io.BytesIO(raw)) as source:
-        if source.width * source.height > 64_000_000:
-            raise ValueError("hosted_image_pixels_exceeded")
-        image = source.convert("RGB")
+    image, _ = decode_encoded(raw)
     return image, digest
 
 

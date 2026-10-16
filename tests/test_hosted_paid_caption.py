@@ -109,6 +109,69 @@ def test_paid_current_image_job_uses_native_flow_and_retains_real_ledger(system)
     assert len(gateway.accounts.calls(system["admin"])) == len(calls)
 
 
+def test_paid_caption_and_qa_share_encoded_pixels_and_original_identity(system):
+    """Run HTTP admission and both native stages; double only provider transport."""
+    import base64
+    import hashlib
+    import io
+    import json
+    from services.hosted.media import decode_encoded
+
+    source = Image.new("RGB", (64, 48), "red")
+    source.paste("blue", (0, 0, 24, 48))
+    exif = Image.Exif()
+    exif[274] = 6
+    content = io.BytesIO()
+    source.save(content, format="TIFF", exif=exif)
+    original = content.getvalue()
+    reference = system["artifacts"].put_bytes(original)
+    store, admin = system["store"], system["admin"]
+    image = store.import_image(admin, system["dataset"]["id"], reference.sha256,
+        "oriented.tif", {}, op(), width=64, height=48, size_bytes=reference.size_bytes)
+    image = store.assign(admin, image["dataset_id"], [image["id"]], system["alice"].user_id, op(),
+        expected={image["id"]: {"expected_version": image["current_version"], "generation": image["generation"]}})["images"][0]
+    image = acquire(system, image)
+    decoded, _ = decode_encoded(original)
+    expected_pixels = hashlib.sha256(decoded.tobytes()).hexdigest()
+    sent_images = []
+
+    def respond(_secret, payload):
+        for message in payload["input"]:
+            for item in message.get("content", []):
+                if item.get("type") == "input_image":
+                    raw = base64.b64decode(item["image_url"].split(",", 1)[1])
+                    with Image.open(io.BytesIO(raw)) as submitted:
+                        sent_images.append((submitted.size, hashlib.sha256(submitted.convert("RGB").tobytes()).hexdigest()))
+        # Empty QA is a valid provider response for this pixel-grid check; the
+        # native helper still executes its real generation and retention path.
+        text = "A red vehicle is parked on a road." if len(sent_images) == 1 else '{"pairs": []}'
+        return {"id": str(len(sent_images)), "status": "completed",
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": text}]}],
+            "usage": {"input_tokens": 10, "output_tokens": 12}}
+
+    gateway, calls = configure_paid(system, respond)
+    body = paid_body(image)
+    body["settings"].update(instruction_dataset=True, subcaptions_per_image=1, instruction_qa_max_topup_attempts=0)
+    url = "/api/hosted/tools/caption-jobs"
+    response = system["client"].post(url, json=body)
+    assert response.status_code == 202, response.text
+    job_id = response.json()["job_id"]
+    done = eventually(lambda: (row if (row := system["client"].get(url + "/" + job_id).json()).get("status") in {"completed", "failed"} else None))
+    assert len(sent_images) >= 2, done
+    assert all(value == ((64, 48), expected_pixels) for value in sent_images)
+    ledger = gateway.accounts.calls(admin)
+    assert len(ledger) == len(calls) and all(row["state"] == "settled" for row in ledger)
+    with store.read_connection() as con:
+        results = [json.loads(row[0]) for row in con.execute("SELECT result_json FROM hosted_provider_results")]
+    for result in results:
+        with system["artifacts"].open(result["input_artifacts"][-1]["sha256"]) as stream:
+            identity = json.load(stream)
+        assert identity["source_media_hash"] == reference.sha256
+    with system["artifacts"].open(reference) as stream:
+        assert stream.read() == original
+    assert store.image(system["alice"], image["id"])["current_version"] == image["current_version"]
+
+
 def test_paid_snapshot_batch_keeps_canonical_source_and_real_proposal(system):
     gateway, calls = configure_paid(system)
     store, actor = system["store"], system["admin"]

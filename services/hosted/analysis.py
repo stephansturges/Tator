@@ -19,6 +19,7 @@ from utils.capture_metadata import CAPTURE_METADATA_FIELDS, portable_capture_met
 
 from .artifacts import ArtifactRef, ArtifactStore, open_regular
 from .errors import DomainError
+from .job_authority import HeavyJobAuthority
 from .operations import HostedOperations
 from .store import HostedStore, _id, _json
 from .types import Actor, MutationContext
@@ -79,7 +80,10 @@ def read_canonical_snapshot(reference: dict, *, allowed_root: str | Path) -> dic
         seen.add(image["id"])
         media = _inside(image["media_path"], path.parent)
         actual, size = _hash_file(media)
-        if actual != image["media_hash"] or size != image["size_bytes"]:
+        working = image.get('working_media', {})
+        if working and (working.get('source_sha256') != image['media_hash'] or working.get('source_size_bytes') != image['size_bytes']):
+            raise DomainError('analysis_media_changed', 409)
+        if actual != working.get('sha256', image["media_hash"]) or size != working.get('size_bytes', image["size_bytes"]):
             raise DomainError("analysis_media_changed", 409, {"image_id": image["id"]})
     if _hash_file(path)[0] != checksum:
         raise DomainError("analysis_manifest_changed", 409)
@@ -110,7 +114,10 @@ def read_candidate_set(reference: dict, *, allowed_root: str | Path) -> dict:
             raise DomainError('ingestion_candidate_duplicate', 409)
         seen.add(image['id'])
         media = _inside(image['media_path'], path.parent)
-        if _hash_file(media) != (image['media_hash'], image['size_bytes']):
+        working = image.get('working_media', {})
+        if working and (working.get('source_sha256') != image['media_hash'] or working.get('source_size_bytes') != image['size_bytes']):
+            raise DomainError('ingestion_candidate_media_changed', 409)
+        if _hash_file(media) != (working.get('sha256', image['media_hash']), working.get('size_bytes', image['size_bytes'])):
             raise DomainError('ingestion_candidate_media_changed', 409)
     if _hash_file(path)[0] != checksum:
         raise DomainError('ingestion_candidates_changed', 409)
@@ -140,6 +147,8 @@ def legacy_source_manifest(manifest: dict, directory: str | Path) -> dict:
     classes = sorted(manifest["classes"], key=lambda row: row["position"])
     indices = {row["id"]: index for index, row in enumerate(classes)}
     rows = []
+    media_map_path = directory / 'hosted-media.json'
+    media_map = json.loads(media_map_path.read_text())['images'] if media_map_path.is_file() else {}
     for image in manifest["images"]:
         # Materializer records the actual encoded suffix, independent of an old
         # user filename. Resolve exactly this ID, not arbitrary folder members.
@@ -148,7 +157,10 @@ def legacy_source_manifest(manifest: dict, directory: str | Path) -> dict:
         if len(choices) != 1:
             raise DomainError("analysis_materialized_image_missing", 409, {"image_id": image["id"]})
         path = _inside(choices[0], directory.resolve())
-        if _hash_file(path) != (image["media_hash"], image["size_bytes"]):
+        view = media_map.get(image['id'], {})
+        if view and (view.get('source_sha256') != image['media_hash'] or view.get('source_size_bytes') != image['size_bytes']):
+            raise DomainError('analysis_media_changed', 409)
+        if _hash_file(path) != (view.get('sha256', image["media_hash"]), view.get('size_bytes', image["size_bytes"])):
             raise DomainError("analysis_media_changed", 409, {"image_id": image["id"]})
         lines, objects = _lines(image, indices)
         annotations = image["annotations"]
@@ -163,7 +175,7 @@ def legacy_source_manifest(manifest: dict, directory: str | Path) -> dict:
         explicit_capture = annotations.get("capture_metadata") if isinstance(annotations.get("capture_metadata"), dict) else {}
         capture = portable_capture_metadata({**metadata, **explicit_capture})
         rows.append({"split": split, "original_split": image["split"], "image_relpath": path.name, "image_path": str(path),
-                     "image_name": image["filename"], "image_sha256": image["media_hash"], "label_lines": lines,
+                     "image_name": image["filename"], "image_sha256": view.get("sha256", image["media_hash"]), "source_image_sha256": image["media_hash"], "label_lines": lines,
                      "label_source_present": True, "text_label": annotations.get("caption", ""),
                      "caption_records": caption_records,
                      "alternate_captions": annotations.get('alternate_captions', []),
@@ -222,7 +234,10 @@ class CanonicalAnalysis:
             return {'candidate_set_id': candidate_set_id, 'dataset_id': row[0], 'manifest': json.loads(row[1])}
 
     def capture(self, actor: Actor, dataset_id: str, consumer: str, parameters: dict,
-                operation_id: str, *, snapshot_id: str | None = None) -> dict:
+                operation_id: str, *, snapshot_id: str | None = None, _bind_job=None) -> dict:
+        """Capture under current admin authority; a private coordinator may bind
+        its grant in this same transaction before the capture receipt commits.
+        """
         if consumer not in CONSUMERS or not isinstance(parameters, dict) or len(_json(parameters).encode()) > 1024 * 1024:
             raise DomainError("analysis_request_invalid", 422)
         payload = {"dataset_id": dataset_id, "consumer": consumer, "parameters": parameters, "snapshot_id": snapshot_id}
@@ -240,7 +255,10 @@ class CanonicalAnalysis:
             request = {**payload, "snapshot_id": captured_id, "dataset_revision": manifest["revision"], "class_version": manifest["class_version"], "settings_version": manifest.get("settings_version", 0),
                        "snapshot_sha256": hashlib.sha256(_json(manifest).encode()).hexdigest(), "settings": manifest.get("settings", {})}
             con.execute("INSERT INTO hosted_analysis_jobs(id,snapshot_id,actor_id,consumer,request_json,state,result_sha256,created_at,updated_at) VALUES (?,?,?,?,?,'captured',NULL,?,?)", (job_id, captured_id, actor.user_id, consumer, _json(request), now, now))
-            return {"job_id": job_id, "snapshot_id": captured_id, "consumer": consumer, "dataset_id": dataset_id, "dataset_revision": manifest["revision"], "state": "captured"}
+            result = {"job_id": job_id, "snapshot_id": captured_id, "consumer": consumer, "dataset_id": dataset_id, "dataset_revision": manifest["revision"], "state": "captured"}
+            if _bind_job is not None:
+                _bind_job(con, result)
+            return result
         return self.store._command(actor, operation_id, "capture_analysis", payload, run, admin=True)
 
     def _job(self, con: sqlite3.Connection, job_id: str) -> tuple[dict, dict, dict]:
@@ -453,13 +471,32 @@ class CanonicalAnalysis:
         their relative paths so backup and later cache rehydration are possible.
         Exact retries remain usable after that temporary tree has been removed.
         """
+        return self._publish_native(actor, job_id, output, operation_id, native_root=native_root)
+
+    def publish_heavy_result(self, request_id, job_id, output, *, native_root):
+        """Internal grant-scoped publication; no login Actor or general write API."""
+        return self._publish_native(None, job_id, output, "heavy-publish-" + request_id,
+                                    native_root=native_root, request_id=request_id)
+
+    def _publish_native(self, actor, job_id, output, operation_id, *, native_root, request_id=None):
         payload = {"job_id": job_id, "output": output}
-        if self.store.receipt(actor, operation_id):
-            return self.store._command(actor, operation_id, "publish_native_analysis", payload,
-                lambda con: (_ for _ in ()).throw(DomainError("analysis_receipt_missing", 409)), admin=True)
-        with self.store.read_connection() as con:
-            self.store._actor(con, actor, admin=True)
-            job, manifest, request = self._job(con, job_id)
+        authority = HeavyJobAuthority(self.store) if request_id else None
+        if authority:
+            with self.store.transaction() as con:
+                previous = authority.recover(con, request_id)
+                if previous:
+                    return previous
+                grant = authority.validate(con, request_id, job_id=job_id)
+                if str(native_root) != json.loads(grant['context_json'])['model_config'].get('native_root'):
+                    raise DomainError('heavy_job_scope_invalid', 409)
+                job, manifest, request = self._job(con, job_id)
+        else:
+            if self.store.raw_receipt(actor, operation_id):
+                return self.store._command(actor, operation_id, "publish_native_analysis", payload,
+                    lambda con: (_ for _ in ()).throw(DomainError("analysis_receipt_missing", 409)), admin=True)
+            with self.store.read_connection() as con:
+                self.store._actor(con, actor, admin=True)
+                job, manifest, request = self._job(con, job_id)
         if (output.get("snapshot_id") != job["snapshot_id"] or output.get("dataset_id") != manifest["dataset_id"]
                 or output.get("revision") != manifest["revision"] or output.get("operation") != job["consumer"]):
             raise DomainError("analysis_native_result_mismatch", 409)
@@ -513,6 +550,9 @@ class CanonicalAnalysis:
                 con.execute("UPDATE hosted_analysis_jobs SET state='complete',result_sha256=?,updated_at=? WHERE id=?",
                             (reference.sha256, self.store.clock(), job_id))
                 return {"job_id": job_id, "state": "complete", "snapshot_id": job["snapshot_id"], "result": reference.as_dict()}
+            if authority:
+                with self.store.transaction() as con:
+                    return authority.publish(con, request_id, job_id, output, run)
             return self.store._command(actor, operation_id, "publish_native_analysis", payload, run, admin=True)
 
     def apply_annotations(self, actor: Actor, job_id: str, context: MutationContext,

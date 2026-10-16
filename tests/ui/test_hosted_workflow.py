@@ -17,6 +17,7 @@ import subprocess
 import sys
 import time
 import uuid
+from datetime import datetime, timedelta
 
 import httpx
 import pytest
@@ -526,6 +527,211 @@ def test_new_edits_survive_old_reply_and_lost_submission_reply(hosted_origin):
     asyncio.run(_network_ordering(hosted_origin))
 
 
+@pytest.mark.parametrize('recovery_case', ['correct', 'delayed', 'reload', 'reload_invalid', 'storage_failure', 'untrusted_rejection'])
+def test_rejected_save_preserves_latest_draft_and_retry_identity(hosted_origin, recovery_case):
+    asyncio.run(_rejected_save(hosted_origin, recovery_case))
+
+
+async def _rejected_save(origin, recovery_case):
+    from playwright.async_api import async_playwright, expect
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page(viewport={'width': 1440, 'height': 1000})
+        page.on('dialog', lambda dialog: dialog.accept())
+        await sign_in(page, origin, 'alice')
+        await page.locator('.hosted-card a').first.click()
+        await expect(page.locator('#hostedSave')).to_be_enabled()
+        await page.clock.install()
+        await page.clock.pause_at(datetime.now() + timedelta(milliseconds=50))
+        await draw(page, .2, .2, .45, .45)
+        await page.locator('#hostedNegative').check()
+        sent, started, release = [], asyncio.Event(), asyncio.Event()
+
+        async def intercept(route):
+            sent.append(route.request.post_data_json)
+            response = await route.fetch()
+            if len(sent) == 1:
+                assert response.status == 422
+                if recovery_case in {'delayed', 'storage_failure'}:
+                    started.set()
+                    await release.wait()
+                if recovery_case == 'untrusted_rejection':
+                    # HTTP status alone is not proof that the exact command
+                    # rolled back (a proxy can generate this response).
+                    await route.fulfill(status=422, json={'error': 'negative_has_objects'})
+                    return
+            await route.fulfill(response=response)
+
+        await page.route('**/api/hosted/images/*/save', intercept)
+        save = """async () => {try {return {ok:await window.TatorHosted.save({manual:true})};}
+            catch(e){return {ok:false,code:e.code,message:e.message};}}"""
+        first_task = asyncio.create_task(page.evaluate(save))
+        if recovery_case in {'delayed', 'storage_failure'}:
+            await asyncio.wait_for(started.wait(), 10)
+            await page.locator('#hostedNegative').uncheck()
+            await draw(page, .55, .45, .75, .65)
+            if recovery_case == 'storage_failure':
+                await page.evaluate("""() => {window.originalSetItem=Storage.prototype.setItem;
+                    Storage.prototype.setItem=function(){throw new DOMException('Fixture quota','QuotaExceededError');};}""")
+            release.set()
+        first = await first_task
+        assert not first['ok']
+        if recovery_case == 'storage_failure':
+            assert 'Keep this tab open' in first['message']
+            await page.evaluate('() => { Storage.prototype.setItem=window.originalSetItem; }')
+        elif recovery_case not in {'delayed', 'untrusted_rejection'}:
+            assert first['code'] == 'negative_has_objects'
+        if recovery_case in {'reload', 'reload_invalid'}:
+            journal = await page.evaluate("JSON.parse(sessionStorage.getItem(Object.keys(sessionStorage).find(k=>k.startsWith('tator.hosted.draft:'))))")
+            assert journal['schema'] == 2 and journal['state'] == 'rejected' and not journal.get('pending')
+            # Keep the corrected latest draft while the rejected command itself
+            # is already resolved. Closing the page must not resurrect it.
+            if recovery_case == 'reload':
+                await page.locator('#hostedNegative').uncheck()
+            await page.evaluate("window.dispatchEvent(new Event('beforeunload'))")
+            await page.clock.resume()
+            await page.reload()
+            await expect(page.locator('#hostedResolve')).to_be_visible()
+            await page.locator('#hostedResolve').click()
+            if recovery_case == 'reload_invalid':
+                await expect(page.locator('#hostedSaveState')).to_contain_text('Clear the empty-image check')
+                await page.clock.pause_at(datetime.now() + timedelta(milliseconds=50))
+                await page.locator('#hostedNegative').uncheck()
+                await page.locator('#hostedComplete').check()
+                await page.evaluate("window.dispatchEvent(new Event('beforeunload'))")
+                latest = await page.evaluate("JSON.parse(sessionStorage.getItem(Object.keys(sessionStorage).find(k=>k.startsWith('tator.hosted.draft:')))).latest")
+                assert not latest['negative'] and latest['complete']
+                assert (await page.evaluate(save))['ok']
+            await expect(page.locator('#hostedSaveState')).to_have_text('All changes saved')
+        else:
+            if recovery_case == 'correct':
+                # Repeating an unchanged invalid draft does not send another
+                # autosave or create a new operation every two seconds.
+                assert not (await page.evaluate(save))['ok']
+                assert len(sent) == 1
+            await page.locator('#hostedNegative').uncheck()
+            second = await page.evaluate(save)
+            if recovery_case == 'untrusted_rejection':
+                assert not second['ok'] and sent[0] == sent[1]
+                # Only the second, actual server rejection retires the command.
+                second = await page.evaluate(save)
+            assert second['ok'], second
+        assert sent[-1]['operation_id'] != sent[0]['operation_id']
+        assert not sent[-1]['negative']
+        stored = await page.evaluate("window.TatorHosted.api('/api/hosted/images/'+window.TatorHosted.imageId)")
+        assert len(stored['annotations']['objects']) == (2 if recovery_case in {'delayed', 'storage_failure'} else 1)
+        assert not stored['negative']
+        await browser.close()
+
+
+@pytest.mark.parametrize('replace_lease', [False, True])
+def test_reload_retries_unknown_save_before_restoring_draft(hosted_origin, replace_lease):
+    asyncio.run(_reload_unknown_save(hosted_origin, replace_lease))
+
+
+async def _reload_unknown_save(origin, replace_lease):
+    from playwright.async_api import async_playwright, expect
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page(viewport={'width': 1440, 'height': 1000})
+        page.on('dialog', lambda dialog: dialog.accept())
+        await sign_in(page, origin, 'alice')
+        await page.locator('.hosted-card a').first.click()
+        await expect(page.locator('#hostedSave')).to_be_enabled()
+        await page.clock.install()
+        await page.clock.pause_at(datetime.now() + timedelta(milliseconds=50))
+        await draw(page, .2, .2, .45, .45)
+        sent, replies = [], []
+
+        async def intercept(route):
+            sent.append(route.request.post_data_json)
+            # Simulate a proxy failing before delivery; the browser cannot
+            # know whether the server committed. Fail the first recovery too.
+            if len(sent) <= 2:
+                await route.fulfill(status=503, json={'error': 'fixture_connection_lost'})
+                return
+            response = await route.fetch()
+            replies.append(response.status)
+            await route.fulfill(response=response)
+
+        await page.route('**/api/hosted/images/*/save', intercept)
+        await page.evaluate("async () => {try {await window.TatorHosted.save({manual:true});} catch (_) {}}")
+        await draw(page, .55, .45, .75, .65)
+        await page.evaluate("window.dispatchEvent(new Event('beforeunload'))")
+        if replace_lease:
+            await page.evaluate("""async () => {
+                const path='/api/hosted/images/'+window.TatorHosted.imageId;
+                const record=await window.TatorHosted.api(path);
+                await window.TatorHosted.api(path+'/editor', {editor_id:'replacement-tab',
+                    expected_version:record.current_version,generation:record.generation,takeover:true});
+            }""")
+        await page.clock.resume()
+        await page.reload()
+        await expect(page.locator('#hostedResolve')).to_be_visible()
+        await page.locator('#hostedResolve').click()
+        await expect(page.locator('#hostedSaveState')).to_contain_text('fixture_connection_lost')
+        journal = await page.evaluate("JSON.parse(sessionStorage.getItem(Object.keys(sessionStorage).find(k=>k.startsWith('tator.hosted.draft:'))))")
+        assert journal['pending']['body'] == sent[0] == sent[1]
+        assert len(journal['latest']['annotations']['objects']) == 2
+        await page.locator('#hostedResolve').click()
+        await expect(page.locator('#hostedSaveState')).to_have_text('All changes saved')
+        assert sent[2] == sent[0]
+        assert replies == ([409, 200] if replace_lease else [200, 200])
+        assert sent[-1]['operation_id'] != sent[0]['operation_id']
+        assert sent[-1]['generation'] > sent[0]['generation']
+        stored = await page.evaluate("window.TatorHosted.api('/api/hosted/images/'+window.TatorHosted.imageId)")
+        assert len(stored['annotations']['objects']) == 2
+        await browser.close()
+
+
+@pytest.mark.parametrize('image_format', ['JPEG', 'PNG', 'WEBP', 'TIFF'])
+def test_encoded_media_grid_matches_canvas_and_worker(hosted_origin, tmp_path, image_format):
+    image = Image.new('RGB', (640, 480), 'red')
+    image.paste(Image.new('RGB', (320, 480), 'blue'), (320, 0))
+    exif = image.getexif(); exif[274] = 6
+    source = tmp_path / ('oriented.' + {'JPEG': 'jpg', 'PNG': 'png', 'WEBP': 'webp', 'TIFF': 'tiff'}[image_format])
+    image.save(source, format=image_format, exif=exif)
+    asyncio.run(_encoded_media(hosted_origin, source))
+
+
+async def _encoded_media(origin, source):
+    from playwright.async_api import async_playwright, expect
+    from services.hosted.adapters import _image
+    original_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    native, _ = _image({'media_path': str(source), 'media_sha256': original_hash}, {'media_root': str(source.parent)})
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page(viewport={'width': 1440, 'height': 1000})
+        await sign_in(page, origin, 'admin')
+        await page.get_by_role('button', name='Incoming', exact=True).click()
+        await page.locator('#uploadInput').set_input_files(str(source))
+        await expect(page.locator('#notice')).to_contain_text('1 new images added')
+        rows = await page.evaluate("window.TatorHostedDashboard.api('/images?dataset_id='+document.getElementById('datasetChoice').value)")
+        record = next(row for row in rows['images'] if row['filename'] == source.name)
+        assert record['media_hash'] == original_hash
+        await page.goto(f"{origin}/annotate?image={record['id']}")
+        await expect(page.locator('#hostedSave')).to_be_enabled()
+        await page.clock.install(); await page.clock.pause_at(datetime.now() + timedelta(milliseconds=50))
+        await draw(page, .5, .16, .57, .25)
+        draft = await page.evaluate('window.TatorHostedCanvas.snapshot()')
+        box = draft['objects'][0]['bbox']
+        center = [int(box[0] + box[2] / 2), int(box[1] + box[3] / 2)]
+        displayed = await page.evaluate("""async ([id,x,y]) => {const im=new Image();
+            im.src='/api/hosted/images/'+id+'/media';await im.decode();
+            const c=document.createElement('canvas');c.width=im.naturalWidth;c.height=im.naturalHeight;
+            const ctx=c.getContext('2d');ctx.drawImage(im,0,0);
+            return {width:c.width,height:c.height,pixel:[...ctx.getImageData(x,y,1,1).data].slice(0,3)};}""", [record['id'], *center])
+        assert (displayed['width'], displayed['height']) == (640, 480) == native.size
+        assert displayed['pixel'] == list(native.getpixel(tuple(center)))
+        # Stay within the displayed landscape image, excluding canvas padding.
+        await draw(page, .35, .40, .55, .55)
+        assert await page.evaluate('window.TatorHosted.save({manual:true})')
+        original = await page.context.request.get(f"{origin}/api/hosted/images/{record['id']}/original")
+        assert original.status == 200 and hashlib.sha256(await original.body()).hexdigest() == original_hash
+        assert hashlib.sha256(source.read_bytes()).hexdigest() == original_hash
+        await browser.close()
+
+
 def test_resumable_import_and_admin_recovery_controls(hosted_origin, tmp_path):
     paths = []
     for name, color in (("new-one.png", "magenta"), ("new-two.png", "cyan")):
@@ -603,7 +809,9 @@ async def _imports_and_recovery(origin, paths):
             pytest.fail(await page.locator('#hostedSaveState').inner_text())
         assert (await context.request.get(f'{origin}/api/hosted/images/{image_id}')).status == 404
         await page.locator('#operations').click()
-        await page.locator('#operationsDialog').get_by_role('button', name='Restore', exact=True).click()
+        async with page.expect_response('**/api/hosted/archives/*/restore') as restored_response:
+            await page.locator('#operationsDialog').get_by_role('button', name='Restore', exact=True).click()
+        assert (await restored_response.value).status == 200
         restored = await (await context.request.get(f'{origin}/api/hosted/images/{image_id}')).json()
         assert restored['annotations']['objects'] == expected['objects']
         assert not errors
@@ -790,7 +998,10 @@ async def _dqe_corrections(origin):
         await page.get_by_role('button', name='Save class correction').click()
         await expect(page.get_by_role('button', name='Check correction result')).to_be_enabled()
         await page.get_by_role('button', name='Check correction result').click()
-        await expect(page.locator('.hosted-dqe')).to_contain_text('Correction confirmed')
+        try:
+            await expect(page.locator('.hosted-dqe')).to_contain_text('Correction confirmed')
+        except AssertionError:
+            pytest.fail(f"DQE recovery notice: {await page.locator('#notice').inner_text()}; browser errors: {errors}")
         assert len(sent) == 2 and sent[0] == sent[1]
         await page.unroute('**/api/hosted/analysis/jobs/*/dqe/actions', lose_correction_reply)
         ds = (await (await context.request.get(origin + '/api/hosted/datasets')).json())['datasets'][0]

@@ -121,7 +121,7 @@ def test_assignment_submission_return_correction_preserves_exact_versions_and_re
     draft = store.save(ALICE, ctx(lease, "alice-save"), objects(ds), complete=True)
     submission_context = ctx(draft, "alice-submit")
     submitted = store.submit(ALICE, submission_context)
-    assert store.submit(ALICE, submission_context) == submitted
+    error("committed_result_restricted", lambda: store.submit(ALICE, submission_context))
     assert len(store.list_images(ALICE)) == 1 and not store.snapshot(ADMIN, ds["id"])["images"]
     assert store.image(ALICE, two["id"])["assignment_id"] == assignment["assignment_id"]
     error("image_not_found", lambda: store.save(ALICE, ctx(submitted, "late-save"), objects(ds)))
@@ -141,7 +141,7 @@ def test_assignment_submission_return_correction_preserves_exact_versions_and_re
     assert [row["version_id"] for row in history["submissions"]] == [draft["current_version"], saved["current_version"]]
     assert {row["action"] for row in history["reviews"]} == {"returned", "approved"}
     assert history["reviews"][0]["feedback"] == "Please include the second car."
-    assert store.submit(ALICE, submission_context) == submitted  # exact old receipt, not a new handoff
+    error("committed_result_restricted", lambda: store.submit(ALICE, submission_context))  # committed without disclosure or another handoff
     assert store.snapshot(ADMIN, ds["id"])["images"][0]["version_id"] == corrected["current_version"]
     statuses = store.own_submission_status(ALICE)
     assert [row["status"] for row in statuses] == ["approved", "returned"]
@@ -586,3 +586,98 @@ def test_queue_approval_is_atomic_idempotent_and_never_bypasses_an_editor(store)
     assert approved["state"] == "confirmed"
     assert HostedStore(store.path, clock=store.clock).approve_from_review_queue(ADMIN, request) == approved
     assert len(store.snapshot(ADMIN, ds["id"])["images"]) == 1
+
+
+def test_receipts_recheck_read_authority_without_mutating_history(store):
+    ds = dataset(store)
+    image = assigned(store, ds, imported(store, ds))
+    image = store.acquire_editor(ALICE, image["id"], "tab")
+    command = ctx(image, "saved-before-handoff")
+    saved = store.save(ALICE, command, objects(ds), complete=True)
+    assert store.receipt(ALICE, command.operation_id)["result"] == saved
+    raw = store.raw_receipt(ALICE, command.operation_id)
+    store.submit(ALICE, ctx(saved, "handoff"))
+    restricted = store.receipt(ALICE, command.operation_id)
+    assert restricted == {**raw, "result": None, "commit_outcome": "committed", "result_restricted": True}
+    with pytest.raises(DomainError) as caught:
+        store.save(ALICE, command, objects(ds), complete=True)
+    assert (caught.value.code, caught.value.commit_outcome, caught.value.operation_id) == (
+        "committed_result_restricted", "committed", command.operation_id)
+    assert store.raw_receipt(ALICE, command.operation_id) == raw
+    error("operation_id_reused", lambda: store.save(ALICE, command, {"objects": []}, complete=True))
+    assert store.receipt(BOB, command.operation_id) is None
+    with store.transaction() as con:
+        con.execute("UPDATE hosted_users SET disabled=1 WHERE id=?", (ALICE.user_id,))
+    error("actor_inactive", lambda: store.raw_receipt(ALICE, command.operation_id))
+
+
+def test_admin_and_unknown_receipts_restrict_after_role_change(store):
+    ds = dataset(store)
+    result = store.create_snapshot(ADMIN, ds["id"], "private-snapshot")
+    with store.transaction() as con:
+        con.execute("UPDATE hosted_users SET role='annotator' WHERE id=?", (ADMIN.user_id,))
+    changed = Actor(ADMIN.user_id, "annotator", ADMIN.username)
+    assert store.receipt(changed, "private-snapshot")["result"] is None
+    error("committed_result_restricted", lambda: store.create_snapshot(changed, ds["id"], "private-snapshot"))
+    error("admin_required", lambda: store.create_snapshot(changed, ds["id"], "new-snapshot"))
+    assert store.raw_receipt(changed, "private-snapshot")["result"] == result
+    store._command(ADMIN2, "unknown-operation", "legacy_unknown", {}, lambda con: {"secret": "opaque"})
+    assert store.receipt(ADMIN2, "unknown-operation")["result_restricted"] is True
+    error("committed_result_restricted", lambda: store._command(ADMIN2, "unknown-operation", "legacy_unknown", {}, lambda con: {}))
+
+
+def test_nested_precondition_validation_and_legacy_fingerprints(store):
+    from services.hosted.preconditions import ImagePrecondition, precondition_payload
+    ds = dataset(store)
+    image = imported(store, ds)
+    for number, malformed in enumerate((None, 17, [], "version", {}, {"expected_version": image["current_version"], "generation": True})):
+        error("invalid_precondition", lambda: store.assign(ADMIN, ds["id"], [image["id"]], ALICE.user_id,
+            f"invalid-{number}", {image["id"]: malformed}))
+        assert store.receipt(ADMIN, f"invalid-{number}") is None
+    legacy = {"version_id": image["current_version"], "generation": image["generation"], "old_extra": {"kept": True}}
+    payload = precondition_payload({image["id"]: ImagePrecondition(**legacy)})
+    assert payload == {image["id"]: legacy} and "expected_version" not in payload[image["id"]]
+    result = store.assign(ADMIN, ds["id"], [image["id"]], ALICE.user_id, "legacy-assignment", payload)
+    assert store.assign(ADMIN, ds["id"], [image["id"]], ALICE.user_id, "legacy-assignment", payload) == result
+    error("invalid_precondition", lambda: store.override_assignment(ADMIN, result["assignment_id"], "bad-override", {image["id"]: None}))
+    assert store.image(ALICE, image["id"])["assignment_id"] == result["assignment_id"]
+
+
+def test_historical_invalid_language_cannot_submit_or_approve(store, monkeypatch):
+    ds = dataset(store)
+    invalid = {"objects": [], "alternate_captions": [{"caption": "Legacy", "generated_qa_pairs": [
+        {"question": "Color?", "answer": "Orange", "metadata": {"validation": {"source_fields": 17}}}]}]}
+    error("invalid_annotation_language", lambda: imported(store, ds, "new-invalid", invalid))
+    # Represent versions written by the older validator, retaining their bytes.
+    with monkeypatch.context() as previous_release:
+        previous_release.setattr(store, "_validate_language_annotations", lambda value: None)
+        image = imported(store, ds, annotations=invalid)
+        lease = store.acquire_editor(ADMIN, image["id"], "tab")
+        saved = store.save(ADMIN, ctx(lease, "legacy-save"), invalid, negative=True)
+    error("invalid_annotation_language", lambda: store.approve(ADMIN, ctx(saved, "blocked-approval")))
+    store.release_editor(ADMIN, ctx(saved, "release"))
+    image = assigned(store, ds, store.image(ADMIN, image["id"]))
+    lease = store.acquire_editor(ALICE, image["id"], "tab")
+    error("invalid_annotation_language", lambda: store.submit(ALICE, ctx(lease, "blocked-submission")))
+    assert store.image(ALICE, image["id"])["annotations"] == invalid
+    assert not store.snapshot(ADMIN, ds["id"])["images"]
+
+
+def test_oriented_import_replays_legacy_receipt_before_new_coordinate_rules(store):
+    from services.hosted.media import MediaInfo
+    ds = dataset(store)
+    digest = sha256(b"historical oriented source").hexdigest()
+    annotations = objects(ds)
+    payload = dict(actor=ADMIN, dataset_id=ds["id"], media_hash=digest, filename="oriented.jpg",
+                   annotations=annotations, operation_id="legacy-oriented-import", width=100, height=80, size_bytes=100)
+    original = store.import_image(**payload)
+    info = MediaInfo(digest, 100, 100, 80, "JPEG", 6, True)
+    assert store.import_image(**payload, media_info=info) == original
+    error("label_coordinate_space_required", lambda: store.import_image(**{**payload, "operation_id": "new-unframed"}, media_info=info))
+    assert store.receipt(ADMIN, "new-unframed") is None
+    assert store.image(ADMIN, original["id"])["annotations"] == annotations
+    yolo = dict(actor=ADMIN, dataset_id=ds["id"], media_hash=digest, filename="oriented.jpg", label_text="0 0.5 0.5 0.2 0.2\n",
+                class_names=["car"], expected_class_version=ds["class_version"], operation_id="legacy-yolo", width=100, height=80, size_bytes=100)
+    outcome = store.import_yolo_image(**yolo)
+    assert store.import_yolo_image(**yolo, media_info=info) == outcome
+    error("label_coordinate_space_required", lambda: store.import_yolo_image(**{**yolo, "operation_id": "new-yolo-unframed"}, media_info=info))

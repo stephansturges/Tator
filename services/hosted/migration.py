@@ -15,16 +15,16 @@ import re
 import stat
 from typing import Any
 
-from PIL import Image
-
 from .artifacts import ArtifactStore, open_regular
 from .errors import DomainError
+from .media import HostedMedia, inspect_media, prepare_yolo_objects
 from .operations import HostedOperations
 from .store import HostedStore, _json
 from .types import Actor, MutationContext
 
 
-FORMAT = "tator-hosted-migration-v1"
+FORMAT = "tator-hosted-migration-v2"
+LEGACY_FORMAT = "tator-hosted-migration-v1"
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 ROLES = {"metadata", "groups", "recipe", "salad_weights", "salad_metadata", "caption_records"}
 
@@ -152,8 +152,13 @@ def inventory(source_root: str | Path, *, mapping: dict | None = None, clip_boxe
     """
     root = _safe_path(source_root)
     mapping = json.loads(_json(mapping or {}))
-    if set(mapping) - {"files", "image_metadata", "external_artifacts", "overlay_root"}:
+    if set(mapping) - {"files", "image_metadata", "external_artifacts", "overlay_root", "label_coordinate_space", "image_coordinate_spaces"}:
         raise DomainError("migration_mapping_unknown_fields", 422)
+    coordinate_spaces = mapping.get("image_coordinate_spaces", {})
+    if (not isinstance(coordinate_spaces, dict)
+            or any(value not in ("encoded", "exif_display") for value in coordinate_spaces.values())
+            or mapping.get("label_coordinate_space") not in (None, "encoded", "exif_display")):
+        raise DomainError("label_coordinate_space_invalid", 422)
     paths = _walk(root)
     if mapping.get("overlay_root"):
         overlay = _safe_path(mapping["overlay_root"])
@@ -197,6 +202,12 @@ def inventory(source_root: str | Path, *, mapping: dict | None = None, clip_boxe
     layout = "flat" if flat else "split"
     active_overlay = "@overlay/" if mapping.get("overlay_root") else ".annotation_overlay/"
     images = []
+    coordinate_blockers = []
+    # A basename sidecar can be selected only if its image association is
+    # unique in that scope. Mirrored paths remain available for collisions.
+    image_names = [name for name in files if PurePosixPath(name).suffix.lower() in IMAGE_SUFFIXES
+                   and (name.startswith("images/") if flat else
+                        any(name.startswith(split + "/images/") for split in ("train", "val", "test")))]
     consumed_labels = set()
     for name, entry in files.items():
         parts = PurePosixPath(name).parts
@@ -209,9 +220,10 @@ def inventory(source_root: str | Path, *, mapping: dict | None = None, clip_boxe
         else:
             continue
         entry["role"] = "image"
-        with open_regular(paths[name]) as stream, Image.open(stream) as image:
-            width, height = image.size
-            image.verify()
+        media_info = inspect_media(paths[name])
+        if media_info.source_sha256 != entry["sha256"]:
+            raise DomainError("migration_source_changed", 409)
+        width, height = media_info.width, media_info.height
         key = relative.as_posix() if flat else f"{split_name}/{relative}"
         source_label = (PurePosixPath("labels") if flat else PurePosixPath(split_name, "labels")) / relative.with_suffix(".txt")
         # Flat legacy DQE overlays use the normalized split token 'train'.
@@ -224,19 +236,33 @@ def inventory(source_root: str | Path, *, mapping: dict | None = None, clip_boxe
             consumed_labels.add(candidate)
             files[candidate]["role"] = "labels"
         current_label = next((candidate for candidate in found if candidate.startswith(active_overlay) or candidate == source_label.as_posix()), None)
-        objects = _objects(_read(Path(files[current_label]["path"])) if current_label else "", width, height, classes, clip=clip_boxes, key=key)
+        label_text = _read(Path(files[current_label]["path"])) if current_label else ""
+        coordinate_space = coordinate_spaces.get(key, mapping.get("label_coordinate_space"))
+        if label_text.strip() and media_info.orientation != 1 and coordinate_space is None:
+            coordinate_blockers.append({"kind": "label_coordinate_space_required", "images": [key], "orientation": media_info.orientation})
+            objects, coordinate_provenance = [], None
+        else:
+            objects, coordinate_provenance = prepare_yolo_objects(label_text, classes, media_info,
+                key=key, label_coordinate_space=coordinate_space, clip=clip_boxes)
         captions = []
-        text_names = list(dict.fromkeys([relative.with_suffix(".txt").as_posix(), relative.stem + ".txt"]))
         caption_paths = []
         # Only the selected overlay is current. Keep other overlay bytes as
         # history, but do not resurrect them when the selected one has no text.
-        for prefix in ("@overlay/", ".annotation_overlay/"):
-            if not flat:
-                caption_paths.extend(prefix + f"text_labels/{split_name}/" + text for text in text_names)
-            caption_paths.extend(prefix + "text_labels/" + text for text in text_names)
-        if not flat:
-            caption_paths.extend(f"{split_name}/text_labels/" + text for text in text_names)
-        caption_paths.extend("text_labels/" + text for text in text_names)
+        for prefix in (active_overlay, "", *(p for p in ("@overlay/", ".annotation_overlay/") if p != active_overlay)):
+            for alias in ("text_labels", "captions", "caption_labels"):
+                scopes = ([prefix + f"{alias}/{overlay_split}/", prefix + f"{alias}/"] if prefix
+                          else ([f"{split_name}/{alias}/", f"{alias}/{split_name}/", f"{alias}/"] if not flat else [f"{alias}/"]))
+                # All qualified candidates beat a basename fallback, within
+                # each alias. Source split roots use split-local uniqueness.
+                for scope in scopes:
+                    scoped_names = [n for n in image_names if n.startswith(split_name + "/images/")] if (not flat and (scope.startswith(split_name + "/") or f"/{split_name}/" in scope)) else image_names
+                    unique_relative = sum(PurePosixPath(*PurePosixPath(n).parts[1 if flat else 2:]).with_suffix(".txt") == relative.with_suffix(".txt") for n in scoped_names) == 1
+                    if unique_relative:
+                        caption_paths.append(scope + relative.with_suffix(".txt").as_posix())
+                for scope in scopes:
+                    scoped_names = [n for n in image_names if n.startswith(split_name + "/images/")] if (not flat and (scope.startswith(split_name + "/") or f"/{split_name}/" in scope)) else image_names
+                    if sum(PurePosixPath(n).stem == relative.stem for n in scoped_names) == 1:
+                        caption_paths.append(scope + relative.stem + ".txt")
         effective_caption = None
         effective_caption_file = None
         for candidate in dict.fromkeys(caption_paths):
@@ -250,20 +276,16 @@ def inventory(source_root: str | Path, *, mapping: dict | None = None, clip_boxe
                 if current:
                     effective_caption = value.strip()  # Empty overlay deliberately clears the source caption.
                     effective_caption_file = candidate
-        for directory in ("captions", "caption_labels"):
-            candidate = ((PurePosixPath(directory) if flat else PurePosixPath(split_name, directory)) / relative.with_suffix(".txt")).as_posix()
-            if candidate in files:
-                files[candidate]["role"] = "caption_text"
-                captions.append({"caption": _read(paths[candidate]), "source_file": candidate, "source": "legacy_import", "lifecycle_status": "superseded", "is_primary": False})
         images.append({"key": key, "file": name, "media_hash": entry["sha256"], "size_bytes": entry["size_bytes"], "width": width, "height": height,
                        "split": split_name, "label_file": current_label, "objects": objects, "captions": captions,
+                       "media": media_info.as_dict(), "media_coordinate_provenance": coordinate_provenance,
                        "effective_caption": effective_caption,
                        "effective_caption_file": effective_caption_file,
                        "metadata": mapping.get("image_metadata", {}).get(key, {})})
     if not images:
         raise DomainError("migration_no_images", 422)
     keys = {row["key"]: row for row in images}
-    unmatched_metadata = set(mapping.get("image_metadata", {})) - set(keys)
+    unmatched_metadata = (set(mapping.get("image_metadata", {})) | set(coordinate_spaces)) - set(keys)
     if unmatched_metadata:
         raise DomainError("migration_image_metadata_unmatched", 422, sorted(unmatched_metadata))
     caption_names = {"captions.jsonl", "text_labels/captions.jsonl", ".annotation_overlay/captions/captions.jsonl", "@overlay/captions/captions.jsonl"}
@@ -332,7 +354,7 @@ def inventory(source_root: str | Path, *, mapping: dict | None = None, clip_boxe
         duplicates.setdefault(row["media_hash"], []).append(row["key"])
     # Membership is pixel-unique in hosted datasets. Do not silently erase a
     # second split or source record while converting a legacy duplicate.
-    blockers = [{"kind": "duplicate_media", "images": group} for group in duplicates.values() if len(group) > 1]
+    blockers = coordinate_blockers + [{"kind": "duplicate_media", "images": group} for group in duplicates.values() if len(group) > 1]
     blockers.extend({"kind": "unmapped_file", "path": name} for name, entry in files.items() if entry["role"] == "unknown")
     plan = {"format": FORMAT, "source_root": str(root), "mapping": mapping, "clip_boxes": bool(clip_boxes), "layout": layout,
             "classes": classes, "images": images, "files": files, "blockers": blockers,
@@ -345,6 +367,7 @@ class HostedMigrator:
     def __init__(self, store: HostedStore, artifacts: ArtifactStore):
         self.store, self.artifacts = store, artifacts
         self.operations = HostedOperations(store, artifacts)
+        self.media = HostedMedia(store, artifacts)
         with store.transaction() as con:
             con.execute("CREATE TABLE IF NOT EXISTS hosted_migration_runs (id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, plan_sha256 TEXT NOT NULL, mode TEXT NOT NULL, name TEXT NOT NULL, dataset_id TEXT, state TEXT NOT NULL, manifest_json TEXT NOT NULL, created_at REAL NOT NULL)")
             con.execute("CREATE TABLE IF NOT EXISTS hosted_migration_items (run_id TEXT NOT NULL REFERENCES hosted_migration_runs(id), image_key TEXT NOT NULL, image_id TEXT NOT NULL, version_id TEXT NOT NULL, PRIMARY KEY(run_id,image_key))")
@@ -354,15 +377,19 @@ class HostedMigrator:
             self.store._actor(con, actor, admin=True)
         if mode not in {"incoming", "approved-baseline"} or (mode == "approved-baseline" and not accept_existing_labels):
             raise DomainError("migration_baseline_attestation_required", 422)
-        if plan.get("format") != FORMAT or plan.get("plan_sha256") != digest({key: value for key, value in plan.items() if key != "plan_sha256"}):
+        if plan.get("format") not in {FORMAT, LEGACY_FORMAT} or plan.get("plan_sha256") != digest({key: value for key, value in plan.items() if key != "plan_sha256"}):
             raise DomainError("migration_plan_invalid", 422)
+        run_id = "migration-" + digest({"plan": plan["plan_sha256"], "actor": actor.user_id, "name": name, "mode": mode})[:40]
+        payload = {"run_id": run_id, "plan_sha256": plan["plan_sha256"], "name": name, "mode": mode, "accept_existing_labels": bool(accept_existing_labels)}
+        if plan["format"] == LEGACY_FORMAT:
+            if self.store.raw_receipt(actor, run_id + "-finish"):
+                return self.store._command(actor, run_id + "-finish", "finish_migration", payload, lambda con: None, admin=True)
+            raise DomainError("migration_plan_requires_review", 409)
         fresh = inventory(plan["source_root"], mapping=plan["mapping"], clip_boxes=plan["clip_boxes"])
         if fresh != plan:
             raise DomainError("migration_source_changed", 409)
         if plan["blockers"] or (mode == "approved-baseline" and plan["missing_labels"]):
             raise DomainError("migration_inventory_unresolved", 409, {"blockers": plan["blockers"], "missing_labels": plan["missing_labels"]})
-        run_id = "migration-" + digest({"plan": plan["plan_sha256"], "actor": actor.user_id, "name": name, "mode": mode})[:40]
-        payload = {"run_id": run_id, "plan_sha256": plan["plan_sha256"], "name": name, "mode": mode, "accept_existing_labels": bool(accept_existing_labels)}
         def start(con):
             con.execute("INSERT INTO hosted_migration_runs VALUES (?,?,?,?,?,NULL,'running',?,?)", (run_id, actor.user_id, plan["plan_sha256"], mode, name, _json(plan), self.store.clock()))
             return {"run_id": run_id}
@@ -381,11 +408,13 @@ class HostedMigrator:
             associations.append({"source_file": filename, "role": source["role"], "sha256": reference.sha256, "size_bytes": reference.size_bytes, "association": source.get("association", {})})
         for row in plan["images"]:
             operation = run_id + "-image-" + digest(row["key"])[:24]
-            if self.store.receipt(actor, operation + "-done"):
+            if self.store.raw_receipt(actor, operation + "-done"):
                 continue
             annotations = {"objects": [{**{key: value for key, value in obj.items() if key != "class_index"}, "class_id": ds["classes"][obj["class_index"]]["id"]} for obj in row["objects"]],
                            "captions": row["captions"], "migration": {"run_id": run_id, "source_key": row["key"], "label_file": row["label_file"], "source_sha256": row["media_hash"], "geometry_clipping_authorized": plan["clip_boxes"], "metadata": row["metadata"]}}
             active_captions = [record for record in row["captions"] if record.get("lifecycle_status", "active") == "active"]
+            if row.get("media_coordinate_provenance"):
+                annotations["media_coordinate_provenance"] = row["media_coordinate_provenance"]
             if row.get("effective_caption") is not None:
                 annotations["caption"] = row["effective_caption"]
             elif active_captions:
@@ -393,15 +422,17 @@ class HostedMigrator:
                 annotations["caption"] = primary.get("caption", "")
             source = plan["files"][row["file"]]
             with self.artifacts.exclusive():
-                reference = self.artifacts.put_file(_safe_path(source["path"]), expected_sha256=source["sha256"], expected_size=source["size_bytes"])
-                imported = self.store.import_image(actor, ds["id"], reference.sha256, row["key"], annotations, operation + "-import", width=row["width"], height=row["height"], size_bytes=row["size_bytes"], split=row["split"])
+                view = self.media.stage(_safe_path(source["path"]))
+                if view["source_sha256"] != source["sha256"] or view["source_size_bytes"] != source["size_bytes"]:
+                    raise DomainError("migration_source_changed", 409)
+                imported = self.store.import_image(actor, ds["id"], view["source_sha256"], row["key"], annotations, operation + "-import", width=row["width"], height=row["height"], size_bytes=row["size_bytes"], split=row["split"])
             completed = imported
             if mode == "approved-baseline":
-                prior_approval = self.store.receipt(actor, operation + "-approve")
+                prior_approval = self.store.raw_receipt(actor, operation + "-approve")
                 if prior_approval:
                     completed = prior_approval["result"]
                 else:
-                    prior_save = self.store.receipt(actor, operation + "-save")
+                    prior_save = self.store.raw_receipt(actor, operation + "-save")
                     expected_version = prior_save["result"]["current_version"] if prior_save else imported["current_version"]
                     current = self.store.image(actor, imported["id"])
                     if current["current_version"] != expected_version:
@@ -417,7 +448,7 @@ class HostedMigrator:
         # Explicit preservation associations do not activate a legacy recipe or
         # pretend that its model has passed hosted-runtime qualification.
         settings_operation = run_id + "-settings"
-        if not self.store.receipt(actor, settings_operation):
+        if not self.store.raw_receipt(actor, settings_operation):
             current = self.store.get_dataset(actor, ds["id"])
             self.store.patch_dataset_settings(actor, ds["id"], {"migration": {"run_id": run_id, "plan_sha256": plan["plan_sha256"], "mode": mode, "artifacts": associations}}, current["revision"], settings_operation)
         def finish(con):

@@ -140,6 +140,11 @@ class HostedOperations:
     def archive_dataset(self, actor: Actor, dataset_id: str, expected_images: dict[str, dict[str, Any]],
                         operation_id: str, reason: str = "", expected_revision: int | None = None) -> dict[str, Any]:
         def run(con: sqlite3.Connection) -> dict[str, Any]:
+            from .preconditions import validate_precondition
+            if not isinstance(expected_images, dict):
+                raise DomainError("invalid_precondition", 422, {"field": "expected_images"})
+            for identifier, expected in expected_images.items():
+                validate_precondition(expected, field=f"expected_images.{identifier}")
             dataset = self.store._dataset(con, dataset_id)
             if expected_revision is None or dataset["revision"] != expected_revision:
                 raise DomainError("dataset_revision_changed", 409)
@@ -358,7 +363,7 @@ class HostedOperations:
             return self.store._command(actor, operation_id, "purge_orphans", payload, finish, admin=True)
 
     def _snapshot_entries(self, manifest: dict[str, Any], *, unsplit_as_train=False) -> Iterator[ExportEntry]:
-        from PIL import Image
+        from .media import HostedMedia, MEDIA_VIEW_POLICY, working_media_bytes
 
         classes = sorted(manifest["classes"], key=lambda item: item["position"])
         mapping = {item["id"]: index for index, item in enumerate(classes)}
@@ -371,7 +376,8 @@ class HostedOperations:
         yield ExportEntry("hosted-snapshot.json", data=_json(manifest).encode())
         splits: dict[str, str] = {}
         caption_rows = []
-        formats = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp", "TIFF": ".tif", "BMP": ".bmp"}
+        media_map = {"policy": MEDIA_VIEW_POLICY, "coordinate_space": "encoded", "images": {}}
+        media = HostedMedia(self.store, self.artifacts) if hasattr(self, "store") else None
         for image in manifest["images"]:
             image_id, split = image["id"], image["split"]
             if not re.fullmatch(r"[A-Za-z0-9_-]+", image_id) or split not in ("train", "val", "test", "unsplit"):
@@ -382,16 +388,29 @@ class HostedOperations:
             if width <= 0 or height <= 0:
                 raise DomainError("invalid_snapshot_dimensions", 409)
             reference = ArtifactRef(image["media_hash"], image["size_bytes"])
-            # Read the actual encoding instead of trusting an uploaded suffix.
-            # The subsequent artifact copy verifies the complete digest.
-            with self.artifacts.open(reference, verify=False) as stream:
-                with Image.open(stream) as decoded:
-                    suffix = formats.get(decoded.format)
-                    if decoded.size != (width, height) or suffix is None:
-                        raise DomainError("snapshot_media_mismatch", 409)
+            if media is not None:
+                view = media.resolve(reference)
+                working = None
+            else:
+                # Native children consume pinned immutable bytes without DB
+                # access. Freeze their actual working hash beside the original
+                # snapshot rather than replacing its provenance identity.
+                with self.artifacts.open(reference) as stream:
+                    working, decoded_view = working_media_bytes(stream)
+                view = image.get("working_media", decoded_view)
+                if (view["source_sha256"] != reference.sha256
+                        or view["source_size_bytes"] != reference.size_bytes
+                        or view["sha256"] != decoded_view["sha256"]
+                        or view["size_bytes"] != len(working)
+                        or (view["width"], view["height"]) != (decoded_view["width"], decoded_view["height"])):
+                    raise DomainError("snapshot_media_mismatch", 409)
+            if (view["width"], view["height"]) != (width, height):
+                raise DomainError("snapshot_media_mismatch", 409)
             prefix = f"{split}/"
-            image_path = f"{prefix}images/{image_id}{suffix}"
-            yield ExportEntry(image_path, artifact=reference)
+            image_path = f"{prefix}images/{image_id}{view['suffix']}"
+            media_map["images"][image_id] = {**view, "path": image_path}
+            yield (ExportEntry(image_path, artifact=HostedMedia.reference(view)) if media is not None
+                   else ExportEntry(image_path, data=working))
             splits[split] = f"{split}/images"
             labels, polygons = [], []
             for obj in image["annotations"]["objects"]:
@@ -423,6 +442,7 @@ class HostedOperations:
             # Preserve unsplit provenance; never manufacture a validation split.
             config["train"] = ([splits["train"], splits["unsplit"]]
                                if "train" in splits else splits["unsplit"])
+        yield ExportEntry("hosted-media.json", data=_json(media_map).encode())
         yield ExportEntry("data.yaml", data=(_json(config) + "\n").encode())  # JSON is valid YAML.
         yield ExportEntry("captions.jsonl", data=("\n".join(_json(row) for row in caption_rows) + ("\n" if caption_rows else "")).encode())
 
@@ -467,12 +487,14 @@ class HostedOperations:
 
     def _existing(self, actor: Actor, operation_id: str, operation: str, payload: Any) -> dict[str, Any] | None:
         with self.store.read_connection() as con:
-            self.store._actor(con, actor, admin=True)
+            self.store._actor(con, actor)
             row = con.execute("SELECT request_hash,response_json FROM hosted_receipts WHERE actor_id=? AND operation_id=?", (actor.user_id, operation_id)).fetchone()
             if row:
                 if row["request_hash"] != _digest({"operation": operation, "payload": payload}):
                     raise DomainError("operation_id_reused", 409)
-                return json.loads(row["response_json"])
+                return self.store.disclose_receipt_result(actor, operation_id, operation,
+                                                         json.loads(row["response_json"]), connection=con)
+            self.store._actor(con, actor, admin=True)
             return None
 
     def _copy_export(self, actor: Actor, reference: ArtifactRef, destination: Path) -> None:
@@ -557,6 +579,19 @@ class HostedOperations:
         for reference in HostedOperations.artifact_references(connection):
             if available.get(reference["sha256"]) != reference["size_bytes"]:
                 raise DomainError("recovery_artifact_missing", 409, {"sha256": reference["sha256"]})
+        if "hosted_media_views" in tables:
+            for source_hash, policy, encoded in connection.execute("SELECT source_sha256,policy,view_json FROM hosted_media_views"):
+                try:
+                    view = json.loads(encoded)
+                    if (view["source_sha256"] != source_hash or view["policy"] != policy
+                            or view["coordinate_space"] != "encoded" or view["width"] <= 0 or view["height"] <= 0):
+                        raise ValueError("media view identity changed")
+                    for digest, size in ((source_hash, view["source_size_bytes"]), (view["sha256"], view["size_bytes"])):
+                        registered = connection.execute("SELECT 1 FROM hosted_artifact_references WHERE kind='media_view' AND owner_id=? AND sha256=? AND size_bytes=?", (source_hash + ":" + policy, digest, size)).fetchone()
+                        if registered is None or available.get(digest) != size:
+                            raise ValueError("working media reference missing")
+                except (KeyError, TypeError, ValueError) as error:
+                    raise DomainError("recovery_media_view_missing", 409) from error
         if 'hosted_ingestion_candidates' in tables:
             for identifier, dataset_id, encoded in connection.execute('SELECT id,dataset_id,manifest_json FROM hosted_ingestion_candidates'):
                 try:
@@ -742,6 +777,8 @@ class HostedOperations:
         if not connection.execute("SELECT 1 FROM hosted_users WHERE role='admin' AND disabled=0 LIMIT 1").fetchone():
             raise DomainError("recovery_has_no_active_administrator", 409)
         AuthService.invalidate_restored_sessions(connection)
+        from .job_authority import invalidate_restored_jobs
+        invalidate_restored_jobs(connection)
         from .providers import ProviderAccounts
         ProviderAccounts.after_restore(connection)
         if "hosted_analysis_jobs" in tables:

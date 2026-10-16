@@ -31,6 +31,44 @@ the explicitly supplied external overlay, or otherwise the local
 ``.annotation_overlay/`` directory. Missing files fall back to the source;
 selecting an external overlay never falls back to a stale local overlay. An
 empty overlay file deliberately clears the corresponding labels or caption.
+Within each selected scope, caption text aliases are ordered ``text_labels``,
+``captions``, then ``caption_labels``. Mirrored image paths precede basename
+fallbacks; a basename is used only when it identifies one image in that scope.
+All recognized shadowed text remains retained as inactive history. An ambiguous
+unassociated sidecar remains an inventory blocker until explicitly mapped.
+
+Media and coordinate frames
+---------------------------
+
+Admission fully decodes each image, including JPEG scan data, before creating
+membership. The input limit is 256 MiB and the decoded limit is 64 million
+pixels; images are never silently resized. Canonical dimensions and annotations
+use the encoded pixel grid. EXIF display orientation is ignored, including TIFF
+decoder rotation. Original source bytes and their SHA-256 remain unchanged.
+Browsers, exported datasets and native consumers use an immutable neutral
+working representation when required; see ``hosted_operations.rst``.
+
+Labeled images with EXIF orientation other than 1 require a declared source
+coordinate frame. Add ``"label_coordinate_space": "encoded"`` or
+``"label_coordinate_space": "exif_display"`` to the mapping, or declare frames
+per image with ``"image_coordinate_spaces": {"train/car.jpg": "encoded"}``.
+Per-image declarations take precedence. Display-frame boxes and polygons are
+converted into encoded pixels and retain the source frame, orientation, source
+hash and policy in annotation provenance. Unknown frames are inventory blockers;
+the importer never guesses the meaning of existing labels. Empty label files
+do not require a frame. Raw label files remain retained unchanged.
+
+Historical hosted data can be inspected without rewriting it using
+``HostedMedia(store, artifacts).audit()`` from an administrator's offline Python
+session. It reports undecodable sources and oriented labeled versions without
+coordinate provenance. Review each reported image against its original source.
+An administrator can explicitly correct its annotations through the normal
+editor and save a new version; the audit does not alter source bytes or history.
+The report includes version IDs and examines historical versions as well as the
+current one, so correcting current annotations does not erase an older warning.
+
+Caption record history
+----------------------
 
 Caption JSONL is a complete record collection, not a patch to older files. An
 explicit external overlay supplies that collection even when its JSONL file is
@@ -126,6 +164,11 @@ plan and source tree until migration and recovery acceptance are complete.
 After upgrading the importer, regenerate and review an inventory before starting
 a new migration; an older inventory with different resolved annotations is
 rejected instead of silently being reinterpreted.
+The current inventory format is ``tator-hosted-migration-v2``. Unfinished v1
+plans return ``migration_plan_requires_review``; regenerate and review their
+resolved captions and coordinate decisions before starting a new run. Completed
+v1 runs retain their exact finish receipt and can replay it without rereading or
+changing their original source tree.
 
 The local fixture tests exercise filesystem preservation, overlay labels,
 caption alternatives, custom artifacts and restart recovery. Importing WALDO40

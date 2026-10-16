@@ -77,10 +77,19 @@
             action(recovery, "Check correction result", async () => {
                 const command = pending;
                 const receipt = await api(`/receipts/${encodeURIComponent(command.context.operation_id)}`);
+                if (receipt?.operation_id === command.context.operation_id && receipt.commit_outcome === "committed" && receipt.result_restricted === true) {
+                    clearPending();
+                    message.textContent = "The correction was saved, but your account can no longer view its result. Reopen the workspace to check your current access.";
+                    detail.replaceChildren();
+                    return;
+                }
                 let result = receipt?.result;
                 if (!result) {
                     try { result = await api(base + "/actions", command); }
-                    catch (e) { if ([400, 409, 422].includes(e.status)) { clearPending(); await refresh(); } throw e; }
+                    catch (e) {
+                        if (e.commit_outcome === "committed" && e.result_restricted === true && e.operation_id === command.context.operation_id) clearPending();
+                        throw e;
+                    }
                 }
                 clearPending();
                 leases.set(result.image.id, {...result.image, _editor_id: command.context.editor_id});

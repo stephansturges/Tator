@@ -6,11 +6,18 @@
     const input = document.getElementById("uploadInput"), start = document.getElementById("import");
     input.accept += ",.txt";
     const resume = document.createElement("button"); resume.type = "button"; resume.id = "resumeImport"; resume.textContent = "Resume image import"; resume.hidden = true; start.after(resume);
+    const frameLabel = document.createElement("label"), frame = document.createElement("select");
+    frameLabel.textContent = "Imported label coordinates "; frame.id = "importLabelCoordinates";
+    for (const [value, text] of [["", "Unspecified (unrotated images only)"], ["encoded", "Original stored pixels"], ["exif_display", "Rotated photo viewer pixels"]]) {
+        const option = document.createElement("option"); option.value = value; option.textContent = text; frame.append(option);
+    }
+    frameLabel.title = "Only needed when importing existing labels on photos with rotation metadata. Tator annotates the original stored pixel grid. Choose the grid your labels were drawn on; viewer coordinates will be converted without changing the original file.";
+    frameLabel.append(frame); resume.after(frameLabel);
     let resuming = false, running = false;
     const storageKey = (dataset) => `tator.hosted.import:${app.session?.instance_id}:${app.session?.user.user_id}:${dataset}`;
     function read(dataset) { try { return JSON.parse(sessionStorage.getItem(storageKey(dataset)) || "null"); } catch { return null; } }
     function persist(key, batch) { sessionStorage.setItem(key, JSON.stringify(batch)); }
-    function refresh() { resume.hidden = running || app.session?.user.role !== "admin" || !read(app.datasetId); }
+    function refresh() { resume.hidden = running || app.session?.user.role !== "admin" || !read(app.datasetId); frameLabel.hidden = start.hidden; frame.disabled = running; }
     function signature(file) { return JSON.stringify([file.name, file.size, file.lastModified]); }
     async function digest(file) { return [...new Uint8Array(await crypto.subtle.digest("SHA-256", await file.arrayBuffer()))].map((byte) => byte.toString(16).padStart(2, "0")).join(""); }
     start.onclick = () => { resuming = false; app.notice("Select images and, optionally, matching YOLO .txt labels plus labelmap.txt, classes.txt or labels.txt. Labels must use existing dataset classes."); input.click(); };
@@ -55,7 +62,7 @@
                     const order = names.map((name, index) => `${index}: ${name}`).join(", ");
                     if (!confirm(`Import ${sidecars.length} YOLO label file(s)? ${maps[0] ? "The selected labelmap" : "No labelmap was selected, so the current dataset order"} gives ${order || "no classes"}. Existing annotations are preserved for comparison if the images already exist.`)) { input.value = ""; return; }
                 }
-                batch = { class_names: names, expected_class_version: description?.class_version,
+                batch = { class_names: names, expected_class_version: description?.class_version, label_coordinate_space: frame.value || null,
                     labelmap_signature: maps[0] ? signature(maps[0]) : null, labelmap_digest: mapDigest,
                     entries: images.map(file => ({ signature: signature(file), name: file.name, operation_id: crypto.randomUUID(), digest: null, state: "pending",
                         label_signature: labels.has(file.name.replace(/\.[^.]+$/, "")) ? signature(labels.get(file.name.replace(/\.[^.]+$/, ""))) : null, label_digest: null })) };
@@ -94,6 +101,7 @@
                     entry.label_digest = labelHash; persist(key, batch);
                     form.set("yolo_labels_json", JSON.stringify((await label.text()).replace(/^\uFEFF/, "")));
                     form.set("labelmap_names", JSON.stringify(batch.class_names)); form.set("expected_class_version", String(batch.expected_class_version));
+                    if (batch.label_coordinate_space) form.set("label_coordinate_space", batch.label_coordinate_space);
                 }
                 if (app.session !== authority || app.datasetId !== dataset) throw new Error("Import paused because the account or dataset changed. Resume it in its original dataset.");
                 const result = await app.api(`/datasets/${encodeURIComponent(dataset)}/incoming`, { method: "POST", body: form });

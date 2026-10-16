@@ -285,7 +285,7 @@ class CaptionBatches:
     def start(self, actor, body):
         self._recover()
         requested = body.model_dump()
-        previous = self.store.receipt(actor, body.operation_id)
+        previous = self.store.raw_receipt(actor, body.operation_id)
         if not previous:
             from services.hosted.tool_api import qwen_guidance
             frozen = self.store.get_snapshot(actor, body.snapshot_id)["manifest"]
@@ -388,7 +388,9 @@ class CaptionBatches:
                 "images": [image for image in manifest["images"] if image["id"] in selected_ids]}))
             with self.tools.artifacts.exclusive():
                 for image in content["images"]:
-                    ref = self.tools.artifacts.pin(image["media_hash"], directory)
+                    view = self.tools.media.resolve(image["media_hash"])
+                    ref = self.tools.artifacts.pin(self.tools.media.reference(view), directory)
+                    image["working_media"] = view
                     image["media_path"] = str(directory / ref.sha256)
                 _atomic(directory / "canonical-snapshot.json", content)
             if body.provider == "openai":
@@ -652,7 +654,7 @@ class CaptionBatches:
         # replay recovers its original receipt after this save advances version.
         self._row(actor, job_id)
         context = MutationContext(image_id, body.expected_version, body.generation, body.editor_id, body.operation_id)
-        previous = self.store.receipt(actor, body.operation_id)
+        previous = self.store.raw_receipt(actor, body.operation_id)
         proposal = None if previous else self.proposal(actor, job_id, image_id)
         if proposal is not None and proposal["proposal_sha256"] != body.proposal_sha256:
             raise DomainError("caption_proposal_changed", 409)
@@ -703,7 +705,7 @@ class CaptionBatches:
         self._recover()
         row = self._row(actor, job_id)
         body = CaptionBatchRequest(**json.loads(row["request_json"]))
-        if not self.store.receipt(actor, operation_id) and self._validate(actor, body)[2] != row["identity"]:
+        if not self.store.raw_receipt(actor, operation_id) and self._validate(actor, body)[2] != row["identity"]:
             raise DomainError("caption_batch_configuration_changed", 409)
         changed = False
         def change(con):

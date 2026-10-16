@@ -8,6 +8,82 @@ import pytest
 from services.hosted.artifacts import CHUNK_SIZE, ArtifactError, ArtifactRef, ArtifactStore
 
 
+@pytest.mark.parametrize("encoding", ["JPEG", "PNG", "WEBP", "TIFF"])
+@pytest.mark.parametrize("orientation", range(1, 9))
+def test_encoded_working_media_preserves_all_orientations_and_native_pixels(tmp_path, encoding, orientation):
+    from PIL import Image
+    from services.hosted.media import decode_encoded, working_media_bytes
+    from services.hosted.adapters import _image
+    picture = Image.new("RGB", (64, 48), "red")
+    picture.paste("blue", (0, 0, 24, 48))
+    exif = Image.Exif(); exif[274] = orientation
+    stream = io.BytesIO(); picture.save(stream, format=encoding, exif=exif)
+    original = stream.getvalue()
+    pixels, info = decode_encoded(original)
+    working, view = working_media_bytes(original)
+    assert info.width == 64 and info.height == 48 and info.orientation == orientation
+    assert view["source_sha256"] == hashlib.sha256(original).hexdigest()
+    with Image.open(io.BytesIO(working)) as neutral:
+        assert neutral.size == (64, 48) and neutral.getexif().get(274, 1) == 1
+        assert neutral.convert("RGB").tobytes() == pixels.tobytes()
+    path = tmp_path / "working"; path.write_bytes(working)
+    native, digest = _image({"media_path": str(path), "media_sha256": view["sha256"]}, {"media_root": str(tmp_path)})
+    assert native.tobytes() == pixels.tobytes() and digest == view["sha256"]
+    assert pixels.getpixel((8, 20))[2] > 240 and pixels.getpixel((48, 20))[0] > 240
+    assert (working != original) == (orientation != 1 or encoding == "TIFF")
+
+
+def test_full_media_decode_rejects_truncation_and_shared_limits_before_retention(tmp_path, monkeypatch):
+    from PIL import Image
+    from services.hosted import media
+    from services.hosted.errors import DomainError
+    from services.hosted.store import HostedStore
+    stream = io.BytesIO(); Image.new("RGB", (64, 48), "orange").save(stream, format="JPEG", quality=95)
+    data = stream.getvalue(); truncated = data[:-40]
+    with Image.open(io.BytesIO(truncated)) as header:
+        header.verify()  # The original regression: header validation succeeds.
+    store = HostedStore(tmp_path / "state.sqlite3")
+    artifacts = ArtifactStore(tmp_path / "artifacts")
+    service = media.HostedMedia(store, artifacts)
+    with pytest.raises(DomainError, match="invalid_image_import"):
+        service.ingest(truncated)
+    assert not list(artifacts.sha256_root.glob("*/*"))
+    monkeypatch.setattr(media, "MAX_MEDIA_BYTES", len(data) - 1)
+    with pytest.raises(DomainError, match="hosted_image_bytes_exceeded"):
+        service.ingest(data)
+    monkeypatch.setattr(media, "MAX_MEDIA_BYTES", len(data))
+    monkeypatch.setattr(media, "MAX_MEDIA_PIXELS", 64 * 48 - 1)
+    with pytest.raises(DomainError, match="hosted_image_pixels_exceeded"):
+        service.ingest(data)
+    monkeypatch.setattr(media, "MAX_MEDIA_PIXELS", 64 * 48)
+    assert service.ingest(data)["source_sha256"] == hashlib.sha256(data).hexdigest()
+
+
+@pytest.mark.parametrize("orientation", range(1, 9))
+def test_explicit_display_label_conversion_matches_encoded_boxes_and_polygons(orientation):
+    from services.hosted.media import MediaInfo, prepare_annotations
+    from services.hosted.errors import DomainError
+    width, height = 64, 48
+    forward = {1: lambda x, y: (x, y), 2: lambda x, y: (width-x, y),
+        3: lambda x, y: (width-x, height-y), 4: lambda x, y: (x, height-y),
+        5: lambda x, y: (y, x), 6: lambda x, y: (height-y, x),
+        7: lambda x, y: (height-y, width-x), 8: lambda x, y: (y, width-x)}[orientation]
+    encoded = [[4, 8], [20, 8], [20, 32], [4, 32]]
+    displayed = [forward(*point) for point in encoded]
+    xs, ys = zip(*displayed)
+    annotations = {"objects": [{"bbox": [min(xs), min(ys), max(xs)-min(xs), max(ys)-min(ys)], "polygon": displayed}]}
+    info = MediaInfo("a" * 64, 100, width, height, "JPEG", orientation, orientation != 1)
+    result = prepare_annotations(annotations, info, "exif_display")
+    assert result["objects"][0] == {"bbox": [4, 8, 16, 24], "polygon": encoded}
+    assert result["media_coordinate_provenance"]["source_coordinate_space"] == "exif_display"
+    assert prepare_annotations(result, info, "encoded")["objects"] == result["objects"]
+    if orientation != 1:
+        with pytest.raises(DomainError, match="label_coordinate_space_required"):
+            prepare_annotations(annotations, info)
+    with pytest.raises(DomainError, match="invalid_bbox"):
+        prepare_annotations({"objects": [{"bbox": [0, 0, -2, 2]}]}, info, "exif_display")
+
+
 def test_streamed_import_is_durable_deduplicated_and_preserves_source(tmp_path):
     source = tmp_path / "original.bin"
     payload = b"pixels" * (CHUNK_SIZE // 2)

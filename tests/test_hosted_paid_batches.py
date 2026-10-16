@@ -126,7 +126,10 @@ def test_batch_exact_native_prompt_upload_collect_and_explicit_apply(system):
     system["store"].recall_images(system["admin"], image["dataset_id"], [image["id"]],
         {image["id"]: {"expected_version": current["current_version"], "generation": current["generation"]}},
         "Fixture recall after committed caption", op())
-    assert client.post(url + "/" + job_id + "/apply", json=command).json() == saved.json()
+    replay = client.post(url + "/" + job_id + "/apply", json=command)
+    assert replay.status_code == 403 and replay.json()["error"] == "committed_result_restricted"
+    receipt = system["store"].receipt(system["alice"], command["operation_id"])
+    assert receipt["commit_outcome"] == "committed" and receipt["result_restricted"] and receipt["result"] is None
     changed_command = {**command, "include_generated_qa": False}
     mismatch = client.post(url + "/" + job_id + "/apply", json=changed_command)
     assert mismatch.status_code == 409 and mismatch.json()["error"] == "operation_id_reused"
@@ -275,3 +278,112 @@ def test_oversize_native_prompt_is_rejected_before_reservation_or_upload(system,
     assert not transport.requests
     with system["store"].read_connection() as con:
         assert not con.execute("SELECT 1 FROM hosted_paid_batches").fetchone()
+
+
+def _oriented_batch_image(system, encoding):
+    import io
+    from PIL import Image
+    picture = Image.new('RGB', (64, 48), 'red')
+    picture.paste('blue', (0, 0, 24, 48))
+    exif = Image.Exif(); exif[274] = 6
+    data = io.BytesIO(); picture.save(data, format=encoding, exif=exif)
+    original = data.getvalue()
+    view = system['controller'].media.stage(original)
+    store, admin = system['store'], system['admin']
+    image = store.import_image(admin, system['dataset']['id'], view['source_sha256'], 'oriented.' + encoding.lower(), {}, op(),
+        width=64, height=48, size_bytes=len(original))
+    assigned = store.assign(admin, image['dataset_id'], [image['id']], system['alice'].user_id, op(),
+        expected={image['id']: {'expected_version': image['current_version'], 'generation': image['generation']}})
+    return acquire(system, assigned['images'][0]), original, view
+
+
+@pytest.mark.parametrize('encoding', ['JPEG', 'PNG', 'WEBP', 'TIFF'])
+def test_paid_batch_uploads_encoded_working_view_and_keeps_source_identity(system, encoding):
+    import hashlib
+    import io
+    from PIL import Image, ImageOps
+    from services.hosted.media import decode_encoded
+    from services.hosted.paid_batches import _digest
+    gateway, transport = configure(system)
+    image, original, view = _oriented_batch_image(system, encoding)
+    client, url = system['client'], '/api/hosted/tools/paid-batches'
+    body = body_for(image)
+    started = client.post(url, json=body)
+    assert started.status_code == 202, started.text
+    job_id = started.json()['job_id']
+    done = eventually(lambda: row if (row := client.get(url + '/' + job_id).json()).get('status') in {'collected', 'failed', 'submission_unknown'} else None)
+    assert done['status'] == 'collected', done
+    uploads = [request[3] for request in transport.requests if request[3] and request[3][2] == 'vision']
+    assert len(uploads) == 1
+    name, data, _ = uploads[0]
+    assert name.endswith('.png')
+    assert hashlib.sha256(data).hexdigest() == view['sha256'] != view['source_sha256']
+    expected, _ = decode_encoded(original)
+    with Image.open(io.BytesIO(data)) as actual:
+        assert actual.size == ImageOps.exif_transpose(actual).size == (64, 48)
+        assert actual.getexif().get(274, 1) == 1
+        assert actual.convert('RGB').tobytes() == expected.tobytes()
+    expected.close()
+    with system['store'].read_connection() as con:
+        retained = con.execute('SELECT * FROM hosted_paid_batch_rows WHERE job_id=?', (job_id,)).fetchone()
+        prepared = json.loads(retained['request_json'])
+        assert prepared['source_media_hash'] == view['source_sha256']
+        assert prepared['working_media'] == view
+        assert retained['upload_sha256'] == view['sha256']
+        price = json.loads(con.execute('SELECT pricing_json FROM hosted_paid_batches WHERE id=?', (job_id,)).fetchone()[0])
+        call = con.execute('SELECT * FROM hosted_provider_calls WHERE id=?', (retained['call_id'],)).fetchone()
+        assert call['request_hash'] == _digest({'prepared': prepared, 'pricing': price, 'transport': 'openai_batch'})
+        assert call['state'] == 'settled' and call['charged'] > 0
+    with system['artifacts'].open(view['source_sha256']) as stream:
+        assert stream.read() == original
+    current = system['store'].image(system['alice'], image['id'])
+    assert current['media_hash'] == view['source_sha256'] and current['current_version'] == image['current_version']
+    assert client.post(url, json=body).json()['job_id'] == job_id
+    assert len(transport.batches) == 1
+    assert len([request for request in transport.requests if request[3] and request[3][2] == 'vision']) == 1
+
+
+def test_paid_batch_replaces_unsent_legacy_oriented_upload_without_new_reservation(system, monkeypatch):
+    """An old original-byte upload and JSONL must not survive into a new dispatch."""
+    from dataclasses import replace
+    from services.hosted.paid_batches import PaidBatchRequest, _digest, _json
+    gateway, transport = configure(system)
+    image, original, view = _oriented_batch_image(system, 'JPEG')
+    ctl = system['controller'].paid_batches
+    launch = ctl._launch
+    monkeypatch.setattr(ctl, '_launch', lambda job_id: None)
+    body = body_for(image)
+    started = system['client'].post('/api/hosted/tools/paid-batches', json=body)
+    assert started.status_code == 202
+    job_id = started.json()['job_id']
+    row = ctl._rows(job_id)[0]
+    prepared = json.loads(row['request_json']); prepared.pop('working_media')
+    old_file = transport.request('fake-local-test-key', 'POST', '/files', upload=('oriented.jpg', original, 'vision'))['id']
+    old_line = json.loads(_json(prepared['line']))
+    old_line['body']['input'][0]['content'][1]['file_id'] = old_file
+    old_input = transport.request('fake-local-test-key', 'POST', '/files', upload=('old-input.jsonl', (_json(old_line) + '\n').encode(), 'batch'))['id']
+    captured = ctl._row(None, job_id)
+    manifest, price = json.loads(captured['manifest_json']), json.loads(captured['pricing_json'])
+    frozen_body = PaidBatchRequest(**json.loads(captured['request_json']))
+    authority = replace(ctl._authority(frozen_body, manifest['images'][0]), operation_id='batch-row-' + _digest([job_id, image['id']]))
+    fingerprint = _digest({'prepared': prepared, 'pricing': price, 'transport': 'openai_batch'})
+    call = gateway.accounts.reserve(system['alice'], authority, provider='openai', model=frozen_body.provider_options.model,
+        maximum_microdollars=ctl._maximum(price, frozen_body), request_fingerprint=fingerprint, replay_settled_stage=True)
+    with system['store'].transaction() as con:
+        con.execute('UPDATE hosted_paid_batch_rows SET request_json=?,upload_id=?,call_id=?,upload_sha256=NULL WHERE job_id=?', (_json(prepared), old_file, call['id'], job_id))
+        con.execute('UPDATE hosted_paid_batches SET input_file_id=? WHERE id=?', (old_input, job_id))
+    monkeypatch.setattr(ctl, '_launch', launch)
+    ctl._launch(job_id)
+    done = eventually(lambda: row if (row := system['client'].get('/api/hosted/tools/paid-batches/' + job_id).json()).get('status') in {'collected', 'failed'} else None)
+    assert done['status'] == 'collected', done
+    retained = ctl._rows(job_id)[0]
+    assert retained['upload_id'] != old_file and retained['upload_sha256'] == view['sha256']
+    remote = next(iter(transport.batches.values()))
+    assert remote['input_file_id'] != old_input
+    line = json.loads(transport.files[remote['input_file_id']].splitlines()[0])
+    assert line['body']['input'][0]['content'][1]['file_id'] == retained['upload_id']
+    assert len(gateway.accounts.calls(system['admin'])) == 1
+    with system['store'].read_connection() as con:
+        final = con.execute('SELECT request_hash,state FROM hosted_provider_calls WHERE id=?', (call['id'],)).fetchone()
+        assert final['request_hash'] == fingerprint and final['state'] == 'settled'
+    assert json.loads(retained['request_json']) == prepared

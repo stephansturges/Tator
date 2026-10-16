@@ -257,7 +257,11 @@ def test_native_caption_export_uses_frozen_records_and_original_readiness(setup,
         annotations = {'objects': [{'id': 'object-' + color, 'class_id': ds['classes'][0]['id'], 'bbox': [2, 3, 10, 15]}],
                        'caption': color + ' car', 'alternate_captions': [{'caption': 'A car.', 'metadata': None, 'source': 'hosted_qwen',
                        'generated_qa_pairs': [{'question': 'What is present?', 'answer': 'A car.', 'validation_status': 'machine_validated', 'review_status': 'unreviewed'}]},
-                       {'caption': 'A car.', 'source': 'hosted_paid_batch', 'model_id': 'test-provenance', 'quality_failures': ['retained fixture warning']}]}
+                       {'caption': 'A car.', 'source': 'hosted_paid_batch', 'model_id': 'test-provenance', 'quality_failures': ['retained fixture warning']},
+                       {'caption': 'Deleted caption.', 'lifecycle_status': 'deleted',
+                        'generated_qa_pairs': [{'question': 'Deleted question?', 'answer': 'Old answer.', 'validation_status': 'machine_validated'}]},
+                       {'caption': 'Superseded caption.', 'lifecycle_status': 'superseded',
+                        'generated_qa_pairs': [{'question': 'Superseded question?', 'answer': 'Old answer.', 'validation_status': 'machine_validated'}]}]}
         image = store.save(actor, ctx(image, 'save-' + color), annotations, complete=True)
         store.approve(actor, ctx(image, 'approve-' + color))
     frozen = store.create_snapshot(actor, ds['id'], 'caption-export-snapshot')
@@ -290,7 +294,10 @@ def test_native_caption_export_uses_frozen_records_and_original_readiness(setup,
     result = json.loads((output / receipt['result_path']).read_text())['engine_result']
     assert result['diagnostic_export'] and result['blocked_reason'] == measured['blocked_reason']
     exported = json.loads((output / result['export_path']).read_text())
-    assert {row['caption'] for row in exported['captions']} == {'red car', 'blue car', 'yellow car', 'purple car', 'A car.'}
+    assert {row['caption'] for row in exported['captions']} == {'red car', 'blue car', 'yellow car', 'purple car', 'A car.', 'Deleted caption.', 'Superseded caption.'}
+    inactive = [row for row in exported['captions'] if row['caption'] in {'Deleted caption.', 'Superseded caption.'}]
+    assert all(row['lifecycle_status'] == 'superseded' and not row['is_primary'] for row in inactive)
+    assert {row['metadata']['hosted_source']['lifecycle_status'] for row in inactive} == {'deleted', 'superseded'}
     assert {row['split'] for row in exported['captions']} == {'train', 'val', 'test', 'unsplit'}
     assert exported['instruction_summary']['generated_qa_pair_count'] == 2
     generated = [row for row in exported['captions'] if row['caption'] == 'A car.']

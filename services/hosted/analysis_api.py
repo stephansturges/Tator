@@ -77,16 +77,16 @@ def install_analysis_api(app, store, artifacts, actor_dependency, admin_dependen
 
     @router.get("/jobs/{job_id}/images/{image_id}/media")
     def frozen_image(job_id: str, image_id: str, identity=Depends(admin_dependency)):
-        from PIL import Image
+        from .media import HostedMedia
         reference = analysis.image_reference(identity, job_id, image_id)
-        with artifacts.open(reference) as source:
-            with Image.open(source) as picture:
-                content_type = Image.MIME.get(picture.format, "application/octet-stream")
+        media = HostedMedia(store, artifacts)
+        view = media.resolve(reference)
+        reference = media.reference(view)
         def chunks():
             with artifacts.open(reference) as source:
                 while chunk := source.read(1024 * 1024):
                     yield chunk
-        return StreamingResponse(chunks(), media_type=content_type)
+        return StreamingResponse(chunks(), media_type=view["content_type"])
 
     @router.get("/jobs/{job_id}/dqe/graph")
     def graph(job_id: str, projection_mode: str | None = None, class_name: str | None = None,

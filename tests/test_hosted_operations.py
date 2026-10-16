@@ -78,6 +78,112 @@ def assert_error(code, callback):
     assert exc.value.code == code
 
 
+def test_encoded_media_export_native_map_and_recovery_retain_original_identity(workspace, tmp_path):
+    from services.hosted.media import HostedMedia
+    from services.hosted.analysis import legacy_source_manifest
+    from services.hosted.native_analysis import _materialize
+    store, _, artifacts, operations, admin, _, ds, _ = workspace
+    media = HostedMedia(store, artifacts)
+    stream = io.BytesIO(); exif = Image.Exif(); exif[274] = 6
+    picture = Image.new("RGB", (64, 48), "red"); picture.paste("blue", (0, 0, 24, 48))
+    picture.save(stream, format="TIFF", exif=exif)
+    original = stream.getvalue(); view = media.ingest(original)
+    assert view["sha256"] != view["source_sha256"]
+    assert media.resolve(view["source_sha256"]) == view
+    assert HostedMedia(HostedStore(store.path), ArtifactStore(artifacts.root)).resolve(view["source_sha256"]) == view
+    with pytest.raises(sqlite3.IntegrityError, match="immutable media view"):
+        with store.transaction() as con:
+            con.execute("UPDATE hosted_media_views SET view_json='{}'")
+    image = store.import_image(admin, ds["id"], view["source_sha256"], "oriented.tif", {}, "oriented-import", width=64, height=48, size_bytes=len(original))
+    image = store.acquire_editor(admin, image["id"], "tab")
+    image = store.save(admin, context(image, "oriented-save"), {"objects": []}, complete=True, negative=True)
+    image = store.approve(admin, context(image, "oriented-approve"))
+    snapshot = store.create_snapshot(admin, ds["id"], "oriented-snapshot")
+    manifest = store.get_snapshot(admin, snapshot["snapshot_id"])["manifest"]
+    target = tmp_path / "encoded-view"
+    operations.materialize_snapshot(admin, snapshot["snapshot_id"], target)
+    mapped = json.loads((target / "hosted-media.json").read_text())["images"][image["id"]]
+    exported = target / mapped["path"]
+    assert exported.suffix == ".png" and hashlib.sha256(exported.read_bytes()).hexdigest() == view["sha256"]
+    assert json.loads((target / "hosted-snapshot.json").read_text()) == manifest
+    with Image.open(exported) as pixels:
+        assert pixels.size == (64, 48) and pixels.getpixel((8, 20)) == (0, 0, 255)
+    source = legacy_source_manifest(manifest, target)
+    assert source["images"][0]["image_sha256"] == view["sha256"]
+    assert source["images"][0]["source_image_sha256"] == view["source_sha256"]
+    # The supervised child receives only pinned working bytes and no store.
+    pinned = json.loads(json.dumps(manifest))
+    pinned["images"][0].update(media_path=str(exported), working_media=view)
+    _, child_source, _ = _materialize(pinned, tmp_path / "child")
+    assert child_source["images"][0]["source_image_sha256"] == view["source_sha256"]
+    with store.read_connection() as con:
+        references = HostedOperations.artifact_references(con)
+        restored = sqlite3.connect(":memory:"); con.backup(restored)
+    try:
+        assert {view["sha256"], view["source_sha256"]}.issubset({ref["sha256"] for ref in references})
+        HostedOperations.restore_hook(restored, {"artifacts": references})
+        restored.execute("DELETE FROM hosted_artifact_references WHERE kind='media_view' AND sha256=?", (view["sha256"],))
+        with pytest.raises(DomainError, match="recovery_media_view_missing"):
+            HostedOperations.restore_hook(restored, {"artifacts": references})
+    finally:
+        restored.close()
+    with artifacts.open(view["source_sha256"]) as raw:
+        assert raw.read() == original
+
+
+def test_historical_media_audit_reports_ambiguity_and_corruption_without_mutation(workspace):
+    from services.hosted.media import HostedMedia
+    store, _, artifacts, _, admin, _, ds, _ = workspace
+    stream = io.BytesIO(); exif = Image.Exif(); exif[274] = 6
+    Image.new("RGB", (64, 48), "orange").save(stream, format="JPEG", quality=95, exif=exif)
+    data = stream.getvalue()
+    ambiguous_ref, corrupt_ref = artifacts.put_bytes(data), artifacts.put_bytes(data[:-40])
+    body = {"objects": [{"id": "legacy-object", "class_id": ds["classes"][0]["id"], "bbox": [1, 2, 8, 10]}]}
+    ambiguous = store.import_image(admin, ds["id"], ambiguous_ref.sha256, "legacy.jpg", body, "legacy-oriented", width=64, height=48, size_bytes=len(data))
+    corrupt = store.import_image(admin, ds["id"], corrupt_ref.sha256, "legacy-broken.jpg", {}, "legacy-corrupt", width=64, height=48, size_bytes=len(data)-40)
+    media = HostedMedia(store, artifacts)
+    with store.read_connection() as con:
+        before = [tuple(row) for row in con.execute("SELECT * FROM hosted_annotation_versions ORDER BY id")]
+    issues = {row["image_id"]: row["issue"] for row in media.audit()}
+    assert issues == {ambiguous["id"]: "historical_label_coordinate_space_unknown", corrupt["id"]: "invalid_image_import"}
+    with store.read_connection() as con:
+        assert [tuple(row) for row in con.execute("SELECT * FROM hosted_annotation_versions ORDER BY id")] == before
+        assert con.execute("SELECT COUNT(*) FROM hosted_media_views").fetchone()[0] == 0
+    with artifacts.open(ambiguous_ref) as raw:
+        assert raw.read() == data
+
+
+def test_failed_admission_does_not_permanently_retain_media_views(workspace):
+    from services.hosted.media import HostedMedia
+    store, _, artifacts, operations, admin, _, ds, _ = workspace
+    stream = io.BytesIO(); exif = Image.Exif(); exif[274] = 6
+    Image.new("RGB", (64, 48), "purple").save(stream, format="JPEG", exif=exif)
+    data = stream.getvalue(); media = HostedMedia(store, artifacts)
+    with artifacts.exclusive():
+        view = media.stage(data)
+        with pytest.raises(DomainError, match="dataset_not_found"):
+            store.import_image(admin, "unknown-dataset", view["source_sha256"], "example.jpg", {}, "rejected-import", width=64, height=48, size_bytes=len(data))
+    with store.read_connection() as con:
+        assert con.execute("SELECT COUNT(*) FROM hosted_media_views").fetchone()[0] == 0
+        assert con.execute("SELECT COUNT(*) FROM hosted_artifact_references WHERE kind='media_view'").fetchone()[0] == 0
+    assert not operations.preview_orphan_purge(admin, [view["source_sha256"]])["artifacts"][0]["referenced"]
+    with artifacts.exclusive():
+        media.stage(data)
+        store.import_image(admin, ds["id"], view["source_sha256"], "example.jpg", {}, "accepted-import", width=64, height=48, size_bytes=len(data))
+    assert operations.preview_orphan_purge(admin, [view["source_sha256"]])["artifacts"][0]["referenced"]
+    assert media.resolve(view["source_sha256"]) == view
+    assert operations.preview_orphan_purge(admin, [view["sha256"]])["artifacts"][0]["referenced"]
+
+
+@pytest.mark.parametrize("invalid", [None, [], {"expected_version": "v", "generation": True}, {"version_id": "v", "generation": -1}])
+def test_archive_dataset_nested_preconditions_are_typed_without_mutation(workspace, invalid):
+    store, _, _, operations, admin, _, ds, _ = workspace
+    image, _ = import_image(workspace)
+    with pytest.raises(DomainError, match="invalid_precondition"):
+        operations.archive_dataset(admin, ds["id"], {image["id"]: invalid}, "bad-archive", expected_revision=store.get_dataset(admin, ds["id"])["revision"])
+    assert store.image(admin, image["id"])["current_version"] == image["current_version"]
+
+
 def test_recovery_paid_stage_requires_exact_registered_input_artifacts(workspace):
     """A real retained stage with a doubled provider transport; no network call."""
     from services.hosted.providers import ProviderAccounts
@@ -253,10 +359,14 @@ def test_real_orphan_purge_retention_reference_fencing_and_interrupted_unlink_re
 
 
 def test_real_encrypted_restore_checks_blob_closure_and_preserves_continued_work(workspace, tmp_path):
+    from services.hosted.media import HostedMedia
     if not shutil.which("age") or not shutil.which("age-keygen"):
         pytest.skip("actual age executable required for composed encrypted recovery proof")
     store, auth, artifacts, ops, admin, alice, ds, now = workspace
     canonical, _ = import_image(workspace)
+    oriented = io.BytesIO(); exif = Image.Exif(); exif[274] = 6
+    Image.new("RGB", (24, 16), "orange").save(oriented, format="JPEG", exif=exif)
+    view = HostedMedia(store, artifacts).ingest(oriented.getvalue())
     pending, _ = import_image(workspace, "blue", approved=False)
     store.assign(admin, ds["id"], [pending["id"]], alice.user_id, "assignment", {pending["id"]: expected(pending)})
     login = auth.login("alice", PASSWORD, address="127.0.0.1")
@@ -287,6 +397,12 @@ def test_real_encrypted_restore_checks_blob_closure_and_preserves_continued_work
     assert other.snapshot(admin, ds["id"])["images"][0]["id"] == canonical["id"]
     with ArtifactStore(restored.artifacts_root).open(custom) as stream:
         assert stream.read() == b"registered custom model weights"
+    restored_media = HostedMedia(other, ArtifactStore(restored.artifacts_root))
+    assert restored_media.resolve(view["source_sha256"]) == view
+    with restored_media.artifacts.open(view["source_sha256"]) as stream:
+        assert stream.read() == oriented.getvalue()
+    with restored_media.artifacts.open(restored_media.reference(view)) as stream, Image.open(stream) as pixels:
+        assert pixels.size == (24, 16) and pixels.getexif().get(274, 1) == 1
     # A valid encrypted archive can still be incomplete if enumeration was
     # wrong. The schema-aware hook must reject it before publishing a root.
     incomplete = create_encrypted_backup(store.path, artifacts, tmp_path / "incomplete.age", recipient=recipient, references=lambda con: [])

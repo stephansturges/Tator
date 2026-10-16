@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .backup import BackupError, create_encrypted_backup
 from .errors import DomainError
 from .operations import HostedOperations
+from .preconditions import ImagePrecondition
 from .types import MutationContext
 
 
@@ -37,7 +38,7 @@ class ImageArchive(Command):
 
 
 class DatasetArchive(Command):
-    expected_images: dict
+    expected_images: dict[str, ImagePrecondition]
     expected_revision: int = Field(ge=0)
     reason: str = Field(default="", max_length=10000)
 
@@ -110,7 +111,7 @@ def install_operations_api(app, store, auth, artifacts, admin, root):
 
     @router.post("/datasets/{dataset_id}/archive")
     def archive_dataset(dataset_id: str, body: DatasetArchive, identity=Depends(admin)):
-        return operations.archive_dataset(identity, dataset_id, **body.model_dump())
+        return operations.archive_dataset(identity, dataset_id, **body.model_dump(exclude_unset=True))
 
     @router.get("/archives")
     def archives(limit: int = 100, offset: int = 0, identity=Depends(admin)):

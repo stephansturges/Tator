@@ -83,6 +83,11 @@ the exact original record remains in ``metadata.hosted_source``. Missing quality
 or approval evidence is never filled in. Original train, validation, test and
 unsplit membership is retained in the exported records and archive.
 
+Inactive caption history remains inactive in native exports. A deleted hosted
+record maps to the native ``superseded`` state; its original state remains in
+``metadata.hosted_source``. Questions attached to an inactive caption cannot
+become training examples independently of that caption.
+
 Import and annotation saves validate the known caption and question/answer
 structures before recording a version. Optional null fields and legacy
 string-only captions are supported; extra metadata and evidence are preserved
@@ -272,3 +277,49 @@ adapter call use job/model doubles; these checks do not measure trained quality
 or Qwen reasoning. Full
 DQE/pruning GPU execution, model training, production crash recovery and the full
 deployed browser workflow require separate qualification on the intended runtime.
+
+
+Durable heavy-job publication
+----------------------------
+
+Administrator-admitted heavy analyses use the scoped job authority described in
+``hosted_runtime.rst``. Canonical capture, its job grant and request binding commit
+in one authenticated admission transaction. A crash before dispatch leaves a
+recoverable binding; failed binding creation rolls back the capture. Logging out
+after that admission commit does not cancel the job, including before the initial
+request acknowledgement. All later reads still require a current login. The
+native worker response is retained before publication; verified artifacts, the
+canonical completed state, publication receipt and request binding commit in
+one authority-checked database transaction. Account revocation or explicit
+cancellation before this transaction prevents publication and records a terminal
+state in both job views. A later cancellation does not undo a committed result.
+Frozen dataset settings and snapshot provenance remain unchanged by subsequent
+settings edits or archival; historical results report staleness separately.
+
+After restart, only retained output may finish publication. Missing output is
+interrupted and never silently recomputed. Recovery first checks an exact
+already committed publication receipt, including owner, operation, payload hash,
+canonical job and result identity. This repairs older failed or pending request
+bindings without rerunning the numerical job. Legacy unfinished jobs with no
+durable grant are interrupted; recovery does not invent authority for them.
+Restoring a backup invalidates unfinished grants while retaining completed
+historical analyses. A fresh authenticated login is required to inspect results.
+
+Native materialization uses the encoded-coordinate working media recorded in
+``hosted-media.json``. Its per-image map preserves the original source SHA and
+size alongside the actual worker SHA, size, format and policy. Legacy engine
+input manifests use the actual bytes for ``image_sha256`` and retain original
+provenance in ``source_image_sha256``. Snapshot source identities never change.
+
+Direct paid-caption preparation
+------------------------------
+
+The direct paid-caption endpoint accepts JPEG, PNG and WebP sources; a TIFF
+working PNG does not change that source-format policy. Source inspection,
+working-image preparation and payload construction share the pre-dispatch
+cleanup boundary. Any definite preparation refusal releases only an unsent
+reservation with a zero-charge audit entry. Automation pause keeps the same
+reservation for an exact retry; completed results replay without another send.
+Dispatched and unknown outcomes are never refunded or resent by this cleanup.
+The per-image caption pipeline keeps its existing image conversion and session
+policy. These rules do not retroactively refund historical reservations.

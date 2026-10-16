@@ -158,6 +158,37 @@ The caller enforces administrator authorization and confirmed-only membership.
 An ordinary dataset ZIP excludes account state, Incoming work and server
 recovery history and cannot replace a full encrypted recovery backup.
 
+Encoded media and immutable working views
+----------------------------------------
+
+All hosted consumers use the original encoded pixel grid. Admission and native
+decoding share a 256 MiB input limit and a 64 million decoded-pixel limit, perform
+a full decode, and do not resize. EXIF orientation is suppressed before loading
+pixels, including TIFF's implicit rotation. Multi-frame inputs use their first
+frame as a static image. Source artifacts are never rewritten.
+
+JPEG, PNG and WebP without display transforms retain their original working
+bytes. Oriented images, TIFF/BMP and multi-frame sources receive an RGB,
+metadata-free, lossless PNG working view. ``hosted_media_views`` permanently maps
+the original source digest and ``encoded-rgb-v1`` policy to the actual view
+digest, dimensions and format. Both original and working artifacts are
+registered for backup, restore validation and orphan-retention protection.
+Authenticated original downloads continue to return the original bytes.
+Admission verifies that the working representation can be encoded, but registers
+its immutable view only when first consumed. Failed label validation or class
+version checks leave no permanent media-view references; unadmitted source blobs
+remain subject to the ordinary orphan retention policy.
+
+``hosted-snapshot.json`` remains an immutable record of source identities.
+Exports and native materializations add ``hosted-media.json`` with the policy,
+encoded coordinate space and an ``images`` mapping keyed by hosted image ID.
+Each item names the exported relative path, actual working SHA-256 and size,
+original source SHA-256 and size, dimensions, format and original orientation.
+Native analyses validate the working hash and retain the source hash separately;
+cache identity therefore describes the bytes actually consumed. Existing
+snapshots and committed export receipts are not rewritten. An export retry
+continues to deliver its already retained ZIP.
+
 Verification boundaries
 -----------------------
 

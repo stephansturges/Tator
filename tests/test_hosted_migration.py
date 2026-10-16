@@ -54,6 +54,88 @@ def hashes(root):
     return {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest() for path in root.rglob("*") if path.is_file()}
 
 
+@pytest.mark.parametrize("alias", ["text_labels", "captions", "caption_labels"])
+def test_caption_aliases_preserve_effective_native_caption_and_overlay_clear(tmp_path, alias):
+    from services.hosted.analysis import CanonicalAnalysis
+    root = tmp_path / "source"
+    for directory in ("train/images/nested", "train/labels/nested", "train/" + alias + "/nested"):
+        (root / directory).mkdir(parents=True)
+    Image.new("RGB", (40, 30), "red").save(root / "train/images/nested/car.png")
+    (root / "train/labels/nested/car.txt").write_text("0 .5 .5 .4 .4\n")
+    (root / "classes.txt").write_text("Car\n")
+    (root / f"train/{alias}/nested/car.txt").write_text("Only current source wording")
+    (root / f"train/{alias}/car.txt").write_text("Less specific wording")
+    original = hashes(root)
+    store, artifacts, admin = authority(tmp_path)
+    plan = inventory(root)
+    assert not plan["blockers"] and plan["images"][0]["effective_caption"] == "Only current source wording"
+    result = HostedMigrator(store, artifacts).apply(admin, plan, name=alias, mode="approved-baseline", accept_existing_labels=True)
+    analysis = CanonicalAnalysis(store, artifacts, tmp_path / "analysis")
+    job = analysis.capture(admin, result["dataset_id"], "statistics", {}, "alias-analysis")
+    prepared = analysis.prepare(admin, job["job_id"])
+    assert prepared["manifest"]["images"][0]["text_label"] == "Only current source wording"
+    assert hashes(root) == original
+    local = root / ".annotation_overlay/text_labels/train/nested"
+    local.mkdir(parents=True); (local / "car.txt").write_text("Stale local text")
+    external = tmp_path / "selected"
+    (external / f"{alias}/train/nested").mkdir(parents=True)
+    # A selected external alias beats any source alias, even text_labels.
+    (external / f"{alias}/train/nested/car.txt").write_text("")
+    cleared = inventory(root, mapping={"overlay_root": str(external)})
+    assert cleared["images"][0]["effective_caption"] == ""
+    assert not any(row["is_primary"] for row in cleared["images"][0]["captions"])
+    (external / f"{alias}/train/nested/car.txt").unlink()
+    assert inventory(root, mapping={"overlay_root": str(external)})["images"][0]["effective_caption"] == "Only current source wording"
+
+
+def test_migration_requires_oriented_label_frame_and_rejects_full_decode_failure(tmp_path):
+    from services.hosted.media import HostedMedia
+    root = tmp_path / "source"
+    (root / "images").mkdir(parents=True); (root / "labels").mkdir()
+    (root / "classes.txt").write_text("Car\n")
+    exif = Image.Exif(); exif[274] = 6
+    Image.new("RGB", (64, 48), "orange").save(root / "images/car.jpg", exif=exif)
+    (root / "labels/car.txt").write_text("0 .5 .25 .5 .25\n")
+    original = hashes(root)
+    blocked = inventory(root)
+    assert blocked["blockers"][0]["kind"] == "label_coordinate_space_required"
+    plan = inventory(root, mapping={"image_coordinate_spaces": {"car.jpg": "exif_display"}})
+    assert not plan["blockers"]
+    assert plan["images"][0]["objects"][0]["bbox"] == [8, 12, 16, 24]
+    store, artifacts, admin = authority(tmp_path)
+    migration = HostedMigrator(store, artifacts)
+    with pytest.raises(DomainError, match="migration_inventory_unresolved"):
+        migration.apply(admin, blocked, name="Blocked")
+    result = migration.apply(admin, plan, name="Converted", mode="approved-baseline", accept_existing_labels=True)
+    frozen = store.snapshot(admin, result["dataset_id"])["images"][0]
+    assert frozen["media_hash"] == original["images/car.jpg"]
+    assert frozen["annotations"]["media_coordinate_provenance"]["source_coordinate_space"] == "exif_display"
+    assert HostedMedia(store, artifacts).audit() == []
+    assert hashes(root) == original
+    data = (root / "images/car.jpg").read_bytes()
+    (root / "images/car.jpg").write_bytes(data[:-40])
+    with pytest.raises(DomainError, match="invalid_image_import"):
+        inventory(root, mapping={"label_coordinate_space": "encoded"})
+
+
+def test_legacy_inventory_completed_receipt_survives_policy_upgrade_and_unfinished_requires_review(tmp_path):
+    from services.hosted.migration import digest, LEGACY_FORMAT
+    root, mapping = source(tmp_path)
+    plan = inventory(root, mapping=mapping)
+    plan["format"] = LEGACY_FORMAT
+    plan["plan_sha256"] = digest({key: value for key, value in plan.items() if key != "plan_sha256"})
+    store, artifacts, admin = authority(tmp_path)
+    migration = HostedMigrator(store, artifacts)
+    with pytest.raises(DomainError, match="migration_plan_requires_review"):
+        migration.apply(admin, plan, name="Old")
+    run_id = "migration-" + digest({"plan": plan["plan_sha256"], "actor": admin.user_id, "name": "Old", "mode": "incoming"})[:40]
+    payload = {"run_id": run_id, "plan_sha256": plan["plan_sha256"], "name": "Old", "mode": "incoming", "accept_existing_labels": False}
+    historical = {"run_id": run_id, "state": "complete", "dataset_id": "historical"}
+    store._command(admin, run_id + "-finish", "finish_migration", payload, lambda con: historical, admin=True)
+    (root / "classes.txt").unlink()
+    assert migration.apply(admin, plan, name="Old") == historical
+
+
 def test_reviewed_baseline_preserves_effective_labels_metadata_and_resumes_after_commit(tmp_path):
     root, mapping = source(tmp_path)
     mapping['image_metadata']['train/red.png'].update(source_group='source-A', duplicate_group=0)

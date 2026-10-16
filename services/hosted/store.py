@@ -25,6 +25,9 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator
 
 from .errors import DomainError
+from .language_schema import validate_language_annotations
+from .preconditions import validate_precondition
+from .receipt_policy import can_disclose
 from .types import Actor, MutationContext
 
 
@@ -263,33 +266,74 @@ class HostedStore:
                  run: Callable[[sqlite3.Connection], dict[str, Any]], *, admin: bool = False) -> dict[str, Any]:
         operation_id = _text(operation_id, "operation_id", 200)
         digest = hashlib.sha256(_json({"operation": operation, "payload": payload}).encode()).hexdigest()
-        with self.transaction() as con:
-            self._actor(con, actor, admin=admin)
-            existing = con.execute("SELECT request_hash,response_json FROM hosted_receipts "
-                                   "WHERE actor_id=? AND operation_id=?", (actor.user_id, operation_id)).fetchone()
-            if existing:
-                if existing["request_hash"] != digest:
-                    raise DomainError("operation_id_reused", 409)
-                return json.loads(existing["response_json"])
-            # Long filesystem purges reserve their operation before unlinking.
-            # A second semantic command must not steal that receipt identity
-            # while the per-item journal is awaiting recovery.
-            if con.execute("SELECT 1 FROM sqlite_master WHERE name='hosted_purge_commands'").fetchone():
-                reserved = con.execute("SELECT request_hash FROM hosted_purge_commands WHERE actor_id=? AND operation_id=?", (actor.user_id, operation_id)).fetchone()
-                if reserved and (operation != "purge_orphans" or reserved[0] != hashlib.sha256(_json(payload).encode()).hexdigest()):
-                    raise DomainError("operation_id_reused", 409)
-            response = run(con)
-            con.execute("INSERT INTO hosted_receipts VALUES (?,?,?,?,?,?)",
-                        (actor.user_id, operation_id, operation, digest, _json(response), self.clock()))
-            return response
+        executing = False
+        try:
+            with self.transaction() as con:
+                self._actor(con, actor)
+                existing = con.execute("SELECT request_hash,response_json FROM hosted_receipts "
+                                       "WHERE actor_id=? AND operation_id=?", (actor.user_id, operation_id)).fetchone()
+                if existing:
+                    if existing["request_hash"] != digest:
+                        raise DomainError("operation_id_reused", 409)
+                    return self.disclose_receipt_result(actor, operation_id, operation,
+                        json.loads(existing["response_json"]), connection=con)
+                if admin:
+                    self._actor(con, actor, admin=True)
+                # Filesystem purges reserve their identity before unlinking.
+                if con.execute("SELECT 1 FROM sqlite_master WHERE name='hosted_purge_commands'").fetchone():
+                    reserved = con.execute("SELECT request_hash FROM hosted_purge_commands WHERE actor_id=? AND operation_id=?", (actor.user_id, operation_id)).fetchone()
+                    if reserved and (operation != "purge_orphans" or reserved[0] != hashlib.sha256(_json(payload).encode()).hexdigest()):
+                        raise DomainError("operation_id_reused", 409)
+                executing = True
+                response = run(con)
+                con.execute("INSERT INTO hosted_receipts VALUES (?,?,?,?,?,?)",
+                            (actor.user_id, operation_id, operation, digest, _json(response), self.clock()))
+                return response
+        except DomainError as exc:
+            # Only recognized user-input errors from an executed save qualify.
+            # This handler runs AFTER transaction rollback, never on replay,
+            # admission/conflict failures, JSON hashing failures or server errors.
+            rejected_save_errors = {
+                "invalid_annotations", "invalid_annotation_language", "invalid_objects", "invalid_object",
+                "invalid_field", "duplicate_object_id", "invalid_class", "invalid_bbox", "image_dimensions_required",
+                "bbox_out_of_bounds", "invalid_polygon", "polygon_out_of_bounds", "invalid_completion", "negative_has_objects",
+            }
+            if executing and operation == "save" and exc.status == 422 and exc.code in rejected_save_errors:
+                exc.commit_outcome, exc.operation_id = "rejected", operation_id
+            raise
+
+    @staticmethod
+    def _receipt(con, actor, operation_id):
+        row = con.execute("SELECT operation,response_json,created_at FROM hosted_receipts "
+                          "WHERE actor_id=? AND operation_id=?", (actor.user_id, operation_id)).fetchone()
+        return None if not row else {"operation_id": operation_id, "operation": row["operation"],
+                                     "result": json.loads(row["response_json"]), "committed_at": row["created_at"]}
+
+    def raw_receipt(self, actor: Actor, operation_id: str) -> dict[str, Any] | None:
+        """Trusted coordinator lookup only; never return this directly to HTTP."""
+        with self.read_connection() as con:
+            self._actor(con, actor)
+            return self._receipt(con, actor, operation_id)
 
     def receipt(self, actor: Actor, operation_id: str) -> dict[str, Any] | None:
         with self.read_connection() as con:
             self._actor(con, actor)
-            row = con.execute("SELECT operation,response_json,created_at FROM hosted_receipts "
-                              "WHERE actor_id=? AND operation_id=?", (actor.user_id, operation_id)).fetchone()
-            return None if not row else {"operation_id": operation_id, "operation": row["operation"],
-                                         "result": json.loads(row["response_json"]), "committed_at": row["created_at"]}
+            receipt = self._receipt(con, actor, operation_id)
+            if receipt is not None and not can_disclose(self, con, actor, receipt["operation"], receipt["result"]):
+                return {**receipt, "result": None, "commit_outcome": "committed", "result_restricted": True}
+            return receipt
+
+    def disclose_receipt_result(self, actor: Actor, operation_id: str, operation: str, result: Any,
+                                *, connection=None) -> Any:
+        """Project a coordinator's already fingerprint-checked replay result."""
+        if connection is None:
+            with self.read_connection() as con:
+                self._actor(con, actor)
+                return self.disclose_receipt_result(actor, operation_id, operation, result, connection=con)
+        if not can_disclose(self, connection, actor, operation, result):
+            raise DomainError("committed_result_restricted", 403, commit_outcome="committed",
+                              operation_id=operation_id, result_restricted=True)
+        return result
 
     @staticmethod
     def _dataset(con: sqlite3.Connection, dataset_id: str, *, include_archived: bool = False) -> sqlite3.Row:
@@ -490,51 +534,7 @@ class HostedStore:
             args.extend([limit, offset])
             return [self._dataset_result(con, actor, row[0]) for row in con.execute(query + " ORDER BY created_at,id LIMIT ? OFFSET ?", args)]
 
-    @staticmethod
-    def _validate_language_annotations(annotations: dict[str, Any]) -> None:
-        """Validate the structures shared by review and canonical consumers.
-
-        Optional legacy fields may be null, and caption collections may contain
-        plain strings. Validate known fields without normalizing text, dropping
-        extension metadata or changing stored review/model evidence.
-        """
-        def typed(value, field, kind):
-            if value is not None and not isinstance(value, kind):
-                raise DomainError("invalid_annotation_language", 422,
-                                  {"field": field, "expected": kind.__name__})
-
-        def qa_pairs(value, field):
-            typed(value, field, list)
-            for index, pair in enumerate(value or []):
-                path = f"{field}[{index}]"
-                if not isinstance(pair, dict):
-                    raise DomainError("invalid_annotation_language", 422,
-                                      {"field": path, "expected": "dict"})
-                for key in ("question", "answer"):
-                    typed(pair.get(key), f"{path}.{key}", str)
-                typed(pair.get("metadata"), f"{path}.metadata", dict)
-                typed(pair.get("validation"), f"{path}.validation", dict)
-
-        typed(annotations.get("caption"), "caption", str)
-        for collection in ("captions", "alternate_captions"):
-            values = annotations.get(collection)
-            typed(values, collection, list)
-            for index, record in enumerate(values or []):
-                if isinstance(record, str):
-                    continue
-                path = f"{collection}[{index}]"
-                if not isinstance(record, dict):
-                    raise DomainError("invalid_annotation_language", 422,
-                                      {"field": path, "expected": "dict or str"})
-                for key in ("caption", "text"):
-                    typed(record.get(key), f"{path}.{key}", str)
-                metadata = record.get("metadata")
-                typed(metadata, f"{path}.metadata", dict)
-                # Check both locations even if the first currently shadows the
-                # second; a later edit must not uncover malformed saved data.
-                qa_pairs(record.get("generated_qa_pairs"), f"{path}.generated_qa_pairs")
-                qa_pairs((metadata or {}).get("generated_qa_pairs"),
-                         f"{path}.metadata.generated_qa_pairs")
+    _validate_language_annotations = staticmethod(validate_language_annotations)
 
     def _annotations(self, con: sqlite3.Connection, dataset_id: str, annotations: Any,
                      *, width: int, height: int) -> dict[str, Any]:
@@ -641,11 +641,29 @@ class HostedStore:
     def import_image(self, actor: Actor, dataset_id: str, media_hash: str, filename: str,
                      annotations: dict[str, Any] | None = None, operation_id: str = "", *,
                      media_path: str = "", width: int = 0, height: int = 0,
-                     size_bytes: int = 0, split: str = "train") -> dict[str, Any]:
+                     size_bytes: int = 0, split: str = "train", media_info=None,
+                     label_coordinate_space: str | None = None) -> dict[str, Any]:
         payload = dict(dataset_id=dataset_id, media_hash=media_hash, filename=filename, annotations=annotations,
                        media_path=media_path, width=width, height=height, size_bytes=size_bytes, split=split)
-        return self._command(actor, operation_id, "import_image", payload,
-                             lambda con: self._import_image(con, actor, **payload), admin=True)
+        if label_coordinate_space is not None:
+            payload['label_coordinate_space'] = label_coordinate_space
+        def run(con):
+            current = {key: value for key, value in payload.items() if key != 'label_coordinate_space'}
+            if media_info is not None:
+                from .media import prepare_annotations
+                self._check_media_info(media_info, media_hash, width, height, size_bytes)
+                current['annotations'] = prepare_annotations(annotations, media_info, label_coordinate_space)
+            elif label_coordinate_space is not None:
+                raise DomainError('media_coordinate_information_required', 422)
+            return self._import_image(con, actor, **current)
+        return self._command(actor, operation_id, "import_image", payload, run, admin=True)
+
+    @staticmethod
+    def _check_media_info(media_info, media_hash, width, height, size_bytes):
+        details = media_info if isinstance(media_info, dict) else media_info.as_dict()
+        if (details['source_sha256'] != media_hash or details['width'] != width
+                or details['height'] != height or details['size_bytes'] != size_bytes):
+            raise DomainError('media_identity_changed', 409)
 
     def _import_image(self, con: sqlite3.Connection, actor: Actor, *, dataset_id: str, media_hash: str,
                       filename: str, annotations: dict[str, Any] | None, media_path: str = "",
@@ -692,10 +710,13 @@ class HostedStore:
 
     def import_yolo_image(self, actor: Actor, dataset_id: str, media_hash: str, filename: str,
                           label_text: str, class_names: list[str], expected_class_version: int,
-                          operation_id: str, *, width: int, height: int, size_bytes: int, split: str = 'unsplit') -> dict[str, Any]:
+                          operation_id: str, *, width: int, height: int, size_bytes: int, split: str = 'unsplit',
+                          media_info=None, label_coordinate_space: str | None = None) -> dict[str, Any]:
         payload = dict(dataset_id=dataset_id, media_hash=media_hash, filename=filename, label_text=label_text,
                        class_names=class_names, expected_class_version=expected_class_version,
                        width=width, height=height, size_bytes=size_bytes, split=split)
+        if label_coordinate_space is not None:
+            payload['label_coordinate_space'] = label_coordinate_space
         def run(con):
             dataset = self._dataset(con, dataset_id)
             if type(expected_class_version) is not int or dataset['class_version'] != expected_class_version:
@@ -712,11 +733,22 @@ class HostedStore:
             if missing:
                 raise DomainError('import_classes_missing', 422, {'classes': missing})
             from .migration import _objects
-            objects = _objects(label_text, width, height, names, clip=False, key=filename)
+            provenance = None
+            if media_info is not None:
+                from .media import prepare_yolo_objects
+                self._check_media_info(media_info, media_hash, width, height, size_bytes)
+                objects, provenance = prepare_yolo_objects(label_text, names, media_info,
+                    key=filename, label_coordinate_space=label_coordinate_space)
+            else:
+                if label_coordinate_space is not None:
+                    raise DomainError('media_coordinate_information_required', 422)
+                objects = _objects(label_text, width, height, names, clip=False, key=filename)
             annotations = {'objects': [{**{key: value for key, value in item.items() if key != 'class_index'},
                                         'class_id': known[names[item['class_index']].casefold()]} for item in objects],
                            'import_provenance': {'format': 'yolo', 'filename': filename, 'label_text': label_text,
                                                  'class_names': names, 'class_version': expected_class_version}}
+            if provenance is not None:
+                annotations['media_coordinate_provenance'] = provenance
             return self._import_image(con, actor, dataset_id=dataset_id, media_hash=media_hash, filename=filename,
                                       annotations=annotations, width=width, height=height, size_bytes=size_bytes, split=split)
         return self._command(actor, operation_id, 'import_yolo_image', payload, run, admin=True)
@@ -806,13 +838,13 @@ class HostedStore:
         def run(con: sqlite3.Connection) -> dict[str, Any]:
             self._dataset(con, dataset_id)
             self._annotator(con, annotator_id)
-            if not image_ids or len(set(image_ids)) != len(image_ids) or not expected or set(expected) != set(image_ids):
+            if not image_ids or len(set(image_ids)) != len(image_ids) or not isinstance(expected, dict) or not expected or set(expected) != set(image_ids):
                 raise DomainError("exact_assignment_preconditions_required", 422)
             for image_id in image_ids:
                 image = self._image(con, image_id)
                 if image["dataset_id"] != dataset_id or image["state"] != "unassigned":
                     raise DomainError("image_not_assignable", 409, {"image_id": image_id})
-                pre = expected[image_id]
+                pre = validate_precondition(expected[image_id], field=f"expected.{image_id}")
                 self._expected(image, pre.get("expected_version", pre.get("version_id")), pre.get("generation"))
                 lease = con.execute("SELECT expires_at FROM hosted_editor_leases WHERE image_id=?", (image_id,)).fetchone()
                 if lease and lease[0] > self.clock():
@@ -1316,13 +1348,14 @@ class HostedStore:
             assignment = con.execute("SELECT * FROM hosted_assignments WHERE id=?", (assignment_id,)).fetchone()
             if not assignment:
                 raise DomainError("assignment_not_found", 404)
-            if not expected:
+            if not isinstance(expected, dict) or not expected:
                 raise DomainError("exact_assignment_preconditions_required", 422)
             members = {row[0] for row in con.execute("SELECT image_id FROM hosted_assignment_members WHERE assignment_id=?", (assignment_id,))}
             if not set(expected).issubset(members):
                 raise DomainError("assignment_member_mismatch", 409)
             recovered, skipped = [], []
             for image_id, pre in expected.items():
+                pre = validate_precondition(pre, field=f"expected.{image_id}")
                 image = self._image(con, image_id)
                 if image["assignment_id"] != assignment_id or image["state"] not in ("assigned", "returned"):
                     skipped.append({"image_id": image_id, "reason": "no_longer_annotator_owned"})

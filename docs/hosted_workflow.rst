@@ -49,10 +49,33 @@ the lease; an explicit takeover replaces it. Stale tabs and late automated
 results cannot overwrite a newer version, ownership change or restored server.
 Expired sessions and disabled accounts are checked again when a change commits.
 
-Each command has an operation ID. Retrying the same command recovers its saved
-result, including after a lost response. Reusing that ID for different content
+Each command has an operation ID. Retrying the same command recovers its committed
+outcome, including after a lost response. Reusing that ID for different content
 is rejected. A version conflict requires reloading and reconciling changes;
 retrying with a new ID does not bypass it.
+
+Receipts disclose saved results only while the signed-in account has current
+permission to read them. A committed save or submission can become inaccessible
+after handoff, recall, reassignment or archive. In that case the server confirms
+that the operation committed without returning annotation, dataset, model or
+editor details. The client stops retrying that operation and keeps newer unsent
+edits available for recovery. It does not apply the inaccessible saved version.
+Administrator command results require current administrator authority. Unknown
+legacy operation types receive the same restricted acknowledgment. The stored
+command, fingerprint and original receipt remain unchanged.
+An administrator-only endpoint can reject a demoted user's POST with an ordinary
+403 before inspecting the command. Use the authenticated receipt endpoint to
+check whether that earlier command committed; the restricted acknowledgment
+does not grant access to its administrative result.
+
+A known annotation-validation error can be corrected and saved under a new
+operation ID only when the server certifies that this exact save rolled back.
+The certification includes ``commit_outcome: rejected`` and its ``operation_id``.
+Transport failures, incomplete responses and server errors leave the outcome
+unknown: the browser retains the exact original command for retry. Authentication,
+version and identity conflicts require reconnecting or reconciling first.
+Rejected saves preserve the latest draft and the last acknowledged version;
+unchanged invalid content is not repeatedly submitted by autosave.
 
 If another tab logs out or editing authority expires, the canvas first retains
 its latest unsent draft in this tab's browser storage, then disables editing.
@@ -62,6 +85,31 @@ the original command's receipt and the current server version before restoring;
 it cannot automatically overwrite a newer saved version. Keep this browser tab
 open until recovery is complete. If browser storage cannot retain the draft, an
 error says so and leaving the page still prompts about unsaved work.
+
+The version 2 recovery journal records pending, unsent and rejected drafts
+separately. Older journals remain conservatively unresolved until the original
+receipt and current version can be checked. A storage failure retains the draft
+in memory and keeps the unsaved-work warning active.
+If no receipt exists after reload, recovery first retries the exact original
+command. Another unknown response leaves it intact. If a replaced or expired
+editing lease rejects that retry, explicit draft restoration requires an
+unchanged server version and a newer editing generation. Restoring an invalid
+draft still resumes retention of subsequent edits while the user corrects it.
+
+Known language fields are validated on import, save, submit and approval. QA
+``validated_against`` and ``source_fields`` values must be lists or null at the
+pair, metadata and validation locations, including locations shadowed by another
+value. Legacy null fields, plain caption strings and unknown extension data are
+preserved. Invalid input creates no annotation version. Instruction export also
+checks historical snapshots before starting native processing and reports the
+image ID and precise invalid field; it does not repair or omit that content.
+
+Assignment and dataset-archive commands require a nested exact precondition for
+each image: a nonempty ``expected_version`` (or legacy ``version_id``), a strict
+nonnegative integer ``generation``, and an optional nonempty ``editor_id``.
+Malformed entries return 422. Supplied legacy aliases and extension keys remain
+part of the fingerprint; omitted defaults are not inserted. Store validation
+runs only for new commands, after checking for an exact committed receipt.
 
 Classes and repeated imports
 ---------------------------
@@ -78,6 +126,16 @@ the uploader asks you to confirm the dataset's current class order. Class names
 must already exist. Ambiguous filenames, changed class maps and out-of-bounds
 geometry are rejected rather than guessed or silently clipped. Empty sidecar
 files are retained as empty imported annotations, not approved negatives.
+
+For labeled images with EXIF rotation or reflection, use **Imported label
+coordinates** to declare **Original stored pixels** or **Rotated photo viewer
+pixels**. No coordinate frame is assumed for an oriented labeled import. Viewer
+coordinates are converted to the original encoded grid with provenance retained;
+the original image bytes remain unchanged. The upload API uses
+``label_coordinate_space=encoded`` or ``exif_display`` for this declaration.
+Upload and migration fully decode admitted images within the shared limits of
+256 MiB input and 64 million pixels. Unsupported, corrupt or oversized media is
+rejected before image membership is created.
 
 Conflicting imported labels are retained separately. Open the image and choose
 **Imported labels** to compare the current and imported boxes on the same image.

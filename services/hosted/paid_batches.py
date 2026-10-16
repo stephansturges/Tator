@@ -162,6 +162,8 @@ class PaidBatches:
             con.execute("""CREATE TABLE IF NOT EXISTS hosted_paid_batch_rows(
                 job_id TEXT NOT NULL,image_id TEXT NOT NULL,call_id TEXT,request_json TEXT NOT NULL,
                 upload_id TEXT,output_json TEXT,PRIMARY KEY(job_id,image_id))""")
+            if 'upload_sha256' not in {row[1] for row in con.execute('PRAGMA table_info(hosted_paid_batch_rows)')}:
+                con.execute('ALTER TABLE hosted_paid_batch_rows ADD COLUMN upload_sha256 TEXT')
 
     @property
     def gateway(self):
@@ -285,7 +287,7 @@ class PaidBatches:
     def start(self, actor, body):
         self._recover()
         requested = body.model_dump()
-        if self.store.receipt(actor, body.operation_id):
+        if self.store.raw_receipt(actor, body.operation_id):
             def unreachable(con):
                 raise AssertionError("receipt missing")
             receipt = self.store._command(actor, body.operation_id, "paid_batch_start", requested, unreachable)
@@ -320,7 +322,8 @@ class PaidBatches:
                 encoded_bytes += len((_json(line) + "\n").encode()) + 200
                 if encoded_bytes > MAX_BATCH_INPUT_BYTES:
                     raise DomainError("paid_batch_input_too_large", 422)
-                record = {"case": case, "line": line, "source_media_hash": image["media_hash"]}
+                view = self.tools.media.resolve(image['media_hash'])
+                record = {"case": case, "line": line, "source_media_hash": image["media_hash"], "working_media": view}
                 prepared.write((_json([image["id"], _json(record)]) + "\n").encode())
             prepared.seek(0)
             def create(con):
@@ -433,17 +436,28 @@ class PaidBatches:
                     raise DomainError("paid_batch_row_outcome_unresolved", 409)
                 with self.store.transaction() as con:
                     con.execute("UPDATE hosted_paid_batch_rows SET call_id=? WHERE job_id=? AND image_id=?", (call["id"], job_id, item["image_id"]))
+                view = prepared.get('working_media') or self.tools.media.resolve(image['media_hash'])
+                if (view['source_sha256'] != image['media_hash'] or view['source_size_bytes'] != image['size_bytes']):
+                    raise DomainError('paid_batch_source_changed', 409)
                 file_id = item["upload_id"]
+                # Legacy uploads were original bytes. Reuse only a matching
+                # grid; an unsent row can replace its upload without rebilling.
+                uploaded_hash = item['upload_sha256'] or image['media_hash']
+                if file_id and uploaded_hash != view['sha256']:
+                    file_id = None
                 if not file_id:
-                    with self.tools.artifacts.open(image["media_hash"]) as stream:
+                    with self.tools.artifacts.open(self.tools.media.reference(view)) as stream:
                         data = stream.read(40 * 1024 * 1024 + 1)
                     if len(data) > 40 * 1024 * 1024:
                         raise DomainError("paid_batch_image_too_large", 422)
-                    uploaded = self.transport.request(secret, "POST", "/files", upload=(image["filename"], data, "vision"))
+                    upload_name = image["id"] + view["suffix"]
+                    uploaded = self.transport.request(secret, "POST", "/files", upload=(upload_name, data, "vision"))
                     file_id = self._remote_id(uploaded.get("id"))
-                    self._retain(job_id, _json({"image_id": image["id"], "upload": uploaded, "source_media_hash": image["media_hash"]}).encode())
+                    self._retain(job_id, _json({"image_id": image["id"], "upload": uploaded, "source_media_hash": image["media_hash"], "working_media": view}).encode())
                     with self.store.transaction() as con:
-                        con.execute("UPDATE hosted_paid_batch_rows SET upload_id=? WHERE job_id=? AND image_id=?", (file_id, job_id, item["image_id"]))
+                        con.execute("UPDATE hosted_paid_batch_rows SET upload_id=?,upload_sha256=? WHERE job_id=? AND image_id=?", (file_id, view['sha256'], job_id, item["image_id"]))
+                        # A retained pre-create JSONL may name the old image file.
+                        con.execute("UPDATE hosted_paid_batches SET input_file_id=NULL WHERE id=? AND remote_id IS NULL", (job_id,))
                 line = prepared["line"]
                 line["body"]["input"][0]["content"][1]["file_id"] = file_id
                 content.write((_json(line) + "\n").encode())
@@ -662,7 +676,7 @@ class PaidBatches:
     def resume(self, actor, job_id, body):
         row = self._row(actor, job_id)
         payload = {"job_id": job_id, **body.model_dump()}
-        if self.store.receipt(actor, body.operation_id):
+        if self.store.raw_receipt(actor, body.operation_id):
             def no_new_command(con):
                 raise AssertionError("committed resume receipt disappeared")
             receipt = self.store._command(actor, body.operation_id, "paid_batch_resume", payload, no_new_command)
@@ -693,7 +707,7 @@ class PaidBatches:
 
     def recover_remote(self, actor, job_id, remote_id, operation_id):
         row = self._row(actor, job_id)
-        if self.store.receipt(actor, operation_id):
+        if self.store.raw_receipt(actor, operation_id):
             self.store._command(actor, operation_id, "paid_batch_recover", {"job_id": job_id, "remote_id": remote_id}, lambda con: None)
             return self.status(actor, job_id)
         if row["state"] != "submission_unknown" or not row["input_file_id"]:
@@ -728,7 +742,7 @@ class PaidBatches:
 
     def apply(self, actor, job_id, body):
         payload = {"job_id": job_id, **body.model_dump()}
-        if self.store.receipt(actor, body.operation_id):
+        if self.store.raw_receipt(actor, body.operation_id):
             def no_new_command(con):
                 raise AssertionError("committed caption receipt disappeared")
             return self.store._command(actor, body.operation_id, "paid_batch_apply", payload, no_new_command)

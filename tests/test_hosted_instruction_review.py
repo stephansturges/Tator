@@ -4,7 +4,83 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from test_hosted_api import application, login, dataset, upload, acquire, context, op, provision
+
+
+def test_nested_qa_shapes_reject_without_versions_and_preserve_legacy_extensions(application):
+    admin = login(application)
+    ds = dataset(admin)
+    image = acquire(admin, upload(admin, ds["id"]))
+    base = f"/api/hosted/images/{image['id']}"
+    for collection in ("captions", "alternate_captions"):
+        for nested in (False, True):
+            for location in ((), ("metadata",), ("validation",), ("metadata", "validation")):
+                for field in ("validated_against", "source_fields"):
+                    pair = {"question": "What color?", "answer": "Orange", "validated_against": ["image"]}
+                    target = pair
+                    for key in location:
+                        target = target.setdefault(key, {})
+                    target[field] = 17
+                    record = {"caption": "Orange scene", "generated_qa_pairs": []}
+                    destination = record.setdefault("metadata", {}) if nested else record
+                    destination["generated_qa_pairs"] = [pair]
+                    response = admin.post(base + "/save", json={**context(image), "annotations": {"objects": [], collection: [record]}})
+                    assert response.status_code == 422, response.text
+                    expected_path = collection + "[0]." + ("metadata." if nested else "") + "generated_qa_pairs[0]." + ".".join((*location, field))
+                    assert response.json()["detail"]["field"] == expected_path
+                    assert admin.get(base).json()["current_version"] == image["current_version"]
+    valid = {"objects": [], "caption": None, "captions": ["Legacy plain text"], "alternate_captions": [{
+        "caption": None, "metadata": {"generated_qa_pairs": [{"question": None, "answer": "Orange",
+            "source_fields": None, "validated_against": ["image", {"legacy": "extension"}],
+            "metadata": {"validation": {"source_fields": [], "validated_against": None}, "custom": 17}, "custom": {"anything": True}}]}, "custom": 17}]}
+    saved = admin.post(base + "/save", json={**context(image), "annotations": valid, "negative": True})
+    assert saved.status_code == 200, saved.text
+    assert admin.get(base).json()["annotations"] == valid
+    approved = admin.post(base + "/approve", json=context(saved.json()))
+    assert approved.status_code == 200
+
+
+def test_historical_nested_qa_preflight_before_actual_native_export(application, tmp_path):
+    from services.hosted.errors import DomainError
+    from services.hosted.native_analysis import NativeAnalysisAdapter
+    admin = login(application)
+    ds = dataset(admin)
+    image = acquire(admin, upload(admin, ds["id"]))
+    annotations = {"objects": [], "caption": "An orange scene.", "alternate_captions": [{"caption": "An orange scene.",
+        "generated_qa_pairs": [{"question": "What color?", "answer": "Orange.", "metadata": {"validated_against": ["image"], "source_fields": []}}]}]}
+    base = f"/api/hosted/images/{image['id']}"
+    saved = admin.post(base + "/save", json={**context(image), "annotations": annotations, "negative": True})
+    assert saved.status_code == 200
+    assert admin.post(base + "/approve", json=context(saved.json())).status_code == 200
+    snapshot = admin.post(f"/api/hosted/datasets/{ds['id']}/snapshots", json={"operation_id": op()}).json()
+    manifest = snapshot["manifest"] | {"snapshot_id": snapshot["snapshot_id"]}
+    frozen = tmp_path / "frozen"
+    frozen.mkdir()
+    with application.state.artifacts.exclusive():
+        for member in manifest["images"]:
+            ref = application.state.artifacts.pin(member["media_hash"], frozen)
+            member["media_path"] = str(frozen / ref.sha256)
+    def reference(value, name):
+        path = frozen / name
+        path.write_text(json.dumps(value))
+        return {**{key: value[key] for key in ("snapshot_id", "dataset_id", "revision", "class_version", "settings_version")},
+                "manifest_path": str(path), "manifest_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    adapter = NativeAnalysisAdapter(config={"canonical_root": str(frozen), "native_root": str(tmp_path / "native")}, device="cpu")
+    request_context = {"dataset_id": ds["id"], "annotation_version": snapshot["snapshot_id"]}
+    result = adapter.execute("caption_export", {"canonical_snapshot": reference(manifest, "valid.json")}, request_context)
+    assert result["state"] == "complete" and (Path(result["native_directory"]) / "receipt.json").is_file()
+    bad = copy.deepcopy(manifest)
+    bad["images"][0]["annotations"]["alternate_captions"][0]["generated_qa_pairs"][0]["metadata"]["validated_against"] = 17
+    bad_reference = reference(bad, "historical-invalid.json")
+    before = sorted((tmp_path / "native").iterdir())
+    with pytest.raises(DomainError) as caught:
+        adapter.execute("caption_export", {"canonical_snapshot": bad_reference}, request_context)
+    assert caught.value.status == 422
+    assert caught.value.detail == {"image_id": image["id"], "field": "alternate_captions[0].generated_qa_pairs[0].metadata.validated_against", "expected": "list"}
+    assert sorted((tmp_path / "native").iterdir()) == before
+    assert json.loads((frozen / "historical-invalid.json").read_text()) == bad
 
 
 def test_explicit_review_is_versioned_receipted_and_keeps_model_evidence(application):

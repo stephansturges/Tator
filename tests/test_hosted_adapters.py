@@ -257,7 +257,7 @@ def test_qwen_user_adapter_preserves_real_inference_pipeline_and_private_sam(ass
     monkeypatch.setattr(adapters, "_build_sam", lambda *_: (predictor, object()))
     spec = registry.user_spec("alice", "sam", media_root=media, device="cpu")
     adapter = adapters.UserToolAdapter(config={**dict(spec.config), "qwen": {**worker.config, "device": "cpu"}}, device="cpu")
-    result = adapter.execute("qwen_infer", {**payload, "item_list": "car", "prompt_type": "point"}, context.as_dict())
+    result = adapter.execute("qwen_infer", {**payload, "source_media_hash": "a" * 64, "item_list": "car", "prompt_type": "point"}, context.as_dict())
     assert calls and result["boxes"][0]["qwen_label"] == "car"
     assert predictor.loads == 1 and adapter.slots["current"]["key"] is None
     assert result["boxes"][0]["bbox"] == pytest.approx([22.5 / 64, 15 / 48, 15 / 64, 10 / 48])

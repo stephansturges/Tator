@@ -55,6 +55,20 @@ class FixtureTools:
         return {"bbox": [0.5, 0.5, 0.25, 0.25], "image_id": context["image_id"]}
 
 
+class PreviewUserTools:
+    """Actual production adapter/Qwen preview without unused SAM weight loading."""
+    def __new__(cls, *, config, device):
+        from collections import OrderedDict
+        from services.hosted.adapters import UserToolAdapter
+        from services.hosted.qwen_adapters import QwenRuntime
+        adapter = object.__new__(UserToolAdapter)
+        adapter.config, adapter.device, adapter.capacity = config, device, config['capacity']
+        adapter.slots = OrderedDict()
+        adapter.classifier = adapter.sam3_prompts = adapter.sam3_chain = None
+        adapter.qwen = QwenRuntime(config['qwen'], config['qwen']['device'])
+        return adapter
+
+
 from services.hosted.caption_batch import CaptionBatchAdapter
 
 
@@ -143,7 +157,12 @@ def system(tmp_path, monkeypatch):
     app = FastAPI()
     @app.exception_handler(DomainError)
     async def domain_error(request, error):
-        return JSONResponse({"error": error.code, "detail": error.detail}, status_code=error.status)
+        payload = {"error": error.code, "detail": error.detail}
+        for name in ("commit_outcome", "operation_id", "result_restricted"):
+            value = getattr(error, name, None)
+            if value is not None:
+                payload[name] = value
+        return JSONResponse(payload, status_code=error.status)
     def identity(request: Request):
         return auth.authenticate(request.headers.get("authorization", ""),
             csrf=request.headers.get("x-tator-csrf", "") if request.method != "GET" else None)
@@ -289,8 +308,9 @@ def test_real_api_media_authority_preload_and_server_only_model_setup(system):
     assert result.status_code == 200 and result.json()["result"]["image_id"] == image["id"]
     assert "session_id" not in result.text and "media_path" not in result.text and "checkpoint" not in result.text
     assert admin.get(f"/api/hosted/tools/requests/{accepted.json()['id']}").status_code == 404
-    bad = request(image, media_path="/etc/passwd")
-    assert client.post("/api/hosted/tools/request", json=bad).status_code == 422
+    for internal in ({"media_path": "/etc/passwd"}, {"source_media_hash": "a" * 64}):
+        bad = request(image, **internal)
+        assert client.post("/api/hosted/tools/request", json=bad).status_code == 422
     bad = request(image)
     bad["dataset_id"] = "different-dataset"
     assert client.post("/api/hosted/tools/request", json=bad).status_code == 409
@@ -834,3 +854,303 @@ def test_caption_batch_restart_reuses_retained_success_without_generating_it_aga
         assert replay["status"] == "completed" and replay["auto_resume_count"] == 1
     finally:
         restarted.close()
+
+
+def _native_statistics(system):
+    """Real CPU native analysis, with no model loading or provider calls."""
+    from services.hosted.tool_api import HeavyRequest, NATIVE_ANALYSIS_FACTORY
+    image = acquire(system, system['images'][0])
+    def context(row, editor='alice-editor'):
+        return MutationContext(row['id'], row['current_version'], row['generation'], editor, op())
+    image = system['store'].save(system['alice'], context(image), {'objects': []}, complete=True, negative=True)
+    image = system['store'].submit(system['alice'], context(image))
+    image = system['store'].acquire_editor(system['admin'], image['id'], 'admin-editor', expected_version=image['current_version'], generation=image['generation'])
+    system['store'].approve(system['admin'], context(image, 'admin-editor'))
+    ctl = system['controller']
+    ctl.configuration['heavy_jobs']['statistics'] = {'factory': NATIVE_ANALYSIS_FACTORY,
+        'config': {'native_root': str((system['root'] / 'native').resolve())}, 'device': 'cpu',
+        'operation': 'statistics', 'allowed_parameters': [], 'timeout': 30}
+    return HeavyRequest(dataset_id=system['dataset']['id'], job='statistics', operation_id=op())
+
+
+@pytest.mark.parametrize('change', ['logout', 'expiry', 'disable_reenable', 'demote_repromote', 'reset', 'cancel', 'noop'])
+def test_native_publication_uses_durable_job_authority(system, monkeypatch, change):
+    """Publication boundary races use job epoch; reads still need a live login."""
+    import threading
+    ctl, auth, store, admin = (system[key] for key in ('controller', 'auth', 'store', 'admin'))
+    body = _native_statistics(system)
+    second = auth.create_user(admin, 'second-admin', 'admin')
+    auth.redeem(second['invite_token'], PASSWORD)
+    second_actor = auth.authenticate(auth.login('second-admin', PASSWORD, 'fixture').token)
+    entered, release = threading.Event(), threading.Event()
+    publish = ctl.analysis.publish_heavy_result
+    def held(*args, **kwargs):
+        entered.set()
+        assert release.wait(12)
+        return publish(*args, **kwargs)
+    monkeypatch.setattr(ctl.analysis, 'publish_heavy_result', held)
+    accepted = ctl.heavy(admin, body)
+    rid, jid = accepted['id'], accepted['analysis_job_id']
+    assert entered.wait(12)
+    if change == 'logout':
+        auth.logout(system['admin_client'].headers['authorization'])
+    elif change == 'expiry':
+        with store.transaction() as con:
+            con.execute('UPDATE hosted_sessions SET expires_at=0 WHERE user_id=?', (admin.user_id,))
+    elif change == 'disable_reenable':
+        auth.set_user(second_actor, admin.user_id, disabled=True, role='admin')
+        auth.set_user(second_actor, admin.user_id, disabled=False, role='admin')
+    elif change == 'demote_repromote':
+        auth.set_user(second_actor, admin.user_id, disabled=False, role='annotator')
+        auth.set_user(second_actor, admin.user_id, disabled=False, role='admin')
+    elif change == 'reset':
+        link = auth.reset_link(second_actor, admin.user_id)
+        auth.redeem(link['reset_token'], PASSWORD)
+    elif change == 'cancel':
+        assert ctl.cancel(admin, rid)['state'] == 'cancelled'
+    elif change == 'noop':
+        auth.set_user(second_actor, admin.user_id, disabled=False, role='admin')
+    release.set()
+    eventually(lambda: rid not in ctl._publishing)
+    binding = eventually(lambda: row if (row := ctl._analysis_binding(rid))['state'] in {'complete', 'failed', 'cancelled'} else None)
+    fresh = auth.authenticate(auth.login('admin', PASSWORD, 'fixture').token)
+    canonical = ctl.analysis.status(fresh, jid)
+    if change in {'logout', 'expiry', 'noop'}:
+        assert binding['state'] == canonical['state'] == 'complete'
+        assert ctl.result(fresh, rid)['result']['state'] == 'complete'
+        assert ctl.heavy(fresh, body)['id'] == rid
+    else:
+        expected = 'cancelled' if change == 'cancel' else 'failed'
+        assert binding['state'] == canonical['state'] == expected
+        assert canonical['error'] == ('request_cancelled' if change == 'cancel' else 'heavy_job_authority_revoked')
+        with pytest.raises(DomainError, match='analysis_result_unavailable'):
+            ctl.result(fresh, rid)
+    with pytest.raises(Exception):
+        ctl.result(second_actor, rid)
+
+
+@pytest.mark.parametrize('retained,legacy', [(True, False), (False, False), (False, True), (False, 'failed')])
+def test_native_restart_retained_output_or_interrupts_without_recompute(system, monkeypatch, retained, legacy):
+    from services.hosted.tool_api import ToolController
+    ctl, auth, store, admin = (system[key] for key in ('controller', 'auth', 'store', 'admin'))
+    body = _native_statistics(system)
+    monkeypatch.setattr(ctl, '_start_publication', lambda request_id: None)
+    accepted = ctl.heavy(admin, body)
+    rid, jid = accepted['id'], accepted['analysis_job_id']
+    runtime = ctl._ensure_runtime()
+    assert runtime.wait(rid, actor_id=admin.user_id, timeout=12)['state'] == 'completed'
+    output = runtime.result(rid, actor_id=admin.user_id)['result']
+    with store.transaction() as con:
+        if retained:
+            con.execute("UPDATE hosted_tool_analysis SET state='publishing',output_json=? WHERE request_id=?", (json.dumps(output), rid))
+        if legacy:
+            con.execute('DELETE FROM hosted_heavy_grants WHERE request_id=?', (rid,))
+            if legacy == 'failed':
+                con.execute("UPDATE hosted_tool_analysis SET state='failed',error='login_required' WHERE request_id=?", (rid,))
+    auth.logout(system['admin_client'].headers['authorization'])
+    ctl.close()
+    fresh = auth.authenticate(auth.login('admin', PASSWORD, 'fixture').token)
+    restarted = ToolController(store, auth, system['artifacts'], system['root'], configuration=ctl.configuration)
+    try:
+        restarted._ensure_runtime()
+        binding = eventually(lambda: row if (row := restarted._analysis_binding(rid))['state'] in {'complete', 'failed', 'interrupted'} else None)
+        assert binding['state'] == ('complete' if retained else 'interrupted')
+        assert restarted.analysis.status(fresh, jid)['state'] == binding['state']
+        assert restarted.heavy(fresh, body)['id'] == rid
+        if retained:
+            assert restarted.result(fresh, rid)['result']['state'] == 'complete'
+    finally:
+        restarted.close()
+
+
+def test_heavy_context_scope_and_account_epoch_fence_dispatch(system):
+    from dataclasses import replace
+    from services.hosted.runtime import RequestContext
+    from services.hosted.tool_api import HeavyRequest
+    ctl, admin = system['controller'], system['admin']
+    body = HeavyRequest(dataset_id=system['dataset']['id'], job='fixture', operation_id=op(), parameters={'uuid': 'hold-scope'})
+    accepted = ctl.heavy(admin, body)
+    eventually(lambda: (system['gate'] / 'hold-scope.started').exists())
+    with system['store'].read_connection() as con:
+        grant = ctl.job_authority.row(con, accepted['id'])
+    context = RequestContext(**json.loads(grant['context_json']))
+    for wrong in (replace(context, dataset_id='other'), replace(context, operation='statistics'),
+                  replace(context, model_config={}), replace(context, background_job_id='other')):
+        with pytest.raises(DomainError, match='heavy_job_scope_invalid'):
+            ctl.authorize(wrong, 'heavy_result')
+    system['auth'].logout(system['admin_client'].headers['authorization'])
+    assert ctl.authorize(context, 'heavy_result') is True
+    from services.hosted.runtime import RuntimeRejected
+    with pytest.raises(RuntimeRejected, match='heavy_job_scope_invalid'):
+        ctl._ensure_runtime().begin_heavy(context, AdapterSpec('test_hosted_tools_api:FixtureTools', dict(context.model_config), 'changed-device'), context.operation, {}, request_id=accepted['id'])
+    (system['gate'] / 'hold-scope.release').touch()
+    eventually(lambda: ctl._ensure_runtime().request_status(accepted['id'], actor_id=admin.user_id)['state'] == 'completed')
+    fresh = system['auth'].authenticate(system['auth'].login('admin', PASSWORD, 'fixture').token)
+    assert ctl.result(fresh, accepted['id'])['result']['images'] == []
+
+
+def test_native_exact_committed_receipt_repairs_legacy_failed_binding(system):
+    from services.hosted.tool_api import ToolController
+    ctl, auth, store, admin = (system[key] for key in ('controller', 'auth', 'store', 'admin'))
+    body = _native_statistics(system)
+    accepted = ctl.heavy(admin, body)
+    rid, jid = accepted['id'], accepted['analysis_job_id']
+    eventually(lambda: ctl._analysis_binding(rid)['state'] == 'complete')
+    original = ctl.result(admin, rid)
+    # Emulate a pre-fix crash after canonical publication and before binding commit.
+    with store.transaction() as con:
+        con.execute("UPDATE hosted_tool_analysis SET state='failed',publication_json=NULL,error='login_required' WHERE request_id=?", (rid,))
+        con.execute('DELETE FROM hosted_heavy_grants WHERE request_id=?', (rid,))
+    auth.logout(system['admin_client'].headers['authorization'])
+    ctl.close()
+    fresh = auth.authenticate(auth.login('admin', PASSWORD, 'fixture').token)
+    restarted = ToolController(store, auth, system['artifacts'], system['root'], configuration=ctl.configuration)
+    try:
+        assert restarted.result(fresh, rid) == original
+        assert restarted.analysis.status(fresh, jid)['state'] == 'complete'
+        assert restarted.heavy(fresh, body)['state'] == 'completed'
+    finally:
+        restarted.close()
+
+
+@pytest.mark.parametrize('completed', [False, True])
+def test_restore_invalidates_unfinished_heavy_grants_and_keeps_completed_history(system, monkeypatch, completed):
+    from services.hosted.job_authority import invalidate_restored_jobs
+    from services.hosted.runtime import RequestContext
+    ctl, auth, store, admin = (system[key] for key in ('controller', 'auth', 'store', 'admin'))
+    body = _native_statistics(system)
+    if not completed:
+        monkeypatch.setattr(ctl, '_start_publication', lambda request_id: None)
+    accepted = ctl.heavy(admin, body)
+    rid, jid = accepted['id'], accepted['analysis_job_id']
+    if completed:
+        eventually(lambda: ctl._analysis_binding(rid)['state'] == 'complete')
+    else:
+        assert ctl._ensure_runtime().wait(rid, actor_id=admin.user_id, timeout=12)['state'] == 'completed'
+    with store.transaction() as con:
+        context = RequestContext(**json.loads(ctl.job_authority.row(con, rid)['context_json']))
+        auth.invalidate_restored_sessions(con)
+        invalidate_restored_jobs(con)
+    fresh = auth.authenticate(auth.login('admin', PASSWORD, 'fixture').token)
+    if completed:
+        assert ctl.result(fresh, rid)['result']['state'] == 'complete'
+    else:
+        with pytest.raises(DomainError, match='installation_restored'):
+            ctl.authorize(context, 'heavy_result')
+        assert ctl.status(fresh, rid)['state'] == ctl.analysis.status(fresh, jid)['state'] == 'interrupted'
+        assert ctl.analysis.status(fresh, jid)['error'] == 'installation_restored'
+
+
+def test_completed_generic_heavy_result_uses_current_admin_login(system):
+    from services.hosted.tool_api import HeavyRequest
+    ctl, auth, admin = system['controller'], system['auth'], system['admin']
+    accepted = ctl.heavy(admin, HeavyRequest(dataset_id=system['dataset']['id'], job='fixture', operation_id=op()))
+    eventually(lambda: ctl.status(admin, accepted['id'])['state'] == 'completed')
+    expected = ctl.result(admin, accepted['id'])
+    second = auth.create_user(admin, 'account-manager', 'admin')
+    auth.redeem(second['invite_token'], PASSWORD)
+    manager = auth.authenticate(auth.login('account-manager', PASSWORD, 'fixture').token)
+    auth.set_user(manager, admin.user_id, disabled=False, role='annotator')
+    demoted = auth.authenticate(auth.login('admin', PASSWORD, 'fixture').token)
+    with pytest.raises(DomainError):
+        ctl.result(demoted, accepted['id'])
+    auth.set_user(manager, admin.user_id, disabled=False, role='admin')
+    fresh = auth.authenticate(auth.login('admin', PASSWORD, 'fixture').token)
+    assert ctl.result(fresh, accepted['id']) == expected
+
+    # A separate unfinished job is still revoked and its blocked worker stopped.
+    held = ctl.heavy(fresh, HeavyRequest(dataset_id=system['dataset']['id'], job='fixture', operation_id=op(), parameters={'uuid': 'hold-revoked-worker'}))
+    eventually(lambda: (system['gate'] / 'hold-revoked-worker.started').exists())
+    auth.set_user(manager, admin.user_id, disabled=True, role='admin')
+    auth.set_user(manager, admin.user_id, disabled=False, role='admin')
+    fresh = auth.authenticate(auth.login('admin', PASSWORD, 'fixture').token)
+    eventually(lambda: ctl.status(fresh, held['id'])['state'] == 'failed' and ctl._ensure_runtime().snapshot()['phase'] == 'available')
+    assert ctl._ensure_runtime().request_status(held['id'], actor_id=admin.user_id)['state'] == 'cancelled'
+    assert ctl.result(fresh, accepted['id']) == expected
+
+
+@pytest.mark.parametrize('failure', ['logout', 'dispatch_failure', 'binding_failure', 'restart_before_dispatch'])
+def test_native_capture_grant_and_binding_commit_as_one_admission(system, monkeypatch, failure):
+    from services.hosted.runtime import RuntimeRejected
+    from services.hosted.tool_api import ToolController
+    ctl, auth, store, admin = (system[key] for key in ('controller', 'auth', 'store', 'admin'))
+    body = _native_statistics(system)
+    capture = ctl.analysis.capture
+    def after_capture(*args, **kwargs):
+        result = capture(*args, **kwargs)
+        if failure == 'logout':
+            auth.logout(system['admin_client'].headers['authorization'])
+        return result
+    monkeypatch.setattr(ctl.analysis, 'capture', after_capture)
+    if failure in {'dispatch_failure', 'restart_before_dispatch'}:
+        def rejected(*args, **kwargs):
+            if failure == 'restart_before_dispatch':
+                raise SystemExit('fixture process exit before dispatch')
+            raise RuntimeRejected('fixture_dispatch_failed')
+        monkeypatch.setattr(ctl._ensure_runtime(), 'begin_heavy', rejected)
+    if failure == 'binding_failure':
+        mint = ctl.job_authority.mint
+        def failed_binding(*args, **kwargs):
+            mint(*args, **kwargs)
+            raise OSError('fixture grant binding failure')
+        monkeypatch.setattr(ctl.job_authority, 'mint', failed_binding)
+    if failure == 'logout':
+        accepted = ctl.heavy(admin, body)
+        eventually(lambda: ctl._analysis_binding(accepted['id'])['state'] == 'complete')
+    else:
+        with pytest.raises((RuntimeRejected, OSError, SystemExit)):
+            ctl.heavy(admin, body)
+    with store.read_connection() as con:
+        jobs = [dict(row) for row in con.execute('SELECT id,state FROM hosted_analysis_jobs')]
+        bindings = [dict(row) for row in con.execute('SELECT request_id,job_id,state FROM hosted_tool_analysis')]
+        grants = [dict(row) for row in con.execute('SELECT request_id,state FROM hosted_heavy_grants')]
+    if failure == 'binding_failure':
+        assert jobs == bindings == grants == []
+    elif failure == 'restart_before_dispatch':
+        assert len(jobs) == len(bindings) == len(grants) == 1
+        assert jobs[0]['state'] == 'captured' and bindings[0]['state'] == 'pending' and grants[0]['state'] == 'active'
+    else:
+        expected = 'complete' if failure == 'logout' else 'failed'
+        assert len(jobs) == len(bindings) == len(grants) == 1
+        assert jobs[0]['state'] == bindings[0]['state'] == grants[0]['state'] == expected
+    ctl.close()
+    fresh = auth.authenticate(auth.login('admin', PASSWORD, 'fixture').token)
+    restarted = ToolController(store, auth, system['artifacts'], system['root'], configuration=ctl.configuration)
+    try:
+        replay = restarted.heavy(fresh, body)
+        if failure == 'restart_before_dispatch':
+            replay = eventually(lambda: result if (result := restarted.status(fresh, replay['id']))['state'] == 'interrupted' else None)
+        assert replay['state'] == {'logout': 'completed', 'dispatch_failure': 'failed', 'binding_failure': 'unavailable', 'restart_before_dispatch': 'interrupted'}[failure]
+        with store.read_connection() as con:
+            assert not con.execute("SELECT 1 FROM hosted_analysis_jobs WHERE state='captured'").fetchone()
+    finally:
+        restarted.close()
+
+
+def test_qwen_preview_controller_payload_runs_actual_adapter_and_pipeline(system, monkeypatch):
+    from test_hosted_paid_batches import _oriented_batch_image
+    install(system); install(system, 'qwen')
+    image, original, view = _oriented_batch_image(system, 'JPEG')
+    ctl = system['controller']
+    configured = ctl._spec
+    def actual_preview_spec(*args):
+        spec, owner = configured(*args)
+        return AdapterSpec('test_hosted_tools_api:PreviewUserTools', spec.config, spec.device), owner
+    monkeypatch.setattr(ctl, '_spec', actual_preview_spec)
+    body = request(image, 'qwen_caption_preview')
+    body['parameters'] = {'user_prompt': 'Describe the encoded image.'}
+    response = system['client'].post('/api/hosted/tools/request', json=body)
+    assert response.status_code == 202, response.text
+    status, result = finish(system['client'], response.json()['id'])
+    assert status['state'] == 'completed', status
+    assert result.status_code == 200, result.text
+    output = result.json()['result']
+    assert output['meta']['image_width'] == 64 and output['meta']['image_height'] == 48
+    assert output['hosted_evidence']['models'] == []
+    assert 'Describe the encoded image.' in output['full_text']
+    assert view['source_sha256'] not in result.text and view['sha256'] not in result.text
+    for operation in ('qwen_infer', 'qwen_caption', 'qwen_caption_preview'):
+        body['operation'] = operation
+        body['parameters'] = {'source_media_hash': 'a' * 64}
+        denied = system['client'].post('/api/hosted/tools/request', json=body)
+        assert denied.status_code == 422 and denied.json()['error'] == 'tool_parameter_not_allowed'

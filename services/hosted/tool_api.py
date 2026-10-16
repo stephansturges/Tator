@@ -18,6 +18,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from services.hosted.config import ModelRegistry, file_digest, validate_model_id, validate_model_member
 from services.hosted.analysis import CanonicalAnalysis
+from services.hosted.job_authority import HeavyJobAuthority
+from services.hosted.media import HostedMedia
 from services.hosted.caption_jobs import CaptionJobRequest, CaptionJobCommand
 from services.hosted.caption_batch import CaptionBatchRequest, CaptionProposalApply
 from services.hosted.errors import DomainError
@@ -168,6 +170,8 @@ class ToolController:
         self.model_root.mkdir(exist_ok=True, mode=0o700)
         self.operations = HostedOperations(store, artifacts, root)
         self.analysis = CanonicalAnalysis(store, artifacts, Path(root) / "analysis")
+        self.job_authority = HeavyJobAuthority(store)
+        self.media = HostedMedia(store, artifacts)
         self._lock = threading.RLock()
         self._runtime = None
         self._pins = {}
@@ -274,25 +278,25 @@ class ToolController:
 
     def install_model(self, actor, model_id, operation_id):
         self.auth.require_admin(actor)
-        previous = self.store.receipt(actor, operation_id)
+        previous = self.store.raw_receipt(actor, operation_id)
         if previous:
             if previous["operation"] != "install_tool_model" or previous["result"].get("model_id") != model_id:
                 raise DomainError("operation_id_reused", 409)
             with self._lock, self.artifacts.exclusive():
                 self._reload_model(model_id)
-            return previous["result"]
+            return self.store.disclose_receipt_result(actor, operation_id, previous["operation"], previous["result"])
         sources = self.configuration.get("models", {})
         if model_id not in sources:
             raise DomainError("tool_model_not_configured", 404, "An administrator must configure this model on the server.")
         source = ModelRegistry(allowed_roots=self.configuration.get("allowed_model_roots", []), definitions={model_id: sources[model_id]})
         definition = source.definition(model_id)
         with self._lock, self.artifacts.exclusive():
-            previous = self.store.receipt(actor, operation_id)
+            previous = self.store.raw_receipt(actor, operation_id)
             if previous:
                 if previous["operation"] != "install_tool_model" or previous["result"].get("model_id") != model_id:
                     raise DomainError("operation_id_reused", 409)
                 self._reload_model(model_id)
-                return previous["result"]
+                return self.store.disclose_receipt_result(actor, operation_id, previous["operation"], previous["result"])
             if definition["kind"] in {"edr", "sam3_recipe"}:
                 identities = {}
                 for kind, component in definition["components"].items():
@@ -465,6 +469,10 @@ class ToolController:
         raise DomainError("tool_not_implemented", 503, "This tool's hosted runtime is not connected yet.")
 
     def authorize(self, context, phase):
+        if phase.startswith("heavy") and context.background_job_id:
+            with self.store.read_connection() as con:
+                self.job_authority.validate(con, context.background_job_id, context=context, completed=phase == "heavy_result")
+            return True
         actor = self._actor(context)
         if phase.startswith("heavy"):
             self.auth.require_admin(actor)
@@ -508,7 +516,19 @@ class ToolController:
                 # not persist potentially large model responses. Resume only
                 # retention of an already computed, captured native response.
                 with self.store.transaction() as con:
-                    con.execute("UPDATE hosted_tool_analysis SET state='pending' WHERE state='publishing'")
+                    rows = con.execute("SELECT request_id,state FROM hosted_tool_analysis WHERE state!='complete'").fetchall()
+                    for row in rows:
+                        if self.job_authority.recover(con, row['request_id']):
+                            continue
+                        grant = self.job_authority.row(con, row['request_id'])
+                        if not grant:
+                            # Old publication failures could leave the canonical job captured.
+                            con.execute("UPDATE hosted_tool_analysis SET state='pending' WHERE request_id=? AND job_id IN (SELECT id FROM hosted_analysis_jobs WHERE state='captured')", (row['request_id'],))
+                            self.job_authority.terminal(con, row['request_id'], 'interrupted', 'legacy_job_authority_unavailable')
+                        elif row['state'] in {'failed', 'cancelled', 'interrupted'}:
+                            self.job_authority.terminal(con, row['request_id'], row['state'], grant['error'] or 'native_analysis_interrupted')
+                        else:
+                            con.execute("UPDATE hosted_tool_analysis SET state='pending' WHERE request_id=?", (row['request_id'],))
                     recover = con.execute("SELECT request_id FROM hosted_tool_analysis WHERE state='pending'").fetchall()
                 for row in recover:
                     self._start_publication(row[0])
@@ -520,6 +540,17 @@ class ToolController:
                 pins = list(self._pins.items())
             for request_id, (_, actor_id) in pins:
                 try:
+                    with self.store.transaction() as con:
+                        grant = self.job_authority.row(con, request_id)
+                        revoked = False
+                        if grant and grant['state'] == 'active':
+                            try:
+                                self.job_authority.validate(con, request_id)
+                            except DomainError as exc:
+                                self.job_authority.terminal(con, request_id, 'failed', exc.code)
+                                revoked = True
+                    if revoked:
+                        self._runtime.cancel(request_id, actor_id=actor_id)
                     status = self._runtime.request_status(request_id, actor_id=actor_id)
                     if status["state"] in TERMINAL:
                         self._terminal(request_id)
@@ -543,6 +574,21 @@ class ToolController:
         if binding and binding["state"] in {"pending", "publishing"}:
             self._start_publication(request_id)
         elif not binding or binding["state"] == "complete":
+            if not binding and self._runtime:
+                with self.store.transaction() as con:
+                    grant = self.job_authority.row(con, request_id)
+                    if grant and grant['state'] == 'active':
+                        status = self._runtime.request_status(request_id, actor_id=grant['actor_id'])
+                        if status['state'] == 'completed':
+                            try:
+                                self.job_authority.validate(con, request_id)
+                                con.execute("UPDATE hosted_heavy_grants SET state='complete' WHERE request_id=?", (request_id,))
+                            except DomainError as exc:
+                                self.job_authority.terminal(con, request_id, 'failed', exc.code)
+                        elif status['state'] in TERMINAL:
+                            self.job_authority.terminal(con, request_id,
+                                status['state'] if status['state'] in {'cancelled', 'interrupted'} else 'failed',
+                                status.get('error') or 'heavy_job_interrupted')
             self._cleanup(request_id)
 
     def _start_publication(self, request_id):
@@ -558,41 +604,47 @@ class ToolController:
 
     def _publish_native(self, request_id):
         try:
+            with self.store.transaction() as con:
+                if self.job_authority.recover(con, request_id):
+                    return
             binding = self._analysis_binding(request_id)
             if not binding or binding["state"] not in {"pending", "publishing"}:
                 return
-            actor = Actor(**json.loads(binding["actor_json"]))
+            with self.store.read_connection() as con:
+                self.job_authority.validate(con, request_id, job_id=binding['job_id'])
+            owner = json.loads(binding['actor_json'])['user_id']
             output = json.loads(binding["output_json"]) if binding["output_json"] else None
             if output is None:
-                status = self._runtime.request_status(request_id, actor_id=actor.user_id)
+                try:
+                    status = self._runtime.request_status(request_id, actor_id=owner)
+                except RuntimeRejected as exc:
+                    if exc.code != 'runtime_request_not_found':
+                        raise
+                    status = {'state': 'interrupted', 'error': 'runtime_request_not_retained'}
                 if status["state"] not in TERMINAL:
                     return
+                if status["state"] == "completed" and not status.get("result_available"):
+                    status = {"state": "interrupted", "error": "runtime_result_not_retained"}
                 if status["state"] != "completed":
-                    self.analysis.mark_terminal(actor, binding["job_id"],
-                        status["state"] if status["state"] in {"cancelled", "interrupted"} else "failed",
-                        status.get("error"), "heavy-terminal-" + request_id)
-                    raise RuntimeRejected(status.get("error") or "native_analysis_interrupted")
-                output = self._runtime.result(request_id, actor_id=actor.user_id)["result"]
-            # Durable before retention: publication can be retried after a
-            # control restart without ever executing the heavy job twice.
+                    with self.store.transaction() as con:
+                        self.job_authority.terminal(con, request_id,
+                            status['state'] if status['state'] in {'cancelled', 'interrupted'} else 'failed',
+                            status.get('error') or 'native_analysis_interrupted')
+                    return
+                output = self._runtime.result(request_id, actor_id=owner)["result"]
             with self.store.transaction() as con:
+                self.job_authority.validate(con, request_id, job_id=binding['job_id'])
                 con.execute("UPDATE hosted_tool_analysis SET state='publishing',output_json=? WHERE request_id=?",
                             (json.dumps(output, allow_nan=False, sort_keys=True), request_id))
-            publication = self.analysis.publish_native_result(actor, binding["job_id"], output,
-                "heavy-publish-" + request_id, native_root=binding["native_root"])
-            with self.store.transaction() as con:
-                con.execute("UPDATE hosted_tool_analysis SET state='complete',publication_json=?,error=NULL WHERE request_id=?",
-                            (json.dumps(publication, allow_nan=False, sort_keys=True), request_id))
+            self.analysis.publish_heavy_result(request_id, binding["job_id"], output, native_root=binding["native_root"])
             try:
                 self._cleanup(request_id)
             except OSError:
-                pass  # Publication is committed; the pin reaper retries cleanup.
+                pass
         except Exception as exc:
             code = exc.code if isinstance(exc, (DomainError, RuntimeRejected)) else "analysis_publication_failed"
             with self.store.transaction() as con:
-                con.execute("UPDATE hosted_tool_analysis SET state='failed',error=? WHERE request_id=?", (code, request_id))
-            # Retain private files when validation, authority or persistence
-            # fails. A terminal compute result is not a published analysis.
+                self.job_authority.terminal(con, request_id, 'failed', code)
         finally:
             with self._lock:
                 self._publishing.discard(request_id)
@@ -601,7 +653,10 @@ class ToolController:
         with self._lock:
             pinned = self._pins.get(request_id)
             if pinned:
-                shutil.rmtree(pinned[0], ignore_errors=False)
+                try:
+                    shutil.rmtree(pinned[0], ignore_errors=False)
+                except FileNotFoundError:
+                    pass  # A later supervisor may already have removed old pins.
                 self._pins.pop(request_id, None)
 
     def submit(self, actor, body):
@@ -626,8 +681,10 @@ class ToolController:
                 if image["dataset_id"] != body.dataset_id:
                     raise DomainError("tool_dataset_mismatch", 409)
                 directory = Path(tempfile.mkdtemp(prefix="request-", dir=self.media_root))
-                reference = self.artifacts.pin(image["media_hash"], directory)
-                payload = {**body.parameters, "media_path": str(directory / reference.sha256), "media_sha256": reference.sha256}
+                view = self.media.resolve(image['media_hash'])
+                reference = self.artifacts.pin(self.media.reference(view), directory)
+                payload = {**body.parameters, "media_path": str(directory / reference.sha256), "media_sha256": reference.sha256,
+                           "source_media_hash": image['media_hash']}
                 spec, owner = self._spec(actor, body.dataset_id, body.operation)
                 if body.operation in EDR_OPERATIONS:
                     recipe_id = spec.config["edr"]["model"]["model_id"]
@@ -701,12 +758,12 @@ class ToolController:
     def select_sam_recipes(self, actor, dataset_id, body):
         self.auth.require_admin(actor)
         request = body.model_dump(exclude={"operation_id"})
-        previous = self.store.receipt(actor, body.operation_id)
+        previous = self.store.raw_receipt(actor, body.operation_id)
         if previous:
             result = previous["result"]
             if previous["operation"] != "patch_dataset_settings" or result.get("id") != dataset_id or result.get("settings", {}).get("sam3_recipes", {}).get("selection_request") != request:
                 raise DomainError("operation_id_reused", 409)
-            return result
+            return self.store.disclose_receipt_result(actor, body.operation_id, previous["operation"], result)
         if len(body.model_ids) != len(set(body.model_ids)):
             raise DomainError("tool_recipe_selection_invalid", 422)
         identities = {}
@@ -753,7 +810,7 @@ class ToolController:
     def save_cascade(self, actor, dataset_id, body):
         # Immutable command replay remains valid even if an attached recipe was
         # retired after this preference was saved.
-        previous = self.store.receipt(actor, body.operation_id)
+        previous = self.store.raw_receipt(actor, body.operation_id)
         dataset = None if previous else self._validate_cascade(actor, dataset_id, body.steps, body.dedupe)
         def save(con):
             cascade_id = body.id or uuid.uuid4().hex
@@ -788,12 +845,12 @@ class ToolController:
     def select_dataset_model(self, actor, dataset_id, body, kind):
         self.auth.require_admin(actor)
         request = body.model_dump(exclude={"operation_id"})
-        previous = self.store.receipt(actor, body.operation_id)
+        previous = self.store.raw_receipt(actor, body.operation_id)
         if previous:
             result = previous["result"]
             if previous["operation"] != "patch_dataset_settings" or result.get("id") != dataset_id or result.get("settings", {}).get(kind, {}).get("selection_request") != request:
                 raise DomainError("operation_id_reused", 409)
-            return result
+            return self.store.disclose_receipt_result(actor, body.operation_id, previous["operation"], result)
         definition = self._definition(body.model_id)
         if definition["kind"] not in ({"yolo", "rfdetr"} if kind == "detector" else {kind}):
             raise DomainError("tool_model_kind_invalid", 422)
@@ -935,13 +992,19 @@ class ToolController:
         with self.store.read_connection() as con:
             self.store._actor(con, actor)
         runtime = self._ensure_runtime()
+        with self.store.read_connection() as con:
+            grant = self.job_authority.row(con, request_id)
+            if grant:
+                self.store._actor(con, actor, admin=True)
+                if grant['actor_id'] != actor.user_id:
+                    raise RuntimeRejected('runtime_request_not_found')
         binding = self._analysis_binding(request_id)
         if binding and json.loads(binding["actor_json"])["user_id"] != actor.user_id:
             raise RuntimeRejected("runtime_request_not_found")
         try:
             status = runtime.request_status(request_id, actor_id=actor.user_id)
         except RuntimeRejected as exc:
-            if not binding or exc.code != "runtime_request_not_found":
+            if not (binding or grant) or exc.code != "runtime_request_not_found":
                 raise
             status = {"id": request_id, "state": "interrupted", "error": "runtime_request_not_retained", "result_available": False}
         if status["state"] in TERMINAL:
@@ -951,35 +1014,59 @@ class ToolController:
             status.update(analysis_job_id=binding["job_id"], publication_state=binding["state"])
             if binding["state"] == "complete":
                 status.update(state="completed", error=None, result_available=True)
-            elif binding["state"] == "failed":
-                status.update(state="failed", error=binding["error"], result_available=False)
+            elif binding["state"] in {"failed", "cancelled", "interrupted"}:
+                status.update(state=binding["state"], error=binding["error"], result_available=False)
             elif status["state"] in TERMINAL:
                 status.update(state="publishing", result_available=False)
+        elif grant:
+            with self.store.read_connection() as con:
+                grant = self.job_authority.row(con, request_id)
+            if grant['state'] in {'failed', 'cancelled', 'interrupted'}:
+                status.update(state=grant['state'], error=grant['error'], result_available=False)
         return status
 
     def result(self, actor, request_id):
-        self.status(actor, request_id)
+        status = self.status(actor, request_id)
         binding = self._analysis_binding(request_id)
         if binding:
             if binding["state"] != "complete":
                 raise DomainError("analysis_result_unavailable", 409)
             context = json.loads(binding["context_json"])
-            self.authorize(RequestContext(**context), "heavy_result")
+            self.auth.require_admin(actor)
+            self.analysis.status(actor, binding["job_id"])
             return {"request_id": request_id, "analysis_job_id": binding["job_id"],
                     "context": {key: context[key] for key in ("dataset_id", "image_id", "annotation_version", "ownership_generation", "editor_id", "operation")},
                     "result": json.loads(binding["publication_json"])}
+        with self.store.read_connection() as con:
+            grant = self.job_authority.row(con, request_id)
+        if grant and status['state'] != 'completed':
+            raise DomainError('analysis_result_unavailable', 409)
         result = self._ensure_runtime().result(request_id, actor_id=actor.user_id)
         context = result["context"]
         result["context"] = {key: context[key] for key in ("dataset_id", "image_id", "annotation_version", "ownership_generation", "editor_id", "operation")}
         return result
 
     def cancel(self, actor, request_id):
-        self.status(actor, request_id)
-        return self._ensure_runtime().cancel(request_id, actor_id=actor.user_id)
+        status = self.status(actor, request_id)
+        with self.store.transaction() as con:
+            grant = self.job_authority.row(con, request_id)
+            if grant:
+                self.store._actor(con, actor, admin=True)
+                if grant['actor_id'] != actor.user_id:
+                    raise RuntimeRejected('runtime_request_not_found')
+                if grant['state'] == 'complete' or self.job_authority.recover(con, request_id):
+                    return status
+                self.job_authority.terminal(con, request_id, 'cancelled', 'request_cancelled')
+        try:
+            result = self._ensure_runtime().cancel(request_id, actor_id=actor.user_id)
+        except RuntimeRejected as exc:
+            if not grant or exc.code != 'runtime_request_not_found':
+                raise
+        return self.status(actor, request_id) if grant else result
 
     def heavy(self, actor, body):
         self.auth.require_admin(actor)
-        previous = self.store.receipt(actor, body.operation_id)
+        previous = self.store.raw_receipt(actor, body.operation_id)
         if not previous:
             definition = self.configuration.get("heavy_jobs", {}).get(body.job)
             if not isinstance(definition, dict):
@@ -1049,7 +1136,9 @@ class ToolController:
                         "heavy-candidates-" + request_id)
                     candidate_manifest = candidates["manifest"]
                     for image in candidate_manifest["images"]:
-                        ref = self.artifacts.pin(image["media_hash"], directory)
+                        view = self.media.resolve(image["media_hash"])
+                        ref = self.artifacts.pin(self.media.reference(view), directory)
+                        image["working_media"] = view
                         image["media_path"] = str(directory / ref.sha256)
                     candidate_path = directory / "incoming-candidates.json"
                     with candidate_path.open("x", encoding="utf-8") as stream:
@@ -1080,7 +1169,9 @@ class ToolController:
                     native_config["cache_input_roots"] = [*native_config.get("cache_input_roots", []), str(directory)]
                 spec = AdapterSpec(spec.factory, native_config, spec.device)
                 for image in content["images"]:
-                    ref = self.artifacts.pin(image["media_hash"], directory)
+                    view = self.media.resolve(image["media_hash"])
+                    ref = self.artifacts.pin(self.media.reference(view), directory)
+                    image["working_media"] = view
                     image["media_path"] = str(directory / ref.sha256)
                 manifest = directory / "canonical-snapshot.json"
                 with manifest.open("x", encoding="utf-8") as stream:
@@ -1092,25 +1183,37 @@ class ToolController:
                 reference.update(manifest_path=str(manifest), manifest_sha256=file_digest(manifest))
             with self._lock:
                 context = RequestContext(actor.user_id, body.dataset_id, "", snapshot_id, 0, "", actor_role=actor.role,
-                    session_id=actor.session_id, instance_id=actor.instance_id, operation=definition["operation"], model_config=spec.config)
+                    session_id=actor.session_id, instance_id=actor.instance_id, operation=definition["operation"], model_config=spec.config,
+                    background_job_id=request_id, background_adapter_identity=spec.identity)
+                def bind_native(con, analysis):
+                    self.job_authority.mint(con, actor, request_id, context, spec.identity, analysis['job_id'])
+                    con.execute("INSERT INTO hosted_tool_analysis VALUES (?,?,?,?,?,'pending',NULL,NULL,NULL)",
+                        (request_id, analysis["job_id"], json.dumps(asdict(actor)), str(spec.config["native_root"]), json.dumps(context.as_dict())))
                 if native:
-                    analysis = self.analysis.capture(actor, body.dataset_id, definition["operation"], {**native_config.get("parameters", {}), **parameters, **capture_provenance},
-                        "heavy-capture-" + request_id, snapshot_id=snapshot_id)
+                    self.analysis.capture(actor, body.dataset_id, definition["operation"], {**native_config.get("parameters", {}), **parameters, **capture_provenance},
+                        "heavy-capture-" + request_id, snapshot_id=snapshot_id, _bind_job=bind_native)
+                else:
                     with self.store.transaction() as con:
-                        con.execute("INSERT INTO hosted_tool_analysis VALUES (?,?,?,?,?,'pending',NULL,NULL,NULL)",
-                            (request_id, analysis["job_id"], json.dumps(asdict(actor)), str(spec.config["native_root"]), json.dumps(context.as_dict())))
+                        self.job_authority.mint(con, actor, request_id, context, spec.identity)
                 request_id = runtime.begin_heavy(context, spec, definition["operation"],
                     {**parameters, "canonical_snapshot": reference, **({"candidate_set": candidate_reference} if candidate_reference else {})}, drain_timeout=float(definition.get("drain_timeout", 30)),
                     timeout=float(definition.get("timeout", 3600)), request_id=request_id)
                 self._pins[request_id], directory = (directory, actor.user_id), None
-                return self.status(actor, request_id)
+                # Admission has committed under the authenticated login. A
+                # logout before this acknowledgement does not revoke the job.
+                accepted = runtime.request_status(request_id, actor_id=actor.user_id)
+                binding = self._analysis_binding(request_id)
+                if binding:
+                    accepted.update(analysis_job_id=binding['job_id'], publication_state=binding['state'])
+                    if binding['state'] == 'complete':
+                        accepted.update(state='completed', error=None, result_available=True)
+                    elif accepted['state'] in TERMINAL:
+                        accepted.update(state='publishing', result_available=False)
+                return accepted
         except Exception as exc:
-            binding = self._analysis_binding(request_id)
-            if binding:
-                code = exc.code if isinstance(exc, (DomainError, RuntimeRejected)) else "analysis_admission_failed"
-                with self.store.transaction() as con:
-                    con.execute("UPDATE hosted_tool_analysis SET state='failed',error=? WHERE request_id=?", (code, request_id))
-                self.analysis.mark_terminal(actor, binding["job_id"], "failed", code, "heavy-failed-" + request_id)
+            code = exc.code if isinstance(exc, (DomainError, RuntimeRejected)) else "analysis_admission_failed"
+            with self.store.transaction() as con:
+                self.job_authority.terminal(con, request_id, "failed", code)
             raise
         finally:
             if directory:

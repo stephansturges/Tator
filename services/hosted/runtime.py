@@ -74,9 +74,11 @@ class RequestContext:
     instance_id: str = ""
     actor_role: str = ""
     operation: str = ""
+    background_job_id: str = ""
+    background_adapter_identity: str = ""
 
     def __post_init__(self):
-        for name in ("actor_id", "dataset_id", "image_id", "annotation_version", "editor_id", "workspace_id", "session_id", "instance_id", "actor_role", "operation"):
+        for name in ("actor_id", "dataset_id", "image_id", "annotation_version", "editor_id", "workspace_id", "session_id", "instance_id", "actor_role", "operation", "background_job_id", "background_adapter_identity"):
             if not isinstance(getattr(self, name), str):
                 raise ValueError("runtime_context_invalid")
         if not self.actor_id or not self.dataset_id:
@@ -666,6 +668,8 @@ class RuntimeSupervisor:
 
     def begin_heavy(self, context: RequestContext, spec: AdapterSpec, operation: str, payload: Mapping[str, Any], *, drain_timeout: float = 30, timeout: float | None = None, request_id: str | None = None) -> str:
         context = replace(context, operation=operation)
+        if context.background_job_id and (context.background_adapter_identity != spec.identity or context.background_job_id != request_id):
+            raise RuntimeRejected("heavy_job_scope_invalid")
         self._authorized(context, "heavy")  # The integrating authority requires admin.
         if not math.isfinite(drain_timeout) or drain_timeout <= 0 or (timeout is not None and (not math.isfinite(timeout) or timeout <= 0)):
             raise ValueError("runtime_timeout_invalid")

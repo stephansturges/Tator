@@ -85,7 +85,7 @@ def test_full_caption_executes_real_pipeline_and_native_generation_seam(monkeypa
     result = worker.execute("qwen_caption", Image.new("RGB", (80, 60)), {
         "user_prompt": "Describe the scene.", "restrict_to_labels": False, "include_counts": False,
         "final_caption_max_sentences": 2, "max_new_tokens": 128, "unload_others": True,
-        "media_path": "/private/server/path", "media_sha256": "private-hash"}, {"actor_id": "annotator"})
+        "media_path": "/private/server/path", "media_sha256": "private-hash", "source_media_hash": "a" * 64}, {"actor_id": "annotator"})
     assert "red car" in result["caption"]
     assert len(calls) >= 1 and calls[0]["images"] == [(80, 60)]
     assert calls[0]["max_new_tokens"] == 128
@@ -143,7 +143,7 @@ def test_caption_prompt_preview_keeps_real_window_refinement_plan_without_loadin
         "caption_windowed_full_image_strategy": strategy, "caption_all_windows": True,
         "two_stage_refine": True, "user_prompt": "Describe the road and vehicles.",
         "label_hints": [{"label": "car", "bbox": [40, 20, 100, 60]}],
-        "image_width": 12345, "image_height": 12345, "max_new_tokens": 128,
+        "image_width": 12345, "image_height": 12345, "max_new_tokens": 128, "source_media_hash": "a" * 64,
     }, {"actor_id": "annotator"})
     assert calls == models == [], "preview must not load or run a model"
     assert result["meta"]["planned_windows"] == 2
@@ -184,7 +184,7 @@ def test_qwen_detection_preserves_parsing_and_same_image_sam_handoff(monkeypatch
         return mask, [1], None
     worker, calls, _ = runtime(monkeypatch, raw, sam_predict=sam)
     result = worker.execute("qwen_infer", Image.new("RGB", (100, 100)),
-                            {"item_list": "car", "prompt_type": kind}, {"actor_id": "annotator"})
+                            {"item_list": "car", "prompt_type": kind, "source_media_hash": "a" * 64}, {"actor_id": "annotator"})
     assert len(result["boxes"]) == 1 and result["raw_response"] == raw
     assert result["boxes"][0]["qwen_label"] == "car"
     if kind == "bbox":
@@ -201,7 +201,7 @@ def test_unregistered_models_provider_keys_and_owner_fail_before_generation(monk
     worker, calls, _ = runtime(monkeypatch)
     image = Image.new("RGB", (10, 10))
     for payload, actor in [({"model_id": "not-registered"}, "annotator"),
-                           ({"openai_api_key": "must-not-pass"}, "annotator"), ({}, "different-user")]:
+                           ({"openai_api_key": "must-not-pass"}, "annotator"), ({"source_media_hash": "not-a-digest"}, "annotator"), ({}, "different-user")]:
         with pytest.raises(ValueError):
             worker.execute("qwen_caption", image, payload, {"actor_id": actor})
     assert not calls

@@ -95,7 +95,7 @@ class AnalysisViews:
         return self._call_session(actor, job_id, get_class_analysis_point_evidence_payload, point_id)
 
     def thumbnail(self, actor, job_id, point_id, *, context=False, size=256):
-        from PIL import Image
+        from .media import decode_encoded
         if type(size) is not int or not 32 <= size <= 1024:
             raise DomainError("analysis_thumbnail_size_invalid", 422)
         identity = self.point(actor, job_id, point_id)["hosted_identity"]
@@ -103,8 +103,9 @@ class AnalysisViews:
             self.store._actor(con, actor, admin=True)
             _, manifest, _ = self.analysis._job(con, job_id)
         image = next(row for row in manifest["images"] if row["id"] == identity["image_id"])
-        with self.artifacts.open(ArtifactRef(image["media_hash"], image["size_bytes"])) as stream, Image.open(stream) as decoded:
-            view = decoded.convert("RGB")
+        with self.artifacts.open(ArtifactRef(image["media_hash"], image["size_bytes"])) as stream:
+            view, _ = decode_encoded(stream)
+        try:
             if not context:
                 x, y, w, h = identity["bbox"]
                 view = view.crop((x, y, x + w, y + h))
@@ -112,6 +113,8 @@ class AnalysisViews:
             result = io.BytesIO()
             view.save(result, format="JPEG", quality=88)
             return result.getvalue()
+        finally:
+            view.close()
 
     def _pruning_file(self, actor, job_id, filename):
         meta = self.metadata(actor, job_id)

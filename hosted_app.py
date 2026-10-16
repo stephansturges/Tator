@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.exceptions import RequestValidationError
-from PIL import Image, UnidentifiedImageError
+from PIL import Image
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.concurrency import run_in_threadpool
@@ -34,6 +34,8 @@ from services.hosted.tool_api import install_tool_api
 from services.hosted.provider_api import install_provider_api
 from services.hosted.analysis_api import install_analysis_api
 from services.hosted.types import Actor, MutationContext
+from services.hosted.preconditions import ImagePrecondition, precondition_payload
+from services.hosted.media import HostedMedia, inspect_media
 
 WEB_ROOT = Path(__file__).resolve().parent / "ybat-master"
 COOKIE = "tator_session"
@@ -83,7 +85,7 @@ class Assignment(BaseModel):
     image_ids: list[str] = Field(min_length=1, max_length=10000)
     annotator_id: str
     operation_id: str = Field(min_length=8, max_length=128)
-    expected: dict | None = None
+    expected: dict[str, ImagePrecondition] | None = None
 
 
 class RecallPrecondition(BaseModel):
@@ -198,6 +200,7 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
     store = HostedStore(root / "hosted.sqlite3")
     auth = AuthService(store)
     artifacts = ArtifactStore(root / "artifacts")
+    media_store = HostedMedia(store, artifacts)
     @asynccontextmanager
     async def control_lifespan(_application):
         descriptor = os.open(root / "control.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
@@ -215,13 +218,16 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
 
     app = FastAPI(title="Tator hosted authority", docs_url=None, redoc_url=None, openapi_url=None, lifespan=control_lifespan)
     app.state.store, app.state.auth, app.state.artifacts = store, auth, artifacts
+    app.state.media = media_store
     app.state.root = root
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[parsed.hostname])
     app.add_middleware(BodyLimitMiddleware)
 
     @app.exception_handler(DomainError)
     async def domain_error(_request, error):
-        return JSONResponse({"error": error.code, "detail": error.detail}, status_code=error.status)
+        outcome = {name: getattr(error, name) for name in ("commit_outcome", "operation_id", "result_restricted")
+                   if getattr(error, name, None) is not None}
+        return JSONResponse({"error": error.code, "detail": error.detail, **outcome}, status_code=error.status)
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(_request, error):
@@ -371,6 +377,7 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
     @app.post("/api/hosted/datasets/{dataset_id}/incoming")
     def upload(dataset_id: str, file: UploadFile = File(...), annotations: str | None = Form(None),
                yolo_labels_json: str | None = Form(None), labelmap_names: str | None = Form(None),
+               label_coordinate_space: Literal['encoded', 'exif_display'] | None = Form(None),
                expected_class_version: int | None = Form(None), operation_id: str = Form(...), identity: Actor = Depends(admin)):
         if not 8 <= len(operation_id) <= 128 or len(annotations or "") > 16 * 1024 * 1024:
             raise DomainError("invalid_import", 422)
@@ -386,25 +393,22 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
                 raise ValueError()
             if labels is not None and not isinstance(labels, dict):
                 raise ValueError()
-            with Image.open(file.file) as picture:
-                width, height = picture.size
-                if picture.format not in ("PNG", "JPEG", "WEBP", "TIFF", "BMP"):
-                    raise ValueError()
-                picture.verify()
-            file.file.seek(0)
-        except (ValueError, OSError, UnidentifiedImageError, Image.DecompressionBombError):
+        except (ValueError, OSError):
             raise DomainError("invalid_image_import", 422, "Select a supported image and valid annotations.") from None
         filename = str(file.filename or "image").replace("\\", "/").rsplit("/", 1)[-1]
+        info = inspect_media(file.file)
         with artifacts.exclusive():
-            ref = artifacts.put_stream(file.file, max_bytes=256 * 1024 * 1024)
+            media_store.stage(file.file)
             if yolo_labels is not None:
-                return store.import_yolo_image(identity, dataset_id, ref.sha256, filename, yolo_labels, names,
-                                              expected_class_version, operation_id, width=width, height=height, size_bytes=ref.size_bytes)
-            return store.import_image(identity, dataset_id, ref.sha256, filename, labels, operation_id, width=width, height=height, size_bytes=ref.size_bytes, split='unsplit')
+                return store.import_yolo_image(identity, dataset_id, info.source_sha256, filename, yolo_labels, names,
+                                              expected_class_version, operation_id, width=info.width, height=info.height, size_bytes=info.size_bytes,
+                                              media_info=info, label_coordinate_space=label_coordinate_space)
+            return store.import_image(identity, dataset_id, info.source_sha256, filename, labels, operation_id, width=info.width, height=info.height, size_bytes=info.size_bytes, split='unsplit',
+                                      media_info=info, label_coordinate_space=label_coordinate_space)
 
     @app.post("/api/hosted/datasets/{dataset_id}/assignments")
     def assign(dataset_id: str, body: Assignment, identity: Actor = Depends(admin)):
-        return store.assign(identity, dataset_id, body.image_ids, body.annotator_id, body.operation_id, expected=body.expected)
+        return store.assign(identity, dataset_id, body.image_ids, body.annotator_id, body.operation_id, expected=precondition_payload(body.expected))
 
     @app.post("/api/hosted/datasets/{dataset_id}/recall-images")
     def recall_images(dataset_id: str, body: RecallImages, identity: Actor = Depends(admin)):
@@ -441,9 +445,20 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
     @app.get("/api/hosted/images/{image_id}/media")
     def media(image_id: str, identity: Actor = Depends(actor)):
         record = store.image(identity, image_id)
-        digest = record["media_hash"]
         # Authorize by membership before resolving a content digest. Never expose
         # the artifact directory through a static-file mount.
+        view = media_store.resolve(record["media_hash"])
+        reference = media_store.reference(view)
+        def chunks():
+            with artifacts.open(reference) as source:
+                while chunk := source.read(1024 * 1024):
+                    yield chunk
+        return StreamingResponse(chunks(), media_type=view["content_type"])
+
+    @app.get("/api/hosted/images/{image_id}/original")
+    def original_media(image_id: str, identity: Actor = Depends(actor)):
+        record = store.image(identity, image_id)
+        digest = record["media_hash"]
         with artifacts.open(digest) as source:
             with Image.open(source) as picture:
                 content_type = Image.MIME.get(picture.format, "application/octet-stream")
@@ -451,7 +466,7 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
             with artifacts.open(digest) as source:
                 while chunk := source.read(1024 * 1024):
                     yield chunk
-        return StreamingResponse(chunks(), media_type=content_type)
+        return StreamingResponse(chunks(), media_type=content_type, headers={"Content-Disposition": 'attachment; filename="original-image"'})
 
     @app.post("/api/hosted/images/{image_id}/editor")
     def acquire_editor(image_id: str, body: Editor, identity: Actor = Depends(actor)):

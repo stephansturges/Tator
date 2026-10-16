@@ -278,7 +278,12 @@ class QwenRuntime:
         caption_operation = operation in {"qwen_caption", "qwen_caption_preview"}
         schema = QwenCaptionRequest if caption_operation else QwenInferenceRequest
         fields = set(schema.model_fields)
-        server_fields = {"media_path", "media_sha256", "request_id"}
+        # The controller supplies provenance beside the verified working hash.
+        # It is never a model request field and browser parameters cannot set it.
+        server_fields = {"media_path", "media_sha256", "source_media_hash", "request_id"}
+        if 'source_media_hash' in payload:
+            from services.hosted.artifacts import validate_digest
+            validate_digest(payload['source_media_hash'])
         if set(payload) - fields - server_fields:
             raise ValueError("hosted_qwen_request_fields_unknown")
         values = {key: value for key, value in payload.items() if key in fields}

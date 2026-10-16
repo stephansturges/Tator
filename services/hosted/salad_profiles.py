@@ -236,7 +236,7 @@ class HostedSaladProfiles:
         operation_id = payload.get("operation_id", "")
         command = {"dataset_id": dataset_id, "payload": payload}
         # Exact successful retries do not require a still-current source listing.
-        if self.store.receipt(actor, operation_id):
+        if self.store.raw_receipt(actor, operation_id):
             return self.store._command(actor, operation_id, "register_salad_head", command,
                                        lambda con: (_ for _ in ()).throw(DomainError("salad_receipt_missing", 409)), admin=True)
         with self.store.read_connection() as con:

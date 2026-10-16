@@ -80,6 +80,8 @@ class AuthService:
                 "CREATE TABLE IF NOT EXISTS hosted_meta (key TEXT PRIMARY KEY,value TEXT NOT NULL)",
             ):
                 db.execute(sql)
+            if "authority_epoch" not in {row[1] for row in db.execute("PRAGMA table_info(hosted_users)")}:
+                db.execute("ALTER TABLE hosted_users ADD COLUMN authority_epoch INTEGER NOT NULL DEFAULT 0")
             db.execute("INSERT OR IGNORE INTO hosted_meta VALUES ('instance_id',?)", (str(uuid.uuid4()),))
 
     @property
@@ -110,7 +112,7 @@ class AuthService:
         with self.store.transaction() as db:
             if db.execute("SELECT 1 FROM hosted_users LIMIT 1").fetchone():
                 raise DomainError("already_bootstrapped", 409)
-            db.execute("INSERT INTO hosted_users VALUES (?,?,?,?,0,?,?)", (user_id, username, encoded, "admin", now, now))
+            db.execute("INSERT INTO hosted_users(id,username,password_hash,role,disabled,created_at,password_changed_at) VALUES (?,?,?,?,0,?,?)", (user_id, username, encoded, "admin", now, now))
         return {"id": user_id, "username": username, "role": "admin"}
 
     def create_user(self, actor: Actor, username: str, role="annotator") -> dict:
@@ -124,7 +126,7 @@ class AuthService:
             self.require_admin(actor, db)
             if db.execute("SELECT 1 FROM hosted_users WHERE username=?", (username,)).fetchone():
                 raise DomainError("username_exists", 409)
-            db.execute("INSERT INTO hosted_users VALUES (?,?,?,?,0,?,?)", (user_id, username, encoded, role, now, now))
+            db.execute("INSERT INTO hosted_users(id,username,password_hash,role,disabled,created_at,password_changed_at) VALUES (?,?,?,?,0,?,?)", (user_id, username, encoded, role, now, now))
             db.execute("INSERT INTO hosted_auth_links VALUES (?,?,?,?,NULL)", (_digest(token), user_id, "invite", now + 86400))
         return {"id": user_id, "username": username, "role": role, "invite_token": token, "expires_at": now + 86400}
 
@@ -148,7 +150,7 @@ class AuthService:
                 count = db.execute("SELECT count(*) FROM hosted_users WHERE role='admin' AND disabled=0").fetchone()[0]
                 if count <= 1:
                     raise DomainError("last_administrator", 409)
-            db.execute("UPDATE hosted_users SET disabled=?,role=? WHERE id=?", (int(disabled), role, user_id))
+            db.execute("UPDATE hosted_users SET disabled=?,role=?,authority_epoch=authority_epoch+? WHERE id=?", (int(disabled), role, int(bool(row["disabled"]) != bool(disabled) or row["role"] != role), user_id))
             db.execute("DELETE FROM hosted_sessions WHERE user_id=?", (user_id,))
             if disabled:
                 db.execute("DELETE FROM hosted_auth_links WHERE user_id=?", (user_id,))
@@ -163,6 +165,7 @@ class AuthService:
                 raise DomainError("user_not_available", 404)
             db.execute("DELETE FROM hosted_auth_links WHERE user_id=?", (user_id,))
             db.execute("DELETE FROM hosted_sessions WHERE user_id=?", (user_id,))
+            db.execute("UPDATE hosted_users SET authority_epoch=authority_epoch+1 WHERE id=?", (user_id,))
             db.execute("INSERT INTO hosted_auth_links VALUES (?,?,?,?,NULL)", (_digest(token), user_id, "reset", now + 3600))
         return {"reset_token": token, "expires_at": now + 3600}
 
@@ -172,7 +175,7 @@ class AuthService:
             row = db.execute("SELECT l.*,u.disabled FROM hosted_auth_links l JOIN hosted_users u ON u.id=l.user_id WHERE l.token_hash=?", (_digest(token),)).fetchone()
             if row is None or row["used_at"] is not None or row["expires_at"] <= now or row["disabled"]:
                 raise DomainError("invalid_or_expired_link", 400)
-            db.execute("UPDATE hosted_users SET password_hash=?,password_changed_at=? WHERE id=?", (encoded, now, row["user_id"]))
+            db.execute("UPDATE hosted_users SET password_hash=?,password_changed_at=?,authority_epoch=authority_epoch+1 WHERE id=?", (encoded, now, row["user_id"]))
             db.execute("UPDATE hosted_auth_links SET used_at=? WHERE token_hash=?", (now, _digest(token)))
             db.execute("DELETE FROM hosted_sessions WHERE user_id=?", (row["user_id"],))
 

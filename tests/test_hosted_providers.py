@@ -267,3 +267,55 @@ def test_paid_stage_replays_settled_output_after_reconnect_and_guards_dispatch(c
     with pytest.raises(DomainError, match='paid_call_outcome_unresolved'):
         gateway.stage(actor, new_authority, **resumed)
     assert len(sent) == 2
+
+
+def test_paid_caption_predispatch_failures_release_budget_but_pause_keeps_exact_call(configured, monkeypatch):
+    import io
+    from PIL import Image
+    from services.hosted.provider_gateway import PaidCaptionGateway
+    app, actor, previous = configured
+    pricing = {'fixture-model': {'input_microdollars_per_million': 1000000, 'cached_input_microdollars_per_million': 500000,
+        'output_microdollars_per_million': 2000000, 'input_token_ceiling': 600, 'max_output_tokens': 100}}
+    sends = []
+    def transport(secret, payload):
+        sends.append(payload)
+        return {'id': 'prepared-call', 'status': 'completed', 'output': [],
+                'usage': {'input_tokens': 30, 'output_tokens': 5}}
+    gateway = PaidCaptionGateway(app.state.providers, app.state.artifacts, pricing=pricing, transport=transport)
+    def source(encoding):
+        stream = io.BytesIO(); Image.new('RGB', (32, 24), 'blue').save(stream, format=encoding)
+        ref = app.state.artifacts.put_bytes(stream.getvalue())
+        image = app.state.store.import_image(actor, previous['dataset_id'], ref.sha256, 'fixture.' + encoding.lower(), None, uid(),
+            width=32, height=24, size_bytes=ref.size_bytes)
+        image = app.state.store.acquire_editor(actor, image['id'], 'provider-fixture', expected_version=image['current_version'], generation=image['generation'])
+        return MutationContext(image['id'], image['current_version'], image['generation'], 'provider-fixture', uid())
+    def caption(ctx, **kwargs):
+        return gateway.caption(actor, ctx, model='fixture-model', prompt='Describe.', max_output_tokens=32, **kwargs)
+    with pytest.raises(DomainError, match='paid_caption_image_format_unsupported'):
+        caption(source('TIFF'))
+    assert not sends
+    calls = app.state.providers.calls(actor)
+    assert calls[0]['state'] == 'reconciled' and calls[0]['charged'] == 0
+    assert app.state.providers.list(actor)[0]['spent_or_reserved'] == 0
+    ctx = source('PNG')
+    def paused(con):
+        raise DomainError('runtime_automation_paused', 409)
+    with pytest.raises(DomainError, match='runtime_automation_paused'):
+        caption(ctx, dispatch_guard=paused)
+    reserved = next(row for row in app.state.providers.calls(actor) if row['state'] == 'reserved')
+    assert app.state.providers.list(actor)[0]['spent_or_reserved'] == 664
+    result = caption(ctx)
+    assert result['call_id'] == reserved['id'] and len(sends) == 1
+    assert caption(ctx) == result and len(sends) == 1
+    # A read/normalization failure after reserve also cannot strand allowance.
+    ctx2 = source('WEBP')
+    original_open = app.state.artifacts.open
+    def broken_open(reference):
+        raise OSError('fixture read failure before dispatch')
+    monkeypatch.setattr(app.state.artifacts, 'open', broken_open)
+    with pytest.raises(OSError, match='fixture read failure'):
+        caption(ctx2)
+    monkeypatch.setattr(app.state.artifacts, 'open', original_open)
+    assert len(sends) == 1
+    assert app.state.providers.list(actor)[0]['spent_or_reserved'] == 40
+    assert sum(row['state'] == 'reserved' for row in app.state.providers.calls(actor)) == 0

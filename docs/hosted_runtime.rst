@@ -55,9 +55,26 @@ It runs at ordinary request admission (``admit``), immediately before dispatch
 (``dispatch``), after computation and whenever a result is retrieved (``result``).
 Check the live account, dataset membership, image version, assignment generation
 and editor lease each time, including revocation of the captured session. Heavy
-jobs use ``heavy`` at admission and dispatch,
-then ``heavy_result`` at completion and retrieval; require a current admin for
-these phases. They may use a dataset context without an image/editor identity.
+jobs use ``heavy`` at admission and dispatch, then ``heavy_result`` at completion
+and retrieval. Admin ``/tools/heavy`` admission mints a durable internal job grant
+under the current authenticated login. Its request, owner, required admin role,
+account authority epoch, installation, dataset, snapshot, operation and adapter
+identity (factory, device and frozen configuration) are immutable. The context
+contains only an internal grant reference; clients cannot supply it.
+
+An admitted heavy job continues after logout or session expiry. Account disable,
+role changes and credential reset revoke unfinished work permanently, including
+a disable/re-enable or demote/re-promote before the next worker poll. No-op account
+updates and logout do not advance the authority epoch. Admission, dispatch,
+loading completion, computation completion and publication validate the grant;
+the reaper cancels workers whose grant was revoked. Restore changes the
+installation identity and interrupts unfinished grants. Status, cancellation and
+result reads still require a current login, original ownership and admin access.
+Completed retained results remain readable under that current access check.
+
+This authority applies only to the admin heavy-job endpoint. Interactive image
+assistance, per-image captions and caption batches retain their captured-session,
+image and editor fences, even when their coordinator uses the heavy scheduler.
 
 Keep these callbacks short and bound their database waits. They execute outside
 the scheduler lock. They cannot replace the final annotation compare-and-swap:
@@ -167,6 +184,10 @@ pipeline, configured model choices and loop recovery. Its bounded evidence
 contains actual model inputs/outputs and progress at completion. Live status
 reports the scheduler phase; it does not pretend to stream tokens or know a
 percentage complete. Models load only from registered local file manifests.
+Trusted worker payloads carry ``media_sha256`` for the verified encoded working
+bytes and ``source_media_hash`` for original provenance. Qwen accepts that
+server-owned provenance as an internal field, validates its digest and excludes
+it from the model request. Browser parameters cannot supply either identity.
 These CPU component proofs still require real-weight tool qualification.
 
 Authenticated API and model installation
@@ -396,6 +417,9 @@ The paid runner changes only the visual/text generation primitive. The existing
 caption pipeline still selects windows, builds each prompt, merges descriptions,
 performs requested refinement and recovery, and generates/verifies instruction
 QA. Each crop call, text-only merge and QA call goes through the spending ledger.
+Caption and QA stages read the same encoded-coordinate working image, including
+when a source TIFF would normally rotate on opening. Ledger provenance keeps
+the original source hash while each visual call records the pixels it sends.
 Local sampling knobs (temperature, top-p/top-k and presence penalty) are rejected
 when explicitly populated. The remote model's generation policy and the
 separate provider options apply. One permitted provider model is used for every
@@ -452,7 +476,14 @@ The preview displays the exact first-image prompt and reservation ceiling.
 
 Only models with an explicit operator-supplied ``batch`` price and token-limit
 record are offered. No discount or live price is guessed. Images are uploaded
-to the fixed provider Files API, followed by the frozen JSONL; Batch creation
+to the fixed provider Files API using their shared encoded-coordinate working
+view, followed by the frozen JSONL. New prepared rows freeze both original
+source identity and working-view identity in the reservation fingerprint. Upload
+audit records retain both hashes, and filenames match the actual image encoding.
+An older unsent reservation keeps its original immutable request and fingerprint;
+if its saved upload contains different bytes, only that definitely unsent row
+replaces the image upload and invalidates its pre-create JSONL. Dispatched or
+unknown submissions are never rewritten or resent. Batch creation
 uses ``/v1/responses`` and the documented 24-hour completion window
 (https://developers.openai.com/api/docs/guides/batch). Every image has a stable
 ledger entry. One transaction checks every source version, current authority,

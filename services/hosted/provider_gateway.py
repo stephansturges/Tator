@@ -95,28 +95,30 @@ class PaidCaptionGateway:
             return self._current_result(actor, context, json.loads(prior[0]))
         if call['state'] != 'reserved':
             raise DomainError('paid_call_outcome_unresolved', 409)
-        with self.artifacts.open(reference) as stream:
-            pixels = stream.read()
-        # Validated image imports may be JPEG/PNG/WebP; identify actual bytes.
-        import io
-        from PIL import Image
-        with Image.open(io.BytesIO(pixels)) as picture:
-            mime = Image.MIME.get(picture.format)
-        if mime not in {'image/jpeg', 'image/png', 'image/webp'}:
-            raise DomainError('paid_caption_image_format_unsupported', 422)
-        payload = {'model': model, 'store': False, 'service_tier': 'default',
-                   'max_output_tokens': max_output_tokens,
-                   'input': [{'role': 'user', 'content': [
-                       {'type': 'input_text', 'text': prompt},
-                       {'type': 'input_image', 'detail': detail,
-                        'image_url': f'data:{mime};base64,' + base64.b64encode(pixels).decode('ascii')}]}]}
         try:
+            # Source-format policy is independent of the browser/worker view.
+            from .media import HostedMedia, inspect_media
+            with self.artifacts.open(reference) as stream:
+                info = inspect_media(stream)
+            if info.format not in {'JPEG', 'PNG', 'WEBP'}:
+                raise DomainError('paid_caption_image_format_unsupported', 422)
+            media_views = HostedMedia(self.store, self.artifacts)
+            view = media_views.resolve(reference)
+            with self.artifacts.open(media_views.reference(view)) as stream:
+                pixels = stream.read()
+            mime = view['content_type']
+            payload = {'model': model, 'store': False, 'service_tier': 'default',
+                       'max_output_tokens': max_output_tokens,
+                       'input': [{'role': 'user', 'content': [
+                           {'type': 'input_text', 'text': prompt},
+                           {'type': 'input_image', 'detail': detail,
+                            'image_url': f'data:{mime};base64,' + base64.b64encode(pixels).decode('ascii')}]}]}
             secret = self.accounts.dispatch(actor, context, call['id'], guard=dispatch_guard)
-        except DomainError as error:
-            # A paused call remains reserved for an exact retry after restore.
-            # Definitively refused calls cannot keep holding spending allowance.
-            if error.code != 'runtime_automation_paused':
-                self.accounts.release_reserved(call['id'], error.code)
+        except Exception as error:
+            # All preparation failures are definitely pre-dispatch. A pause
+            # alone preserves its exact reservation for a later explicit retry.
+            if not isinstance(error, DomainError) or error.code != 'runtime_automation_paused':
+                self.accounts.release_reserved(call['id'], error.code if isinstance(error, DomainError) else 'paid_caption_preparation_failed')
             raise
         try:
             response = self.transport(secret, payload)

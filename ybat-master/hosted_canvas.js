@@ -10,6 +10,7 @@
     let base = `/api/hosted/images/${encodeURIComponent(imageId)}`;
     let key = `tator.hosted.draft:${boot.instance_id}:${boot.user.user_id}:${imageId}`;
     let record, dataset, editable = false, ready = false, pending = null, saving = null, lastSaved = "", busy = false, handoff = false, recoveryRequired = false, toolState = null, retentionCommand = null;
+    let rejected = null, storageFailed = false;
     const $ = (id) => document.getElementById(id);
     const uuid = () => crypto.randomUUID();
     const toolRoutes = { "/sam_slots": "sam_state", "/sam_preload": "sam_preload", "/sam_point": "sam_point", "/sam_point_multi": "sam_point_multi", "/sam_bbox": "sam_bbox",
@@ -48,6 +49,9 @@
         return retentionFailure;
     }
     function report(error) {
+        if (pending && error.commit_outcome === "committed" && error.result_restricted === true && error.operation_id === pending.body.operation_id) {
+            retainRestrictedCommit(pending, error);
+        }
         const retentionFailure = [401, 403, 409, 423].includes(error.status) ? freeze() : null;
         status(retentionFailure?.message || error.message || String(error), true);
     }
@@ -65,7 +69,9 @@
         try { value = await response.json(); }
         catch (_) { throw new Error("The server reply was incomplete. Your pending change is retained; reconnect or save again to check its original result."); }
         if (accountChanged) throw Object.assign(new Error("Your account changed while this request was running. Its result is retained for the original account."), {status: 401});
-        if (!response.ok) { const error = new Error(messages[value.error] || (typeof value.detail === "string" ? value.detail : value.error) || `Request failed (${response.status}).`); error.status = response.status; error.code = value.error; throw error; }
+        if (!response.ok) { const error = new Error(messages[value.error] || (typeof value.detail === "string" ? value.detail : value.error) || `Request failed (${response.status}).`); error.status = response.status; error.code = value.error;
+            for (const name of ["commit_outcome", "operation_id", "result_restricted"]) error[name] = value[name];
+            throw error; }
         return value;
     }
     function checkedResult(operation, result) {
@@ -81,8 +87,26 @@
         const receipt = await api(`/api/hosted/receipts/${encodeURIComponent(operation.body.operation_id)}`);
         if (receipt === null) return null;
         if (receipt?.operation_id !== operation.body.operation_id) throw new Error("The saved-operation receipt was incomplete. Your pending change is retained.");
+        if (receipt.commit_outcome === "committed" && receipt.result_restricted === true) {
+            if (operation.path.endsWith("/save")) {
+                retainRestrictedCommit(operation, receipt);
+                throw new Error("Your earlier change was saved, but your account can no longer view its result. Any later draft is retained in this tab. Return to the workspace or ask an administrator for access.");
+            }
+            return receipt;
+        }
         checkedResult(operation, receipt.result);
         return receipt;
+    }
+    function retainRestrictedCommit(operation, receipt) {
+        let previous = null;
+        try { previous = JSON.parse(sessionStorage.getItem(key) || "null"); } catch (_) { /* Keep the live draft if storage failed. */ }
+        const latest = ready && record && !recoveryRequired ? draft() : previous?.latest;
+        pending = null; retentionCommand = null; recoveryRequired = true; editable = false; handoff = true;
+        window.TatorHostedCanvas?.freeze();
+        journal({ state: "committed_restricted", committed: { operation_id: operation.body.operation_id, commit_outcome: "committed", result_restricted: true },
+            base: { expected_version: operation.body.expected_version, generation: operation.body.generation }, latest });
+        for (const id of ["hostedHandoffRetry", "hostedImportConflictRetry", "hostedInstructionReviewRetry", "hostedPaidCaptionRetry", "hostedCaptionRetry"]) $(id)?.remove();
+        update();
     }
     async function toolFetch(operation, options) {
         if (!record || !dataset) throw new Error("Load an assigned image before using its tools.");
@@ -330,8 +354,11 @@
     }
     function context() { return { expected_version: record.current_version, generation: record.generation, editor_id: editorId, operation_id: uuid() }; }
     function draft() { return { annotations: window.TatorHostedCanvas.snapshot(), complete: record.state === "confirmed" || Boolean($("hostedComplete")?.checked), negative: Boolean($("hostedNegative")?.checked) }; }
-    function journal(value) { try { sessionStorage.setItem(key, JSON.stringify(value)); } catch (_) { throw new Error("This browser cannot retain unsent edits. Free browser storage before continuing."); } }
-    function clearJournal() { sessionStorage.removeItem(key); retentionCommand = null; }
+    function journal(value) {
+        try { sessionStorage.setItem(key, JSON.stringify({ schema: 2, state: value.pending ? "pending" : value.rejected ? "rejected" : "unsent", ...value })); storageFailed = false; }
+        catch (_) { storageFailed = true; throw new Error("This browser cannot retain unsent edits. Keep this tab open and free browser storage before continuing."); }
+    }
+    function clearJournal() { sessionStorage.removeItem(key); retentionCommand = null; rejected = null; storageFailed = false; }
     function retainDraft() {
         // During recovery the canvas initially shows the server version, not the
         // retained draft. Do not overwrite that journal before explicit restore.
@@ -343,7 +370,7 @@
             retentionCommand = { path: `${base}/save`, body: { ...context(), ...latest } };
         }
         try {
-            journal({ pending: pending || retentionCommand, latest });
+            journal({ pending, unsent: pending ? null : retentionCommand, rejected, latest });
         } catch (_) {
             throw new Error("This browser could not retain your latest unsent edits. Keep this tab open and free browser storage before leaving.");
         }
@@ -361,6 +388,11 @@
         if (pending && !pending.path.endsWith("/save")) throw new Error("Resolve the earlier handoff before saving again.");
         const current = draft();
         if (!pending && JSON.stringify(current) === lastSaved) { if (manual) status("All changes saved"); return true; }
+        if (!pending && rejected && JSON.stringify(current) === rejected.draft) {
+            if (manual) throw new Error(rejected.message);
+            return false;
+        }
+        if (!pending) rejected = null;
         if (!pending) pending = { path: `${base}/save`, body: { ...context(), ...current } };
         const sent = pending;
         journal({ pending: sent, latest: current });
@@ -373,10 +405,20 @@
             pending = null;
             const latest = draft();
             if (JSON.stringify(latest) === lastSaved) { clearJournal(); status("All changes saved"); }
-            else { journal({ pending: { path: `${base}/save`, body: { ...context(), ...latest } }, latest }); status("Earlier edits saved · saving remaining changes next"); }
+            else { retentionCommand = { path: `${base}/save`, body: { ...context(), ...latest } }; journal({ unsent: retentionCommand, latest }); status("Earlier edits saved · saving remaining changes next"); }
             return true;
         })();
-        try { return await saving; } catch (error) { report(error); throw error; }
+        try { return await saving; } catch (error) {
+            if (error.status === 422 && error.commit_outcome === "rejected" && error.operation_id === sent.body.operation_id) {
+                // The server certifies this exact transaction rolled back. Edits
+                // made while awaiting its reply belong to the next command.
+                rejected = { operation_id: sent.body.operation_id, context: { expected_version: sent.body.expected_version, generation: sent.body.generation },
+                    draft: JSON.stringify({ annotations: sent.body.annotations, complete: sent.body.complete, negative: sent.body.negative }), message: error.message };
+                pending = null; retentionCommand = null;
+                try { journal({ rejected, latest: draft() }); } catch (retentionError) { report(retentionError); throw retentionError; }
+            }
+            report(error); throw error;
+        }
         finally { saving = null; update(); }
     }
     async function run(button, action) { if (busy) return; busy = true; update(); try { await action(); } catch (error) { report(error); } finally { busy = false; update(); } }
@@ -427,7 +469,7 @@
             }
             const targetKey = `tator.hosted.draft:${boot.instance_id}:${boot.user.user_id}:${targetId}`;
             if (sessionStorage.getItem(targetKey) || target.state !== record.state) { location.assign(`/annotate?image=${encodeURIComponent(targetId)}`); return; }
-            ready = false; editable = false; pending = null;
+            ready = false; editable = false; pending = null; rejected = null; retentionCommand = null;
             imageId = targetId; base = `/api/hosted/images/${encodeURIComponent(imageId)}`; key = targetKey; record = target;
             let accessError = null;
             try { await acquire(); } catch (error) { accessError = error; editable = false; }
@@ -527,6 +569,7 @@
             await verifySession();
             const retained = sessionStorage.getItem(key);
             const recovery = retained ? JSON.parse(retained) : null;
+            if (recovery?.state === "committed_restricted") throw new Error("Your earlier change was saved, but its result is no longer available to this account. A later draft is retained in this tab. Ask an administrator to help recover it.");
             let recoveredReceipt = recovery?.pending ? await commandReceipt(recovery.pending) : null;
             if (recoveredReceipt && !recovery.pending.path.endsWith("/save")) {
                 clearJournal(); location.assign("/"); return;
@@ -549,19 +592,38 @@
                 freeze();
                 status("A draft from the earlier connection is retained in this tab. Recover it before continuing.", true);
                 addButton($("hostedSaveState").parentElement, "hostedResolve", "Recover my draft", async () => {
-                    const receipt = await commandReceipt(recovery.pending);
+                    let receipt = recovery.pending ? await commandReceipt(recovery.pending) : null;
                     if (receipt && !recovery.pending.path.endsWith("/save")) { clearJournal(); location.assign("/"); return; }
+                    let rejectedByLease = false;
+                    if (recovery.pending && !receipt) {
+                        // A missing receipt alone does not resolve a lost reply.
+                        // Replay the original command before considering a new
+                        // editing reservation or a different operation ID.
+                        const original = recovery.pending;
+                        try { receipt = {result: checkedResult(original, await api(original.path, original.body))}; }
+                        catch (error) {
+                            const certified = error.status === 422 && error.commit_outcome === "rejected" && error.operation_id === original.body.operation_id;
+                            rejectedByLease = [409, 423].includes(error.status) && ["editor_lease_expired", "editor_lease_conflict", "ownership_changed", "annotation_version_changed"].includes(error.code);
+                            if (!certified && !rejectedByLease) throw error;
+                        }
+                    }
                     const fresh = await api(base);
-                    const expected = receipt?.result.current_version || recovery.pending.body.expected_version;
+                    const anchor = recovery.pending?.body || recovery.unsent?.body || recovery.rejected?.context;
+                    const expected = receipt?.result.current_version || anchor?.expected_version;
                     if (fresh.current_version !== expected) throw new Error("Someone saved a newer version. Your earlier draft is retained; it cannot replace their changes automatically. Ask the administrator to reconcile it.");
-                    const restored = recovery.latest || recovery.pending.body;
+                    const restored = recovery.latest || recovery.pending?.body || recovery.unsent?.body;
                     if (!restored.annotations) throw new Error("No unsent annotations are attached to this operation. Check the workspace for its current review status.");
                     if (!confirm("Restore your retained draft on this unchanged server version? This also takes over your own previous editing tab.")) return;
                     record = fresh; await acquire(true, true);
+                    if (rejectedByLease && record.generation <= anchor.generation) throw new Error("The earlier editing reservation has not been replaced. Your original command and draft remain retained; reconnect before trying again.");
                     window.TatorHostedCanvas.restoreDraft(restored.annotations);
                     $("hostedComplete").checked = restored.complete;
                     $("hostedNegative").checked = restored.negative;
-                    pending = null; await save({ manual: true }); recoveryRequired = false; $("hostedResolve").remove();
+                    // Restoration is complete even if this draft still needs
+                    // correction. Subsequent edits must use the live canvas,
+                    // not the old recovery journal, as their source of truth.
+                    recoveryRequired = false; $("hostedResolve").remove();
+                    pending = null; await save({ manual: true });
                 });
             } else if (editable) status("Connected · edits save automatically");
             const history = await api(`${base}/history`);
@@ -596,6 +658,10 @@
         catch (error) {
             if (!$(retryId)) addButton($("hostedSaveState").parentElement, retryId, "Check saved proposal result", async () => {
                 const receipt = await commandReceipt(operation);
+                if (receipt?.result_restricted === true) {
+                    retainRestrictedCommit(operation, receipt);
+                    throw new Error("The proposal was saved, but your account can no longer view its result. Return to the workspace to check your access.");
+                }
                 if (!receipt) checkedResult(operation, await api(operation.path, operation.body));
                 await finish();
             });
@@ -683,7 +749,7 @@
         catch (error) { report(error); }
     }, 30000);
     window.addEventListener("beforeunload", (event) => {
-        if (pending || (ready && JSON.stringify(draft()) !== lastSaved)) {
+        if (storageFailed || pending || (ready && JSON.stringify(draft()) !== lastSaved)) {
             try { retainDraft(); } catch (error) { status(error.message, true); }
             event.preventDefault(); event.returnValue = "";
         }

@@ -148,6 +148,9 @@ class NativeAnalysisAdapter:
         manifest = read_canonical_snapshot(payload["canonical_snapshot"], allowed_root=self.config["canonical_root"])
         if context.get("dataset_id") != manifest["dataset_id"] or context.get("annotation_version") != manifest["snapshot_id"]:
             raise DomainError("native_snapshot_context_changed", 409)
+        if operation == "caption_export":
+            from .language_schema import validate_instruction_manifest
+            validate_instruction_manifest(manifest)
         candidates = None
         if operation == 'ingestion':
             candidates = read_candidate_set(payload['candidate_set'], allowed_root=self.config['canonical_root'])
@@ -654,6 +657,9 @@ def _child(directory):
         raise RuntimeError("Native working directory mismatch")
     request = json.loads((directory / "request.json").read_text())
     manifest = read_canonical_snapshot(request["snapshot_reference"], allowed_root=request["canonical_root"])
+    if request["operation"] == "caption_export":
+        from .language_schema import validate_instruction_manifest
+        validate_instruction_manifest(manifest)
     dataset, source, inputs = _materialize(manifest, directory)
     result = _run_native(request, manifest, dataset, source, directory)
     _verify_inputs(dataset, inputs)

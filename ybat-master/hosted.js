@@ -28,8 +28,11 @@
             }
             if (state.session !== authority || state.sessionEpoch !== epoch) throw Object.assign(new Error("This account view has changed."), { stale: true });
             if (!response.ok) {
-                const error = new Error(errorMessages[data.error] || (typeof data.detail === "string" ? data.detail : data.error) || `Request failed (${response.status})`);
+                const error = new Error(data.commit_outcome === "committed" && data.result_restricted === true
+                    ? "The change was saved, but your account can no longer view its result. Refresh the workspace to see what you can access."
+                    : errorMessages[data.error] || (typeof data.detail === "string" ? data.detail : data.error) || `Request failed (${response.status})`);
                 error.status = response.status;
+                for (const name of ["commit_outcome", "operation_id", "result_restricted"]) error[name] = data[name];
                 if ((response.status === 401 || ["installation_changed", "csrf_rejected"].includes(data.error)) && authority) loginView();
                 throw error;
             }

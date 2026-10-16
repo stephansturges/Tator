@@ -21,6 +21,15 @@ def _native_caption_source(record):
     return record.get('source', 'manual')
 
 
+def _native_lifecycle(record, parent=None):
+    """Preserve inactivity despite the native reader's smaller vocabulary."""
+    def status(value):
+        name = re.sub(r'[\s-]+', '_', str(value or '').strip().lower())
+        return 'superseded' if name == 'deleted' else name if name in {'superseded', 'overflow', 'rejected'} else 'active'
+    parent_status = status(parent.get('lifecycle_status')) if parent else 'active'
+    return parent_status if parent_status != 'active' else status(record.get('lifecycle_status'))
+
+
 def _effective_review(record, kind):
     """Human and machine qualification apply only to their original text."""
     from .instruction_review import review_content_digest
@@ -96,12 +105,14 @@ def export_native_instructions(api, manifest, source, directory, options):
             if text:
                 captions.append(_effective_review({**record, 'id': identifier, 'image_name': row['image_relpath'], 'image_key': image_key,
                     'split': row['split'], 'caption': text, 'source': _native_caption_source(record),
-                    'is_primary': text == primary, 'metadata': metadata}, 'caption0'))
+                    'lifecycle_status': _native_lifecycle(record),
+                    'is_primary': text == primary and _native_lifecycle(record) == 'active', 'metadata': metadata}, 'caption0'))
             pairs = record.get('generated_qa_pairs') or recorded_metadata.get('generated_qa_pairs') or []
             for number, pair in enumerate(pairs):
                 if not isinstance(pair, dict):
                     raise ValueError('Confirmed instruction row must be an object')
                 instructions.append(_effective_review({**pair, 'id': identifier + '-qa-' + str(number), 'caption_id': identifier,
+                    'lifecycle_status': _native_lifecycle(pair, record),
                     'image_name': row['image_relpath'], 'image_key': image_key, 'split': row['split'],
                     'caption': text, 'metadata': {**(pair.get('metadata') if isinstance(pair.get('metadata'), dict) else {}),
                         'hosted_source': dict(pair), 'hosted_caption_source': dict(record), 'hosted_identity': identity}}, 'generated_qa'))

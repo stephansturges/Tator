@@ -94,7 +94,7 @@ class FrozenAdapter:
         for image in images:
             identifier = Path(image["image_relpath"]).stem
             frozen = wanted.get(identifier)
-            if frozen is None or frozen["media_hash"] != image["image_sha256"] or file_state(Path(image["image_path"])) != image["image_state"]:
+            if frozen is None or frozen["media_hash"] != image.get("source_image_sha256", image["image_sha256"]) or file_state(Path(image["image_path"])) != image["image_state"]:
                 raise HTTPException(409, "Frozen pruning media changed")
     @staticmethod
     def export_file_state(path):

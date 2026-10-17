@@ -219,7 +219,7 @@ execution ends. A neighbor preload checks read access and the exact image
 version without taking its editing lease.
 
 An administrator supplies ``TATOR_HOSTED_MODEL_CONFIG`` with approved source
-roots, model definitions, permitted user SAM choices and explicit devices::
+roots, model definitions, a default SAM choice and explicit devices::
 
     {
       "allowed_model_roots": ["/srv/tator-model-source"],
@@ -230,18 +230,34 @@ roots, model definitions, permitted user SAM choices and explicit devices::
                              "checkpoint": "/srv/tator-model-source/detector.pt"}
       },
       "user_sam": {"default_model_id": "sam-base",
-                   "allowed_model_ids": ["sam-base"],
                    "device": "cuda:0", "capacity": 3},
       "detector_device": "cuda:1"
     }
 
 These devices are an explicit configuration example, not a measured capacity
 recommendation. Classifier definitions use ``kind: classifier``, foreground
-``labels``, a checkpoint and ``metadata_path``. SAM3 additionally requires
-``bpe_path``. SHA-256 fields may pin expected bytes. Installation copies these
+``labels``, a checkpoint and ``metadata_path``. Native PyTorch SAM3 additionally
+requires ``bpe_path``. SHA-256 fields may pin expected bytes. Installation copies these
 files into immutable artifact storage, registers every required file for full
 recovery, and publishes a portable model definition only after registration.
 Installed models and selections survive loss of the original source directory.
+
+Every installed SAM1 or SAM3 model is a personal choice for every dataset; there
+is no second SAM allowlist. With no explicit default, the controller picks an
+installed SAM1 first. A saved personal choice and an explicit server default
+remain authoritative. Dataset detector and class-predictor selection still
+belong to the administrator.
+
+On Apple Silicon, a SAM3 definition can use ``backend: mlx`` with ``model_path``
+and a SHA-256 ``files`` manifest instead of a PyTorch checkpoint. The package
+must include the supported SAM3 detector-and-tracker configuration, safetensors
+weights and processor/tokenizer files. Installation pins the entire manifest;
+the worker checks it before loading and uses the existing MLX predictor.
+Predictor slots share fixed model weights inside one user's process but retain
+separate image features. Point, box and positive/negative point prompts are
+supported. The MLX bridge reports text/PCS prompts as unsupported; these need
+the native SAM3 runtime. The annotation controls show that limitation explicitly.
+
 Never accept executable classifier pickle/joblib files from inference payloads.
 
 Local Qwen definitions use ``kind: qwen``, ``model_path`` and a ``files`` mapping
@@ -267,7 +283,7 @@ The API exposes:
 
 * ``GET /api/hosted/tools/catalog?dataset_id=...`` for permitted models and current
   selections; ``POST /models/{id}/install`` is administrator-only.
-* ``POST /sam`` for the user's permitted SAM choice with a preference revision.
+* ``POST /sam`` for the user's installed SAM choice with a preference revision.
 * ``POST /datasets/{id}/detector`` and ``/classifier`` for administrator model
   attachment with the expected dataset revision and an operation ID.
 * ``POST /request`` followed by ``GET /requests/{id}``, ``/result`` or

@@ -1477,11 +1477,14 @@ def score_quality_records(
                 "point_id": point_id,
                 "quality_recipe": recipe.recipe_id,
                 "quality_score": float(final_score[index]),
-                "compact_logistic_disagreement": float(compact_logistic[index]),
+                # A held-out source can contain a class absent from its
+                # training fold. Keep that unavailable estimate missing in
+                # JSON, as it already is in the finite-only rank blend.
+                "compact_logistic_disagreement": float(compact_logistic[index]) if np.isfinite(compact_logistic[index]) else None,
                 "compact_neighbor_disagreement": float(compact_local[index]),
-                "cradio_logistic_disagreement": float(cradio_logistic[index]),
+                "cradio_logistic_disagreement": float(cradio_logistic[index]) if np.isfinite(cradio_logistic[index]) else None,
                 "cradio_neighbor_disagreement": float(cradio_local[index]),
-                "el2n_score": float(el2n[index]),
+                "el2n_score": float(el2n[index]) if np.isfinite(el2n[index]) else None,
                 "quality_signal_available": bool(signal_available[index]),
                 "quality_abstention_reason": None if signal_available[index] else "no_discriminating_quality_signal",
                 "quality_review_fraction": effective_fraction,

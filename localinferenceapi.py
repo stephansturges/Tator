@@ -44929,6 +44929,9 @@ def _class_analysis_embedding_head_cache_identity(
         # provenance before entering the existing shared image-pack producer.
         # Legacy identities remain unchanged for explicitly attested imports.
         identity['qualified_producer'] = dict(head['qualified_producer_identity'])
+    if head.get("crop_salad_head_id"):
+        identity["selected_crop_salad"] = {"id": head["crop_salad_head_id"],
+                                           "sha256": head.get("crop_salad_head_sha256")}
     if encoder_type == "cradio":
         runtime = cradio_runtime_identity(
             identity["encoder_model"],
@@ -60512,11 +60515,45 @@ CLASS_ANALYSIS_SAM3_MASK_FUSION_SAM_WEIGHT = 0.25
 CLASS_ANALYSIS_SALAD_TRAIN_LOCK = threading.Lock()
 
 
+def _class_analysis_selected_crop_salad_metadata(payload, settings):
+    """Validate an explicit trained crop head without reinterpreting its fit."""
+    selected = str(payload.get("crop_salad_head_id") or "").strip()
+    expected = str(payload.get("crop_salad_head_sha256") or "").strip()
+    if not selected:
+        if expected:
+            raise HTTPException(400, "crop_salad_head_identity_required")
+        return None
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise HTTPException(400, "crop_salad_head_identity_required")
+    path = _local_salad_head_path(selected)
+    if salad_sha256_file(path) != expected:
+        raise HTTPException(409, "crop_salad_head_changed")
+    _head, metadata = _load_local_salad_head(selected, device_name="cpu", backend="torch")
+    if salad_sha256_file(path) != expected:
+        raise HTTPException(409, "crop_salad_head_changed")
+    if (metadata.get("representation_scope") != "bbox_crop" or metadata.get("encoder_type") != "dinov3"
+            or metadata.get("encoder_model") != payload.get("encoder_model")):
+        raise HTTPException(400, "crop_salad_head_backbone_mismatch")
+    signature = metadata.get("training_signature") or {}
+    view = signature.get("view_recipe") or {}
+    keys = ("crop_mode", "padding_ratio", "preprocess_mode", "canonical_size", "background_mode", "embedding_view_mode", "dinov3_pooling")
+    if not signature.get("training_fingerprint") or any(view.get(key) != payload.get(key) for key in keys):
+        raise HTTPException(400, "crop_salad_head_preprocessing_mismatch")
+    config = metadata.get("config") or {}
+    if any(config.get(key) != getattr(settings, key) for key in
+           ("num_clusters", "cluster_dim", "token_dim", "hidden_dim", "dropout", "sinkhorn_iters", "sinkhorn_reg")):
+        raise HTTPException(400, "crop_salad_head_architecture_mismatch")
+    return metadata
+
+
 def _class_analysis_salad_training_plan(
     records: Sequence[Mapping[str, Any]],
     payload: Mapping[str, Any],
 ) -> Tuple[ClassAnalysisSALADSettings, List[int], str]:
     settings = class_analysis_salad_settings(payload)
+    selected = _class_analysis_selected_crop_salad_metadata(payload, settings)
+    if selected is not None:
+        return settings, [], selected["training_signature"]["training_fingerprint"]
     seed = _coerce_int(payload.get("seed"), 42)
     indices = class_analysis_salad_training_indices(
         records,
@@ -60546,6 +60583,30 @@ def _class_analysis_train_salad_head(
     out_dir: Path,
 ) -> Tuple[Any, Dict[str, Any]]:
     """Train from a bounded label-free reservoir and delete temporary tokens."""
+    selected = _class_analysis_selected_crop_salad_metadata(payload, settings)
+    if selected is not None:
+        saved_id = payload["crop_salad_head_id"]
+        _model, _processor, _resolved, device_name = _data_ingestion_get_dinov3(payload["encoder_model"])
+        saved_head, saved_metadata = _load_local_salad_head(saved_id,
+            device_name=_dinov3_aux_torch_device(device_name), backend=resolve_local_salad_backend(payload.get("local_salad_backend")))
+        if salad_sha256_file(_local_salad_head_path(saved_id)) != payload["crop_salad_head_sha256"]:
+            raise HTTPException(409, "crop_salad_head_changed")
+        historical_runtime = dict(saved_metadata.get("crop_training_runtime") or {})
+        runtime = {"schema": CLASS_ANALYSIS_SAM3_SALAD_FUSION_SCHEMA,
+            "backend": resolve_local_salad_backend(payload.get("local_salad_backend")),
+            "encoder_model": selected["encoder_model"], "settings": settings.to_dict(),
+            "training_runtime": historical_runtime,
+            "training_rng_receipt": selected.get("training_rng_receipt"),
+            "training_source_population_object_count": historical_runtime.get("dataset_object_count"),
+            "dataset_object_count": len(records)}
+        runtime.update(reused_existing_head=True, selection="explicit_immutable_crop_head",
+            persistent_head_id=saved_id, persistent_head_sha256=payload["crop_salad_head_sha256"],
+            training_fingerprint=selected["training_signature"]["training_fingerprint"],
+            training_population_object_count=len(selected["training_signature"].get("content") or []),
+            encoding_population_object_count=len(records), all_objects_encoded=False, encoding_status="pending_full_object_stream")
+        with CLASS_ANALYSIS_JOBS_LOCK:
+            job.runtime = {**dict(job.runtime or {}), "salad_fusion": runtime}
+        return saved_head, runtime
     if len(train_indices) < 2:
         raise HTTPException(
             status_code=HTTP_400_BAD_REQUEST,
@@ -61923,6 +61984,8 @@ def _class_analysis_collect_records(
         ),
         "embedding_aggregation": _embedding_normalize_aggregation(payload.get("embedding_aggregation")),
         "embedding_salad_head_id": str(payload.get("embedding_salad_head_id") or "").strip(),
+        "crop_salad_head_id": str(payload.get("crop_salad_head_id") or ""),
+        "crop_salad_head_sha256": str(payload.get("crop_salad_head_sha256") or ""),
     }
     seed = _coerce_int(payload.get("seed"), 42)
     sample_cap = _class_analysis_sample_cap(payload.get("sample_cap"))
@@ -62418,6 +62481,8 @@ def _class_analysis_collect_records(
         "dinov3_pooling": _embedding_normalize_dinov3_pooling(payload.get("dinov3_pooling")),
         "embedding_aggregation": _embedding_normalize_aggregation(payload.get("embedding_aggregation")),
         "embedding_salad_head_id": str(payload.get("embedding_salad_head_id") or "").strip(),
+        "crop_salad_head_id": str(payload.get("crop_salad_head_id") or ""),
+        "crop_salad_head_sha256": str(payload.get("crop_salad_head_sha256") or ""),
         "crop_cache": {
             "reused": sum(1 for record in records if record.get("crop_cache_reused")),
             "total": len(records),
@@ -75213,6 +75278,8 @@ def _run_class_analysis_job(job: ClassAnalysisJob) -> None:
             "embedding_salad_head_id": str(
                 job.request.get("embedding_salad_head_id") or ""
             ).strip(),
+            "crop_salad_head_id": str(job.request.get("crop_salad_head_id") or ""),
+            "crop_salad_head_sha256": str(job.request.get("crop_salad_head_sha256") or ""),
         }
         salad_settings: Optional[ClassAnalysisSALADSettings] = None
         salad_train_indices: List[int] = []
@@ -77055,6 +77122,12 @@ def _normalize_class_analysis_request(payload: Dict[str, Any]) -> Dict[str, Any]
         request_payload["salad_weight"] = settings.weight
         request_payload["embedding_view_mode"] = "tight_context"
         request_payload["dinov3_pooling"] = "pooler"
+        request_payload["crop_salad_head_id"] = str(request_payload.get("crop_salad_head_id") or "").strip()
+        request_payload["crop_salad_head_sha256"] = str(request_payload.get("crop_salad_head_sha256") or "").strip()
+        _class_analysis_selected_crop_salad_metadata(request_payload, settings)
+    else:
+        request_payload.pop("crop_salad_head_id", None)
+        request_payload.pop("crop_salad_head_sha256", None)
     request_payload["resolved_recipe"] = _class_analysis_resolved_recipe(
         request_payload
     )

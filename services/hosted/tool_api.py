@@ -16,7 +16,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field
 
-from services.hosted.config import ModelRegistry, file_digest, validate_model_id, validate_model_member
+from services.hosted.config import ModelRegistry, file_digest, model_uses_manifest, validate_model_id, validate_model_member
 from services.hosted.analysis import CanonicalAnalysis
 from services.hosted.job_authority import HeavyJobAuthority
 from services.hosted.media import HostedMedia
@@ -225,7 +225,7 @@ class ToolController:
         directory.mkdir(exist_ok=True, mode=0o700)
         if directory.is_symlink():
             raise DomainError("tool_model_definition_invalid", 409)
-        if definition.get("kind") in {"qwen", "edr", "sam3_recipe"}:
+        if model_uses_manifest(definition):
             # The descriptor digest names a fresh immutable directory. Updating
             # an installation never changes files beneath an existing worker.
             manifest = self.artifacts.pin(definition["checkpoint_sha256"], directory)
@@ -306,7 +306,7 @@ class ToolController:
                 if definition.get("component_identities", identities) != identities:
                     raise DomainError("tool_edr_component_changed", 409)
                 definition["component_identities"] = identities
-            if definition["kind"] in {"qwen", "edr", "sam3_recipe"}:
+            if model_uses_manifest(definition):
                 for files_field, path_field in (("files", "model_path"), ("adapter_files", "adapter_path")):
                     if files_field not in definition:
                         continue
@@ -341,12 +341,22 @@ class ToolController:
             self._load_definition(model_id, definition)
             return result
 
+    def _sam_model_ids(self):
+        # SAM is a personal annotation tool in every dataset. Installing a
+        # trusted model makes it available; it needs no second permission list.
+        models = [row for row in self.registry.catalog() if row["kind"] in {"sam1", "sam3"}]
+        return [row["model_id"] for row in sorted(models, key=lambda row: (row["kind"] != "sam1", row["model_id"]))]
+
     def _sam_selection(self, actor):
         with self.store.read_connection() as con:
             self.store._actor(con, actor)
             selected = con.execute("SELECT model_id,revision FROM hosted_tool_preferences WHERE user_id=?", (actor.user_id,)).fetchone()
         policy = self.configuration.get("user_sam", {})
-        return {"model_id": selected[0] if selected else policy.get("default_model_id"), "revision": selected[1] if selected else 0}
+        default = policy.get("default_model_id")
+        if default is None:
+            available = self._sam_model_ids()
+            default = available[0] if available else None
+        return {"model_id": selected[0] if selected else default, "revision": selected[1] if selected else 0}
 
     def _definition(self, model_id):
         try:
@@ -444,11 +454,14 @@ class ToolController:
             selection = self._sam_selection(actor)
             policy = self.configuration.get("user_sam", {})
             model_id = selection["model_id"]
-            if model_id not in policy.get("allowed_model_ids", []):
-                raise DomainError("tool_not_configured", 503, "No permitted SAM model is configured.")
+            if model_id not in self._sam_model_ids():
+                raise DomainError("tool_not_configured", 503, "No installed SAM model is selected.")
             model = self._definition(model_id)
             if operation.startswith("sam3_") and operation not in SAM_RECIPE_OPERATIONS and model["kind"] != "sam3":
-                raise DomainError("tool_sam3_required", 503, "Select a permitted SAM3 model to use this tool.")
+                raise DomainError("tool_sam3_required", 503, "Select an installed SAM3 model to use this tool.")
+            if model.get("backend") == "mlx" and operation in {"sam3_text", "sam3_text_auto", "sam3_visual"}:
+                raise DomainError("tool_backend_not_supported", 503,
+                    "MLX SAM3 supports point and box prompts. Text and find-similar prompts need the native SAM3 model.")
             classifier, bindings = self._dataset_model(dataset, "classifier", required=operation in CLASSIFIER_OPERATIONS)
             spec = self.registry.user_spec(actor.user_id, model_id, media_root=self.media_root,
                 device=policy.get("device"), capacity=policy.get("capacity", 3), classifier_id=classifier["model_id"] if classifier else None)
@@ -736,7 +749,7 @@ class ToolController:
                 shutil.rmtree(directory)
 
     def select_sam(self, actor, body):
-        if body.model_id not in self.configuration.get("user_sam", {}).get("allowed_model_ids", []):
+        if body.model_id not in self._sam_model_ids():
             raise DomainError("tool_model_not_allowed", 403)
         if self._definition(body.model_id)["kind"] not in {"sam1", "sam3"}:
             raise DomainError("tool_model_kind_invalid", 422)
@@ -873,7 +886,8 @@ class ToolController:
     def catalog(self, actor, dataset_id=None):
         from services.hosted.caption_case import CaptionSettings
         self._sam_selection(actor)  # Verify current session, including on GET.
-        allowed = set(self.configuration.get("user_sam", {}).get("allowed_model_ids", []))
+        sam_models = self._sam_model_ids()
+        allowed = set(sam_models)
         allowed.update(self.configuration.get("user_qwen", {}).get("allowed_model_ids", []))
         dataset = self.store.get_dataset(actor, dataset_id) if dataset_id else None
         if dataset:
@@ -883,7 +897,7 @@ class ToolController:
                 allowed.update(self._definition(recipe_id).get("components", {}).values())
         installed = [row for row in self.registry.catalog() if actor.role == "admin" or row["model_id"] in allowed]
         result = {"models": installed, "sam": self._sam_selection(actor), "implemented": sorted(SAM_OPERATIONS | DETECTOR_OPERATIONS | QWEN_OPERATIONS | EDR_OPERATIONS | SAM_RECIPE_OPERATIONS),
-                  "sam_allowed_model_ids": list(self.configuration.get("user_sam", {}).get("allowed_model_ids", [])),
+                  "sam_allowed_model_ids": sam_models,
                   "parameters": {operation: sorted(_parameters_for(operation)) for operation in QWEN_OPERATIONS | SAM_RECIPE_OPERATIONS},
                   "caption_job_parameters": {"caption_request": sorted(_parameters_for("qwen_caption")), "settings": sorted(CaptionSettings.model_fields)},
                   "caption_job_capabilities": {"current_image": True, "dataset_batch": actor.role == "admin", "providers": ["local_qwen"],
@@ -980,7 +994,7 @@ class ToolController:
             "sam_models": [{"id": model["model_id"], "key": model["model_id"], "path": model["model_id"],
                 "variant": "sam3" if model["kind"] == "sam3" else "sam1", "promoted": True,
                 "active": model["model_id"] == catalog["sam"]["model_id"]}
-                for model in catalog["models"] if model["kind"] in {"sam1", "sam3"} and model["model_id"] in self.configuration.get("user_sam", {}).get("allowed_model_ids", [])],
+                for model in catalog["models"] if model["kind"] in {"sam1", "sam3"}],
             "labelmaps": [{"path": dataset_id, "rel_path": dataset_id, "filename": dataset["name"],
                 "classes": [row["name"] for row in dataset["classes"]], "n_classes": len(dataset["classes"])}],
             "prepass_recipes": [{"id": model["model_id"], "name": model["model_id"], "read_only": True,
@@ -1157,6 +1171,8 @@ class ToolController:
                         native_config["hosted_salad_heads"] = {head["id"]: head["head_sha256"] for head in profiles["heads"] if head["representation_scope"] == "whole_image"}
                     if definition["operation"] == "pruning":
                         native_config["parameters"] = {**native_config.get("parameters", {}), **profiles["pruning_defaults"]}
+                    elif definition["operation"] == "dqe":
+                        native_config["parameters"] = {**native_config.get("parameters", {}), **profiles["dqe_defaults"]}
                 if injected_cache:
                     cache = {}
                     for item in [*native_config.get("cache_inputs", []), *injected_cache]:

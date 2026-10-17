@@ -4,12 +4,12 @@
     const app = window.TatorHostedDashboard;
     if (!app) return;
     const node = (tag, text) => { const e = document.createElement(tag); if (text !== undefined) e.textContent = text; return e; };
-    const button = node("button", "Feature recipes"); button.id = "hostedProfiles"; button.hidden = true;
+    const button = node("button", "Analysis presets"); button.id = "hostedProfiles"; button.hidden = true;
     document.querySelector(".hosted-actions").append(button);
-    const dialog = node("dialog"), notice = node("p"), list = node("section"), recipes = node("section"), sources = node("section");
+    const dialog = node("dialog"), notice = node("p"), catalog = node("section"), list = node("section"), recipes = node("details"), sources = node("section");
     dialog.id = "hostedProfilesDialog"; notice.setAttribute("role", "status");
     const close = node("button", "Close"); close.onclick = () => dialog.close();
-    dialog.append(node("h2", "Feature recipes and SALAD"), node("p", "Associate trained SALAD descriptors with this dataset and choose recipes for whole images or labelled objects. Changes affect new analyses. Existing results keep the exact models and settings used to create them."), notice, list, recipes, sources, close); document.body.append(dialog);
+    dialog.append(node("h2", "Analysis presets & trained descriptors"), node("p", "Use the established Data Quality Explorer presets across datasets. Keep trained SALAD descriptors attached to the dataset they describe; completed analyses retain their original recipe."), notice, catalog, list, recipes, sources, close); document.body.append(dialog);
     let epoch = 0, datasetId, snapshot, authority, pending = false;
     const valid = ticket => epoch === ticket && dialog.open && app.datasetId === datasetId && app.session === authority && app.session?.user.role === "admin";
     const api = (path, body) => app.api(`/datasets/${encodeURIComponent(datasetId)}/salad-profiles${path}`, body === undefined ? {} : {method: "POST", body});
@@ -23,7 +23,10 @@
             controls.forEach(control => { if (control !== close) control.disabled = true; });
             try { await callback(); }
             catch (e) { if (valid(ticket) && !e.stale) notice.textContent = e.message; }
-            finally { pending = false; controls.forEach((control, i) => { control.disabled = disabled[i]; }); }
+            finally {
+                pending = false; controls.forEach((control, i) => { control.disabled = disabled[i]; });
+                for (const panel of recipes.querySelectorAll("[data-recipe-role]")) panel.refreshButtons?.();
+            }
         };
         parent.append(b); return b;
     }
@@ -32,15 +35,27 @@
         if (valid(ticket)) { notice.textContent = "Dataset recipe settings saved. Run a new analysis to use them."; await render(ticket); }
     }
     function label(text, control) { const l = node("label", text); l.append(control); return l; }
+    async function renderCatalog(ticket) {
+        const value = await app.api("/analysis-presets"); if (!valid(ticket)) return;
+        catalog.replaceChildren(node("h3", "Shared object-analysis presets"), node("p", "Choose a preset when starting Data Quality Explorer. Thorough is the established default: three image encoders plus a trained SALAD aggregator. These are shared recipes, so each dataset does not need its own manual setup."));
+        for (const preset of value.presets) {
+            const row = node("div"); row.className = "hosted-profile-row";
+            row.append(node("strong", preset.label + (preset.id === value.default_recipe ? " · default" : "")), node("p", preset.components.map(c => `${c.label} ${(100 * c.weight).toFixed(3).replace(/\.?0+$/, "")}%`).join(" + ")));
+            catalog.append(row);
+        }
+        catalog.append(node("p", "Each component is normalized before mixing. The established size-and-shape correction is fitted on the analysed dataset for DINOv3, SAM3 and crop SALAD; C-RADIO keeps its original features. Alternative C-RADIO corrections remain experiments, not a new default."), node("p", "Whole-image SALAD uses its own trained heads. Pruning then combines picture similarity with object similarity; that final balance is separate from the backbone weights above."));
+        const open = node("button", "Open Data Quality Explorer"); open.type = "button";
+        open.disabled = !datasetId; open.onclick = () => { dialog.close(); window.TatorHostedAnalysis?.open("dqe"); }; catalog.append(open);
+    }
     async function render(ticket) {
         const value = await api(""); if (!valid(ticket)) return; snapshot = value;
-        list.replaceChildren(node("h3", "Registered descriptors")); recipes.replaceChildren(node("h3", "Preferred recipes"));
+        list.replaceChildren(node("h3", "Trained descriptors for this dataset"), node("p", "A SALAD head contains learned weights, not the dataset images. Its encoder, training scope and exact weight file travel with the association. Attaching a head preserves that training history; it does not retrain it.")); recipes.replaceChildren(node("summary", "Advanced: dataset-specific pruning overrides"), node("p", "Component weights and preprocessing below affect pruning. Data Quality Explorer keeps its selected preset and reuses the chosen compatible crop SALAD head. An incompatible head needs a matching recipe; it is never silently retrained. Existing results keep their captured settings."));
         if (!value.heads.length) list.append(node("p", "No trained SALAD descriptors have been registered yet. Discover retained training outputs below, or import an existing dataset with its descriptors."));
         for (const head of value.heads) {
             const row = node("div"); row.className = "hosted-profile-row";
             const display = node("input"); display.value = head.display_label || head.label || head.id; display.maxLength = 160;
             row.append(label(`${head.encoder_type} · ${head.representation_scope === "bbox_crop" ? "Object crops" : "Whole images"}`, display));
-            row.append(node("small", `${head.encoder_model} · ${head.descriptor_dim || "—"} dimensions${head.archived ? " · Archived" : ""}`));
+            row.append(node("small", `${head.encoder_model} · ${head.descriptor_dim || "—"} dimensions${head.train_image_count ? ` · trained on ${head.train_image_count} ${head.representation_scope === "bbox_crop" ? "crops" : "images"}` : ""} · weights ${head.head_sha256.slice(0, 12)}${head.archived ? " · Archived" : ""}`));
             action(row, "Save name", () => mutate({action: "rename", head_id: head.id, display_label: display.value}, ticket));
             const attached = value.dataset.head_ids.includes(head.id);
             action(row, attached ? "Detach" : "Attach to dataset", () => mutate({action: attached ? "detach" : "attach", head_id: head.id}, ticket));
@@ -55,18 +70,18 @@
         const panel = node("section"); panel.dataset.recipeRole = role;
         panel.append(node("h4", title));
         const current = value.dataset.preferred_recipes[role];
-        panel.append(node("p", current ? "The saved preference is shown below. Changes apply to new analyses." : "No preference is saved yet. This editable starting point uses DINOv3; analyses keep their existing recipe until you save a preference."));
+        panel.append(node("p", current ? "Saved pruning override. Changes apply to the next pruning analysis." : "No override: pruning uses its analysis defaults. Add components only if you want a dataset-specific recipe."));
         const names = {dinov3: "DINOv3", cradio: "C-RADIO", sam3: "SAM3"};
         const aliases = {dinov3_pooled: "dinov3", cradio_pooled: "cradio", sam3_mask: "sam3"};
         const base = c => aliases[c.encoder_type || c.encoder || c.backbone || c.id] || c.encoder_type || c.encoder || c.backbone || c.id;
         const key = c => c.head_id ? `salad:${c.head_id}` : `base:${base(c)}`;
         const choices = (role === "whole_image" ? ["dinov3", "cradio"] : ["dinov3", "sam3", "cradio"])
-            .map(id => ({key: `base:${id}`, label: names[id], component: {encoder_type: id}}));
-        for (const head of value.heads.filter(h => value.dataset.head_ids.includes(h.id) && !h.archived && h.representation_scope === role)) {
+            .map(id => ({key: `base:${id}`, label: names[id], component: {encoder_type: id, encoder: role === "whole_image" ? `${id}_pooled` : id, ...(role === "bbox_crop" ? {id} : {})}}));
+        for (const head of value.heads.filter(h => value.dataset.head_ids.includes(h.id) && !h.archived && h.representation_scope === role && (role === "whole_image" || h.encoder_type === "dinov3"))) {
             choices.push({key: `salad:${head.id}`, label: `${head.display_label || head.label || head.id} · SALAD on ${names[head.encoder_type] || head.encoder_type}`,
-                component: {encoder_type: head.encoder_type, encoder_model: head.encoder_model, head_id: head.id, head_sha256: head.head_sha256}});
+                component: {encoder_type: head.encoder_type, encoder: role === "whole_image" ? "local_salad" : head.encoder_type, ...(role === "bbox_crop" ? {id: "salad"} : {}), encoder_model: head.encoder_model, head_id: head.id, head_sha256: head.head_sha256}});
         }
-        let recipe = structuredClone(current || {components: [{encoder_type: "dinov3", weight: 1}]}), advancedDirty = false;
+        let recipe = structuredClone(current || {components: []}), advancedDirty = false;
         const rows = node("div"), shares = node("p"), hint = node("p"), tools = node("div"), advanced = node("details"), editor = node("textarea");
         tools.className = "hosted-actions"; shares.setAttribute("aria-live", "polite");
         hint.textContent = role === "whole_image" ? "Combine DINOv3 and C-RADIO, optionally with attached SALAD descriptors. SAM3 is used for object crops." : "Combine up to three backbones: DINOv3, SAM3 and C-RADIO. Attached SALAD descriptors can contribute alongside them.";
@@ -80,7 +95,7 @@
         const sync = () => { editor.value = JSON.stringify(recipe, null, 2); advancedDirty = false; };
         const updateShares = () => {
             const total = recipe.components.reduce((n, c) => n + Number(c.weight ?? 1), 0);
-            shares.textContent = "Relative contribution: " + recipe.components.map(c => `${choices.find(option => option.key === key(c))?.label || base(c)} ${Number.isFinite(total) && total > 0 ? (100 * (c.weight ?? 1) / total).toFixed(0) : "—"}%`).join(" · ");
+            shares.textContent = recipe.components.length ? "Relative contribution: " + recipe.components.map(c => `${choices.find(option => option.key === key(c))?.label || base(c)} ${Number.isFinite(total) && total > 0 ? (100 * (c.weight ?? 1) / total).toFixed(1) : "—"}%`).join(" · ") : "No dataset-specific components selected.";
         };
         const loadJSON = () => { recipe = parse(); advancedDirty = false; draw(); };
         editor.addEventListener("input", () => {
@@ -88,13 +103,14 @@
             for (const control of rows.querySelectorAll("input,select,button")) control.disabled = true;
             add.disabled = true;
             shares.textContent = "JSON has unsaved changes. Load it into the editor, or save it directly below.";
+            save.disabled = false;
         });
         action(advanced, "Load JSON into visual editor", loadJSON);
         const add = action(tools, "Add descriptor", () => {
             const available = choices.find(choice => !recipe.components.some(c => key(c) === choice.key));
             if (available) { recipe.components.push({...available.component, weight: 1}); draw(); }
         });
-        action(tools, "Save preferred recipe", () => {
+        const save = action(tools, "Save pruning override", () => {
             if (!advancedDirty) {
                 for (const input of rows.querySelectorAll('input[type="number"]')) {
                     if (!Number.isFinite(Number(input.value)) || Number(input.value) <= 0) throw new Error("Enter a positive numeric weight for every descriptor.");
@@ -103,6 +119,10 @@
             const selected = advancedDirty ? parse() : structuredClone(recipe);
             return mutate({action: "prefer_recipe", role, recipe: selected}, ticket);
         });
+        panel.refreshButtons = () => {
+            add.disabled = advancedDirty || recipe.components.length >= 12 || choices.every(choice => recipe.components.some(c => key(c) === choice.key));
+            save.disabled = !advancedDirty && !recipe.components.length;
+        };
         function draw() {
             rows.replaceChildren();
             recipe.components.forEach((component, index) => {
@@ -128,7 +148,7 @@
                     if (!selected || selected.key === selectedKey) return;
                     if (recipe.components.some((other, i) => i !== index && key(other) === selected.key)) { select.value = selectedKey; notice.textContent = "That descriptor is already in this recipe. Adjust its weight instead."; return; }
                     const kept = {...component};
-                    for (const field of ["encoder_type", "encoder", "backbone", "id", "head_id", "head_sha256", "model", "encoder_model", "pooling", "cradio_pooling"]) delete kept[field];
+                    for (const field of ["encoder_type", "encoder", "backbone", "id", "head_id", "head_sha256", "model", "encoder_model", "pooling", "cradio_pooling", "input_size"]) delete kept[field];
                     recipe.components[index] = {...kept, ...selected.component}; draw();
                 };
                 row.append(label("Descriptor", select), label("Relative weight", slider), weight);
@@ -137,8 +157,7 @@
                 if (!choices.some(choice => choice.key === selectedKey)) row.append(node("small", "This saved descriptor is unavailable here. Choose an attached, active descriptor before saving."));
                 rows.append(row);
             });
-            add.disabled = recipe.components.length >= 12 || choices.every(choice => recipe.components.some(c => key(c) === choice.key));
-            sync(); updateShares();
+            sync(); updateShares(); panel.refreshButtons();
         }
         panel.append(hint, rows, shares, tools, advanced); draw(); return panel;
     }
@@ -160,9 +179,8 @@
         if (result.next_offset !== null) { const more = action(sources, "More retained outputs", () => discover(ticket, result.next_offset)); more.dataset.more = ""; }
     }
     button.onclick = async () => {
-        const ticket = ++epoch; datasetId = app.datasetId; authority = app.session; snapshot = null; notice.textContent = ""; list.replaceChildren(); recipes.replaceChildren(); sources.replaceChildren(); dialog.showModal();
-        if (!datasetId) { notice.textContent = "Choose a dataset first."; return; }
-        try { await render(ticket); if (valid(ticket)) action(sources, "Discover retained SALAD training outputs", () => discover(ticket)); }
+        const ticket = ++epoch; datasetId = app.datasetId; authority = app.session; snapshot = null; notice.textContent = ""; catalog.replaceChildren(); list.replaceChildren(); recipes.replaceChildren(); recipes.open = false; recipes.hidden = !datasetId; sources.replaceChildren(); dialog.showModal();
+        try { await renderCatalog(ticket); if (!datasetId) { notice.textContent = "Select a dataset to manage its trained descriptors or pruning overrides."; return; } await render(ticket); if (valid(ticket)) action(sources, "Discover retained SALAD training outputs", () => discover(ticket)); }
         catch (e) { if (valid(ticket) && !e.stale) notice.textContent = e.message; }
     };
     dialog.addEventListener("close", () => { ++epoch; });

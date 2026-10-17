@@ -30,6 +30,66 @@ _HEAD_ID = re.compile(r"[A-Za-z0-9_-]{1,160}\Z")
 _MAX_HEAD_BYTES = 512 * 1024 * 1024
 
 
+def analysis_preset_catalog():
+    """Describe the existing shared presets; this does not change a dataset."""
+    from utils.class_analysis_quality import RECIPES, THOROUGH_QUALITY_RECIPE
+    from utils.class_analysis_salad import class_analysis_salad_settings
+    compact = class_analysis_salad_settings({}).fusion_weights
+    labels = {"dinov3": "DINOv3", "sam3": "SAM3", "salad": "DINOv3 crop SALAD", "cradio": "C-RADIO"}
+    presets = []
+    for key, recipe in RECIPES.items():
+        if key == "fast_map_v1":
+            components = [{"id": "dinov3", "weight": 1.0}]
+        else:
+            components = [{"id": name, "weight": weight * recipe.compact_weight}
+                          for name, weight in zip(("dinov3", "sam3", "salad"), compact)]
+            if recipe.use_cradio:
+                components.append({"id": "cradio", "weight": recipe.cradio_weight})
+        presets.append({"id": key, "label": recipe.label,
+                        "components": [{**item, "label": labels[item["id"]],
+                                        "size_correction": "unchanged" if item["id"] == "cradio" else "dataset_fitted"}
+                                       for item in components]})
+    return {"default_recipe": THOROUGH_QUALITY_RECIPE, "presets": presets,
+            "scope": "shared_object_analysis_presets", "normalization": "unit_rows_sqrt_weight_concat_unit_rows"}
+
+
+def native_recipe_components(recipe, role, heads=None):
+    """Translate profile vocabulary to the existing native producer contract.
+
+    Saved preferences retain their exact historical JSON. In particular, an
+    encoder_type-only C-RADIO/SALAD component must never fall through to native
+    pruning's default DINO encoder.
+    """
+    result, seen = [], set()
+    aliases = {"dinov3_pooled": "dinov3", "cradio_pooled": "cradio", "sam3_mask": "sam3"}
+    heads = heads or {}
+    for saved in recipe["components"]:
+        component = copy.deepcopy(saved)
+        base = component.get("encoder_type") or component.get("encoder") or component.get("backbone") or component.get("id")
+        base = aliases.get(base, base)
+        if base in {"local_salad", "salad"}:
+            base = heads.get(component.get("head_id"), {}).get("encoder_type") or ("dinov3" if role == "bbox_crop" else None)
+        if base not in {"dinov3", "cradio", "sam3"}:
+            raise DomainError("salad_recipe_encoder_invalid", 422)
+        if component.get("encoder_model") and not component.get("model"):
+            component["model"] = component["encoder_model"]
+        if role == "whole_image":
+            if base == "sam3":
+                raise DomainError("salad_recipe_encoder_invalid", 422)
+            component["encoder"] = "local_salad" if component.get("head_id") else base + "_pooled"
+        else:
+            if component.get("head_id") and base != "dinov3":
+                raise DomainError("salad_crop_backbone_unsupported", 422,
+                                  "The object producer currently supports trained crop SALAD on DINOv3.")
+            identifier = "salad" if component.get("head_id") or component.get("id") == "salad" else base
+            if identifier in seen:
+                raise DomainError("salad_recipe_duplicate_object_component", 422)
+            seen.add(identifier)
+            component.update(id=identifier, encoder=base)
+        result.append(component)
+    return result
+
+
 class _TransactionProfiles(DatasetProfiles):
     """Run the unchanged native mutation rules inside the caller's transaction."""
     def __init__(self, value):
@@ -71,6 +131,15 @@ def _inspect_child(path):
               "train_view_max_side", "epochs", "batch_size", "learning_rate", "weight_decay", "temperature",
               "seed", "training_signature", "training_rng_receipt", "config")
     result = {key: metadata[key] for key in fields if key in metadata}
+    # Crop heads retain every training row in the weight file. The registry
+    # needs the fit identity and view recipe, not thousands of coordinates in
+    # every catalog response. Preserve a digest/count of that unchanged list.
+    signature = result.get("training_signature")
+    if isinstance(signature, dict) and isinstance(signature.get("content"), list):
+        rows = signature["content"]
+        result["training_signature"] = {key: value for key, value in signature.items() if key != "content"}
+        result["training_signature"].update(content_count=len(rows), content_sha256=hashlib.sha256(
+            json.dumps(rows, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest())
     result.setdefault("representation_scope", "whole_image")
     result.setdefault("encoder_type", "dinov3")
     if result["representation_scope"] not in {"whole_image", "bbox_crop"} or result["encoder_type"] not in {"dinov3", "cradio", "sam3"}:
@@ -127,6 +196,11 @@ class HostedSaladProfiles:
             self.store._actor(con, actor, admin=True)
             return self._snapshot(con, dataset_id)
 
+    def presets(self, actor):
+        with self.store.read_connection() as con:
+            self.store._actor(con, actor, admin=True)
+        return analysis_preset_catalog()
+
     def _save(self, con, actor, dataset_id, snapshot):
         settings = self._settings(con, dataset_id)
         settings["salad_profiles"] = {**snapshot["datasets"]["dataset:" + dataset_id], "profiles": snapshot["profiles"]}
@@ -152,6 +226,8 @@ class HostedSaladProfiles:
             request = {**payload, "request_id": hashlib.sha256(operation_id.encode()).hexdigest()[:32],
                        "source_identity": "dataset:" + dataset_id}
             result = native.mutate(request, before["heads"])
+            if payload.get("action") == "prefer_recipe":
+                native_recipe_components(payload["recipe"], payload["role"], {head["id"]: head for head in before["heads"]})
             self._save(con, actor, dataset_id, result["profiles"])
             return {"outcome": "committed", "receipt": {**result["receipt"], "operation_id": operation_id},
                     "profiles": self._snapshot(con, dataset_id)}
@@ -173,6 +249,14 @@ class HostedSaladProfiles:
                 if known:
                     rows.append({"origin": "migration", "owner_id": dataset_id, "name": item["source_file"],
                                  "sha256": item["sha256"], "size_bytes": item["size_bytes"]})
+        # Trusted operator imports are separate from the original migration
+        # manifest. They still require a retained, backup-visible artifact.
+        for item in self._settings(con, dataset_id).get("salad_imports", []):
+            known = con.execute("SELECT 1 FROM hosted_artifact_references WHERE kind='salad_import_weights' AND owner_id=? AND sha256=? AND size_bytes=?",
+                                (dataset_id, item["sha256"], item["size_bytes"])).fetchone()
+            if known:
+                rows.append({"origin": "administrator_import", "owner_id": dataset_id, "name": item["source_file"],
+                             "sha256": item["sha256"], "size_bytes": item["size_bytes"]})
         for row in rows:
             row["source_id"] = hashlib.sha256(_json(row).encode()).hexdigest()
         return rows
@@ -301,16 +385,20 @@ class HostedSaladProfiles:
                 ref = self.artifacts.pin(ArtifactRef(head["head_sha256"], head["size_bytes"]), Path(pin_directory))
                 inputs.append({"namespace": "salad_heads", "relative_path": head["id"] + ".pt",
                                "path": str(Path(pin_directory) / ref.sha256), **ref.as_dict()})
-        defaults = {}
+        defaults, dqe_defaults = {}, {}
         if "whole_image" in preferences:
-            defaults["scene_components"] = preferences["whole_image"]["components"]
+            defaults["scene_components"] = native_recipe_components(preferences["whole_image"], "whole_image", heads)
         if "bbox_crop" in preferences:
             recipe = preferences["bbox_crop"]
-            defaults.update(object_recipe=recipe.get("object_recipe", "inherit_dqe"), object_components=recipe["components"], object_adjustment=recipe.get("adjustment", "inherit"))
+            defaults.update(object_recipe=recipe.get("object_recipe", "inherit_dqe"), object_components=native_recipe_components(recipe, "bbox_crop", heads), object_adjustment=recipe.get("adjustment", "inherit"))
             if recipe.get("preprocessing"):
                 defaults["object_preprocessing"] = recipe["preprocessing"]
+            selected_crop = next((item for item in defaults["object_components"] if item["id"] == "salad" and item.get("head_id") and item.get("enabled", True)), None)
+            if selected_crop:
+                dqe_defaults = {"crop_salad_head_id": selected_crop["head_id"],
+                                "crop_salad_head_sha256": selected_crop["head_sha256"]}
         return {"snapshot_id": snapshot_id, "cache_inputs": inputs, "preferred_recipes": preferences,
-                "pruning_defaults": defaults, "heads": selected}
+                "pruning_defaults": defaults, "dqe_defaults": dqe_defaults, "heads": selected}
 
 
 def install_salad_profiles_api(app, store, artifacts, admin_dependency):
@@ -319,6 +407,10 @@ def install_salad_profiles_api(app, store, artifacts, admin_dependency):
         return service
     service = HostedSaladProfiles(store, artifacts)
     app.state.hosted_salad_profiles = service
+    @app.get("/api/hosted/analysis-presets", tags=["hosted analysis presets"])
+    def presets(identity=Depends(admin_dependency)):
+        return service.presets(identity)
+
     router = APIRouter(prefix="/api/hosted/datasets/{dataset_id}/salad-profiles", tags=["hosted SALAD profiles"])
 
     @router.get("")

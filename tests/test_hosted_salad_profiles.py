@@ -153,7 +153,7 @@ def test_frozen_capture_retains_exact_heads_and_defaults_after_current_archive_a
     mutate(workspace, action="prefer_recipe", role="whole_image", recipe={"components": [{"encoder_type": "dinov3", "weight": 1.0}]}, operation_id="pooled-default")
     mutate(workspace, action="archive", head_id="vehicle_head", archived=True, operation_id="archive-current")
     capture = service.capture(actor, frozen["snapshot_id"], tmp_path / "pins")
-    assert capture["pruning_defaults"]["scene_components"] == recipe["components"]
+    assert capture["pruning_defaults"]["scene_components"] == [{**recipe["components"][0], "encoder": "local_salad"}]
     assert hashlib.sha256(Path(capture["cache_inputs"][0]["path"]).read_bytes()).hexdigest() == ref.sha256
     assert capture["cache_inputs"][0]["relative_path"] == "vehicle_head.pt"
     with store.read_connection() as con:

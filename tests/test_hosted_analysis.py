@@ -501,7 +501,11 @@ def test_native_vlm_review_reuses_parent_and_preserves_full_response(setup, tmp_
         saved = json.loads((directory / 'class_analysis/ca_frozen/config.json').read_text())
         assert saved['workspace_dir'] == str(dataset) and saved['workspace_manifest']['snapshot_id'] == manifest['snapshot_id']
         return {'review_id': 'cqr_fixture'}
-    monkeypatch.setitem(sys.modules, 'localinferenceapi', SimpleNamespace(create_class_analysis_qwen_review=create, get_class_analysis_qwen_review=lambda _: response))
+    from services.annotation_entity_store import AnnotationEntityStore
+    entity_store = AnnotationEntityStore(directory / 'annotation_entities.sqlite3')
+    monkeypatch.setitem(sys.modules, 'localinferenceapi', SimpleNamespace(create_class_analysis_qwen_review=create, get_class_analysis_qwen_review=lambda _: response,
+        _class_analysis_annotation_entity_store=lambda: entity_store,
+        _class_analysis_annotation_image_key=lambda row: f"{row['split']}:{row['image_relpath']}"))
     result = _run_native({'operation': 'dqe_review', 'parameters': {'point_id': 'point-0', 'max_turns': 4, 'model_id': '/untrusted'},
                          'parent_analysis': {'job_id': 'hosted-parent', 'native_job_id': 'ca_frozen'},
                          'review_model_directory': 'models/review', 'timeout': 1}, manifest, dataset, source, directory)

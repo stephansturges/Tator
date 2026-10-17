@@ -18,6 +18,8 @@ analysis, training and dataset exports. **Incoming** shows images that are not
 yet confirmed, including assigned, returned and submitted work. **Review**
 focuses on submitted images awaiting an administrator's decision. Uploading,
 assigning, saving or submitting does not add an image to the canonical dataset.
+Confirmed background images are valid members of the canonical dataset even
+when they contain no boxes. Empty annotations alone do not make an image Incoming.
 
 Annotators use **My work** to open their own assigned or returned images.
 **Submitted work · all datasets** tracks images they have handed over, including
@@ -26,12 +28,21 @@ grant access to the submitted pixels or annotations.
 
 While annotating, save and review controls sit in a floating panel at the bottom
 right. Use the minus button to minimize it; save status and the workspace button
-remain visible. Workflow messages no longer push the canvas down. **Admin workspace**
-saves your edits and returns to the selected dataset. There, **Quality & compute**
-opens dataset analysis and training tasks, **Feature recipes** manages saved
-descriptors, and **Tools & models**, **People**, **Classes**, and **Export & recovery**
-provide the other administration controls. Compute tasks appear only after their
-recipes and models have been configured on the hosted server.
+remain visible. Workflow messages no longer push the canvas down. Administrators
+also have a top navigation bar: **Datasets**, **Data Quality Explorer**,
+**Dataset pruning**, **Data ingestion**, **Train models**, **Tools & models** and
+**Analysis presets**. Leaving annotation for an analysis saves the current image
+and releases its editing reservation first; a failed save keeps you on the image.
+These destinations use the hosted dataset and its versioned analysis results.
+The legacy local-file panes remain hidden because they use a different storage
+and permission model. The administrator navigation is never shown to annotators.
+
+**Admin workspace** returns to the selected dataset, where **People**, **Classes**,
+**Dataset guidance** and **Export & recovery** provide administration controls.
+**Quality & compute** remains an advanced list of all analysis and training jobs.
+It freezes the confirmed input versions and schedules heavy work; it does not
+select which annotation tools users are allowed to use. A named analysis page
+shows an explicit setup message if its runtime is not configured on this server.
 
 Large work lists load compact image identifiers and filenames in bounded parallel
 requests. Annotation versions and editing ownership are checked again when an
@@ -40,6 +51,14 @@ SAM preloading runs only when a SAM model is configured for the hosted account.
 Image switching loads the latest review feedback with the image instead of
 downloading every past annotation version. Account checks can run alongside the
 image lookup; saving and the transfer of editing ownership still happen in order.
+
+Once the current image is ready, the browser downloads the next two images in
+the displayed list in the background, one at a time. These full-resolution bytes
+stay in a temporary, per-tab cache; annotations and editing permissions are
+checked afresh when you open an image. Prefetching pauses when you change images
+or hide the tab and clears when the account changes or the page closes. It keeps
+at most 64 MiB of encoded image data, skipping images larger than 32 MiB until
+you open them. No extra model inference runs for prefetching.
 
 The hosted server compresses public JavaScript and CSS for browsers that support
 gzip and lets browsers revalidate those files when reopening a page. Updated
@@ -182,14 +201,14 @@ does not guarantee that its required weights or recipe have been installed.
    * - SAM Mode; Point Mode; Multi-Point Mode
      - Interactive box or point segmentation, positive/negative points and SAM
        box refinement; Preload SAM prepares the current image
-     - Your permitted SAM model; classifier for combined Auto Class operations
+     - Your installed SAM model; classifier for combined Auto Class operations
    * - SAM3 Text Prompt; Run SAM3; Start cascade
      - Text-driven segmentation, optional windowing, or sequential text prompts
        through Run cascade
-     - Permitted SAM3 model
+     - Installed SAM3 model with native prompt support
    * - SAM3 similarity prompt (use selected box(es))
      - Use selected positive/negative boxes as visual examples
-     - Permitted SAM3 model
+     - Installed SAM3 model with native prompt support
    * - Run detector (current image); Detector mode
      - Region, Full image or Windowed (SAHI) detection; loaded-work batch controls
        operate on the images available in this canvas
@@ -222,7 +241,10 @@ without sharing their interactive SAM state.
 Administrators install server-configured packages and select **Dataset detector**,
 **Dataset class predictor** and **Dataset detection recipe** in **Tools & models**.
 Each model label must map to a dataset class. **Your segmentation model** lets
-each user choose an allowed installed model with **Use this SAM model**.
+each user choose any installed SAM1 or SAM3 model with **Use this SAM model**.
+SAM availability is installation-wide, not a dataset permission. Backend
+capabilities still matter: the Apple MLX SAM3 bridge supports point and box
+segmentation; text and find-similar prompts require the native SAM3 runtime.
 
 **Saved SAM3 recipes** manages which installed recipe packages are attached to
 the dataset. These packages are distinct from the visible **Text prompt cascade**.
@@ -370,9 +392,17 @@ Snapshots, analysis and dataset downloads
 -----------------------------------------
 
 Open **Export & recovery**, then **Export confirmed dataset** for a canonical
-ZIP. **Quality & compute** provides configured administrator analyses and
-training tasks. **Caption jobs** provides retained dataset caption work and
-caption-training export. See `Canonical inputs for analysis and training
+ZIP. The named administrator tabs open analysis and training tools;
+**Quality & compute** retains the complete job list. Dataset captioning starts
+in the annotation pane: expand the Qwen caption controls and choose
+**Caption whole dataset…**, beside **Caption image + Q&A**. The dialog contains
+pilot runs, whole-dataset runs, retained proposals and caption-training export.
+**Remote dataset captions…** beside it opens provider Batch runs; the price
+preview and explicit submission step still apply.
+The current image must be saved and its annotation tools idle before a new run
+captures the confirmed dataset. Continuing a certified pilot intentionally reuses
+that pilot's saved snapshot. Caption generation does not apply proposals
+automatically. See `Canonical inputs for analysis and training
 <hosted_analysis.rst>`_ for those workflows and their qualification limits.
 
 A snapshot fixes the approved image list, annotation versions, class map and

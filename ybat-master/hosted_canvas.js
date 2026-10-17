@@ -11,7 +11,68 @@
     let key = `tator.hosted.draft:${boot.instance_id}:${boot.user.user_id}:${imageId}`;
     let record, dataset, editable = false, ready = false, pending = null, saving = null, lastSaved = "", busy = false, handoff = false, recoveryRequired = false, toolState = null, retentionCommand = null;
     let rejected = null, storageFailed = false;
+    let mediaEpoch = 0, mediaCacheAllowed = false, mediaWarmTimer = null;
     const $ = (id) => document.getElementById(id);
+    const mediaPrefetch = window.HostedMediaPrefetch ? new window.HostedMediaPrefetch({
+        request: async (id, signal) => {
+            if (accountChanged) throw new Error("The account changed.");
+            const response = await nativeFetch(`/api/hosted/images/${encodeURIComponent(id)}/media`, {
+                credentials: "same-origin", headers: headers(), cache: "no-store", priority: "low", signal,
+            });
+            if ([401, 403, 409].includes(response.status)) clearMediaPrefetch();
+            return response;
+        },
+    }) : null;
+    function pauseMediaPrefetch(keepId = null) {
+        clearTimeout(mediaWarmTimer); mediaWarmTimer = null;
+        mediaPrefetch?.pause(keepId);
+    }
+    function clearMediaPrefetch() {
+        mediaEpoch++; mediaCacheAllowed = false;
+        pauseMediaPrefetch(); mediaPrefetch?.clear();
+    }
+    function scheduleMediaPrefetch() {
+        clearTimeout(mediaWarmTimer);
+        // Let the current canvas paint first. No speculative decoding, labels,
+        // editing reservations or durable browser storage are involved.
+        mediaWarmTimer = setTimeout(() => {
+            if (!ready || busy || handoff || recoveryRequired || accountChanged || !mediaCacheAllowed || document.hidden) return;
+            mediaPrefetch?.schedule(window.TatorHostedCanvas?.nextImageIds(2) || []);
+        }, 150);
+    }
+    async function mediaBlobFor(id) {
+        if (accountChanged) throw new Error("Your account changed. Reopen the workspace.");
+        const epoch = mediaEpoch;
+        const current = id === imageId && record?.id === id;
+        const sourceHash = current ? record.media_hash : null;
+        const check = () => {
+            if (accountChanged || epoch !== mediaEpoch || (current && id !== imageId)) {
+                throw new DOMException("The image or account changed.", "AbortError");
+            }
+        };
+        if (current && mediaCacheAllowed) {
+            const blob = await mediaPrefetch?.take(id, sourceHash);
+            check();
+            if (blob) return blob;
+        }
+        const response = await nativeFetch(`/api/hosted/images/${encodeURIComponent(id)}/media`, {
+            credentials: "same-origin", headers: headers(), cache: "no-store", priority: current ? "high" : "auto",
+        });
+        check();
+        if (!response.ok) {
+            if (current || [401, 403, 409].includes(response.status)) clearMediaPrefetch();
+            throw new Error(`Could not load this image (${response.status}). Reopen it to check your access.`);
+        }
+        const responseHash = response.headers.get("X-Tator-Source-Media-Hash");
+        if (sourceHash && responseHash && sourceHash !== responseHash) {
+            await response.body?.cancel();
+            clearMediaPrefetch();
+            throw new Error("The image source changed. Reopen it to load its current pixels and annotations.");
+        }
+        const blob = await response.blob();
+        check();
+        return blob;
+    }
     const uuid = () => crypto.randomUUID();
     const toolRoutes = { "/sam_slots": "sam_state", "/sam_preload": "sam_preload", "/sam_point": "sam_point", "/sam_point_multi": "sam_point_multi", "/sam_bbox": "sam_bbox",
         "/qwen/infer": "qwen_infer", "/qwen/caption": "qwen_caption",
@@ -41,6 +102,7 @@
     };
     function status(text, error = false) { if ($("hostedSaveState")) { $("hostedSaveState").textContent = text; $("hostedSaveState").dataset.error = String(error); } }
     function freeze() {
+        clearMediaPrefetch();
         // Editing authority and local recovery are separate. Capture the newest
         // draft while the original image/account context is still available.
         let retentionFailure = null;
@@ -98,6 +160,7 @@
         return receipt;
     }
     function retainRestrictedCommit(operation, receipt) {
+        clearMediaPrefetch();
         let previous = null;
         try { previous = JSON.parse(sessionStorage.getItem(key) || "null"); } catch (_) { /* Keep the live draft if storage failed. */ }
         const latest = ready && record && !recoveryRequired ? draft() : previous?.latest;
@@ -438,7 +501,7 @@
         }
         finally { saving = null; update(); }
     }
-    async function run(button, action) { if (busy) return; busy = true; update(); try { await action(); } catch (error) { report(error); } finally { busy = false; update(); } }
+    async function run(button, action) { if (busy) return; busy = true; pauseMediaPrefetch(); update(); try { await action(); } catch (error) { report(error); } finally { busy = false; update(); scheduleMediaPrefetch(); } }
     window.addEventListener("storage", event => {
         if (event.key === "tator.hosted.session-event") {
             accountChanged = true;
@@ -463,9 +526,11 @@
         }
         const lease = await api(`${base}/editor`, { editor_id: editorId, expected_version: fresh.current_version, generation: fresh.generation, takeover });
         record = { ...fresh, ...lease }; editable = true;
+        mediaCacheAllowed = true;
         window.TatorHostedCanvas?.freeze(false); status("Connected · edits save automatically"); update();
     }
     async function leave(next = false, destination = "/") {
+        pauseMediaPrefetch();
         if (editable && !handoff) { if (!await save({ manual: true })) throw new Error("Save your work before leaving."); await api(`${base}/release`, context()); editable = false; }
         if (next && dataset) {
             const result = await api(`/api/hosted/images?dataset_id=${encodeURIComponent(dataset.id)}&limit=100${boot.user.role === "admin" ? "&state=submitted" : ""}`);
@@ -478,7 +543,7 @@
         if (busy || handoff) throw new Error("Wait for the current save or handoff before changing images.");
         if (targetId === imageId) return;
         if ([...activeTools.values()].some((item) => !["sam_preload", "sam_state"].includes(item.operation))) throw new Error("Wait for the current annotation tool, or cancel it before changing images.");
-        busy = true; update();
+        busy = true; pauseMediaPrefetch(targetId); update();
         try {
             const sessionCheck = verifySession();
             const [, target] = await Promise.all([sessionCheck, api(`/api/hosted/images/${encodeURIComponent(targetId)}?include_review=true`)]);
@@ -492,7 +557,7 @@
             ready = false; editable = false; pending = null; rejected = null; retentionCommand = null;
             imageId = targetId; base = `/api/hosted/images/${encodeURIComponent(imageId)}`; key = targetKey; record = target;
             let accessError = null;
-            try { await acquire(false, false, target, sessionCheck); } catch (error) { accessError = error; editable = false; }
+            try { await acquire(false, false, target, sessionCheck); } catch (error) { accessError = error; editable = false; clearMediaPrefetch(); }
             history.replaceState(null, "", `/annotate?image=${encodeURIComponent(imageId)}`);
             $("hostedComplete").checked = record.complete; $("hostedNegative").checked = record.negative;
             document.querySelector(".hosted-canvas-title strong").textContent = record.filename;
@@ -510,8 +575,8 @@
             await refreshFeedback();
             if (accessError) report(accessError);
             else status("Connected · edits save automatically");
-        } catch (error) { report(error); throw error; }
-        finally { busy = false; update(); }
+        } catch (error) { if ([401, 403, 404, 409, 423].includes(error.status)) clearMediaPrefetch(); report(error); throw error; }
+        finally { busy = false; update(); scheduleMediaPrefetch(); }
     }
     async function transition(kind) {
         if (window.TatorHostedCanvas.hasPendingTools() || [...activeTools.values()].some((item) => !["sam_preload", "sam_state"].includes(item.operation))) throw new Error("Wait for the annotation tool to finish, or cancel it before handing over this image.");
@@ -680,6 +745,7 @@
                 });
             } else if (editable) status("Connected · edits save automatically");
             await refreshFeedback();
+            scheduleMediaPrefetch();
         } catch (error) { if (!$("hostedSaveState")) { document.body.replaceChildren(node("p", error.message)); const back = node("a", "Return to sign in"); back.href = "/"; document.body.append(back); } else report(error); }
     }
     async function applyVersionedProposal(path, fields, expectedVersion, message, eventName, retryId) {
@@ -720,9 +786,34 @@
         } finally { busy = false; update(); }
     }
     window.TatorHosted = {
+        get session() { return accountChanged ? null : boot; },
+        async leaveFor(destination) {
+            const target = new URL(destination, location.href);
+            if (target.origin !== location.origin || !["/", "/annotate"].includes(target.pathname)) throw new Error("Choose a hosted workspace destination.");
+            const blocked = busy || handoff || recoveryRequired || accountChanged || !ready
+                ? "Finish saving or reconnect editing before leaving this image."
+                : window.TatorHostedCanvas.hasPendingTools() || [...activeTools.values()].some(item => !["sam_preload", "sam_state"].includes(item.operation))
+                    ? "Wait for the current annotation tool, or cancel it before leaving." : null;
+            if (blocked) { status(blocked, true); throw new Error(blocked); }
+            busy = true; pauseMediaPrefetch(); update();
+            try { await leave(false, target.href); }
+            catch (error) { report(error); throw error; }
+            finally { busy = false; update(); scheduleMediaPrefetch(); }
+        },
+        async prepareDatasetCaptionRun() {
+            if (busy || handoff || recoveryRequired || accountChanged || !ready) throw new Error("Finish saving or reconnect editing before starting a dataset caption run.");
+            if (boot.user.role !== "admin") throw new Error("An administrator starts dataset caption runs.");
+            if (pending || saving || (!editable && JSON.stringify(draft()) !== lastSaved)) throw new Error("Save or recover the current image's unsent changes before starting a dataset caption run.");
+            if (window.TatorHostedCanvas.hasPendingTools() || [...activeTools.values()].some(item => !["sam_preload", "sam_state"].includes(item.operation))) throw new Error("Wait for the annotation tool to finish, or cancel it before starting a dataset caption run.");
+            busy = true; update();
+            try { if (editable && !await save({manual: true})) throw new Error("Save the current image before starting a dataset caption run."); }
+            finally { busy = false; update(); }
+        },
         get editable() { return editable && ready && !handoff && !busy && !recoveryRequired; },
         editorId, get imageId() { return imageId; }, instanceId: boot.instance_id, get mediaUrl() { return `${base}/media`; }, save, navigate,
         mediaUrlFor: (id) => `/api/hosted/images/${encodeURIComponent(id)}/media`,
+        mediaBlobFor,
+        get mediaPrefetchState() { return mediaPrefetch?.stats || {entries: 0, bytes: 0, inFlight: 0}; },
         get datasetId() { return dataset?.id; }, api,
         async capturePaidBatchContext() {
             if (!window.TatorHosted.editable) throw new Error("Reconnect editing before preparing a paid caption batch.");
@@ -761,6 +852,13 @@
         },
         setToolsState(value) { toolState = value; },
         get samConfigured() { return Boolean(toolState?.capabilities?.sam_point?.configured); },
+        get sam3PromptUnavailable() {
+            const capability = toolState?.capabilities?.sam3_text;
+            if (!capability || capability.configured) return null;
+            return capability.reason === "tool_backend_not_supported"
+                ? "This installed SAM3 model supports points and boxes. Text and similarity prompts need the native SAM3 weights on this server."
+                : "SAM3 text and similarity prompts need a compatible SAM3 model selected in Tools & models.";
+        },
         get edrReady() { return Boolean(toolState?.capabilities?.edr_prepass?.configured) && toolState?.phase === "available"; },
         get automationPauseReason() { return toolState && toolState.phase !== "available" ? "Annotation assistance is paused while server compute changes. You can still annotate and save manually." : null; },
         async fetch(url, options = {}) {
@@ -788,6 +886,18 @@
         },
     };
     window.addEventListener("load", start, { once: true });
+    window.addEventListener("pageshow", event => {
+        if (!event.persisted) return;
+        // Back from analysis can restore a cached document whose editor lease
+        // was released. A clean canvas must reload current versions/authority.
+        clearMediaPrefetch();
+        if (ready && !pending && !recoveryRequired && JSON.stringify(draft()) === lastSaved) location.reload();
+        else { freeze(); status("Your draft is retained. Reconnect editing before continuing.", true); }
+    });
+    document.addEventListener("visibilitychange", () => {
+        if (document.hidden) pauseMediaPrefetch();
+        else scheduleMediaPrefetch();
+    });
     setInterval(() => {
         if (editable && ready && !busy && !handoff) {
             if (saving && pending) { try { journal({ pending, latest: draft() }); } catch (error) { report(error); } }
@@ -808,6 +918,7 @@
         }
     });
     window.addEventListener("pagehide", () => {
+        clearMediaPrefetch();
         if (!editable || !record || handoff || pending || saving) return;
         nativeFetch(`${base}/release`, { method: "POST", headers: { ...Object.fromEntries(headers()), "content-type": "application/json" }, body: JSON.stringify(context()), credentials: "same-origin", keepalive: true }).catch(() => {});
     });

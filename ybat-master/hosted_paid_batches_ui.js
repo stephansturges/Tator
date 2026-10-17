@@ -51,7 +51,7 @@
             timer = setTimeout(() => inspect(id, ticket).catch(error => { if (current(ticket)) notice.textContent = error.message; }), 3000);
         }
         if (["failed", "interrupted"].includes(job.status)) action(details, "Resume retained work", async () => {
-            const context = window.TatorHosted ? await window.TatorHosted.capturePaidBatchContext() : {};
+            const context = job.request.image_context && window.TatorHosted ? await window.TatorHosted.capturePaidBatchContext() : {};
             await api(`${base}/${id}/resume`, {operation_id: operation(), ...(context.image_context ? {image_context: context.image_context} : {})}); await inspect(id, ticket);
         });
         if (job.status === "submission_unknown") {
@@ -85,7 +85,9 @@
                     if (window.TatorHosted?.imageId === proposal.image_id) action(card, "Use this caption", async () => {
                         await window.TatorHosted.applyPaidCaptionProposal(id, proposal); notice.textContent = "Caption saved. Existing annotations and earlier captions were preserved.";
                     });
-                    else { const link = node("a", "Review on image"); link.href = `/annotate?image=${encodeURIComponent(proposal.image_id)}&paid_batch=${encodeURIComponent(id)}`; card.append(link); }
+                    else { const link = node("a", "Review on image"); link.href = `/annotate?image=${encodeURIComponent(proposal.image_id)}&paid_batch=${encodeURIComponent(id)}`;
+                        if (window.TatorHosted) link.onclick = event => { event.preventDefault(); window.TatorHosted.leaveFor(link.href).catch(error => { notice.textContent = error.message; }); };
+                        card.append(link); }
                 }
                 gallery.append(card);
             }
@@ -101,7 +103,8 @@
         if (!datasetId) { notice.textContent = "Choose a dataset first."; return; }
         const catalog = await api(`/tools/catalog?dataset_id=${encodeURIComponent(datasetId)}`);
         if (!current(ticket)) return;
-        if (dashboard?.session?.user.role === "admin" && catalog.paid_batch?.models.length) {
+        const admin = (dashboard?.session || window.TatorHosted?.session)?.user.role === "admin";
+        if (admin && catalog.paid_batch?.models.length) {
             const label = (title, input) => { const e = node("label", title); e.append(input); form.append(e); return input; };
             const model = label("Batch model", node("select"));
             for (const item of catalog.paid_batch.models) model.add(new Option(item.id, item.id));
@@ -109,7 +112,7 @@
             const qa = label("QA pairs per image", node("input")); qa.type = "number"; qa.min = "0"; qa.max = "20"; qa.value = "8";
             const effort = label("Reasoning effort", node("select")); for (const value of ["none", "minimal", "low", "medium", "high", "xhigh"]) effort.add(new Option(value, value)); effort.value = "high";
             const questions = label("Required questions, one per line (optional)", node("textarea")); questions.rows = 3;
-            const all = label("Use all confirmed images (otherwise use selected confirmed images)", node("input")); all.type = "checkbox"; all.checked = true;
+            const all = label(dashboard ? "Use all confirmed images (otherwise use selected confirmed images)" : "All confirmed images in this dataset", node("input")); all.type = "checkbox"; all.checked = true; all.disabled = !dashboard;
             function changed() { const item = catalog.paid_batch.models.find(row => row.id === model.value); detail.replaceChildren(...item.image_details.map(value => new Option(value, value))); detail.value = item.image_details.includes("high") ? "high" : item.image_details[0]; tokens.max = String(item.max_output_tokens); tokens.value = Math.min(8192, item.max_output_tokens); }
             model.onchange = changed; changed();
             let prepared = null, formRevision = 0;
@@ -126,6 +129,8 @@
                 const selectedIds = all.checked ? null : dashboard.selectedImages.map(image => image.id);
                 const options = {model: model.value, detail: detail.value, max_output_tokens: Number(tokens.value), reasoning_effort: effort.value};
                 const settings = {instruction_dataset: Number(qa.value) > 0, subcaptions_per_image: Number(qa.value), instruction_qa_imposed_questions: questions.value.split(/\n/).map(value => value.trim()).filter(Boolean)};
+                if (window.TatorHosted) await window.TatorHosted.prepareDatasetCaptionRun();
+                if (!current(ticket) || revision !== formRevision) return;
                 const snapshot = await api(`/datasets/${datasetId}/snapshots`, {operation_id: operation(), name: "Remote caption batch"});
                 if (!current(ticket) || revision !== formRevision) return;
                 const request = {dataset_id: datasetId, snapshot_id: snapshot.snapshot_id || snapshot.id, image_ids: selectedIds,
@@ -136,7 +141,7 @@
                 notice.textContent = `${result.image_count} frozen images. The server will reserve at most $${(result.maximum_reserved_microdollars / 1000000).toFixed(4)} using the configured token ceilings. Actual reported usage is settled per image.`;
                 submit.dataset.disabled = "false"; submit.disabled = false;
             });
-        } else if (dashboard) form.append(node("p", "Configure an allowed model and explicit Batch prices in the server provider settings to submit a batch."));
+        } else if (admin) form.append(node("p", "Configure a model and explicit Batch prices in Paid services to submit a remote batch."));
         await refresh(ticket); if (id && current(ticket)) await inspect(id, ticket);
     }
     function legacyShape(job) {
@@ -157,7 +162,7 @@
         }
         if (!suffix && method === "POST") {
             const captured = await window.TatorHosted.capturePaidBatchContext();
-            if (source.image_names?.length !== 1 || source.image_names[0].split("/").at(-1) !== captured.image_context.image_id) throw new Error("Submit the open assigned image here. Use Remote caption batches in the administrator workspace for a dataset run.");
+            if (source.image_names?.length !== 1 || source.image_names[0].split("/").at(-1) !== captured.image_context.image_id) throw new Error("Submit the open assigned image here. Administrators can use Remote dataset captions in this annotation pane for a dataset run.");
             const catalog = await api(`/tools/catalog?dataset_id=${encodeURIComponent(captured.dataset_id)}`);
             const model = catalog.paid_batch?.models.find(item => item.id === source.openai_model);
             if (!model) throw new Error("This model has no permitted Batch price and token policy for the dataset.");
@@ -177,17 +182,22 @@
         if (["poll", "collect", "cancel", "archive", "resume"].includes(actionName)) {
             const command = {operation_id: operation()};
             if (actionName === "archive") command.archived = source.archived !== false;
-            if (actionName === "resume") command.image_context = (await window.TatorHosted.capturePaidBatchContext()).image_context;
+            if (actionName === "resume") {
+                const job = await api(`${base}/${encodeURIComponent(id)}`);
+                if (job.request.image_context) command.image_context = (await window.TatorHosted.capturePaidBatchContext()).image_context;
+            }
             return response(legacyShape(await api(`${base}/${encodeURIComponent(id)}/${actionName}`, command)));
         }
         throw new Error("This remote Batch action is not available for a hosted job.");
     }
     window.TatorHostedPaidBatches = {legacyFetch, open};
-    if (dashboard) {
-        const button = node("button", "Remote Batch jobs"); button.id = "hostedPaidBatchJobs"; button.hidden = true;
-        document.querySelector(".hosted-actions").append(button); button.onclick = () => open().catch(error => { notice.textContent = error.message; });
-        window.addEventListener("tator:hosted-session", () => { button.hidden = dashboard.session?.user.role !== "admin"; if (button.hidden) dialog?.close(); });
-    } else window.addEventListener("load", async () => {
+    if (!dashboard && window.TatorHostedBoot?.user.role === "admin") {
+        const button = node("button", "Remote dataset captions…"); button.id = "hostedPaidBatchJobs"; button.type = "button"; button.className = "training-button secondary";
+        document.getElementById("hostedCaptionJobs")?.insertAdjacentElement("afterend", button);
+        button.onclick = () => open().catch(error => { notice.textContent = error.message; });
+        window.addEventListener("storage", event => { if (event.key === "tator.hosted.session-event") { button.hidden = true; dialog?.close(); } });
+    }
+    if (!dashboard) window.addEventListener("load", async () => {
         const id = new URLSearchParams(location.search).get("paid_batch"); if (!id) return;
         const began = Date.now();
         while (!window.TatorHostedCanvas?.ready()) { if (Date.now() - began > 30000) return; await new Promise(resolve => setTimeout(resolve, 100)); }

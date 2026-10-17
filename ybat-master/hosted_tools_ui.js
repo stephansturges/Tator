@@ -42,8 +42,8 @@
         try {
             const [catalog, dataset] = await Promise.all([api(`/tools/catalog?dataset_id=${encodeURIComponent(id)}`), api(`/datasets/${encodeURIComponent(id)}`)]);
             if (generation !== epoch || datasetId() !== id || !dialog.open) return;
-            const sam = section("Your segmentation model", "This model and its image cache belong to your account. Selecting it does not change another person's tools.");
-            const select = choices(sam, "SAM model", catalog.models.filter((model) => ["sam1", "sam3"].includes(model.kind) && catalog.sam_allowed_model_ids?.includes(model.model_id)), catalog.sam?.model_id);
+            const sam = section("Your segmentation model", "Installed SAM1 and SAM3 models are available in every dataset. Your choice and image cache follow your account, without changing anyone else's tools.");
+            const select = choices(sam, "SAM model", catalog.models.filter((model) => ["sam1", "sam3"].includes(model.kind)), catalog.sam?.model_id);
             action(sam, "Use this SAM model", async (valid) => {
                 if (!select.value) throw new Error("Choose an installed model.");
                 await api("/tools/sam", { model_id: select.value, expected_revision: catalog.sam?.revision || 0, operation_id: crypto.randomUUID() });

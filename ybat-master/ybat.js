@@ -28864,13 +28864,14 @@ async function cancelRfDetrTrainingJobRequest() {
     function updateSam3TextButtons() {
         refreshSam3SimilarityVisibility();
         const locked = isGpuHeavyLockActive();
+        const unavailable = hostedMode ? window.TatorHosted?.sam3PromptUnavailable : null;
         const lockMessage = "GPU-heavy labeling is locked while prepass/calibration or training is active.";
         const busy = sam3TextRequestActive
             || sam3SimilarityRequestActive
             || sam3TextBatchActive
             || sam3TextCascadeActive
             || sam3AgentApplyActive;
-        const blocked = busy || locked;
+        const blocked = busy || locked || Boolean(unavailable);
         setButtonDisabled(sam3TextElements.runButton, blocked);
         setButtonDisabled(sam3TextElements.similarityButton, blocked);
         setButtonDisabled(sam3TextElements.cascadeToggleButton, blocked);
@@ -28909,7 +28910,9 @@ async function cancelRfDetrTrainingJobRequest() {
             sam3TextElements.cascadeRunButton.textContent = sam3TextCascadeActive ? "Running cascade…" : (locked ? "Run cascade (GPU locked)" : "Run cascade");
         }
         const statusText = sam3TextElements.status?.textContent || "";
-        if (!busy && !locked && (!statusText || statusText === lockMessage)) {
+        if (unavailable && !busy) {
+            setSam3TextStatus(unavailable, "warn");
+        } else if (!busy && !locked && (!statusText || statusText === lockMessage || statusText.includes("compatible SAM3 model") || statusText.includes("native SAM3 weights"))) {
             setSam3TextStatus("Enter a prompt to run SAM3 text segmentation.", "info");
         } else if (locked && !busy) {
             setSam3TextStatus(lockMessage, "warn");
@@ -87775,15 +87778,16 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                     });
                     return;
                 }
-                fetch(imageUrl)
-                    .then(async (resp) => {
+                const bytes = hostedMode
+                    ? window.TatorHosted.mediaBlobFor(image.annotationRelpath)
+                    : fetch(imageUrl).then(async (resp) => {
                         if (!resp.ok) {
                             const detail = await resp.text();
                             throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
                         }
                         return resp.blob();
-                    })
-                    .then((blob) => {
+                    });
+                bytes.then((blob) => {
                         if (isSelectionStale() || image._loadVersion !== loadVersion) {
                             return;
                         }
@@ -90531,15 +90535,16 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                     reject(new Error("Dataset image URL is unavailable."));
                     return;
                 }
-                fetch(imageUrl)
-                    .then(async (resp) => {
+                const bytes = hostedMode
+                    ? window.TatorHosted.mediaBlobFor(imgData.annotationRelpath)
+                    : fetch(imageUrl).then(async (resp) => {
                         if (!resp.ok) {
                             const detail = await resp.text();
                             throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
                         }
                         return resp.blob();
-                    })
-                    .then((blob) => {
+                    });
+                bytes.then((blob) => {
                         const objectUrl = URL.createObjectURL(blob);
                         const im = new Image();
                         im.onload = () => {
@@ -90897,6 +90902,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         imageNameFor(id) { return Object.values(images).find((image) => image.annotationRelpath === id)?.name || null; },
         configureTools(catalog, state) {
             window.TatorHosted.setToolsState(state);
+            updateSam3TextButtons();
             updateQwenAgentButtons();
             const catalogIdentity = JSON.stringify(catalog);
             if (this.catalogIdentity === catalogIdentity) return;
@@ -91020,6 +91026,19 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             setCurrentImage(image);
         },
         ready() { return Boolean(currentImage?.object && currentImage.annotationRelpath === hostedCanvasRecord?.id && annotationSourceState.hydratedKeys.has(currentImage.name)); },
+        nextImageIds(count = 2) {
+            const list = document.getElementById("imageList");
+            if (!this.ready() || !list || list.selectedIndex < 0) return [];
+            const ids = [];
+            for (let step = 1; step <= Math.min(count, list.options.length - 1); step++) {
+                const option = list.options[(list.selectedIndex + step) % list.options.length];
+                const next = images[getOptionImageName(option)];
+                // Visited images already have decoded pixels; don't transfer
+                // them again merely to warm the encoded-byte cache.
+                if (next?.annotationRelpath && !next.object) ids.push(next.annotationRelpath);
+            }
+            return ids;
+        },
         snapshot() {
             if (!this.ready()) throw new Error("Wait for the image and its annotations to load.");
             const result = structuredClone(hostedCanvasRecord.annotations);

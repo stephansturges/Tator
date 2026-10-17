@@ -69,6 +69,12 @@ def _image(payload, config):
 
 
 def _build_sam(model, device):
+    if model.get("backend") == "mlx":
+        if model["kind"] != "sam3" or device != "mps":
+            raise ValueError("hosted_sam3_mlx_requires_apple_silicon")
+        from services.hosted.mlx_sam3 import build_predictor
+        predictor = build_predictor(model)
+        return predictor, predictor.model
     verify_checkpoint(model)
     import torch
     if model["kind"] == "sam1":
@@ -154,7 +160,17 @@ class UserToolAdapter:
         if name not in allowed:
             raise ValueError("hosted_predictor_slot_disabled")
         if name not in self.slots:
-            self.slots[name] = {"backend": _build_sam(self.config["model"], self.device), "key": None}
+            if self.config["model"].get("backend") == "mlx":
+                # Reuse immutable weights within this user's worker; each slot
+                # still owns its own image features and prompt state.
+                from services.mlx_sam3 import MlxSam3PredictorAdapter
+                current = self.slots["current"]["backend"][0]
+                predictor = MlxSam3PredictorAdapter(current.model, current.processor,
+                    model_path=current.model_path, runtime_notice=current.runtime_notice)
+                backend = (predictor, current.model)
+            else:
+                backend = _build_sam(self.config["model"], self.device)
+            self.slots[name] = {"backend": backend, "key": None}
         return self.slots[name]
 
     def execute(self, operation, payload, context):
@@ -228,6 +244,8 @@ class UserToolAdapter:
             if operation in {"sam3_text", "sam3_visual"}:
                 if self.config["model"]["kind"] != "sam3":
                     raise ValueError("hosted_sam3_required")
+                if self.config["model"].get("backend") == "mlx":
+                    raise ValueError("hosted_sam3_mlx_grounding_not_supported")
                 if self.sam3_prompts is None:
                     from services.hosted.assistance_adapters import Sam3PromptRuntime
                     self.sam3_prompts = Sam3PromptRuntime(self._slot("current")["backend"][1], self.device)

@@ -21,7 +21,31 @@
             const context = field("Dataset context", dataset.settings.context || "", 4); context.maxLength = 32000;
             const glossary = field("Class glossary", dataset.settings.labelmap_glossary || "", 7); glossary.maxLength = 64000;
             glossary.placeholder = "Car: passenger car, SUV\nBus: passenger bus, coach";
-            form.append(node("p", `Use one class per line, followed by a colon and its terms. Current classes: ${dataset.classes.filter(c => !c.retired).map(c => c.name).join(", ")}.`));
+            const preview = node("section"), editor = node("details");
+            preview.setAttribute("aria-label", "Class meanings");
+            editor.append(node("summary", "Edit class glossary"), glossary.parentElement);
+            form.append(preview, editor);
+            const renderGlossary = () => {
+                preview.replaceChildren(); preview.hidden = true;
+                try {
+                    const value = JSON.parse(glossary.value);
+                    if (!value || Array.isArray(value) || typeof value !== "object") return false;
+                    const entries = Object.entries(value);
+                    if (!entries.length || !entries.every(([, terms]) => typeof terms === "string" || (Array.isArray(terms) && terms.every(term => typeof term === "string")))) return false;
+                    preview.append(node("strong", "Class meanings"));
+                    const list = node("dl"); list.style.margin = ".6rem 0";
+                    for (const [name, terms] of entries) {
+                        const term = node("dt", name), meaning = node("dd", Array.isArray(terms) ? terms.join(", ") : terms);
+                        term.style.fontWeight = "600";
+                        meaning.style.margin = "0 0 .5rem";
+                        list.append(term, meaning);
+                    }
+                    preview.append(list); preview.hidden = false; return true;
+                } catch (_) { return false; }
+            };
+            editor.open = !renderGlossary();
+            glossary.addEventListener("input", renderGlossary);
+            editor.append(node("p", `Keep the JSON mapping, or use one class per line followed by a colon and its terms. Current classes: ${dataset.classes.filter(c => !c.retired).map(c => c.name).join(", ")}.`));
             const save = node("button", "Save guidance"); save.type = "submit"; form.append(save);
             form.onsubmit = async event => {
                 event.preventDefault(); if (!valid()) return; save.disabled = true;

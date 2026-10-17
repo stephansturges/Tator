@@ -1,11 +1,16 @@
 /* Administrator caption runs use the same prompt pipeline on a frozen dataset. */
 (() => {
     "use strict";
-    const app = window.TatorHostedDashboard;
-    if (!app) return;
+    const canvas = window.TatorHosted;
+    if (!canvas || window.TatorHostedBoot?.user.role !== "admin") return;
+    const app = {
+        get datasetId() { return canvas.datasetId; },
+        get session() { return canvas.session; },
+        api(path, options = {}) { return canvas.api(`/api/hosted${path}`, options.body, options.method || "GET"); },
+    };
     const node = (tag, text) => { const e = document.createElement(tag); if (text !== undefined) e.textContent = text; return e; };
-    const button = node("button", "Caption jobs"); button.id = "hostedCaptionJobs"; button.hidden = true;
-    document.querySelector(".hosted-actions").append(button);
+    const button = node("button", "Caption whole dataset…"); button.id = "hostedCaptionJobs"; button.type = "button"; button.className = "training-button secondary";
+    document.getElementById("qwenCaptionBuildInstructionDataset")?.insertAdjacentElement("afterend", button);
     const dialog = node("dialog"), form = node("section"), history = node("section"), detail = node("section"), notice = node("p");
     dialog.id = "hostedCaptionDialog"; notice.setAttribute("role", "status");
     const close = node("button", "Close"); close.onclick = () => dialog.close();
@@ -13,7 +18,7 @@
     document.body.append(dialog);
     const exportButton = node("button", "Export confirmed captions for training");
     exportButton.type = "button";
-    exportButton.onclick = () => { dialog.close(); window.dispatchEvent(new Event("tator:caption-export")); };
+    exportButton.onclick = () => canvas.leaveFor(`/?dataset=${encodeURIComponent(app.datasetId)}&tool=caption_export`).catch(error => { notice.textContent = error.message; });
     dialog.insertBefore(exportButton, close);
     let epoch = 0, datasetId = "", selected = null, timer = null;
     const valid = (ticket) => ticket === epoch && dialog.open && app.datasetId === datasetId && app.session?.user.role === "admin";
@@ -68,6 +73,7 @@
             for (const item of result.captions) {
                 const card = node("article"), image = node("img"); image.src = `/api/hosted/images/${item.image_id}/media`; image.alt = item.row.image_name; image.loading = "lazy";
                 const inspect = node("a", "Review on image"); inspect.href = `/annotate?image=${encodeURIComponent(item.image_id)}&caption_batch=${encodeURIComponent(id)}`;
+                inspect.onclick = event => { event.preventDefault(); canvas.leaveFor(inspect.href).catch(error => { notice.textContent = error.message; }); };
                 card.append(image, node("strong", item.row.image_name), node("p", item.caption || "No accepted caption for this attempt."), inspect); gallery.append(card);
             }
             offset += result.captions.length;
@@ -126,6 +132,8 @@
                 settings.caption_request.refinement_model_id = model.value; settings.caption_request.caption_fallback_model_id = model.value;
             }
             if (!pilot && !confirm("Run on all confirmed images without a passing pilot? Results remain proposals. Paid runs incur provider charges; local runs use server compute.")) return;
+            await canvas.prepareDatasetCaptionRun();
+            if (!valid(ticket)) return;
             const snapshot = await api(`/datasets/${datasetId}/snapshots`, {operation_id: crypto.randomUUID(), name: "Caption run"});
             if (!valid(ticket)) return;
             const job = await api("/tools/caption-batches", {dataset_id: datasetId, snapshot_id: snapshot.id || snapshot.snapshot_id,
@@ -140,4 +148,5 @@
     button.onclick = () => { const ticket = epoch + 1; open().catch(e => { if (valid(ticket) && !e.stale) notice.textContent = e.message; }); };
     dialog.addEventListener("close", () => { ++epoch; clearTimeout(timer); });
     window.addEventListener("tator:hosted-session", () => { button.hidden = app.session?.user.role !== "admin"; if (button.hidden) { ++epoch; clearTimeout(timer); dialog.close(); form.replaceChildren(); history.replaceChildren(); detail.replaceChildren(); } });
+    window.addEventListener("storage", event => { if (event.key === "tator.hosted.session-event") { ++epoch; clearTimeout(timer); dialog.close(); button.hidden = true; } });
 })();

@@ -1,14 +1,18 @@
 Hosted analysis and training
 ============================
 
-Administrators start analysis from a selected dataset's **Quality & compute**
-dialog. Choose a server-configured **Compute task**, review its parameters, and
-select **Start task**. The same dialog lists saved analyses and their results.
+Administrators open **Data Quality Explorer**, **Dataset pruning** or
+**Data ingestion** from the top navigation in either the dataset workspace or
+annotation view. **Train models** lists the supported training tasks. Each
+entry shows that tool's server-configured tasks and saved results. Leaving the
+canvas saves the current image and releases its editing reservation first.
+**Quality & compute** remains the advanced launcher for all job types.
+Review the parameters and select **Start task** to run the selected operation.
 If no compute recipes are configured, saved results remain readable; an operator
 must configure the available tasks before a new run can start.
 
 For Incoming diversity analysis, first select unassigned images in **Incoming**
-and attach a whole-image SALAD descriptor in **Feature recipes**. For pruning,
+and attach a whole-image SALAD descriptor in **Analysis presets**. For pruning,
 start a configured pruning task here, then open its completed review page.
 Changing that hosted review's producer recipe requires a new analysis.
 
@@ -48,6 +52,14 @@ validation split: it does not silently reuse training images for validation.
 Polygon training needs a dedicated polygon view because canonical exports retain
 bounding boxes and polygon labels separately.
 
+Before DQE or its review runs, the private native annotation sidecar is seeded
+with the snapshot's existing image/object identities and exact label rows.
+Legacy row-number migration must not replace these identities: object zero in
+two images represents two distinct objects. The bridge verifies that every
+identity remains unique and binds to the same row, without changing labels.
+Unavailable held-out class metrics remain null in saved results; they are not
+reported as measured zeros.
+
 Recipes, caches and results
 ---------------------------
 
@@ -78,6 +90,13 @@ fresh capture for another edit. The DQE review workflow described below instead
 tracks its own corrections explicitly to support continued review. No legacy
 annotation writer may bypass either admission boundary.
 
+On Apple Silicon, the native child can bind ``MLX_DINOV3_MODEL_ROOT`` and
+``CRADIO_MLX_ROOT`` to private model directories. Every file in either directory
+must come from a hash-verified ``cache_inputs`` entry; source roots are never
+inherited from the operator's home directory. SAM3's MLX package travels through
+the same verified, offline Hugging Face cache mechanism. These bindings retain
+the existing encoder implementations and do not substitute a different recipe.
+
 Heavy-worker transport
 ----------------------
 
@@ -91,7 +110,7 @@ it is not a streaming numerical-analysis implementation.
 Caption training export
 -----------------------
 
-Open **Caption jobs → Export confirmed captions for training**, or choose
+In the annotation view, open **Caption whole dataset… → Export confirmed captions for training**, or choose
 **Caption training export** in **Quality & compute**. This CPU task freezes the
 confirmed dataset and calls the existing ``export_captions``, readiness checks,
 instruction-bundle writer and checksum validator inside a private child. It
@@ -164,7 +183,7 @@ The following existing entrypoints implement the actual numerical work:
   projection. The adapter adds stable hosted identities without changing scores.
 * Whole-image SALAD: ``create_local_salad_training_job`` trains its gathering
   head on the confirmed snapshot using the existing augmentations and losses.
-  The learned head is retained and can be attached in Feature recipes.
+  The learned head is retained and can be attached in Analysis presets.
 * Pruning: ``services.dataset_pruning_jobs.PruningService`` owns analysis and
   review. ``TatorPruningAdapter`` currently resolves legacy source authority;
   ``dataset_pruning_components`` reuses DQE/SAM/SALAD/C-RADIO producers and

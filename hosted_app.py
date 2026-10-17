@@ -469,7 +469,10 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
             with artifacts.open(reference) as source:
                 while chunk := source.read(1024 * 1024):
                     yield chunk
-        return StreamingResponse(chunks(), media_type=view["content_type"])
+        return StreamingResponse(chunks(), media_type=view["content_type"], headers={
+            "Content-Length": str(view["size_bytes"]),
+            "X-Tator-Source-Media-Hash": record["media_hash"],
+        })
 
     @app.get("/api/hosted/images/{image_id}/original")
     def original_media(image_id: str, identity: Actor = Depends(actor)):
@@ -575,8 +578,11 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
         # Hosted annotation exposes only the labeling pane. Workspace graphs
         # load Plotly separately; keep the legacy page's graph dependency intact.
         html = re.sub(r'<script src="plotly-[^"\n]+"></script>', '', html, count=1)
-        html = html.replace('<script src="canvas.min.js', '<script>window.TatorHostedBoot=' + bootstrap + ';</script>\n<script src="/hosted_canvas.js"></script>\n<script src="/hosted_tools_ui.js"></script>\n<script src="canvas.min.js', 1)
-        return html.replace("</head>", '<link rel="stylesheet" href="/hosted_canvas.css"><script src="/hosted_caption_review.js" defer></script><script src="/hosted_paid_batches_ui.js" defer></script><script src="/hosted_import_conflicts_ui.js" defer></script><script src="/hosted_instruction_review.js" defer></script></head>', 1)
+        html = html.replace('<script src="canvas.min.js', '<script>window.TatorHostedBoot=' + bootstrap + ';</script>\n<script src="/hosted_media_prefetch.js"></script>\n<script src="/hosted_canvas.js"></script>\n<script src="/hosted_tools_ui.js"></script>\n<script src="canvas.min.js', 1)
+        # Hide the unmanaged legacy tabs before first paint, then render the
+        # role-aware navigation to hosted, snapshot-bound destinations.
+        html = html.replace("<body>", '<body class="hosted-canvas">', 1)
+        return html.replace("</head>", '<link rel="stylesheet" href="/hosted_canvas.css"><link rel="stylesheet" href="/hosted_admin_nav.css"><script src="/hosted_admin_nav.js" defer></script><script src="/hosted_caption_ui.js" defer></script><script src="/hosted_caption_review.js" defer></script><script src="/hosted_paid_batches_ui.js" defer></script><script src="/hosted_import_conflicts_ui.js" defer></script><script src="/hosted_instruction_review.js" defer></script></head>', 1)
 
     @app.api_route("/{asset_name}", methods=["GET", "HEAD"])
     def asset(asset_name: str, request: Request):

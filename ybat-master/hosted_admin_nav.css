@@ -1,0 +1,9 @@
+#hostedAdminNav{position:relative;z-index:1050;display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding:9px 14px;border-bottom:1px solid var(--border-color,var(--border,#bdcbd4));background:var(--panel-bg,var(--surface,#fff));color:var(--text-color,var(--text,#182c3d));font:13px/1.4 system-ui}
+#hostedAdminNav[hidden]{display:none!important}
+#hostedAdminNav button,#hostedAdminNav summary{display:block;padding:7px 10px;border:1px solid var(--border-color,var(--border,#bdcbd4));border-radius:6px;background:transparent;color:inherit;font:inherit;cursor:pointer;white-space:nowrap;list-style:none}
+#hostedAdminNav summary::-webkit-details-marker{display:none}
+#hostedAdminNav summary::after{content:" ▾"}
+#hostedAdminNav [aria-current=page]{background:var(--accent-light,#dfeee9);color:var(--accent,#08765b);font-weight:700}
+#hostedAdminNav button:focus-visible,#hostedAdminNav summary:focus-visible{outline:2px solid #48b8ec;outline-offset:2px}
+#hostedAdminNav details{position:relative}
+.hosted-training-menu{position:absolute;top:calc(100% + 6px);left:0;min-width:190px;display:grid;gap:6px;padding:10px;border:1px solid var(--border-color,var(--border,#bdcbd4));border-radius:8px;background:var(--panel-bg,var(--surface,#fff));box-shadow:0 8px 24px #0003}

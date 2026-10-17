@@ -31,4 +31,15 @@
 .hosted-model-mapping{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px}
 
 .hosted-canvas .active-fallback{display:none!important}
+.hosted-canvas :is(#hostedCaptionDialog,#hostedPaidBatchDialog){width:min(1000px,calc(100% - 32px));max-height:85vh;overflow:auto;border:1px solid var(--border-color,#788d9f);border-radius:12px;padding:24px;background:var(--panel-bg,#fff);color:var(--text-color,#182c3d);font:14px/1.5 system-ui}
+:is(#hostedCaptionDialog,#hostedPaidBatchDialog)>section{border-top:1px solid var(--border-color,#788d9f);padding:16px 0}
+:is(#hostedCaptionDialog,#hostedPaidBatchDialog) label{display:grid;gap:5px;margin:10px 0}
+:is(#hostedCaptionDialog,#hostedPaidBatchDialog) textarea{width:100%;box-sizing:border-box}
+:is(#hostedCaptionDialog,#hostedPaidBatchDialog) input,:is(#hostedCaptionDialog,#hostedPaidBatchDialog) select,:is(#hostedCaptionDialog,#hostedPaidBatchDialog) textarea{padding:7px;background:var(--panel-bg,#fff);color:inherit;border:1px solid var(--border-color,#788d9f);border-radius:6px}
+:is(#hostedCaptionDialog,#hostedPaidBatchDialog) button{padding:7px 12px;margin:4px;border:1px solid var(--border-color,#788d9f);border-radius:6px;cursor:pointer}
+:is(#hostedCaptionDialog,#hostedPaidBatchDialog) .hosted-analysis-job{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:8px 0}
+.hosted-caption-proposals{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:16px}
+.hosted-caption-proposals article{border:1px solid var(--border-color,#788d9f);border-radius:10px;padding:12px}
+.hosted-caption-proposals img{width:100%;height:160px;object-fit:contain;display:block}
+.hosted-caption-proposals strong{display:block;overflow-wrap:anywhere}
 .hosted-caption-review{margin:12px;padding:16px;border:1px solid var(--border,#bcc6cf);border-radius:10px;background:var(--surface,#fff);color:var(--text,#152536);max-height:35vh;overflow:auto}.hosted-caption-review h2{font-size:1rem;margin:0 0 8px}.hosted-caption-review label{display:block;margin:8px 0}.hosted-caption-review p{white-space:pre-wrap}

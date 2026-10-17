@@ -17,6 +17,11 @@ RFDETR_CLASSES = {
 }
 
 
+def model_uses_manifest(definition):
+    return definition.get("kind") in {"qwen", "edr", "sam3_recipe"} or (
+        definition.get("kind") == "sam3" and definition.get("backend") == "mlx")
+
+
 def file_digest(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -91,14 +96,19 @@ class ModelRegistry:
         kind = value.get("kind")
         if kind not in {"sam1", "sam3", "yolo", "rfdetr", "classifier", "qwen", "edr", "sam3_recipe"}:
             raise ValueError("hosted_model_kind_unsupported")
-        allowed = {"model_id", "kind", "checkpoint", "checkpoint_sha256", "model_type", "variant", "labels", "bpe_path", "bpe_sha256", "enable_segmentation", "class_ids", "metadata_path", "metadata_sha256", "model_path", "files", "adapter_path", "adapter_files", "recipe_file", "ensemble_model_file", "ensemble_meta_file", "feature_contract_file", "components", "component_identities"}
+        allowed = {"model_id", "kind", "backend", "checkpoint", "checkpoint_sha256", "model_type", "variant", "labels", "bpe_path", "bpe_sha256", "enable_segmentation", "class_ids", "metadata_path", "metadata_sha256", "model_path", "files", "adapter_path", "adapter_files", "recipe_file", "ensemble_model_file", "ensemble_meta_file", "feature_contract_file", "components", "component_identities"}
         if set(value) - allowed:
             raise ValueError("hosted_model_settings_unknown")
         if value.get("model_id", model_id) != model_id:
             raise ValueError("hosted_model_id_invalid")
-        if kind in {"qwen", "edr", "sam3_recipe"}:
+        if "backend" in value and (kind != "sam3" or value["backend"] != "mlx"):
+            raise ValueError("hosted_model_backend_invalid")
+        if model_uses_manifest(value):
             package_fields = {"model_id", "kind", "checkpoint_sha256", "model_path", "files"}
-            package_fields |= {"variant", "adapter_path", "adapter_files"} if kind == "qwen" else {"recipe_file", "ensemble_model_file", "ensemble_meta_file", "feature_contract_file", "components", "component_identities", "labels"}
+            if kind == "sam3":
+                package_fields.add("backend")
+            else:
+                package_fields |= {"variant", "adapter_path", "adapter_files"} if kind == "qwen" else {"recipe_file", "ensemble_model_file", "ensemble_meta_file", "feature_contract_file", "components", "component_identities", "labels"}
             if set(value) - package_fields:
                 raise ValueError("hosted_model_settings_unknown")
             for path_field, files_field in (("model_path", "files"), ("adapter_path", "adapter_files")):
@@ -118,7 +128,18 @@ class ModelRegistry:
                     if not path.is_relative_to(directory.resolve(strict=True)) or file_digest(path) != expected:
                         raise ValueError("hosted_model_artifact_changed")
                 value[path_field] = str(directory.resolve(strict=True))
-            if kind == "qwen":
+            if kind == "sam3":
+                required = {"config.json", "model.safetensors", "processor_config.json", "tokenizer.json", "tokenizer_config.json"}
+                if not required.issubset(value["files"]):
+                    raise ValueError("hosted_sam3_mlx_package_incomplete")
+                config = json.loads((Path(value["model_path"]) / "config.json").read_text())
+                # The geometric adapter uses the interactive tracker as well
+                # as the vision backbone; a detector-only package cannot run it.
+                if (config.get("model_type") != "sam3_video"
+                        or config.get("detector_config", {}).get("model_type") != "sam3"
+                        or config.get("tracker_config", {}).get("model_type") != "sam3_tracker_video"):
+                    raise ValueError("hosted_sam3_mlx_configuration_invalid")
+            elif kind == "qwen":
                 if "config.json" not in value["files"]:
                     raise ValueError("hosted_qwen_configuration_required")
                 if value.get("variant", "Instruct") not in {"Instruct", "Thinking"}:
@@ -204,7 +225,7 @@ class ModelRegistry:
 
     def catalog(self):
         with self._lock:
-            return json.loads(json.dumps([{key: value[key] for key in ("model_id", "kind", "checkpoint_sha256", "variant", "labels") if key in value}
+            return json.loads(json.dumps([{key: value[key] for key in ("model_id", "kind", "backend", "checkpoint_sha256", "variant", "labels") if key in value}
                     for value in self._definitions.values()]))
 
     def user_spec(self, user_id, model_id, *, media_root, device, capacity=3, classifier_id=None):

@@ -134,6 +134,43 @@ def native_environment(directory: Path, device: str) -> dict[str, str]:
     return environment
 
 
+def _seed_hosted_annotation_entities(api, source, directory):
+    """Keep canonical image/object IDs through legacy DQE initialization.
+
+    The legacy migrator derives IDs from a source and row ordinal when no
+    sidecar exists. Hosted sources already have authoritative identities; row
+    zero in two different images must never become the same graph point.
+    This sidecar belongs only to the private analysis child.
+    """
+    from services.annotation_entities import _build_record, bind_label_rows_to_entities, canonical_label_line
+    store = api._class_analysis_annotation_entity_store()
+    if not store.path.resolve().is_relative_to(directory.resolve()):
+        raise DomainError("native_entity_store_not_private", 409)
+    seen = set()
+    with store.transaction() as connection:
+        for row in source["images"]:
+            identities = row["annotation_entities_by_label_row"]
+            lines = row["label_lines"]
+            if len(identities) != len(lines):
+                raise DomainError("native_annotation_identity_changed", 409)
+            entities = []
+            for ordinal, (identity, line) in enumerate(zip(identities, lines)):
+                key = identity["annotation_entity_id"]
+                if key in seen or not key.startswith("hosted:" + row["hosted_image_id"] + ":"):
+                    raise DomainError("native_annotation_identity_changed", 409)
+                seen.add(key)
+                entities.append({**identity, "source_row_ordinal": ordinal, "label_line": canonical_label_line(line), "deleted": False})
+            source_id = row["annotation_source_identity"]
+            image_key = api._class_analysis_annotation_image_key(row)
+            record = _build_record(source_id, entities)
+            if [entity["annotation_entity_id"] for entity in bind_label_rows_to_entities(record, lines)] != [entity["annotation_entity_id"] for entity in identities]:
+                raise DomainError("native_annotation_identity_changed", 409)
+            previous = store.get_record(source_id, image_key, connection=connection)
+            if previous is not None and previous != record:
+                raise DomainError("native_annotation_identity_changed", 409)
+            store.put_record(source_id, image_key, record, connection=connection)
+
+
 class NativeAnalysisAdapter:
     def __init__(self, *, config, device):
         self.config, self.device = dict(config), str(device)
@@ -211,11 +248,32 @@ class NativeAnalysisAdapter:
         _write_json(directory / "request.json", request)
         environment = native_environment(directory, self.device)
         # Model paths are trusted, relative references to the verified copies.
+        verified_paths = {NAMESPACES[item["namespace"]] + "/" + item["relative_path"] for item in copied}
         for name, relative in self.config.get("model_environment", {}).items():
+            if name in {"MLX_DINOV3_MODEL_ROOT", "CRADIO_MLX_ROOT"}:
+                relative = _safe_relative(relative)
+                path = directory / relative
+                expected = {member for member in verified_paths if member.startswith(relative + "/")}
+                if (not relative.startswith("models/") or not expected or not path.is_dir()
+                        or any(part.is_symlink() for part in (path, *path.parents))):
+                    raise DomainError("native_model_not_verified", 409)
+                members = list(path.rglob("*"))
+                if any(member.is_symlink() for member in members) or {
+                    str(member.relative_to(directory)) for member in members if member.is_file()
+                } != expected:
+                    raise DomainError("native_model_not_verified", 409)
+                environment[name] = str(path)
+                if name == "CRADIO_MLX_ROOT":
+                    if relative + "/src/cradio_mlx/__init__.py" not in expected:
+                        raise DomainError("native_model_not_verified", 409)
+                    # A globally installed package must not shadow the exact
+                    # implementation whose files were recorded for this job.
+                    environment["PYTHONPATH"] = str(path / "src") + os.pathsep + environment["PYTHONPATH"]
+                continue
             if name not in {"SAM_CHECKPOINT_PATH", "SAM3_CHECKPOINT_PATH", "SAM3_BPE_PATH"}:
                 raise DomainError("native_model_environment_invalid", 422)
             path = _inside(directory / _safe_relative(relative), directory)
-            if str(path.relative_to(directory)) not in {NAMESPACES[item["namespace"]] + "/" + item["relative_path"] for item in copied}:
+            if str(path.relative_to(directory)) not in verified_paths:
                 raise DomainError("native_model_not_verified", 409)
             environment[name] = str(path)
         with (directory / "native.log").open("xb") as log:
@@ -492,6 +550,8 @@ def _run_native(request, manifest, dataset, source, directory):
     # This import is permitted ONLY in this fresh confined child, never in the
     # control process or ordinary per-user inference worker.
     import localinferenceapi as api
+    if operation in {"dqe", "dqe_review"}:
+        _seed_hosted_annotation_entities(api, source, directory)
     if private_sam3 is not None:
         # Exact copied vendor code, with the same Hydra package-relative config
         # name; only its working/generated-file location changes.

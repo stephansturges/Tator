@@ -141,7 +141,7 @@
                 notice.textContent = `${result.image_count} frozen images. The server will reserve at most $${(result.maximum_reserved_microdollars / 1000000).toFixed(4)} using the configured token ceilings. Actual reported usage is settled per image.`;
                 submit.dataset.disabled = "false"; submit.disabled = false;
             });
-        } else if (admin) form.append(node("p", "Configure a model and explicit Batch prices in Paid services to submit a remote batch."));
+        } else if (admin) form.append(node("p", "Paid remote captioning is coming later."));
         await refresh(ticket); if (id && current(ticket)) await inspect(id, ticket);
     }
     function legacyShape(job) {

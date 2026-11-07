@@ -43,3 +43,5 @@
 .hosted-caption-proposals img{width:100%;height:160px;object-fit:contain;display:block}
 .hosted-caption-proposals strong{display:block;overflow-wrap:anywhere}
 .hosted-caption-review{margin:12px;padding:16px;border:1px solid var(--border,#bcc6cf);border-radius:10px;background:var(--surface,#fff);color:var(--text,#152536);max-height:35vh;overflow:auto}.hosted-caption-review h2{font-size:1rem;margin:0 0 8px}.hosted-caption-review label{display:block;margin:8px 0}.hosted-caption-review p{white-space:pre-wrap}
+#hostedToolsDialog .hosted-tools-action{margin-top:8px}
+#hostedToolsDialog section>button{margin-top:8px}

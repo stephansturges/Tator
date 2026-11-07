@@ -61,6 +61,16 @@ class Redeem(BaseModel):
 class NewUser(BaseModel):
     username: str
     role: str = "annotator"
+    display_name: str | None = Field(default=None, max_length=200)
+    password: str | None = Field(default=None, max_length=1024)
+
+
+class UserProfile(BaseModel):
+    display_name: str | None = Field(default=None, max_length=200)
+
+
+class UserPassword(BaseModel):
+    password: str = Field(max_length=1024)
 
 
 class UserChange(BaseModel):
@@ -323,12 +333,28 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
         return response
 
     @app.get("/api/hosted/users")
-    def users(identity: Actor = Depends(admin)):
-        return {"users": auth.list_users(identity)}
+    def users(include_removed: bool = False, identity: Actor = Depends(admin)):
+        return {"users": auth.list_users(identity, include_removed=include_removed)}
 
     @app.post("/api/hosted/users")
     def create_user(body: NewUser, identity: Actor = Depends(admin)):
-        return auth.create_user(identity, body.username, body.role)
+        return auth.create_user(identity, body.username, body.role, display_name=body.display_name, password=body.password)
+
+    @app.post("/api/hosted/users/{user_id}/profile")
+    def user_profile(user_id: str, body: UserProfile, identity: Actor = Depends(admin)):
+        return auth.set_profile(identity, user_id, body.display_name)
+
+    @app.post("/api/hosted/users/{user_id}/password")
+    def user_password(user_id: str, body: UserPassword, identity: Actor = Depends(admin)):
+        return auth.set_password(identity, user_id, body.password)
+
+    @app.post("/api/hosted/users/{user_id}/links/cancel")
+    def cancel_user_links(user_id: str, identity: Actor = Depends(admin)):
+        return auth.cancel_links(identity, user_id)
+
+    @app.post("/api/hosted/users/{user_id}/remove")
+    def remove_user(user_id: str, identity: Actor = Depends(admin)):
+        return auth.remove_user(identity, user_id)
 
     @app.patch("/api/hosted/users/{user_id}")
     def change_user(user_id: str, body: UserChange, identity: Actor = Depends(admin)):

@@ -102,11 +102,11 @@ async def _picker(origin):
         await page.get_by_role('button', name='Assign tranche', exact=True).click()
         await dialog.get_by_label('Annotator', exact=True).select_option(alice)
         await dialog.get_by_role('button', name='Assign unfinished images', exact=True).click()
-        await expect(page.locator('#tranchePanel')).to_contain_text('Active · alice')
+        await expect(page.locator('#tranchePanel')).to_contain_text('Active · assigned to alice')
         await page.get_by_role('button', name='Change annotator', exact=True).click()
         await dialog.get_by_label('Annotator', exact=True).select_option(bob)
         await dialog.get_by_role('button', name='Assign unfinished images', exact=True).click()
-        await expect(page.locator('#tranchePanel')).to_contain_text('Active · bob')
+        await expect(page.locator('#tranchePanel')).to_contain_text('Active · assigned to bob')
         other = (await api(page, f'/datasets/{dataset}/tranches', {'operation_id': str(uuid.uuid4()), 'name': 'Destination draft'}))['tranche']
         await page.locator('#tranchePanel .hosted-card input').first.check()
         await page.get_by_role('button', name='Move to another tranche', exact=True).click()

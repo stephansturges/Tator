@@ -81,7 +81,7 @@
                     }
                 }
                 choice.onchange = drawMapping; drawMapping();
-                action(panel, `Set dataset ${kind}`, async (valid) => {
+                action(panel, {detector: "Set dataset detector", classifier: "Set dataset classifier", edr: "Set detection recipe"}[kind], async (valid) => {
                     if (!choice.value) throw new Error("Choose an installed model.");
                     const pairs = [...mapping.querySelectorAll("select")].map((item) => [item.dataset.modelLabel, item.value]);
                     if (pairs.some(([, value]) => !value)) throw new Error("Link every model label to a dataset class.");
@@ -109,14 +109,19 @@
             const qwenModels = catalog.models.filter((model) => model.kind === "qwen" && catalog.qwen?.allowed_model_ids?.includes(model.model_id));
             qwen.append(node("p", qwenModels.length ? `Installed choices: ${qwenModels.map((model) => model.model_id).join(", ")}` : "No permitted Qwen weights have been installed yet."));
             if (user()?.role === "admin") {
-                const install = section("Install configured models", "Model files are configured on the server. Installation copies their exact weights into recoverable storage.");
-                const choicesList = (catalog.available_to_install || []).map((model_id) => ({ model_id }));
-                const choice = choices(install, "Server model", choicesList);
-                action(install, "Install model", async (valid) => {
-                    if (!choice.value) throw new Error("Choose a configured server model.");
-                    await api(`/tools/models/${encodeURIComponent(choice.value)}/install`, { operation_id: crypto.randomUUID() }); if (!valid()) return; await render(); await poll();
-                });
-                if (!choicesList.length) install.append(node("p", "No server model files have been configured yet."));
+                const installed = new Set(catalog.models.map((model) => model.model_id));
+                const configured = catalog.available_to_install || [], pending = configured.filter((model_id) => !installed.has(model_id));
+                const install = section("Add a configured model", "The server's model configuration can list model files that are not in use yet. Installing one copies its exact weights into Tator's verified storage, after which it can be chosen above. Installed models are not listed here.");
+                if (!configured.length) install.append(node("p", "No server model files have been configured yet."));
+                else if (!pending.length) install.append(node("p", "Every model configured on this server is already installed."));
+                else {
+                    const choice = choices(install, "Configured model", pending.map((model_id) => ({ model_id })));
+                    const row = node("div"); row.className = "hosted-tools-action"; install.append(row);
+                    action(row, "Install model", async (valid) => {
+                        if (!choice.value) throw new Error("Choose a configured server model.");
+                        await api(`/tools/models/${encodeURIComponent(choice.value)}/install`, { operation_id: crypto.randomUUID() }); if (!valid()) return; await render(); await poll();
+                    });
+                }
             }
         } catch (error) { if (generation === epoch && datasetId() === id && dialog.open && !error.stale) errorText(error); }
     }
@@ -148,7 +153,8 @@
         dialog = node("dialog"); dialog.id = "hostedToolsDialog"; dialog.append(node("h2", "Annotation tools"));
         notice = node("p"); notice.setAttribute("role", "alert"); notice.hidden = true;
         content = node("div"); dialog.append(notice, content);
-        const close = node("button", "Close"); close.type = "button"; close.onclick = () => dialog.close(); dialog.append(close); document.body.append(dialog);
+        const close = node("button", "Close"); close.type = "button"; close.onclick = () => dialog.close();
+        const closeRow = node("div"); closeRow.className = "dialog-actions"; closeRow.append(close); dialog.append(closeRow); document.body.append(dialog);
         dialog.addEventListener("close", () => { epoch++; });
         button.onclick = () => { dialog.showModal(); render(); };
         button.hidden = !user(); poll();

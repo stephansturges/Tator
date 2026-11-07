@@ -286,8 +286,9 @@ async def _caption_export(origin):
         page = await browser.new_page(viewport={'width': 1440, 'height': 1000})
         errors = []; page.on('pageerror', lambda error: errors.append(str(error)))
         await sign_in(page, origin, 'admin')
-        await page.locator('#hostedCaptionJobs').click()
-        await page.get_by_role('button', name='Export confirmed captions for training', exact=True).click()
+        # Caption export now opens from the canvas caption dialog through this route.
+        dataset_id = await page.locator('#datasetChoice').input_value()
+        await page.goto(origin + '/?dataset=' + dataset_id + '&tool=caption_export')
         dialog = page.locator('#hostedAnalysisDialog')
         await expect(dialog.get_by_label('Compute task', exact=True)).to_have_value('caption_export')
         await dialog.get_by_role('button', name='Start task', exact=True).click()
@@ -545,16 +546,12 @@ async def _terminal_batch_billing(origin):
         assert calls[0]['batch_job_id'] == job_id
         call_id = calls[0]['id']
         await batch.get_by_role('button', name='Close', exact=True).click()
-        await page.locator('#hostedBack').click()
-        await page.locator('#hostedProviders').click()
-        billing = page.locator('#hostedProvidersDialog')
-        row = billing.locator(f'[data-provider-call="{call_id}"]')
-        await expect(row).to_contain_text('The batch has finished; its bill still needs confirmation.')
-        await expect(row.get_by_role('button', name='Record confirmed charge')).to_be_enabled()
-        replies = iter(['0.002345', 'Checked the retained provider bill in this fixture'])
-        page.on('dialog', lambda prompt: prompt.accept(next(replies)))
-        await row.get_by_role('button', name='Record confirmed charge').click()
-        await expect(row).to_have_count(0)
+        # The workspace no longer exposes billing; operators reconcile through the provider API.
+        assert calls[0]['reason'] == 'batch_usage_unresolved'
+        csrf = {'x-tator-csrf': await page.evaluate("window.TatorHostedBoot?.csrf || ''"), 'x-tator-instance': await page.evaluate("window.TatorHostedBoot?.instance_id || ''")}
+        reply = await page.request.post(origin + f'/api/hosted/providers/calls/{call_id}/reconcile', headers=csrf,
+            data={'operation_id': 'reconcile-' + call_id, 'charged': 2345, 'note': 'Checked the retained provider bill in this fixture'})
+        assert reply.status == 200, await reply.text()
         calls = (await (await page.request.get(origin + '/api/hosted/providers/calls')).json())['calls']
         assert len(calls) == 1 and calls[0]['state'] == 'reconciled' and calls[0]['charged'] == 2345
         assert not (await (await page.request.get(origin + '/api/hosted/providers/calls?unresolved_only=true')).json())['calls']
@@ -801,7 +798,7 @@ async def _encoded_media(origin, source):
         await sign_in(page, origin, 'admin')
         await page.get_by_role('button', name='Incoming', exact=True).click()
         await page.locator('#uploadInput').set_input_files(str(source))
-        await expect(page.locator('#notice')).to_contain_text('1 new images added')
+        await expect(page.locator('#notice')).to_contain_text('1 new images uploaded')
         rows = await page.evaluate("window.TatorHostedDashboard.api('/images?dataset_id='+document.getElementById('datasetChoice').value)")
         record = next(row for row in rows['images'] if row['filename'] == source.name)
         assert record['media_hash'] == original_hash
@@ -857,7 +854,7 @@ async def _special_pixel_modes(origin, source, mode):
         await sign_in(page, origin, 'admin')
         await page.get_by_role('button', name='Incoming', exact=True).click()
         await page.locator('#uploadInput').set_input_files(str(source))
-        await expect(page.locator('#notice')).to_contain_text('1 new images added')
+        await expect(page.locator('#notice')).to_contain_text('1 new images uploaded')
         rows = await page.evaluate("window.TatorHostedDashboard.api('/images?dataset_id='+document.getElementById('datasetChoice').value)")
         image = next(row for row in rows['images'] if row['filename'] == source.name)
         await page.goto(origin + '/annotate?image=' + image['id'])
@@ -1037,14 +1034,14 @@ async def _imports_and_recovery(origin, paths):
         async with page.expect_file_chooser() as chooser:
             await page.locator("#resumeImport").click()
         await (await chooser.value).set_files(paths)
-        await expect(page.locator("#notice")).to_contain_text("2 new images added")
+        await expect(page.locator("#notice")).to_contain_text("2 new images uploaded")
         images = await (await context.request.get(f"{origin}/api/hosted/images?dataset_id={dataset_id}")).json()
         assert len(images["images"]) == 2 and commits[0]["id"] in {row["id"] for row in images["images"]}
         await page.locator("#hostedTools").click()
         await expect(page.locator("#hostedToolsDialog")).to_contain_text("No server model files have been configured yet")
         await page.locator("#hostedToolsDialog").get_by_role("button", name="Close", exact=True).click()
         await page.locator("#hostedProviders").click()
-        await expect(page.locator("#hostedProvidersDialog")).to_contain_text("Monthly budget (USD)")
+        await expect(page.locator("#hostedProvidersDialog")).to_contain_text("coming later")
         await page.locator("#hostedProvidersDialog").get_by_role("button", name="Close", exact=True).click()
         await page.locator("#operations").click()
         await page.get_by_role("button", name="Archive this dataset…", exact=True).click()

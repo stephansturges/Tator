@@ -309,7 +309,7 @@ explicitly included to be available.
 Reservations serialize against a UTC monthly budget in millionths of USD.
 Unknown outcomes retain their reservation; underestimated usage pauses further
 paid calls. These are application reservations, not a provider-enforced cap.
-Review and reconcile bills in **Paid services**, including terminal Batch
+Review and reconcile bills through the provider calls API, including terminal Batch
 requests whose output collection failed. Restore pauses providers because a
 backup may predate external charges.
 

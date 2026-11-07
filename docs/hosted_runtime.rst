@@ -564,9 +564,11 @@ A local transport error alone does not prove that a remote Batch has finished.
 Startup repairs older stranded rows only from retained terminal evidence bound
 to the same remote Batch and input file; this repair makes no provider calls.
 
-In **Paid services**, unresolved calls show whether billing can be reconciled.
-After checking the provider's records, an administrator can **Record confirmed
-charge**, including zero, with an explanation. Linked Batch calls require verified
+``GET /api/hosted/providers/calls?unresolved_only=true`` shows whether each
+unresolved call can be reconciled. After checking the provider's records, an
+administrator records the confirmed charge, including zero, with an explanation
+through ``POST /api/hosted/providers/calls/{id}/reconcile``. The workspace's
+**Paid services** button currently only says that paid services are coming later. Linked Batch calls require verified
 terminal evidence, including after backup restoration. Active batches remain
 unavailable for this action. The list pages unresolved calls so older unfinished
 bills are not hidden behind completed calls.

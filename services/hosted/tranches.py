@@ -198,7 +198,7 @@ class TrancheMixin:
         for row in con.execute(query, [*tranche_ids, *([actor.user_id] if personal else [])]):
             counts_by_id[row['tranche_id']][BUCKETS[row['outcome']]] = row['n']
         users = 'u.id=?' if personal else 'u.id=t.annotator_id'
-        rows = con.execute('SELECT t.*,d.name AS dataset_name,u.username AS annotator_name,u.role AS annotator_role,'
+        rows = con.execute('SELECT t.*,d.name AS dataset_name,COALESCE(u.display_name,u.username) AS annotator_name,u.role AS annotator_role,'
             'u.disabled AS annotator_disabled FROM hosted_tranches t JOIN hosted_datasets d ON d.id=t.dataset_id '
             'LEFT JOIN hosted_users u ON ' + users + ' WHERE t.id IN (' + marks + ')',
             [*([actor.user_id] if personal else []), *tranche_ids])
@@ -390,7 +390,7 @@ class TrancheMixin:
         self._pagination(limit, 0)
         if type(limit) is not int or limit > 500:
             raise DomainError('invalid_pagination', 422)
-        if lifecycle not in (None, 'draft', 'active', 'closed'):
+        if lifecycle not in (None, 'open', 'draft', 'active', 'closed'):
             raise DomainError('invalid_tranche_lifecycle', 422)
         q = _string(q, 'q', 200, empty=True)
         scope = [actor.user_id, 'tranches', dataset_id, lifecycle, annotator_id, q]
@@ -400,7 +400,9 @@ class TrancheMixin:
             if dataset_id:
                 self._dataset(con, dataset_id)
                 conditions.append('t.dataset_id=?'); args.append(dataset_id)
-            if lifecycle:
+            if lifecycle == 'open':
+                conditions.append("t.lifecycle IN ('draft','active')")
+            elif lifecycle:
                 conditions.append('t.lifecycle=?'); args.append(lifecycle)
             if actor.role != 'admin':
                 if annotator_id not in (None, actor.user_id):
@@ -579,7 +581,7 @@ class TrancheMixin:
             rows = con.execute('''SELECT i.*,v.id AS version_id,v.complete,v.negative,v.class_version,d.revision AS dataset_revision,
                 (SELECT m.tranche_id FROM hosted_tranche_members m WHERE m.image_id=i.id AND m.is_current=1) AS tranche_id,
                 (SELECT t.name FROM hosted_tranche_members m JOIN hosted_tranches t ON t.id=m.tranche_id WHERE m.image_id=i.id AND m.is_current=1) AS tranche_name,
-                (SELECT u.username FROM hosted_users u WHERE u.id=i.assignee_id) AS assignee_name
+                (SELECT COALESCE(u.display_name,u.username) FROM hosted_users u WHERE u.id=i.assignee_id) AS assignee_name
                 FROM hosted_images i JOIN hosted_annotation_versions v ON v.id=i.current_version JOIN hosted_datasets d ON d.id=i.dataset_id
                 WHERE ''' + where + boundary + ' ORDER BY i.created_at ' + ordering + ',i.id ' + ordering + ' LIMIT ?', [*page_args, limit]).fetchall()
             if direction == 'backward':

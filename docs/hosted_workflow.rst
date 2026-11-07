@@ -133,8 +133,9 @@ First day: administrator
 
 1. Choose **New dataset**, enter a name and **Classes, one per line**, then
    **Create dataset**. Classes can be added later through **Classes**.
-2. Open **People**, enter a username and role, and choose **Create invitation**.
-   Send the private invitation link yourself; the person uses it to set a password.
+2. Open **People** and add each person with a username, the name shown in
+   Tator and a role. Either set their password yourself, or choose an invitation
+   and copy the one-time link shown at the top of the dialog to send privately.
 3. Select the dataset, open **Incoming**, then **Add images**. Images alone are
    enough to start. Existing YOLO labels can accompany image uploads; use the
    reviewed migration workflow for a dataset with caption history.
@@ -154,10 +155,22 @@ canvas. Use it only after reviewing those images. Outcomes are recorded per
 image, so inspect reported conflicts or failures before assuming the whole
 selection was approved.
 
-In **People**, **Save account** applies a role or **Disable access** change;
-**Password reset link** creates a new password-setting link. Account changes
-sign out existing sessions while preserving assignments and saved work. Use the
-ownership recovery controls below when that work needs a different editor.
+In **People**, each account shows whether the person can sign in, has an unused
+invitation or has no password yet. **Save changes** applies a name, role or
+**Disable access** change. **Set password** replaces their password directly;
+**New invitation link** or **Password reset link** creates a one-time link, and
+an open link can be cancelled. Password, role and access changes sign out
+existing sessions while preserving assignments and saved work.
+
+**Remove** hides an account permanently and stops it signing in; its past work
+and review history stay attributed to it, and its username cannot be reused.
+It is refused while the person still owns unfinished or submitted images, so
+review, recall or move those first. You cannot change your own role or access,
+or remove yourself, and the last active administrator stays protected.
+
+The **Tranches** list shows open tranches, Draft and Active, by default. Closed
+tranches remain available through **Status**. A Draft is private to
+administrators until **Assign tranche** gives it to an annotator.
 
 First day: annotator
 --------------------
@@ -262,13 +275,14 @@ During administrator heavy compute, the tool status can show that assistance
 is paused or reloading. Manual annotation and saving remain available. A pause
 does not approve drafts, hand work to someone else or discard their saved state.
 
-For paid captioning, an administrator configures **Paid services**, including
-allowed datasets, models and spending limits. Credentials stay on the server.
-An interrupted provider reply can leave a reservation unresolved; check the
-existing job or bill before starting another request. **Record confirmed charge**
-requires administrator confirmation of provider usage, and a linked remote Batch
-must have a verified terminal status. Local verification uses provider transport
-doubles; it does not establish live price, throughput or model quality.
+Paid captioning is not offered in the workspace yet; **Paid services** says that
+it is coming later. The server-side provider gateway and its API remain for
+operators, with allowed datasets, models and spending limits; credentials stay on
+the server. An interrupted provider reply can leave a reservation unresolved;
+check the existing job or bill before starting another request. Confirming a
+charge requires administrator confirmation of provider usage, and a linked remote
+Batch must have a verified terminal status. Local verification uses provider
+transport doubles; it does not establish live price, throughput or model quality.
 
 Corrections, returns and ownership recovery
 -------------------------------------------

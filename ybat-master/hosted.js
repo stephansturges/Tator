@@ -7,7 +7,7 @@
     function notice(message, error = false) {
         for (const element of [$("notice"), ...document.querySelectorAll("dialog[open] [data-dialog-notice]")]) { element.textContent = message; element.dataset.error = String(error); element.hidden = !message; }
     }
-    const errorMessages = {tranche_revision_changed: "The tranche changed. Refresh it before applying this change.", tranche_capacity_exceeded: "A tranche can hold at most 10,000 unfinished images. Create another tranche for the remaining images.", image_left_queue: "That image left this queue. Reopen the tranche to continue.", tranche_has_pending_review: "Review the submitted images first, or move selected unfinished images to another tranche.", tranche_has_unfinished_members: "Finish or remove the remaining work before closing this tranche.", image_not_assignable: "An image is no longer available in Incoming. Refresh the selection before trying again.", dataset_revision_changed: "The dataset changed. Refresh the preview before applying this change.", split_group_conflict: "These images share a capture group. Preview the complete group before changing its split.", editor_lease_conflict: "An image is open for editing. Close its editing tab before changing this selection.", last_administrator: "Keep at least one active administrator.", username_exists: "That username already exists. Refresh People to manage the account or create a password reset link.", class_version_changed: "The class list changed. Refresh classes and review the current names before trying again.", class_request_already_reviewed: "This request has already been reviewed. Refresh classes to see the result.", class_name_exists: "That class name already exists.", user_changed: "This account changed. Refresh People before applying your change.", installation_changed: "The server changed. Sign in again before continuing." };
+    const errorMessages = {tranche_revision_changed: "The tranche changed. Refresh it before applying this change.", tranche_capacity_exceeded: "A tranche can hold at most 10,000 unfinished images. Create another tranche for the remaining images.", image_left_queue: "That image left this queue. Reopen the tranche to continue.", tranche_has_pending_review: "Review the submitted images first, or move selected unfinished images to another tranche.", tranche_has_unfinished_members: "Finish or remove the remaining work before closing this tranche.", image_not_assignable: "An image is no longer available in Incoming. Refresh the selection before trying again.", dataset_revision_changed: "The dataset changed. Refresh the preview before applying this change.", split_group_conflict: "These images share a capture group. Preview the complete group before changing its split.", editor_lease_conflict: "An image is open for editing. Close its editing tab before changing this selection.", last_administrator: "Keep at least one active administrator.", username_exists: "That username is already used, possibly by a removed account. Choose a different username.", class_version_changed: "The class list changed. Refresh classes and review the current names before trying again.", class_request_already_reviewed: "This request has already been reviewed. Refresh classes to see the result.", class_name_exists: "That class name already exists.", user_changed: "This account changed. Refresh People before applying your change.", installation_changed: "The server changed. Sign in again before continuing." };
     async function api(path, options = {}) {
         const authority = state.session, epoch = state.sessionEpoch;
         const headers = new Headers(options.headers);
@@ -106,7 +106,7 @@
         $("incomingFilterLabel").hidden = state.view !== "incoming";
         $("reviewTrancheLabel").hidden = $("reviewAnnotatorLabel").hidden = state.view !== "submitted";
         if (!isAdmin || state.view !== "submitted") return;
-        $("reviewAnnotator").replaceChildren(new Option("All annotators", ""), ...state.users.map(user => new Option(user.username, user.id)));
+        $("reviewAnnotator").replaceChildren(new Option("All annotators", ""), ...state.users.map(user => new Option(personLabel(user), user.id)));
         $("reviewAnnotator").value = state.filters.annotator;
         const sequence = state.sequence, dataset = $("datasetChoice").value, tranches = []; let cursor = null;
         if (!dataset) return;
@@ -121,7 +121,7 @@
         if (sequence !== state.userSequence) return;
         state.users = result.users;
         $("assignee").replaceChildren();
-        for (const user of state.users.filter((row) => row.role === "annotator" && !row.disabled)) { const option = node("option", user.username); option.value = user.id; $("assignee").append(option); }
+        for (const user of state.users.filter((row) => row.role === "annotator" && !row.disabled)) { const option = node("option", personLabel(user)); option.value = user.id; $("assignee").append(option); }
         if (state.users.some((row) => row.id === previous && row.role === "annotator" && !row.disabled)) $("assignee").value = previous;
         selection();
         drawUsers();
@@ -171,7 +171,7 @@
     async function view(value) {
         state.view = value;
         const captured = invalidateImages();
-        const copy = { confirmed: ["Confirmed images", "Approved images used by analysis, training and dataset exports."], incoming: ["Incoming", "Prepare and assign new images. They join the dataset only after approval."], submitted: ["Review", "Check submitted work, return feedback, or approve it into the dataset."], tranches: ["Annotation tranches", "Prepare a named group of Incoming images, assign it to one annotator, and review finished images as they arrive."], mine: ["My tranches", "Open a tranche to continue your work. Submit each image when it is ready; the remaining images stay with you."] }[value];
+        const copy = { confirmed: ["Confirmed images", "Approved images used by analysis, training and dataset exports. They are finished and not assigned to anyone; new annotation work starts in Incoming."], incoming: ["Incoming", "Prepare and assign new images. They join the dataset only after approval."], submitted: ["Review", "Check submitted work, return feedback, or approve it into the dataset."], tranches: ["Annotation tranches", "Prepare a named group of Incoming images, assign it to one annotator, and review finished images as they arrive."], mine: ["My tranches", "Open a tranche to continue your work. Submit each image when it is ready; the remaining images stay with you."] }[value];
         $("workspaceTitle").textContent = copy[0]; $("workspaceExplanation").textContent = copy[1];
         for (const button of $("views").children) button.setAttribute("aria-current", button.dataset.view === value ? "page" : "false");
         $("import").hidden = state.session.user.role !== "admin" || value !== "incoming";
@@ -215,45 +215,108 @@
         await view(isAdmin ? (state.view === "mine" ? "confirmed" : state.view) : "mine");
         if (sequence === state.workspaceSequence) window.dispatchEvent(new Event("tator:hosted-workspace"));
     }
-    function passwordLink(token, username, reset = false) {
+    function personLabel(user) { return user?.display_name ? `${user.display_name} (${user.username})` : user?.username || ""; }
+    function passwordLink(token, label, purpose = "invite") {
         $("invitationLink").value = `${location.origin}/#invite=${encodeURIComponent(token)}`;
-        $("invitationExplanation").textContent = `Send this private link to ${username} yourself. It can be used once and expires after ${reset ? "one hour" : "24 hours"}.${reset ? " Existing sessions have been signed out." : ""}`;
-        $("invitation").hidden = false;
+        $("invitationExplanation").textContent = purpose === "invite"
+            ? `Send this private link to ${label} yourself. They open it, choose a password and sign in. It works once and expires after 24 hours.`
+            : `Send this private link to ${label} yourself. It lets them choose a new password, works once and expires after one hour. They have been signed out.`;
+        $("invitation").hidden = false; $("invitation").scrollIntoView({ block: "nearest" });
+    }
+    function accountStatus(user) {
+        const when = (seconds) => new Date(seconds * 1000).toLocaleString(), parts = [];
+        if (user.disabled) parts.push("Access disabled");
+        else if (user.password_state === "pending") parts.push(user.link && !user.link.expired ? `Invitation sent, not used yet · expires ${when(user.link.expires_at)}` : "No password yet · create a new invitation link or set a password");
+        else { parts.push("Can sign in"); if (user.link && !user.link.expired) parts.push(`reset link open until ${when(user.link.expires_at)}`); }
+        if (user.self) parts.push("You");
+        if (user.last_administrator) parts.push("Only active administrator");
+        if (user.open_work) parts.push(`${user.open_work} open image${user.open_work === 1 ? "" : "s"}`);
+        return parts.join(" · ");
     }
     function drawUsers() {
         $("userList").replaceChildren();
+        const labelled = (text, input) => { const label = node("label", text); label.append(input); return label; };
         for (const user of state.users) {
+            const label = personLabel(user), path = `/users/${encodeURIComponent(user.id)}`;
             const form = node("form", undefined, "hosted-user"), heading = node("div", undefined, "hosted-user-heading");
-            heading.append(node("strong", user.username), node("small", `${user.disabled ? "Disabled" : "Active"}${user.id === state.session.user.user_id ? " · You" : ""}`));
-            const fields = node("div", undefined, "hosted-inline-fields"), roleLabel = node("label", "Role"), role = node("select");
-            for (const [value, label] of [["annotator", "Annotator"], ["admin", "Administrator"]]) { const option = node("option", label); option.value = value; role.append(option); }
-            role.value = user.role; role.setAttribute("aria-label", "Role"); roleLabel.append(role);
+            heading.append(node("strong", user.display_name || user.username), node("small", `@${user.username} · ${user.role === "admin" ? "Administrator" : "Annotator"}`));
+            const status = node("p", accountStatus(user), "hosted-user-status");
+            const fields = node("div", undefined, "hosted-inline-fields");
+            const name = node("input"); name.value = user.display_name || ""; name.maxLength = 100; name.placeholder = user.username; name.setAttribute("aria-label", `Name shown for ${user.username}`);
+            const role = node("select"); role.setAttribute("aria-label", "Role");
+            for (const [value, text] of [["annotator", "Annotator"], ["admin", "Administrator"]]) { const option = node("option", text); option.value = value; role.append(option); }
+            role.value = user.role;
             const accessLabel = node("label", undefined, "hosted-checkbox"), disabled = node("input"); disabled.type = "checkbox"; disabled.checked = Boolean(user.disabled);
-            accessLabel.append(disabled, document.createTextNode("Disable access")); fields.append(roleLabel, accessLabel);
-            const actions = node("div", undefined, "hosted-actions"), save = node("button", "Save account"), reset = node("button", "Password reset link");
-            save.type = "submit"; save.disabled = true; reset.type = "button"; reset.disabled = Boolean(user.disabled);
-            const changed = () => { save.disabled = role.value === user.role && disabled.checked === Boolean(user.disabled); };
-            role.onchange = changed; disabled.onchange = changed;
+            accessLabel.append(disabled, document.createTextNode("Disable access"));
+            fields.append(labelled("Name shown in Tator", name), labelled("Role", role), accessLabel);
+            const protectedAccount = user.self || user.last_administrator;
+            if (protectedAccount) {
+                role.disabled = disabled.disabled = true;
+                fields.append(node("small", user.self ? "You cannot change your own role or access." : "Add another administrator before changing this one."));
+            }
+            const actions = node("div", undefined, "hosted-actions"), save = node("button", "Save changes");
+            save.type = "submit"; save.disabled = true;
+            const changed = () => { save.disabled = name.value.trim() === (user.display_name || "") && role.value === user.role && disabled.checked === Boolean(user.disabled); };
+            name.oninput = changed; role.onchange = changed; disabled.onchange = changed;
             form.onsubmit = (event) => {
                 event.preventDefault();
-                const nextRole = role.value, nextDisabled = disabled.checked;
-                const detail = nextDisabled ? "They will lose access immediately. Saved work and assignments will remain." : "Existing sessions will be signed out. Saved work and assignments will remain.";
-                if (!window.confirm(`Change ${user.username}'s account? ${detail}`)) return;
+                const nextName = name.value.trim(), nextRole = role.value, nextDisabled = disabled.checked;
+                const accessChanged = nextRole !== user.role || nextDisabled !== Boolean(user.disabled);
+                if (accessChanged && !window.confirm(`Change ${label}'s ${nextDisabled !== Boolean(user.disabled) ? "access" : "role"}? ${nextDisabled ? "They lose access immediately." : "They will be signed out."} Saved work and assignments stay as they are.`)) return;
                 action(save, async () => {
-                    await api(`/users/${encodeURIComponent(user.id)}`, { method: "PATCH", body: { role: nextRole, disabled: nextDisabled, expected_role: user.role, expected_disabled: Boolean(user.disabled) } });
-                    if (user.id === state.session.user.user_id) { loginView(); notice("Your account changed. Sign in again to continue."); return; }
-                    await afterCommit(`Account updated for ${user.username}.`, refreshUsers);
+                    try {
+                        // Access first: it can be refused (changed account, last administrator).
+                        if (accessChanged) await api(path, { method: "PATCH", body: { role: nextRole, disabled: nextDisabled, expected_role: user.role, expected_disabled: Boolean(user.disabled) } });
+                        if (nextName !== (user.display_name || "")) await api(`${path}/profile`, { method: "POST", body: { display_name: nextName || null } });
+                    } catch (error) { await refreshUsers().catch(() => {}); throw error; }
+                    await afterCommit(`Saved ${nextName || user.username}.`, refreshUsers);
                 });
             };
-            reset.onclick = () => {
-                if (!window.confirm(`Create a password reset link for ${user.username}? Existing sessions will be signed out and previous invitation or reset links will stop working.`)) return;
-                action(reset, async () => {
-                    const result = await api(`/users/${encodeURIComponent(user.id)}/reset`, { method: "POST" });
-                    passwordLink(result.reset_token, user.username, true);
-                    notice(`Password reset link created for ${user.username}.`);
+            const passwordButton = node("button", user.self ? "Change my password" : "Set password"); passwordButton.type = "button"; passwordButton.disabled = Boolean(user.disabled);
+            const passwordFields = node("div", undefined, "hosted-inline-fields hosted-password-fields"); passwordFields.hidden = true;
+            const first = node("input"), second = node("input");
+            for (const input of [first, second]) { input.type = "password"; input.minLength = 12; input.autocomplete = "new-password"; }
+            const savePassword = node("button", "Save password"); savePassword.type = "button"; savePassword.className = "primary";
+            passwordFields.append(labelled("New password, at least 12 characters", first), labelled("Repeat password", second), savePassword);
+            passwordButton.onclick = () => { passwordFields.hidden = !passwordFields.hidden; if (!passwordFields.hidden) first.focus(); };
+            savePassword.onclick = () => {
+                if (first.value.length < 12) { notice("Use a password of at least 12 characters.", true); return; }
+                if (first.value !== second.value) { notice("The passwords do not match.", true); return; }
+                if (user.self && !window.confirm("Change your own password? You will be signed out everywhere, and any administrator compute you started will stop.")) return;
+                action(savePassword, async () => {
+                    await api(`${path}/password`, { method: "POST", body: { password: first.value } });
+                    first.value = second.value = "";
+                    if (user.self) { $("peopleDialog").close(); loginView(); notice("Your password changed. Sign in with the new password."); return; }
+                    await afterCommit(`Password set for ${label}. Give it to them privately; any open session was signed out.`, refreshUsers);
                 });
             };
-            actions.append(save, reset); form.append(heading, fields, actions); $("userList").append(form);
+            const linkButton = node("button", user.password_state === "pending" ? "New invitation link" : "Password reset link"); linkButton.type = "button"; linkButton.disabled = Boolean(user.disabled);
+            linkButton.onclick = () => {
+                const invite = user.password_state === "pending";
+                if (!window.confirm(invite ? `Create a new invitation link for ${label}? Any earlier link stops working.` : `Create a password reset link for ${label}? They will be signed out and earlier links stop working.`)) return;
+                action(linkButton, async () => {
+                    const result = await api(`${path}/reset`, { method: "POST" });
+                    passwordLink(result.reset_token, label, result.purpose || (invite ? "invite" : "reset"));
+                    await afterCommit(invite ? `New invitation link created for ${label}. Copy it from People.` : `Password reset link created for ${label}. Copy it from People.`, refreshUsers);
+                });
+            };
+            actions.append(save, passwordButton);
+            if (!user.self) actions.append(linkButton);
+            if (user.link && !user.link.expired) {
+                const cancel = node("button", user.link.purpose === "invite" ? "Cancel invitation" : "Cancel reset link"); cancel.type = "button";
+                cancel.onclick = () => action(cancel, async () => { await api(`${path}/links/cancel`, { method: "POST" }); await afterCommit(`The open link for ${label} no longer works.`, refreshUsers); });
+                actions.append(cancel);
+            }
+            if (!protectedAccount) {
+                const remove = node("button", "Remove", "danger"); remove.type = "button"; remove.disabled = Boolean(user.open_work);
+                remove.title = user.open_work ? "Review, recall or move this person's open images before removing them." : "Remove this account from the list.";
+                remove.onclick = () => {
+                    if (!window.confirm(`Remove ${label}? They can no longer sign in and disappear from this list. Their past work and review history stay attributed to them.`)) return;
+                    action(remove, async () => { await api(`${path}/remove`, { method: "POST" }); await afterCommit(`${label} was removed.`, refreshUsers); });
+                };
+                actions.append(remove);
+            }
+            form.append(heading, status, fields, actions, passwordFields); $("userList").append(form);
         }
     }
     async function loadSubmissions(append = false) {
@@ -344,7 +407,26 @@
     });
     $("people").onclick = () => { $("invitation").hidden = true; $("invitationLink").value = ""; $("peopleDialog").showModal(); notice(""); action($("people"), refreshUsers); };
     $("refreshPeople").onclick = () => action($("refreshPeople"), refreshUsers);
-    $("personForm").onsubmit = (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); action(event.submitter, async () => { const person = await api("/users", { method: "POST", body: { username: form.get("username"), role: form.get("role") } }); passwordLink(person.invite_token, person.username); event.target.reset(); await afterCommit(`Invitation created for ${person.username}.`, refreshUsers); }); };
+    const syncPersonAccess = () => { const form = $("personForm"), password = form.elements.access.value === "password"; $("personPasswordFields").hidden = !password; for (const name of ["password", "repeat"]) form.elements[name].required = password; };
+    for (const radio of $("personForm").querySelectorAll('input[name="access"]')) radio.onchange = syncPersonAccess;
+    syncPersonAccess();
+    $("personForm").onsubmit = (event) => {
+        event.preventDefault();
+        const form = new FormData(event.currentTarget), access = form.get("access");
+        if (access === "password" && form.get("password") !== form.get("repeat")) { notice("The passwords do not match.", true); return; }
+        action(event.submitter, async () => {
+            const body = { username: form.get("username"), role: form.get("role"), display_name: String(form.get("display_name") || "").trim() || null };
+            if (access === "password") body.password = form.get("password");
+            const person = await api("/users", { method: "POST", body });
+            event.target.reset(); syncPersonAccess();
+            if (person.invite_token) passwordLink(person.invite_token, personLabel(person), "invite");
+            await afterCommit(person.invite_token ? `Invitation created for ${personLabel(person)}. Copy the link from People and send it privately.` : `${personLabel(person)} can now sign in with the password you set.`, refreshUsers);
+        });
+    };
+    $("copyInvitation").onclick = async () => {
+        try { await navigator.clipboard.writeText($("invitationLink").value); notice("Link copied."); }
+        catch (_) { $("invitationLink").select(); notice("Select the link and copy it with your keyboard."); }
+    };
     $("classes").onclick = () => { state.classDataset = null; $("classList").replaceChildren(); $("classRequestList").replaceChildren(); $("classesDialog").showModal(); notice(""); action($("classes"), loadClasses); };
     $("classesDialog").addEventListener("close", () => { state.classSequence++; state.classDataset = null; });
     $("refreshClasses").onclick = () => action($("refreshClasses"), loadClasses);
@@ -365,6 +447,6 @@
     $("selectMatchingImages").onclick = event => action(event.currentTarget, selectMatching);
     window.TatorHostedDashboard = { api, action, notice, refresh: workspace,
         selectDataset: async id => { if (!state.datasets.some(d => d.id === id)) throw new Error("Dataset unavailable for this account."); $("datasetChoice").value = id; state.filters.tranche = ""; const captured = invalidateImages(); await prepareFilters(); if (currentImages(captured)) await loadImages(); },
-        showView: view, loadImages, clearSelection, get view() { return state.view; }, get users() { return state.users; },
+        showView: view, loadImages, clearSelection, get view() { return state.view; }, get users() { return state.users; }, personLabel,
         get session() { return state.session; }, get selectedImages() { return [...state.selected.values()]; }, get datasetId() { return $("datasetChoice").value; } };
 })();

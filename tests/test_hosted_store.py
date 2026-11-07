@@ -24,9 +24,9 @@ def store(tmp_path):
     value = HostedStore(tmp_path / "hosted.sqlite3", clock=lambda: now[0], lease_seconds=30)
     value.test_clock = now
     with value.transaction() as con:
-        con.execute("CREATE TABLE hosted_users(id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','annotator')), disabled INTEGER NOT NULL DEFAULT 0,created_at REAL NOT NULL,password_changed_at REAL NOT NULL)")
+        con.execute("CREATE TABLE hosted_users(id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','annotator')), disabled INTEGER NOT NULL DEFAULT 0,created_at REAL NOT NULL,password_changed_at REAL NOT NULL, display_name TEXT)")
         for actor in (ADMIN, ADMIN2, ALICE, BOB):
-            con.execute("INSERT INTO hosted_users VALUES (?,?,? ,?,0,0,0)",
+            con.execute("INSERT INTO hosted_users(id,username,password_hash,role,disabled,created_at,password_changed_at) VALUES (?,?,? ,?,0,0,0)",
                         (actor.user_id, actor.username, "unused by store tests", actor.role))
     return value
 

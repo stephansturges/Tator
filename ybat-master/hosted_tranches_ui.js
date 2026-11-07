@@ -11,7 +11,7 @@
     const recovery = el("aside", undefined, "hosted-tranche-recovery"); recovery.id = "trancheRecovery"; recovery.hidden = true; panel.before(recovery);
     const dialog = el("dialog"); dialog.id = "trancheDialog"; document.body.append(dialog);
     let sequence = 0, shown = false, current = null, members = [], selected = new Map(), cursor = null, pending = null, running = false, owner = "";
-    let filter = "all", lifecycle = "", query = "", assigneeFilter = "", listRows = [], listCursor = null;
+    let filter = "all", lifecycle = "open", query = "", assigneeFilter = "", listRows = [], listCursor = null;
     const identity = () => app.session ? `${app.session.instance_id}:${app.session.user.user_id}` : "";
     const key = () => `tator.hosted.tranche-command:${identity()}`;
     const scopeLink = (id, tranche, queue) => `/annotate?${new URLSearchParams({image: id, ...(tranche ? {tranche} : {}), queue})}`;
@@ -117,30 +117,41 @@
         if (ticket !== sequence || !shown || dataset !== app.datasetId) return;
         listRows.push(...result.tranches); listCursor = result.next_cursor; renderList();
     }
+    function personName(user) { return app.personLabel ? app.personLabel(user) : user.username; }
+    function statusLine(tranche) {
+        if (tranche.lifecycle === "active") return `Active · assigned to ${tranche.annotator_name || "an annotator"}`;
+        if (tranche.lifecycle === "draft") return `Draft · not given to anyone yet${tranche.annotator_name ? ` (planned for ${tranche.annotator_name})` : ""}`;
+        return "Closed · kept for history";
+    }
     function renderList() {
         panel.replaceChildren();
         const toolbar = el("div", undefined, "tranche-toolbar"), stateLabel = el("label", "Status"), stateSelect = el("select");
-        for (const [value, text] of [["", "All tranches"], ["draft", "Draft"], ["active", "Active"], ["closed", "Closed"]]) stateSelect.append(new Option(text, value));
+        for (const [value, text] of [["open", "Open (Draft and Active)"], ["draft", "Draft"], ["active", "Active"], ["closed", "Closed"], ["", "All, including closed"]]) stateSelect.append(new Option(text, value));
         stateSelect.value = lifecycle; stateSelect.onchange = () => { lifecycle = stateSelect.value; app.action(stateSelect, () => list()); }; stateLabel.append(stateSelect);
         const search = el("input"); search.type = "search"; search.placeholder = "Find a tranche"; search.value = query; search.setAttribute("aria-label", "Find a tranche");
         const form = el("form"); form.className = "tranche-search"; form.append(search, button("Search", () => { query = search.value.trim(); return list(); })); form.onsubmit = e => { e.preventDefault(); query = search.value.trim(); app.action(search, () => list()); };
         toolbar.append(stateLabel, form); if (admin()) {
             const label = el("label", "Annotator"), select = el("select"); select.setAttribute("aria-label", "Filter by annotator"); select.append(new Option("All annotators", ""));
-            app.users.filter(user => user.role === "annotator" || listRows.some(row => row.annotator_id === user.id)).forEach(user => select.append(new Option(user.username, user.id)));
+            app.users.filter(user => user.role === "annotator" || listRows.some(row => row.annotator_id === user.id)).forEach(user => select.append(new Option(personName(user), user.id)));
             select.value = assigneeFilter; select.onchange = () => { assigneeFilter = select.value; app.action(select, () => list()); }; label.append(select); toolbar.append(label, button("New tranche", () => create(), "primary"));
         } panel.append(toolbar);
+        if (admin()) {
+            const steps = el("ol", undefined, "tranche-steps");
+            for (const text of ["Add new images in Incoming.", "Group them into a tranche and assign it to one annotator. Drafts stay private until assigned.", "The annotator submits images one by one. Approve them in Review to add them to the Confirmed dataset."]) steps.append(el("li", text));
+            panel.append(steps);
+        }
         const grid = el("div", undefined, "tranche-grid");
         for (const tranche of listRows) {
             const card = el("article", undefined, "tranche-card"); card.dataset.trancheId = tranche.id;
             const complete = tranche.counts.ever_included > 0 && ["not_assigned", "to_finish", "changes_requested", "awaiting_review"].every(key => !tranche.counts[key]);
-            card.append(el("h2", tranche.name), el("p", `${complete ? "Complete · " : ""}${tranche.lifecycle[0].toUpperCase()}${tranche.lifecycle.slice(1)} · ${tranche.annotator_name || "No annotator yet"}${tranche.annotator_id && !tranche.annotator_available ? " · Annotator unavailable" : ""}`), totals(tranche));
+            card.append(el("h2", tranche.name), el("p", `${complete ? "Complete · " : ""}${statusLine(tranche)}${tranche.annotator_id && !tranche.annotator_available ? " · Annotator unavailable" : ""}`), totals(tranche));
             if (tranche.instructions) card.append(el("p", tranche.instructions, "tranche-instructions"));
             if (tranche.updated_at) card.append(el("small", `Last activity ${new Date(tranche.updated_at * 1000).toLocaleString()}`, "tranche-activity"));
             if (!admin() && tranche.counts.to_finish + tranche.counts.changes_requested) card.append(button("Continue annotation", () => openQueue("work", tranche), "primary"));
             card.append(button(admin() ? "Manage tranche" : "Open tranche", () => route(tranche.id))); grid.append(card);
         }
         panel.append(grid);
-        if (!listRows.length) panel.append(el("p", admin() ? "Create a tranche from Incoming images, or start an empty Draft here." : "No tranches match this view. Your submitted work remains available below."));
+        if (!listRows.length) panel.append(el("p", admin() ? `${lifecycle === "open" ? "No open tranches. Closed tranches are listed under Status. " : ""}Create a tranche from Incoming images, or start an empty Draft here.` : "No tranches match this view. Your submitted work remains available below."));
         if (listCursor) panel.append(button("Load more tranches", () => list(true)));
     }
     async function detail(id, append = false) {
@@ -174,7 +185,8 @@
         panel.replaceChildren();
         const tranche = current, head = el("div", undefined, "tranche-toolbar");
         head.append(button("← All tranches", () => route()), el("h2", tranche.name)); panel.append(head);
-        panel.append(el("p", `${tranche.lifecycle[0].toUpperCase()}${tranche.lifecycle.slice(1)} · ${tranche.annotator_name || "No annotator yet"}${tranche.annotator_id && !tranche.annotator_available ? " · Annotator unavailable: recall unfinished work or withdraw pending submissions to reassign it." : ""}`), totals(tranche));
+        panel.append(el("p", `${statusLine(tranche)}${tranche.annotator_id && !tranche.annotator_available ? " · Annotator unavailable: recall unfinished work or withdraw pending submissions to reassign it." : ""}`), totals(tranche));
+        if (admin() && tranche.lifecycle === "draft") panel.append(el("p", "Annotators cannot see a Draft. Choose Assign tranche to give its images to one annotator.", "tranche-hint"));
         if (tranche.instructions) panel.append(el("p", tranche.instructions, "tranche-instructions"));
         const actions = el("div", undefined, "tranche-toolbar");
         if (admin()) {
@@ -227,7 +239,7 @@
     function form(title) { dialog._context = `${identity()}:${app.datasetId}`; dialog.replaceChildren(el("h2", title)); const notice = el("p"); notice.dataset.dialogNotice = ""; notice.className = "dialog-notice"; notice.hidden = true; dialog.append(notice); const f = el("form"); dialog.append(f); dialog.showModal(); return f; }
     function field(f, text, tag = "input", value = "") { const label = el("label", text), input = el(tag); input.value = value; input.setAttribute("aria-label", text); if (tag === "textarea") { input.rows = 3; input.maxLength = 10000; } label.append(input); f.append(label); return input; }
     function submit(f, text, work) { const row = el("div", undefined, "dialog-actions"), save = el("button", text, "primary"); save.type = "submit"; row.append(button("Cancel", () => dialog.close()), save); f.append(row); f.onsubmit = e => { e.preventDefault(); app.action(save, work); }; }
-    function annotators(f, selectedId = "") { const choice = field(f, "Annotator", "select"); choice.append(new Option("Choose an annotator", "")); for (const user of app.users.filter(u => u.role === "annotator" && !u.disabled)) choice.append(new Option(user.username, user.id)); choice.value = selectedId; return choice; }
+    function annotators(f, selectedId = "") { const choice = field(f, "Annotator", "select"); choice.append(new Option("Choose an annotator", "")); for (const user of app.users.filter(u => u.role === "annotator" && !u.disabled)) choice.append(new Option(personName(user), user.id)); choice.value = selectedId; return choice; }
     function checkSelection(rows) { if (!rows.length || rows.length > 500) throw new Error("Select between 1 and 500 images for one membership change."); }
     function create(rows = []) {
         if (rows.length > 500) { app.notice("Create a tranche with up to 500 selected images, then add more in further selections.", true); return; }

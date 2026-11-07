@@ -1621,6 +1621,9 @@
         }
         if (!item) { setClassSplitSessionRestoreStatus("No saved review is available. Open Datasets & sessions to browse datasets."); return; }
         setClassSplitSessionRestoreStatus(`${item.label || "Saved review"} is available. Restore it or choose another in Datasets & sessions.`);
+        // Sent from the admin view, the workbench opens that dataset itself; only a saved review still asks.
+        if (!forceRestore && workbenchApiRoot && new URLSearchParams(window.location.search).has("dataset")
+            && !item.capabilities?.open_review && !item.capabilities?.plot_only) return;
         if (!forceRestore) {
             const saved = dqeSessionStore.readSession(item.source?.job_id || active.jobId || "");
             if (saved.dismissedRestoreJobId === item.id) return;
@@ -9050,6 +9053,44 @@ const sam3TrainState = {
             datasetLabel: String(entry?.label || entry?.id || "dataset"),
             datasetTypeHint: String(entry?.type || ""),
         });
+    }
+
+    // Hosted admin workbench: the hosted chrome opens a dataset's workbench copy
+    // in place, through the same open path as the Datasets tab, keeping the tab.
+    if (workbenchApiRoot) {
+        window.TatorLegacyWorkbench = {
+            openedDataset: () => (annotationSourceState.mode === "linked" ? annotationSourceState.datasetId
+                : annotationSourceState.mode !== "none" ? annotationSourceState.mode : classSplitState.currentJobId ? "review" : ""),
+            // Opens the dataset unless something else is open; replace switches (after saving) anyway.
+            async openDataset(datasetId, datasetLabel, { replace = false } = {}) {
+                // Let a restore or switch already under way finish, then open only if still needed.
+                for (let waited = 0; ; waited += 250) {
+                    await classSplitState.sessionRestorePromise;
+                    await initializeDqeLibrary();
+                    if (!dqeWorkspaceSwitch?.isBusy() && !dqeWorkspaceBusy && !annotationSourceResumeInFlight) break;
+                    if (waited > 600000) throw new Error("Another workspace is still opening here. Try again when it finishes.");
+                    await new Promise((resolve) => setTimeout(resolve, 250));
+                }
+                const opened = window.TatorLegacyWorkbench.openedDataset();
+                if (opened === datasetId) return true;
+                if (opened && !replace) return false;
+                await openDatasetInAnnotationMode({ mode: "linked", datasetId, datasetLabel, activateLabeling: false });
+                return true;
+            },
+            releaseLock() {
+                const base = getAnnotationBasePath(), sessionId = annotationSourceState.lockSessionId;
+                if (!isAnnotationDatasetModeActive() || annotationSourceState.readOnly || !base || !sessionId) return;
+                const backendId = dqeCaptureRequest().backendId;
+                fetch(`${base}/session/stop`, { method: "POST", keepalive: true, credentials: "same-origin",
+                    headers: { "Content-Type": "application/json", ...(backendId ? { "X-Tator-Backend-Id": backendId } : {}) },
+                    body: JSON.stringify({ session_id: sessionId }) }).catch(() => {});
+            },
+        };
+        // Admin and workbench pages alternate in one tab. A fresh navigation never
+        // resumes a lease, so release this page's lock when it goes away; a page
+        // restored from the back-forward cache reloads to take its lock back.
+        window.addEventListener("pagehide", () => window.TatorLegacyWorkbench.releaseLock());
+        window.addEventListener("pageshow", (event) => { if (event.persisted) window.location.reload(); });
     }
 
     async function openTransientPathInAnnotation() {

@@ -181,10 +181,17 @@ class WorkbenchBridge:
         return path.resolve().is_relative_to(root.resolve())
 
     # ---- jobs -----------------------------------------------------------
-    def _start(self, actor, kind, target, args, *, bridge_id=None) -> dict:
+    def _start(self, actor, kind, target, args, *, bridge_id=None, dataset_id=None) -> dict:
         job = {"id": uuid.uuid4().hex, "kind": kind, "actor_id": actor.user_id, "state": "running", "done": 0, "total": None,
-               "result": None, "error": None, "started_at": time.time(), "bridge_id": bridge_id}
+               "result": None, "error": None, "started_at": time.time(), "bridge_id": bridge_id, "dataset_id": dataset_id}
         with self._lock:
+            # One copy of a dataset at a time: a second tab follows the running export.
+            running = next((other for other in self._jobs.values() if dataset_id is not None and other["kind"] == kind
+                            and other["state"] == "running" and other["dataset_id"] == dataset_id), None)
+            if running is not None:
+                if running["actor_id"] != actor.user_id:
+                    raise DomainError("workbench_export_running", 409, "Another administrator is making a workbench copy of this dataset.")
+                return self.job(actor, running["id"])
             if bridge_id is not None and any(other["kind"] == kind and other["state"] == "running" and other["bridge_id"] == bridge_id
                                              for other in self._jobs.values()):
                 raise DomainError("workbench_apply_running", 409, "Changes from this workbench copy are already being applied.")
@@ -224,7 +231,7 @@ class WorkbenchBridge:
         self._require(actor)
         if not ID_PATTERN.fullmatch(dataset_id or ""):
             raise DomainError("dataset_not_found", 404)
-        return self._start(actor, "export", self._export, (actor, dataset_id))
+        return self._start(actor, "export", self._export, (actor, dataset_id), dataset_id=dataset_id)
 
     def _real_directory(self, path: Path) -> Path:
         if path.is_symlink():

@@ -29,26 +29,37 @@ When the server has a workbench, the administrator navigation opens it:
 * **Server jobs** opens the hosted analysis launcher, which runs analysis on
   frozen hosted snapshots as before.
 
-The bar at the top of the workbench returns to the admin workspace. The address
-keeps the open tab, so a reload returns to it. Without a workbench service the
-navigation shows the hosted dialogs only.
+Each entry carries the dataset selected in the admin workspace. The workbench
+opens that dataset's newest workbench copy in the requested tab. On the first
+visit for a dataset, the workbench makes the copy itself, showing progress in
+the bar, and then opens it. If the workbench already has another dataset or a
+saved review open, it keeps it, and the bar offers **Open** for the dataset you
+came from; the open one is saved before it switches.
+
+The bar at the top of the workbench returns to the admin workspace. It names
+the open copy and offers **Make fresh copy** and **Review edits**. The address
+keeps the open tab, so a reload returns to it. Leaving the workbench releases
+its annotation lock, so returning later opens the copy for editing again.
+Without a workbench service the navigation shows the hosted dialogs only.
 
 Working on a hosted dataset
 ---------------------------
 
-1. Select **Hosted data** in the workbench bar, choose the dataset and select
-   **Make workbench copy**. The copy holds every confirmed train, validation and
-   unsplit image and its labels at that moment. Unsplit images appear as train.
+1. A workbench copy holds every confirmed train, validation and unsplit image
+   and its labels at the moment it is made. Unsplit images appear as train.
    Test-split images are left out, because the workbench handles train and
-   validation only; the dialog reports how many. Images are hard links to the
+   validation only; the copy reports how many. Images are hard links to the
    hosted image store, so a copy uses almost no extra disk space. Its name is
-   the dataset name followed by "hosted copy" and the time.
-2. Select **Reload workbench**, then pick the copy in the tab you need. Run
-   quality analysis, pruning reviews, training or annotation as in the local
-   workbench.
-3. To bring label edits back, open **Hosted data** again and select **Review
-   changes** for that copy. The review compares the workbench labels with the
-   version each image had when it was copied. It counts relabeled, moved or
+   the dataset name followed by "hosted copy" and the time. Opening a tool from
+   the admin workspace makes the first copy. **Make fresh copy** in the bar, or
+   **Make workbench copy** under **Hosted data**, makes a newer one that
+   includes images confirmed since.
+2. Run quality analysis, pruning reviews, training or annotation as in the
+   local workbench.
+3. To bring label edits back, select **Review edits** in the bar, or open
+   **Hosted data** and select **Review changes** for a copy. The review
+   compares the workbench labels with the version each image had when it was
+   copied. It counts relabeled, moved or
    resized, added and deleted objects per image.
 4. Select **Apply**. Only the edits shown in that review are applied. An image
    edited again in the workbench after the review is skipped and reported, so

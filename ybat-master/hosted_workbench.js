@@ -14,7 +14,9 @@
     syncBack();
     const dataButton = el("button", {type: "button", id: "hostedWorkbenchDataButton", textContent: "Hosted data"});
     const note = el("span", {id: "hostedWorkbenchNote", textContent: "Full Tator tools on this server. Edits stay in the workbench until you apply them to a hosted dataset."});
-    bar.append(back, el("strong", {textContent: "Admin workbench"}), dataButton, note);
+    const copyInfo = el("span", {id: "hostedWorkbenchCopy"}); copyInfo.setAttribute("role", "status");
+    const copyActions = el("span", {className: "hosted-wb-copy-actions"});
+    bar.append(back, el("strong", {textContent: "Admin workbench"}), copyInfo, copyActions, dataButton, note);
     document.body.prepend(bar);
     document.body.classList.add("hosted-workbench");
 
@@ -119,10 +121,10 @@
             const job = await hosted(`/api/hosted/datasets/${encodeURIComponent(picker.value)}/workbench/export`, {method: "POST", body: {}});
             const result = await follow(job, (state) => say(copyStatus, state.total ? `Linking images: ${state.done} of ${state.total}…` : "Freezing the confirmed snapshot…"));
             await loadCopies();
-            const reload = el("button", {type: "button", textContent: "Reload workbench"});
-            reload.addEventListener("click", () => location.reload());
+            const dataset = picker.value, openHere = el("button", {type: "button", textContent: "Open it here"});
+            openHere.addEventListener("click", () => reopenWith(dataset));
             const excluded = result.excluded_images ? ` ${plural(result.excluded_images, "test-split image")} are not in the copy, because the workbench handles train and val only.` : "";
-            copyStatus.replaceChildren(`Copy ready: “${result.label}”.${excluded} Reload the workbench so every tab lists it, then pick it in the tab you need. `, reload);
+            copyStatus.replaceChildren(`Copy ready: “${result.label}”.${excluded} `, openHere);
             copyStatus.dataset.tone = "ok";
         } catch (error) { showError(copyStatus)(error); } finally { makeCopy.disabled = false; }
     });
@@ -173,5 +175,60 @@
         });
         review.append(el("div", {className: "hosted-wb-actions"}, apply), status);
     }
+    // ---- arriving from the admin view ---------------------------------------
+    // The dataset chosen in the admin view opens here, in the tab that was asked
+    // for: its newest workbench copy, made on the first visit.
+    const pageLoaded = new Promise((resolve) => { if (document.readyState === "complete") resolve(); else window.addEventListener("load", resolve, {once: true}); });
+    const action = (text, onClick) => { const node = el("button", {type: "button", textContent: text}); node.addEventListener("click", onClick); return node; };
+    async function makeCopyOf(datasetId, target) {
+        const job = await hosted(`/api/hosted/datasets/${encodeURIComponent(datasetId)}/workbench/export`, {method: "POST", body: {}});
+        return follow(job, (state) => say(target, state.total ? `Linking images: ${state.done} of ${state.total}…` : "Freezing the confirmed snapshot…"));
+    }
+    function reopenWith(datasetId) {
+        // A fresh load lists a new copy in every tab; arrive() then opens it.
+        const next = new URLSearchParams(location.search); next.set("dataset", datasetId);
+        location.replace(`${location.pathname}?${next}`);
+    }
+    async function arrive() {
+        if (!hostedDataset) return;
+        const [{datasets}, {bridges}] = await Promise.all([hosted("/api/hosted/datasets"),
+            hosted(`/api/hosted/workbench/bridges?${new URLSearchParams({dataset_id: hostedDataset})}`)]);
+        const dataset = datasets.find((row) => row.id === hostedDataset), bridge = bridges[0];
+        if (!dataset) return;
+        note.hidden = true;
+        if (!bridge) {
+            say(copyInfo, `Copying ${dataset.name} into the workbench…`);
+            await makeCopyOf(dataset.id, copyInfo);
+            say(copyInfo, `Opening ${dataset.name}…`);
+            reopenWith(dataset.id); return;
+        }
+        const describe = () => say(copyInfo, `${dataset.name} · workbench copy of ${plural(bridge.image_count, "confirmed image")} from ${when(bridge.created_at)}`);
+        const fresh = action("Make fresh copy", async () => {
+            if (!window.confirm(`Make a new workbench copy of ${dataset.name} from its confirmed images as they are now? Edits in the current copy stay available under Review edits.`)) return;
+            fresh.disabled = true;
+            try { await makeCopyOf(dataset.id, copyInfo); reopenWith(dataset.id); }
+            catch (error) { showError(copyInfo)(error); fresh.disabled = false; }
+        });
+        const reviewEdits = action("Review edits", () => {
+            dialog.showModal(); hostedDataset = dataset.id;
+            loadDatasets().then(() => openReview(bridge)).catch(showError(copyStatus));
+        });
+        copyActions.replaceChildren(fresh, reviewEdits);
+        await pageLoaded;
+        const legacy = window.TatorLegacyWorkbench;
+        if (!legacy) { describe(); return; }
+        // Never replaces what the page restored by itself (a saved review, say); the button does.
+        const openButton = action(`Open ${dataset.name}`, () => open(true));
+        async function open(replace) {
+            say(copyInfo, `Opening ${dataset.name}…`); openButton.remove();
+            try {
+                if (await legacy.openDataset(bridge.legacy_dataset_id, bridge.label, {replace})) { describe(); return; }
+                say(copyInfo, "Another dataset or saved review is open here.");
+            } catch (error) { showError(copyInfo)(error); }
+            copyActions.prepend(openButton);
+        }
+        await open(false);
+    }
+    arrive().catch(showError(copyInfo));
     window.TatorWorkbench = {get hostedDataset() { return hostedDataset; }, bar, dialog};
 })();

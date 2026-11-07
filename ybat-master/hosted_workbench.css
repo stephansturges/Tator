@@ -1,6 +1,8 @@
 #hostedWorkbenchBar{position:sticky;top:0;z-index:1000;display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:8px 16px;background:#0f3b31;color:#e9f6f1;font:14px/1.4 system-ui,-apple-system,sans-serif}
 #hostedWorkbenchBar a{color:#9fe3c9;font-weight:600;text-decoration:none}#hostedWorkbenchBar a:hover{text-decoration:underline}
 #hostedWorkbenchBar span{color:#bcd8cf;font-size:13px}
+#hostedWorkbenchBar #hostedWorkbenchCopy{color:#e9f6f1}#hostedWorkbenchBar #hostedWorkbenchCopy[data-tone=error]{color:#ffb4a8}
+.hosted-wb-copy-actions{display:inline-flex;gap:8px}#hostedWorkbenchBar button:disabled{opacity:.5;cursor:default}
 #hostedWorkbenchBar button{font:inherit;padding:4px 10px;border-radius:6px;border:1px solid #9fe3c9;background:transparent;color:#e9f6f1;cursor:pointer}
 .hosted-wb-dialog{width:min(860px,calc(100vw - 32px));max-height:calc(100vh - 48px);padding:20px 24px;border:1px solid #c9d6d1;border-radius:10px;font:14px/1.45 system-ui,-apple-system,sans-serif;color:#18241f;background:#fff}
 .hosted-wb-dialog::backdrop{background:rgba(10,25,20,.45)}

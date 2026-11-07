@@ -18,7 +18,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.exceptions import RequestValidationError
 from PIL import Image
 from pydantic import BaseModel, Field
@@ -38,6 +38,7 @@ from services.hosted.tranches_api import install_tranches_api
 from services.hosted.types import Actor, MutationContext
 from services.hosted.preconditions import ImagePrecondition, precondition_payload
 from services.hosted.media import HostedMedia, inspect_media
+from services.hosted.thumbnails import DEFAULT_THUMBNAIL_SIZE, THUMBNAIL_SIZES, Thumbnails
 from services.hosted.static_assets import PublicStaticAssets
 
 WEB_ROOT = Path(__file__).resolve().parent / "ybat-master"
@@ -214,6 +215,7 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
     auth = AuthService(store)
     artifacts = ArtifactStore(root / "artifacts")
     media_store = HostedMedia(store, artifacts)
+    thumbnails = Thumbnails(root / "derived" / "thumbnails", media_store, artifacts)
     @asynccontextmanager
     async def control_lifespan(_application):
         descriptor = os.open(root / "control.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
@@ -263,8 +265,8 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
             response.headers["X-Content-Type-Options"] = "nosniff"
             response.headers["Referrer-Policy"] = "same-origin"
             response.headers["X-Frame-Options"] = "SAMEORIGIN"
-            if not (getattr(request.state, "public_static_response", False)
-                    and response.status_code in {200, 304}):
+            cacheable = getattr(request.state, "public_static_response", False) or getattr(request.state, "private_cacheable_response", False)
+            if not (cacheable and response.status_code in {200, 304}):
                 response.headers["Cache-Control"] = "no-store"
             return response
 
@@ -500,6 +502,20 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
             "Content-Length": str(view["size_bytes"]),
             "X-Tator-Source-Media-Hash": record["media_hash"],
         })
+
+    @app.get("/api/hosted/images/{image_id}/thumbnail")
+    def thumbnail(image_id: str, request: Request, size: int = DEFAULT_THUMBNAIL_SIZE, identity: Actor = Depends(actor)):
+        # Same membership authorization as /media. Pixels behind an image ID never
+        # change, so the signed-in browser may keep this small derived copy.
+        if size not in THUMBNAIL_SIZES:
+            raise DomainError("thumbnail_size_invalid", 422, f"Use one of {', '.join(map(str, THUMBNAIL_SIZES))} pixels.")
+        record = store.image(identity, image_id)
+        tag = thumbnails.etag(record["media_hash"], size)
+        headers = {"ETag": tag, "Cache-Control": "private, max-age=604800", "Vary": "Cookie"}
+        request.state.private_cacheable_response = True
+        if tag in request.headers.get("if-none-match", ""):
+            return Response(status_code=304, headers=headers)
+        return FileResponse(thumbnails.get(record["media_hash"], size), media_type="image/jpeg", headers=headers)
 
     @app.get("/api/hosted/images/{image_id}/original")
     def original_media(image_id: str, identity: Actor = Depends(actor)):

@@ -21,6 +21,14 @@ Only server-acknowledged work is in the archive. Unsent edits and recovery
 journals stored in a user's browser are not part of a server backup; resolve or
 retain them separately before maintenance.
 
+Preview thumbnails in the browse grids live under ``derived/thumbnails`` in the
+state directory. They are small JPEG copies made on first view from each image's
+working view, which the canvas also uses. They are a disposable cache: backups
+skip them, deleting the directory only means they are regenerated, and they
+never change originals or annotations. Browsers may keep a thumbnail privately
+for a week because an image's pixels never change; full images remain
+``no-store``.
+
 Run the CLI examples from the matching source checkout with the service's
 Python environment (for example, ``/opt/tator/.venv/bin/python`` in place of
 ``python``). They do not load the systemd environment file automatically.

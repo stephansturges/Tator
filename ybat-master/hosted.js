@@ -133,7 +133,7 @@
         // image's actual tranche scope instead of widening its canvas queue.
         if (state.view !== "incoming") { route.set("queue", state.view === "submitted" ? "review" : "confirmed"); if (state.view === "submitted" && state.filters.tranche) route.set("tranche", state.filters.tranche); }
         link.href = `/annotate?${route}`;
-        const photo = node("img"); photo.src = `/api/hosted/images/${encodeURIComponent(image.id)}/media`; photo.alt = image.filename; photo.loading = "lazy";
+        const photo = node("img"); photo.decoding = "async"; photo.onerror = () => { photo.onerror = null; photo.src = `/api/hosted/images/${encodeURIComponent(image.id)}/media`; }; photo.src = `/api/hosted/images/${encodeURIComponent(image.id)}/thumbnail`; photo.alt = image.filename; photo.loading = "lazy";
         const info = node("div", undefined, "card-info"); info.append(node("strong", image.filename));
         const labels = { confirmed: "Confirmed", assigned: "Assigned", returned: "Changes requested", submitted: "Ready for review", unassigned: "Not assigned" };
         info.append(node("small", `${labels[image.state] || image.state}${image.negative ? " · No target objects" : ""}`));

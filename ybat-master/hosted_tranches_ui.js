@@ -221,7 +221,7 @@
             const card = el("article", undefined, "hosted-card"); card.dataset.imageId = member.image_id;
             const info = el("div", undefined, "card-info"); info.append(el("strong", member.filename), el("small", labels[member.state] || member.state));
             if (member.can_view && member.image) {
-                const image = member.image, link = el("a"), photo = el("img"); photo.loading = "lazy"; photo.alt = member.filename; photo.src = `/api/hosted/images/${encodeURIComponent(image.id)}/media`;
+                const image = member.image, link = el("a"), photo = el("img"); photo.loading = "lazy"; photo.alt = member.filename; photo.decoding = "async"; photo.onerror = () => { photo.onerror = null; photo.src = `/api/hosted/images/${encodeURIComponent(image.id)}/media`; }; photo.src = `/api/hosted/images/${encodeURIComponent(image.id)}/thumbnail`;
                 const queue = {not_assigned: "draft", to_finish: "work", changes_requested: "work", awaiting_review: "review", approved: "confirmed"}[member.state];
                 link.href = queue ? scopeLink(image.id, queue === "confirmed" ? null : tranche.id, queue) : `/annotate?image=${encodeURIComponent(image.id)}`;
                 link.append(photo, info); card.append(link);
@@ -294,7 +294,7 @@
                     else if (check.checked) selectRows([image]); else { chosen.delete(image.id); update(); }
                     lastIndex = index;
                 } catch (error) { update(); app.notice(error.message, true); } };
-                img.src = `/api/hosted/images/${image.id}/media`; img.loading = "lazy"; img.alt = ""; label.append(check, img, document.createTextNode(image.filename)); grid.append(label);
+                img.decoding = "async"; img.onerror = () => { img.onerror = null; img.src = `/api/hosted/images/${encodeURIComponent(image.id)}/media`; }; img.src = `/api/hosted/images/${encodeURIComponent(image.id)}/thumbnail`; img.loading = "lazy"; img.alt = ""; label.append(check, img, document.createTextNode(image.filename)); grid.append(label);
             });
             if (!rows.length) grid.append(el("p", "No unallocated Incoming images match this search.")); more.hidden = !next; update();
         };

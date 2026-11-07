@@ -73,7 +73,7 @@
             gallery.querySelector("button[data-more]")?.remove();
             for (const proposal of result.captions) {
                 const card = node("article"), image = node("img");
-                image.src = `/api/hosted/images/${encodeURIComponent(proposal.image_id)}/media`; image.loading = "lazy"; image.alt = "Source image";
+                image.decoding = "async"; image.onerror = () => { image.onerror = null; image.src = `/api/hosted/images/${encodeURIComponent(proposal.image_id)}/media`; }; image.src = `/api/hosted/images/${encodeURIComponent(proposal.image_id)}/thumbnail`; image.loading = "lazy"; image.alt = "Source image";
                 card.append(image, node("p", proposal.caption || "No caption collected yet."));
                 if (proposal.caption) {
                     card.append(node("small", `${proposal.generated_qa_pairs.length} question-and-answer pairs · ${proposal.quality.final_status}`));

@@ -71,7 +71,7 @@
             if (!valid(ticket) || selected !== id) return;
             gallery.querySelector("button")?.remove();
             for (const item of result.captions) {
-                const card = node("article"), image = node("img"); image.src = `/api/hosted/images/${item.image_id}/media`; image.alt = item.row.image_name; image.loading = "lazy";
+                const card = node("article"), image = node("img"); image.decoding = "async"; image.onerror = () => { image.onerror = null; image.src = `/api/hosted/images/${encodeURIComponent(item.image_id)}/media`; }; image.src = `/api/hosted/images/${encodeURIComponent(item.image_id)}/thumbnail`; image.alt = item.row.image_name; image.loading = "lazy";
                 const inspect = node("a", "Review on image"); inspect.href = `/annotate?image=${encodeURIComponent(item.image_id)}&caption_batch=${encodeURIComponent(id)}`;
                 inspect.onclick = event => { event.preventDefault(); canvas.leaveFor(inspect.href).catch(error => { notice.textContent = error.message; }); };
                 card.append(image, node("strong", item.row.image_name), node("p", item.caption || "No accepted caption for this attempt."), inspect); gallery.append(card);

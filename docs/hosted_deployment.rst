@@ -123,6 +123,12 @@ The example expects these paths under the service account's home:
 * ``~/.local/share/tator-hosted``: private state and model caches.
 * ``~/.config/tator/hosted.env`` and ``models.json``: operator configuration.
 
+A release or state directory may be reached through a symlink for the service
+itself and for interactive model roots. Heavy analysis paths may not: give each
+``heavy_jobs`` ``native_root`` and every ``cache_inputs`` ``path`` its real
+location. Native analysis refuses a symlink anywhere in those paths, and the job
+fails with ``native_root_invalid`` or ``analysis_path_invalid``.
+
 For a new installation, create the directories, copy the configuration examples
 and install the unit::
 

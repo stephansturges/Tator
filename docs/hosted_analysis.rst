@@ -162,6 +162,14 @@ that bundle as not ready. Downloads resolve only registered artifacts belonging
 to the selected analysis; arbitrary file paths and annotator access are rejected.
 Reports, bundles and frozen source identities are part of server recovery.
 
+**Start task** first asks for confirmation and states how many confirmed images
+the run covers. Before any compute starts, the server freezes those images and
+prepares a private copy of each one. On a large dataset this preparation takes
+minutes; the dialog shows its progress and **Cancel this compute task** stops it
+cleanly, with no job created. Image loading and annotation continue meanwhile.
+A run is refused before preparation when the analysis disk lacks room for the
+copied images and model inputs, with the space it needs in the message.
+
 Saved analysis history is paginated. An administrator can reopen a task they
 started to follow its progress or request cancellation after navigating away.
 Completed results remain available when their originating snapshot becomes old.

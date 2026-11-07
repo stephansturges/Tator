@@ -45,7 +45,10 @@
     async function watch(requestId, ticket) {
         const state = await api(`/tools/requests/${encodeURIComponent(requestId)}`);
         if (!valid(ticket) || activeRequest !== requestId) return;
-        notice.textContent = `Compute: ${state.state.replaceAll("_", " ")}${state.error ? " · " + state.error : ""}`;
+        const progress = state.state === "admitting" && state.progress?.total ? ` · ${state.progress.done.toLocaleString()} of ${state.progress.total.toLocaleString()} images` : "";
+        notice.textContent = state.state === "admitting"
+            ? `Preparing inputs: ${(state.phase || "snapshot").replaceAll("_", " ")}${progress}. You can cancel until the run starts.`
+            : `Compute: ${state.state.replaceAll("_", " ")}${state.error ? " · " + state.error : ""}`;
         if (["completed", "failed", "cancelled", "interrupted", "stale", "unavailable"].includes(state.state)) {
             activeRequest = null; cancel?.remove(); cancel = null;
             await refreshHistory(ticket);
@@ -116,11 +119,22 @@
             recipe.onchange = render; render();
             act(controls, "Start task", async () => {
                 const parameters = Object.fromEntries(Object.entries(readers).map(([key, read]) => [key, read()]));
-                const body = { dataset_id: datasetId, job: recipe.value, operation_id: crypto.randomUUID(), parameters };
-                let result;
-                try { result = await api("/tools/heavy", body); } catch (problem) { if (problem.status) throw problem; result = await api("/tools/heavy", body); }
+                const definition = catalog.heavy_job_options[recipe.value];
+                const dataset = await api(`/datasets/${encodeURIComponent(datasetId)}`);
                 if (!valid(ticket)) return;
-                notice.textContent = "Snapshot saved. Waiting for annotation assistance to pause.";
+                const scope = definition.operation === "ingestion" ? `${candidates.length.toLocaleString()} selected Incoming images, compared with ${(dataset.counts?.confirmed || 0).toLocaleString()} confirmed images`
+                    : `all ${(dataset.counts?.confirmed || 0).toLocaleString()} confirmed images`;
+                if (!window.confirm(`Start "${definition.label || definition.operation}" on ${scope} of ${dataset.name}?\n\nLarge datasets can take hours. Annotation assistance pauses for everyone while it runs, and the server needs scratch disk space roughly the size of these images. You can cancel it from this dialog.`)) return;
+                const body = { dataset_id: datasetId, job: recipe.value, operation_id: crypto.randomUUID(), parameters };
+                // Preparing a large dataset can take minutes. An exact replay of the
+                // same command returns its ID and progress at once, so it can be
+                // followed and cancelled while preparation continues.
+                const first = api("/tools/heavy", body); first.catch(() => {});
+                const early = await Promise.race([first.then(value => ({value}), problem => ({problem})), new Promise(resolve => setTimeout(() => resolve(null), 1500))]);
+                if (early?.problem?.status) throw early.problem;
+                const result = early?.value || await api("/tools/heavy", body);
+                if (!valid(ticket)) return;
+                notice.textContent = "Preparing inputs. You can cancel until the run starts.";
                 await refreshHistory(ticket); await track(result.id, ticket);
             });
         }

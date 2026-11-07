@@ -255,6 +255,7 @@ async def _native_statistics(origin):
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page(viewport={'width': 1440, 'height': 1000})
         errors = []; page.on('pageerror', lambda error: errors.append(str(error)))
+        page.on('dialog', lambda dialog: dialog.accept())  # confirms the full-dataset run
         await sign_in(page, origin, 'admin')
         await page.locator('#hostedAnalysis').click()
         await expect(page.locator('#hostedAnalysisDialog')).to_be_visible()
@@ -285,6 +286,7 @@ async def _caption_export(origin):
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page(viewport={'width': 1440, 'height': 1000})
         errors = []; page.on('pageerror', lambda error: errors.append(str(error)))
+        page.on('dialog', lambda dialog: dialog.accept())  # confirms the full-dataset run
         await sign_in(page, origin, 'admin')
         # Caption export now opens from the canvas caption dialog through this route.
         dataset_id = await page.locator('#datasetChoice').input_value()

@@ -10,6 +10,7 @@ from pathlib import Path
 import shutil
 import tempfile
 import threading
+import traceback
 import uuid
 from typing import Literal
 
@@ -175,6 +176,7 @@ class ToolController:
         self._lock = threading.RLock()
         self._runtime = None
         self._pins = {}
+        self._admissions = {}
         self._publishing = set()
         self._publication_threads = []
         self._reaper_stop = threading.Event()
@@ -1015,6 +1017,9 @@ class ToolController:
     def status(self, actor, request_id):
         with self.store.read_connection() as con:
             self.store._actor(con, actor)
+        admission = self._admissions.get(request_id)
+        if admission is not None and admission["actor_id"] == actor.user_id:
+            return self._admission_status(request_id, admission)
         runtime = self._ensure_runtime()
         with self.store.read_connection() as con:
             grant = self.job_authority.row(con, request_id)
@@ -1071,6 +1076,13 @@ class ToolController:
         return result
 
     def cancel(self, actor, request_id):
+        admission = self._admissions.get(request_id)
+        if admission is not None and admission["actor_id"] == actor.user_id:
+            with self.store.read_connection() as con:
+                self.store._actor(con, actor, admin=True)
+            if admission["state"] == "admitting":
+                admission["cancel"].set(); admission["phase"] = "cancelling"
+            return self._admission_status(request_id, admission)
         status = self.status(actor, request_id)
         with self.store.transaction() as con:
             grant = self.job_authority.row(con, request_id)
@@ -1102,12 +1114,24 @@ class ToolController:
                 **({"allowed_parameters": definition.get("allowed_parameters", [])} if native else {}),
                 "canonical_root": str(self.media_root)}, definition["device"])
         new_command = False
+        planned_id = uuid.uuid4().hex
+        # Register progress and a cancel flag before the command commits, so an
+        # exact replay of this command can always find and report it.
+        admission = {"actor_id": actor.user_id, "state": "admitting", "phase": "snapshot", "done": 0, "total": None,
+                     "error": None, "cancel": threading.Event()}
+        with self._lock:
+            self._admissions[planned_id] = admission
         def reserve(con):
             nonlocal new_command
             self.store._dataset(con, body.dataset_id)
             new_command = True
-            return {"id": uuid.uuid4().hex, "state": "admitting"}
-        receipt = self.store._command(actor, body.operation_id, "request_heavy_tool", body.model_dump(), reserve, admin=True)
+            return {"id": planned_id, "state": "admitting"}
+        try:
+            receipt = self.store._command(actor, body.operation_id, "request_heavy_tool", body.model_dump(), reserve, admin=True)
+        finally:
+            if not new_command:
+                with self._lock:
+                    self._admissions.pop(planned_id, None)
         request_id = receipt["id"]
         if not new_command:
             try:
@@ -1117,6 +1141,40 @@ class ToolController:
                     raise
                 return {"id": request_id, "state": "unavailable", "error": "runtime_request_not_retained",
                         "detail": "This command will not run again. Submit a new command if another run is needed."}
+        # Freezing inputs can take minutes for a large dataset. A replay of this
+        # exact command returns the progress below and its ID can be cancelled.
+        return self._admit_heavy(actor, body, definition, spec, native, request_id, admission)
+
+    @staticmethod
+    def _admission_status(request_id, admission):
+        status = {"id": request_id, "state": admission["state"], "phase": admission["phase"], "result_available": False,
+                  "progress": {"done": admission["done"], "total": admission["total"]}}
+        if admission["error"]:
+            status["error"] = admission["error"]
+        return status
+
+    @staticmethod
+    def _admission_check(admission):
+        if admission["cancel"].is_set():
+            raise DomainError("request_cancelled", 409, "The compute task was cancelled before it started.")
+
+    def _heavy_disk_check(self, content, native_config):
+        """Refuse a run whose workspace copy cannot fit on the analysis disk."""
+        probe = Path(native_config["native_root"])
+        while not probe.exists():
+            probe = probe.parent
+        hashes = sorted({image["media_hash"] for image in content["images"]})
+        total = 0
+        with self.store.read_connection() as con:
+            for start in range(0, len(hashes), 500):
+                chunk = hashes[start:start + 500]
+                total += con.execute("SELECT COALESCE(SUM(size_bytes),0) FROM hosted_media WHERE sha256 IN (" + ",".join("?" * len(chunk)) + ")", chunk).fetchone()[0]
+        total += sum(int(item.get("size_bytes") or 0) for item in native_config.get("cache_inputs", []))
+        needed, free = int(total * 1.1) + 2 * 1024 ** 3, shutil.disk_usage(probe).free
+        if free < needed:
+            raise DomainError("heavy_disk_insufficient", 507, f"Not enough free disk space for this run: it needs about {needed / 1e9:.0f} GB on the analysis disk and {free / 1e9:.0f} GB is free. Free some space before starting it.")
+
+    def _admit_heavy(self, actor, body, definition, spec, native, request_id, admission):
         directory = None
         try:
             runtime = self._ensure_runtime()
@@ -1194,19 +1252,31 @@ class ToolController:
                     native_config["cache_inputs"] = list(cache.values())
                     native_config["cache_input_roots"] = [*native_config.get("cache_input_roots", []), str(directory)]
                 spec = AdapterSpec(spec.factory, native_config, spec.device)
-                for image in content["images"]:
+            self._admission_check(admission)
+            if native:
+                admission["phase"] = "checking disk space"
+                self._heavy_disk_check(content, native_config)
+            admission.update(phase="preparing images", total=len(content["images"]))
+            for index, image in enumerate(content["images"], 1):
+                self._admission_check(admission)
+                # Lock per image only, so image loading elsewhere never waits
+                # for a whole dataset to be prepared.
+                with self.artifacts.exclusive():
                     view = self.media.resolve(image["media_hash"])
                     ref = self.artifacts.pin(self.media.reference(view), directory)
-                    image["working_media"] = view
-                    image["media_path"] = str(directory / ref.sha256)
-                manifest = directory / "canonical-snapshot.json"
-                with manifest.open("x", encoding="utf-8") as stream:
-                    json.dump(content, stream, allow_nan=False, sort_keys=True, separators=(",", ":"))
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                manifest.chmod(0o400)
-                reference = {key: content[key] for key in ("snapshot_id", "dataset_id", "revision", "class_version", "settings_version")}
-                reference.update(manifest_path=str(manifest), manifest_sha256=file_digest(manifest))
+                image["working_media"] = view
+                image["media_path"] = str(directory / ref.sha256)
+                admission["done"] = index
+            self._admission_check(admission)
+            admission["phase"] = "starting"
+            manifest = directory / "canonical-snapshot.json"
+            with manifest.open("x", encoding="utf-8") as stream:
+                json.dump(content, stream, allow_nan=False, sort_keys=True, separators=(",", ":"))
+                stream.flush()
+                os.fsync(stream.fileno())
+            manifest.chmod(0o400)
+            reference = {key: content[key] for key in ("snapshot_id", "dataset_id", "revision", "class_version", "settings_version")}
+            reference.update(manifest_path=str(manifest), manifest_sha256=file_digest(manifest))
             with self._lock:
                 context = RequestContext(actor.user_id, body.dataset_id, "", snapshot_id, 0, "", actor_role=actor.role,
                     session_id=actor.session_id, instance_id=actor.instance_id, operation=definition["operation"], model_config=spec.config,
@@ -1225,6 +1295,7 @@ class ToolController:
                     {**parameters, "canonical_snapshot": reference, **({"candidate_set": candidate_reference} if candidate_reference else {})}, drain_timeout=float(definition.get("drain_timeout", 30)),
                     timeout=float(definition.get("timeout", 3600)), request_id=request_id)
                 self._pins[request_id], directory = (directory, actor.user_id), None
+                self._admissions.pop(request_id, None)
                 # Admission has committed under the authenticated login. A
                 # logout before this acknowledgement does not revoke the job.
                 accepted = runtime.request_status(request_id, actor_id=actor.user_id)
@@ -1235,15 +1306,24 @@ class ToolController:
                         accepted.update(state='completed', error=None, result_available=True)
                     elif accepted['state'] in TERMINAL:
                         accepted.update(state='publishing', result_available=False)
-                return accepted
+            if admission["cancel"].is_set():
+                # Cancel arrived during the hand-off; stop the now-registered job.
+                try:
+                    accepted = self.cancel(actor, request_id)
+                except Exception:
+                    traceback.print_exc()
+            return accepted
         except Exception as exc:
+            cancelled = isinstance(exc, DomainError) and exc.code == "request_cancelled"
             code = exc.code if isinstance(exc, (DomainError, RuntimeRejected)) else "analysis_admission_failed"
             with self.store.transaction() as con:
-                self.job_authority.terminal(con, request_id, "failed", code)
+                self.job_authority.terminal(con, request_id, "cancelled" if cancelled else "failed", code)
+            detail = exc.detail if isinstance(exc, DomainError) and isinstance(exc.detail, str) else code
+            admission.update(state="cancelled" if cancelled else "failed", phase="stopped", error=detail)
             raise
         finally:
             if directory:
-                shutil.rmtree(directory)
+                shutil.rmtree(directory, ignore_errors=True)
 
     def close(self):
         self.paid_batches.close()

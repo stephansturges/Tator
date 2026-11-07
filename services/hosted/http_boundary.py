@@ -7,8 +7,11 @@ class RequestBodyTooLarge(Exception):
 
 
 class BodyLimitMiddleware:
-    def __init__(self, app, json_limit=17 * 1024 * 1024, upload_limit=260 * 1024 * 1024):
+    def __init__(self, app, json_limit=17 * 1024 * 1024, upload_limit=260 * 1024 * 1024, large_prefixes=(), large_limit=None):
         self.app, self.json_limit, self.upload_limit = app, json_limit, upload_limit
+        # Streamed pass-through paths (the admin workbench) carry dataset and
+        # model uploads; they are never parsed or buffered by this process.
+        self.large_prefixes, self.large_limit = tuple(large_prefixes), large_limit
 
     async def __call__(self, scope, receive, send):
         if scope['type'] != 'http':
@@ -16,6 +19,8 @@ class BodyLimitMiddleware:
         headers = dict(scope.get('headers', []))
         upload = headers.get(b'content-type', b'').lower().startswith(b'multipart/form-data')
         limit = self.upload_limit if upload else self.json_limit
+        if self.large_limit and scope.get('path', '').startswith(self.large_prefixes):
+            limit = self.large_limit
         try:
             declared = int(headers.get(b'content-length', b'0'))
         except ValueError:

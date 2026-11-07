@@ -1,0 +1,42 @@
+[Unit]
+Description=Tator admin workbench (full legacy tools behind the hosted service)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tator
+Group=tator
+# The legacy backend keeps every output below its working directory. Use a
+# real directory (no symlinks) on the same filesystem as the hosted state, so
+# hosted workbench copies can hard-link images instead of duplicating them.
+WorkingDirectory=/var/lib/tator-workbench
+Environment=PYTHONPATH=/opt/tator
+Environment=PYTHONUNBUFFERED=1
+Environment=DATASET_ROOT=/var/lib/tator-workbench/uploads/datasets
+Environment=DATASET_LINK_ROOTS=/var/lib/tator-workbench
+Environment=HF_HOME=/var/lib/tator-workbench/model-cache/huggingface
+Environment=TORCH_HOME=/var/lib/tator-workbench/model-cache/torch
+# Keep the workbench on its own GPU; hosted jobs keep the other one.
+Environment=CUDA_VISIBLE_DEVICES=1
+# No sign-in of its own: serve it on a Unix socket in a 0700 directory, never on
+# a TCP port. The hosted service (same user) admits enabled administrators and
+# proxies /workbench/api to it. Hosted setting:
+#   TATOR_HOSTED_WORKBENCH_URL=unix:/run/tator-workbench/api.sock
+RuntimeDirectory=tator-workbench
+RuntimeDirectoryMode=0700
+ExecStart=/opt/tator/.venv/bin/python -m uvicorn app:app --uds /run/tator-workbench/api.sock --workers 1 --no-access-log
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=90
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/tator-workbench
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

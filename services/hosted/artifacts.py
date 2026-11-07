@@ -260,6 +260,21 @@ class ArtifactStore:
             fsync_directory(directory)
             return checked
 
+    def link_to(self, reference: ArtifactRef | str, target: str | Path) -> ArtifactRef:
+        """Hard-link one verified immutable blob to a new, absent named path.
+
+        Blobs are read-only (0400), so a consumer cannot modify the shared
+        inode in place; removing the link never affects the store.
+        """
+        target = Path(target)
+        parent = target.parent
+        if not stat.S_ISDIR(parent.lstat().st_mode):
+            raise ArtifactError("Link destination is not a real directory.")
+        with self.exclusive():
+            checked = self.verify(reference)
+            os.link(self._path(checked.sha256), target, follow_symlinks=False)
+            return checked
+
     def delete_unreferenced(self, digest: str, *, is_referenced: Callable[[str], bool]) -> bool:
         """Low-level GC primitive; caller must also enforce purge/retention policy.
 

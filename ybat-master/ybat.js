@@ -721,7 +721,10 @@
     const YOLO_EXPORT_HANDLE_STORE = "handles";
     const YOLO_EXPORT_DIRECTORY_HANDLE_KEY = "yoloCaptionsExportDirectory";
     const hostedMode = Boolean(window.TatorHosted);
-    let API_ROOT = hostedMode ? window.location.origin : loadStoredApiRoot();
+    // The hosted admin workbench serves this page under a path prefix and
+    // supplies its private backend root; a stored local root must not win.
+    const workbenchApiRoot = !hostedMode && typeof window.TATOR_WORKBENCH?.apiRoot === "string" ? window.TATOR_WORKBENCH.apiRoot : "";
+    let API_ROOT = hostedMode ? window.location.origin : (workbenchApiRoot || loadStoredApiRoot());
     window.getTatorApiRoot = () => API_ROOT;
     let yoloExportDirectoryHandle = null;
     let yoloExportDirectoryHandleLoaded = false;
@@ -994,12 +997,17 @@
         return { method, headers: { "Content-Type": "application/json", ...(backendId ? { "X-Tator-Backend-Id": backendId } : {}) }, body: JSON.stringify(value), ...(signal ? { signal } : {}) };
     }
 
+    function apiPathUrl(path, apiRoot) {
+        // Server paths are relative to the API root, which may carry a prefix.
+        return /^\/(?!\/)/.test(path) ? new URL(`${String(apiRoot).replace(/\/$/, "")}${path}`) : new URL(path, `${apiRoot}/`);
+    }
+
     function dqeSourceBase(source, apiRoot) {
         const mode = source.mode;
         const path = source.annotation_base || (mode === "linked"
             ? `/datasets/${encodeURIComponent(source.dataset_id || source.datasetId || "")}/annotation`
             : `/datasets/transient/${encodeURIComponent(source.session_id || source.sessionId || "")}/annotation`);
-        const base = new URL(path, `${apiRoot}/`);
+        const base = apiPathUrl(path, apiRoot);
         if (base.origin !== new URL(apiRoot).origin || !/\/datasets\/(?:transient\/)?[^/]+\/annotation\/?$/.test(base.pathname)) {
             throw new Error("The selected source is not an annotation endpoint on this backend.");
         }
@@ -1332,7 +1340,7 @@
                 if (!window.confirm(`Restore ${item.label || "this dataset"} to the library?`)) return;
                 const context = dqeLibrary.getContext();
                 const path = item.capabilities?.restore_url || `/datasets/trash/${encodeURIComponent(item.source?.id || "")}/restore`;
-                const url = new URL(path, `${context.apiRoot}/`);
+                const url = apiPathUrl(path, context.apiRoot);
                 if (url.origin !== new URL(context.apiRoot).origin) throw new Error("The restore action belongs to another backend.");
                 await dqeRequestJson(url.href, dqeJson("POST", { expected_revision: item.revision }, undefined, context.backendId));
                 await Promise.allSettled([refreshDatasetList(), refreshDatasetTrashList()]);
@@ -66293,10 +66301,12 @@ function captureClassSplitGraphSettlementState(pointIds) {
     }
 
     function renderClassSplitQwenEvidenceThumb(item, citedIds = null) {
-        const url = String(item?.artifact_url || "");
-        if (!url) {
+        const path = String(item?.artifact_url || "");
+        if (!path) {
             return "";
         }
+        // Backend paths are rooted at the API root (the admin workbench serves it under a prefix).
+        const url = /^\/(?!\/)/.test(path) ? apiPathUrl(path, API_ROOT).href : path;
         const evidenceId = String(item?.evidence_id || "").trim();
         const title = String(item?.title || item?.kind || "VLM evidence").trim();
         const role = classSplitQwenReviewEvidenceRole(item, citedIds);

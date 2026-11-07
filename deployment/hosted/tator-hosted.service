@@ -23,6 +23,8 @@ PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/var/lib/tator-hosted
+# Optional admin workbench root; hosted writes workbench copies there.
+ReadWritePaths=-/var/lib/tator-workbench
 # GPU devices remain accessible; model workers have the same service identity.
 LimitNOFILE=65536
 

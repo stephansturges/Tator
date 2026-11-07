@@ -89,6 +89,9 @@ configuration. Edit the installed files before starting the service:
   replace them with the devices and model definitions available on this host.
 * Optional ``TATOR_HOSTED_PROVIDER_PRICING`` names a JSON file of verified
   provider prices and token limits; see `Paid providers`_ below.
+* Optional ``TATOR_HOSTED_WORKBENCH_URL`` and ``TATOR_HOSTED_WORKBENCH_ROOT``
+  enable the `admin workbench <hosted_workbench.rst>`_, a second service with
+  the full original tools for administrators.
 
 The `environment example <../deployment/hosted/hosted.env.example>`_,
 `model example <../deployment/hosted/models.example.json>`_ and
@@ -110,7 +113,7 @@ Keep passwords out of shell arguments and configuration examples. Later,
 invite users through **People** and deliver their invitation links yourself.
 
 Alternative: run under an existing Linux account
------------------------------------------------
+------------------------------------------------
 
 The `user service <../deployment/hosted/tator-hosted-user.service>`_ runs through
 ``systemctl --user`` and needs no system-wide Tator service account. It uses the

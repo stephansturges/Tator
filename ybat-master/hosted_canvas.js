@@ -861,7 +861,7 @@
         get session() { return accountChanged ? null : boot; },
         async leaveFor(destination) {
             const target = new URL(destination, location.href);
-            if (target.origin !== location.origin || !["/", "/annotate"].includes(target.pathname)) throw new Error("Choose a hosted workspace destination.");
+            if (target.origin !== location.origin || !["/", "/annotate", "/workbench"].includes(target.pathname)) throw new Error("Choose a hosted workspace destination.");
             const blocked = busy || handoff || recoveryRequired || accountChanged || !ready
                 ? "Finish saving or reconnect editing before leaving this image."
                 : window.TatorHostedCanvas.hasPendingTools() || [...activeTools.values()].some(item => !["sam_preload", "sam_state"].includes(item.operation))

@@ -1212,6 +1212,9 @@
             if (!value) return "";
             if (/^https?:\/\//.test(value) || value.startsWith("data:")) return value;
             const base = new URL(context.apiRoot, root.location.href);
+            // In the admin workbench the legacy API lives under a path prefix.
+            const prefix = base.pathname.replace(/\/$/, "");
+            if (root.TATOR_WORKBENCH && value.startsWith("/") && prefix && !value.startsWith(`${prefix}/`)) return `${context.apiRoot}${value}`;
             return value.startsWith("/dataset_pruning/") ? `${context.apiRoot}${value}` : value.startsWith("/") ? new URL(value, base.origin).href : `${context.apiRoot}/${value}`;
         }
         function objectCoverageDialog(row) {

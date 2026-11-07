@@ -17,6 +17,8 @@ Use the hosted workspace
   pruning, training and incoming-data comparisons against frozen dataset inputs.
 * `Dataset pruning <dataset_pruning.rst>`_: understand similarity recipes,
   image families, object weighting, unique-object loss and reviewed exports.
+* `Admin workbench <hosted_workbench.rst>`_: the full original tools for
+  administrators, and applying workbench label edits to a hosted dataset.
 
 Operate a hosted server
 -----------------------

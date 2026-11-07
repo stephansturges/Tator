@@ -21,7 +21,7 @@ ADMIN_OPERATIONS = frozenset({
     "publish_native_analysis", "apply_analysis_annotations", "dqe_apply_objects", "dqe_disposition",
     "dqe_create_batch", "dqe_resume_batch", "dqe_cancel_batch", "salad_profiles", "register_salad_head",
     "configure_provider", "reconcile_provider_call", "review_caption_instructions", "caption_batch_start",
-    "apply_caption_proposal", "caption_batch_cancel", "caption_batch_resume",
+    "apply_caption_proposal", "caption_batch_cancel", "caption_batch_resume", "workbench_apply_image",
 })
 IMAGE_OPERATIONS = frozenset({"save", "release_editor", "submit", "paid_batch_apply"})
 CAPTION_OPERATIONS = frozenset({"start_caption_job", "cancel_caption_job", "resume_caption_job"})

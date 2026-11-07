@@ -35,6 +35,8 @@ from services.hosted.tool_api import install_tool_api
 from services.hosted.provider_api import install_provider_api
 from services.hosted.analysis_api import install_analysis_api
 from services.hosted.tranches_api import install_tranches_api
+from services.hosted.workbench_bridge import WorkbenchBridge
+from services.hosted.workbench import PREFIX as WORKBENCH_PREFIX, UPLOAD_LIMIT as WORKBENCH_UPLOAD_LIMIT, install_workbench, workbench_url
 from services.hosted.types import Actor, MutationContext
 from services.hosted.preconditions import ImagePrecondition, precondition_payload
 from services.hosted.media import HostedMedia, inspect_media
@@ -188,6 +190,14 @@ class ClassRequest(BaseModel):
     operation_id: str = Field(min_length=8, max_length=128)
 
 
+class WorkbenchApply(BaseModel):
+    model_config = {"extra": "forbid"}
+    operation_id: str = Field(min_length=8, max_length=128)
+    # The reviewed images and the exact workbench label contents seen in review.
+    expected: dict[str, str]
+    confirm_empty: bool = False
+
+
 class ClassReview(BaseModel):
     approved: bool
     operation_id: str = Field(min_length=8, max_length=128)
@@ -195,7 +205,8 @@ class ClassReview(BaseModel):
     feedback: str = Field(default="", max_length=10000)
 
 
-def create_app(state_dir: str | Path | None = None, *, testing=False, origin: str | None = None) -> FastAPI:
+def create_app(state_dir: str | Path | None = None, *, testing=False, origin: str | None = None, workbench: str | None = None,
+               workbench_root: str | Path | None = None) -> FastAPI:
     configured = state_dir or os.environ.get("TATOR_HOSTED_STATE_DIR")
     if not configured:
         raise RuntimeError("Set TATOR_HOSTED_STATE_DIR to a new dedicated hosted state directory.")
@@ -216,6 +227,8 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
     artifacts = ArtifactStore(root / "artifacts")
     media_store = HostedMedia(store, artifacts)
     thumbnails = Thumbnails(root / "derived" / "thumbnails", media_store, artifacts)
+    workbench_address = workbench_url(workbench if workbench is not None else os.environ.get("TATOR_HOSTED_WORKBENCH_URL"))
+    shutdown_hooks = []
     @asynccontextmanager
     async def control_lifespan(_application):
         descriptor = os.open(root / "control.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
@@ -232,6 +245,8 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
                 con.execute("UPDATE hosted_provider_calls SET state='unknown' WHERE state='dispatched' AND NOT EXISTS (SELECT 1 FROM hosted_paid_batch_rows r WHERE r.call_id=hosted_provider_calls.id)")
             yield
         finally:
+            for hook in shutdown_hooks:
+                await hook()
             os.close(descriptor)
 
     app = FastAPI(title="Tator hosted authority", docs_url=None, redoc_url=None, openapi_url=None, lifespan=control_lifespan)
@@ -240,7 +255,7 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
     app.state.root = root
     public_assets = PublicStaticAssets(WEB_ROOT)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[parsed.hostname])
-    app.add_middleware(BodyLimitMiddleware)
+    app.add_middleware(BodyLimitMiddleware, large_prefixes=(WORKBENCH_PREFIX,), large_limit=WORKBENCH_UPLOAD_LIMIT)
 
     @app.exception_handler(DomainError)
     async def domain_error(_request, error):
@@ -279,7 +294,7 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
             length = int(request.headers.get("content-length", "0"))
         except ValueError:
             return finish(JSONResponse({"error": "invalid_content_length"}, status_code=400))
-        if length > 260 * 1024 * 1024:
+        if length > (WORKBENCH_UPLOAD_LIMIT if request.url.path.startswith(WORKBENCH_PREFIX) else 260 * 1024 * 1024):
             return finish(JSONResponse({"error": "request_too_large"}, status_code=413))
         if request.url.path.startswith("/api/hosted/") and request.url.path not in {"/api/hosted/login", "/api/hosted/redeem"}:
             # Authenticate before multipart/JSON parsers consume the request.
@@ -314,7 +329,8 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
     @app.post("/api/hosted/login")
     def login(body: Credentials, request: Request):
         result = auth.login(body.username, body.password, request.client.host if request.client else "unknown")
-        response = JSONResponse({"user": public_identity(result.actor), "csrf": result.csrf, "instance_id": auth.instance_id, "expires_at": result.expires_at})
+        response = JSONResponse({"user": public_identity(result.actor), "csrf": result.csrf, "instance_id": auth.instance_id, "expires_at": result.expires_at,
+                                 "workbench": bool(workbench_address) and result.actor.role == "admin"})
         response.set_cookie(COOKIE, result.token, max_age=auth.session_seconds, secure=not testing, httponly=True, samesite="strict", path="/")
         return response
 
@@ -325,7 +341,8 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
 
     @app.get("/api/hosted/session")
     def session(request: Request, identity: Actor = Depends(actor)):
-        return {"user": public_identity(identity), "csrf": auth.session_csrf(request.cookies[COOKIE]), "instance_id": auth.instance_id}
+        return {"user": public_identity(identity), "csrf": auth.session_csrf(request.cookies[COOKIE]), "instance_id": auth.instance_id,
+                "workbench": bool(workbench_address) and identity.role == "admin"}
 
     @app.post("/api/hosted/logout")
     def logout(request: Request, _identity: Actor = Depends(actor)):
@@ -582,9 +599,35 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
         return app.openapi()
 
     install_tranches_api(app, store, actor, admin)
+    shutdown_hooks.append(install_workbench(app, auth=auth, origin=origin, cookie=COOKIE, web_root=WEB_ROOT, url=workbench_address))
     install_operations_api(app, store, auth, artifacts, admin, root)
     install_tool_api(app, store, auth, artifacts, actor, admin, root)
     install_provider_api(app, store, artifacts, actor, admin)
+    bench_root = workbench_root if workbench_root is not None else os.environ.get("TATOR_HOSTED_WORKBENCH_ROOT")
+    bench_root = Path(bench_root).resolve() if bench_root else None
+    if workbench_address and (bench_root is None or not bench_root.is_dir()):
+        raise RuntimeError("Set TATOR_HOSTED_WORKBENCH_ROOT to the workbench service's existing storage root.")
+    bridge = app.state.workbench_bridge = WorkbenchBridge(store, artifacts, app.state.tools.operations, bench_root, workbench_address)
+
+    @app.get("/api/hosted/workbench/bridges")
+    def workbench_bridges(dataset_id: str, identity: Actor = Depends(admin)):
+        return {"bridges": bridge.bridges(identity, dataset_id), "available": bridge.available}
+
+    @app.post("/api/hosted/datasets/{dataset_id}/workbench/export")
+    def workbench_export(dataset_id: str, identity: Actor = Depends(admin)):
+        return bridge.start_export(identity, dataset_id)
+
+    @app.get("/api/hosted/workbench/jobs/{job_id}")
+    def workbench_job(job_id: str, identity: Actor = Depends(admin)):
+        return bridge.job(identity, job_id)
+
+    @app.get("/api/hosted/workbench/bridges/{bridge_id}/changes")
+    def workbench_changes(bridge_id: str, identity: Actor = Depends(admin)):
+        return bridge.changes(identity, bridge_id)
+
+    @app.post("/api/hosted/workbench/bridges/{bridge_id}/apply")
+    def workbench_apply(bridge_id: str, body: WorkbenchApply, identity: Actor = Depends(admin)):
+        return bridge.start_apply(identity, bridge_id, expected=body.expected, confirm_empty=body.confirm_empty, operation_id=body.operation_id)
     app.state.tools.provider_gateway = app.state.provider_gateway
     install_analysis_api(app, store, artifacts, actor, admin, app.state.tools.analysis)
 
@@ -643,7 +686,7 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
         bootstrap = json.dumps({"image_id": image, "user": {"user_id": identity.user_id,
             "username": identity.username, "role": identity.role},
             "scope": navigation["scope"], "tranche": navigation["tranche"],
-            "requested_scope": requested_scope, "scope_left": scope_left,
+            "requested_scope": requested_scope, "scope_left": scope_left, "workbench": bool(workbench_address) and identity.role == "admin",
             "csrf": auth.session_csrf(request.cookies[COOKIE]), "instance_id": auth.instance_id}).replace("<", "\\u003c")
         html = (WEB_ROOT / "tator.html").read_text()
         # Hosted annotation exposes only the labeling pane. Workspace graphs

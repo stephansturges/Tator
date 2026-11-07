@@ -7,6 +7,8 @@ annotation view. **Train models** lists the supported training tasks. Each
 entry shows that tool's server-configured tasks and saved results. Leaving the
 canvas saves the current image and releases its editing reservation first.
 **Quality & compute** remains the advanced launcher for all job types.
+On a server with the `admin workbench <hosted_workbench.rst>`_, these entries
+open the full workbench tabs instead, and **Server jobs** opens this launcher.
 Review the parameters and select **Start task** to run the selected operation.
 If no compute recipes are configured, saved results remain readable; an operator
 must configure the available tasks before a new run can start.

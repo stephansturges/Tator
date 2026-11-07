@@ -1,0 +1,21 @@
+#hostedWorkbenchBar{position:sticky;top:0;z-index:1000;display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:8px 16px;background:#0f3b31;color:#e9f6f1;font:14px/1.4 system-ui,-apple-system,sans-serif}
+#hostedWorkbenchBar a{color:#9fe3c9;font-weight:600;text-decoration:none}#hostedWorkbenchBar a:hover{text-decoration:underline}
+#hostedWorkbenchBar span{color:#bcd8cf;font-size:13px}
+#hostedWorkbenchBar button{font:inherit;padding:4px 10px;border-radius:6px;border:1px solid #9fe3c9;background:transparent;color:#e9f6f1;cursor:pointer}
+.hosted-wb-dialog{width:min(860px,calc(100vw - 32px));max-height:calc(100vh - 48px);padding:20px 24px;border:1px solid #c9d6d1;border-radius:10px;font:14px/1.45 system-ui,-apple-system,sans-serif;color:#18241f;background:#fff}
+.hosted-wb-dialog::backdrop{background:rgba(10,25,20,.45)}
+.hosted-wb-dialog h2{margin:0 0 6px;font-size:18px}.hosted-wb-dialog h3{margin:16px 0 6px;font-size:15px}
+.hosted-wb-help{margin:0 0 12px;color:#4a5a54}
+.hosted-wb-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.hosted-wb-row select{min-width:220px;padding:4px 6px}
+.hosted-wb-dialog button{font:inherit;padding:5px 12px;border-radius:6px;border:1px solid #8aa79c;background:#f3f7f5;color:#18241f;cursor:pointer}
+.hosted-wb-dialog button.primary{background:#0f3b31;border-color:#0f3b31;color:#fff}
+.hosted-wb-dialog button:disabled{opacity:.5;cursor:default}
+.hosted-wb-status{min-height:1.4em;margin:8px 0}.hosted-wb-status[data-tone=error]{color:#a32020}.hosted-wb-status[data-tone=ok]{color:#1d6b4a}
+.hosted-wb-copies ul{list-style:none;margin:0;padding:0}
+.hosted-wb-copies li{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:8px 0;border-top:1px solid #e3ebe7}
+.hosted-wb-copies li span{display:flex;flex-direction:column}.hosted-wb-copies small{color:#5b6b65}
+.hosted-wb-table{max-height:280px;overflow:auto;border:1px solid #e3ebe7;border-radius:6px}
+.hosted-wb-table table{width:100%;border-collapse:collapse}.hosted-wb-table th,.hosted-wb-table td{text-align:left;padding:4px 8px;border-bottom:1px solid #eef3f1;vertical-align:top}
+.hosted-wb-table tr.conflict td{color:#8a4b00}
+.hosted-wb-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:14px}

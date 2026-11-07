@@ -37,8 +37,9 @@ also have a top navigation bar: **Datasets**, **Data Quality Explorer**,
 **Analysis presets**. Leaving annotation for an analysis saves the current image
 and releases its editing reservation first; a failed save keeps you on the image.
 These destinations use the hosted dataset and its versioned analysis results.
-The legacy local-file panes remain hidden because they use a different storage
-and permission model. The administrator navigation is never shown to annotators.
+When the server runs the `admin workbench <hosted_workbench.rst>`_, these
+entries open the full original tools instead, and **More tools** and **Server
+jobs** appear. The administrator navigation is never shown to annotators.
 
 **Admin workspace** returns to the selected dataset, where **People**, **Classes**,
 **Dataset guidance** and **Export & recovery** provide administration controls.

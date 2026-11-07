@@ -250,7 +250,7 @@ class NativeAnalysisAdapter:
         # Model paths are trusted, relative references to the verified copies.
         verified_paths = {NAMESPACES[item["namespace"]] + "/" + item["relative_path"] for item in copied}
         for name, relative in self.config.get("model_environment", {}).items():
-            if name in {"MLX_DINOV3_MODEL_ROOT", "CRADIO_MLX_ROOT"}:
+            if name in {"MLX_DINOV3_MODEL_ROOT", "CRADIO_MLX_ROOT", "DINOV3_TORCH_MODEL_ROOT", "CRADIO_TORCH_MODEL_ROOT"}:
                 relative = _safe_relative(relative)
                 path = directory / relative
                 expected = {member for member in verified_paths if member.startswith(relative + "/")}

@@ -118,6 +118,14 @@ class HostedOperations:
         con.execute("INSERT INTO hosted_archives(id,kind,target_id,dataset_id,state,archived_at,actor_id,reason,captured_json) "
                     "VALUES (?,?,?,?,'archived',?,?,?,?)", (archive_id, kind, target_id, dataset_id, now, actor.user_id, reason, _json(captures)))
         for image in images:
+            member = self.store._member(con, image["id"])
+            if image["state"] == "submitted":
+                review_id = self.store._review(con, actor, image, "withdrawn", reason or "Archived; restore returns this image to Incoming.")
+                self.store._event(con, actor, dataset_id, image["id"], "submission_withdrawn", {"review_id": review_id, "archive_id": archive_id})
+            if member:
+                self.store._finish_member(con, member, "archived", actor.user_id, reason, structural=True)
+            if image["state"] != "confirmed":
+                self.store._handoff(con, image["id"], "unassigned", assignee=None, assignment=None, actor_id=actor.user_id)
             con.execute("INSERT INTO hosted_archived_images VALUES (?,?,?)", (image["id"], archive_id, image["current_version"]))
             con.execute("UPDATE hosted_images SET generation=generation+1,updated_at=? WHERE id=?", (now, image["id"]))
             con.execute("DELETE FROM hosted_editor_leases WHERE image_id=?", (image["id"],))
@@ -187,6 +195,8 @@ class HostedOperations:
                 image = self.store._image(con, member["image_id"], include_archived=True)
                 if image["current_version"] != member["version_id"] or image["current_version"] != captures[image["id"]]["version_id"]:
                     raise DomainError("archive_version_changed", 409)
+                if image["state"] != "confirmed":
+                    con.execute("UPDATE hosted_images SET state='unassigned',assignee_id=NULL,assignment_id=NULL,active_submission=NULL WHERE id=?", (image["id"],))
                 con.execute("UPDATE hosted_images SET generation=generation+1,updated_at=? WHERE id=?", (self.store.clock(), image["id"]))
                 self.store._event(con, actor, archive["dataset_id"], image["id"], "image_restored", {"archive_id": archive_id})
             con.execute("DELETE FROM hosted_archived_images WHERE archive_id=?", (archive_id,))
@@ -586,6 +596,8 @@ class HostedOperations:
         version = connection.execute("SELECT version FROM hosted_schema WHERE component='store'").fetchone()
         if not version or version[0] != SCHEMA_VERSION:
             raise DomainError("recovery_schema_unsupported", 409)
+        from .tranche_schema import validate_tranches
+        validate_tranches(connection)
         available = {row["sha256"]: row["size_bytes"] for row in manifest["artifacts"]}
         for reference in HostedOperations.artifact_references(connection):
             if available.get(reference["sha256"]) != reference["size_bytes"]:

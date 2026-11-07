@@ -9,6 +9,8 @@ from .errors import DomainError
 
 
 ADMIN_OPERATIONS = frozenset({
+    "create_tranche", "edit_tranche", "add_tranche_members", "activate_tranche", "remove_tranche_members",
+    "move_tranche_members", "change_tranche_assignee", "close_tranche", "reopen_tranche", "withdraw_submission",
     "create_dataset", "set_dataset_settings", "patch_dataset_settings", "import_image", "import_yolo_image",
     "resolve_import_conflict", "assign", "set_splits", "approve", "approve_from_review_queue", "return",
     "override", "recall_images", "reassign", "override_assignment", "add_class", "rename_class",

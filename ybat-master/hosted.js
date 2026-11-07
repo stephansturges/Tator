@@ -1,13 +1,13 @@
 (() => {
     "use strict";
     const $ = (id) => document.getElementById(id);
-    const state = { session: null, sessionEpoch: 0, datasets: [], images: [], selected: new Map(), users: [], view: "confirmed", sequence: 0, workspaceSequence: 0, userSequence: 0, classSequence: 0, submissionSequence: 0, classDataset: null, submissions: [] };
+    const state = { session: null, sessionEpoch: 0, datasets: [], images: [], selected: new Map(), users: [], view: "confirmed", cursor: null, sequence: 0, workspaceSequence: 0, userSequence: 0, classSequence: 0, submissionSequence: 0, classDataset: null, submissions: [], selectionAnchor: null, filters: {q: "", incoming: "incoming", tranche: "", annotator: ""} };
     const op = () => crypto.randomUUID();
     const node = (tag, text, className) => { const element = document.createElement(tag); if (text !== undefined) element.textContent = text; if (className) element.className = className; return element; };
     function notice(message, error = false) {
         for (const element of [$("notice"), ...document.querySelectorAll("dialog[open] [data-dialog-notice]")]) { element.textContent = message; element.dataset.error = String(error); element.hidden = !message; }
     }
-    const errorMessages = { dataset_revision_changed: "The dataset changed. Refresh the preview before applying this change.", split_group_conflict: "These images share a capture group. Preview the complete group before changing its split.", editor_lease_conflict: "An image is open for editing. Close its editing tab before changing this selection.", last_administrator: "Keep at least one active administrator.", username_exists: "That username already exists. Refresh People to manage the account or create a password reset link.", class_version_changed: "The class list changed. Refresh classes and review the current names before trying again.", class_request_already_reviewed: "This request has already been reviewed. Refresh classes to see the result.", class_name_exists: "That class name already exists.", user_changed: "This account changed. Refresh People before applying your change.", installation_changed: "The server changed. Sign in again before continuing." };
+    const errorMessages = {tranche_revision_changed: "The tranche changed. Refresh it before applying this change.", tranche_capacity_exceeded: "A tranche can hold at most 10,000 unfinished images. Create another tranche for the remaining images.", image_left_queue: "That image left this queue. Reopen the tranche to continue.", tranche_has_pending_review: "Review the submitted images first, or move selected unfinished images to another tranche.", tranche_has_unfinished_members: "Finish or remove the remaining work before closing this tranche.", image_not_assignable: "An image is no longer available in Incoming. Refresh the selection before trying again.", dataset_revision_changed: "The dataset changed. Refresh the preview before applying this change.", split_group_conflict: "These images share a capture group. Preview the complete group before changing its split.", editor_lease_conflict: "An image is open for editing. Close its editing tab before changing this selection.", last_administrator: "Keep at least one active administrator.", username_exists: "That username already exists. Refresh People to manage the account or create a password reset link.", class_version_changed: "The class list changed. Refresh classes and review the current names before trying again.", class_request_already_reviewed: "This request has already been reviewed. Refresh classes to see the result.", class_name_exists: "That class name already exists.", user_changed: "This account changed. Refresh People before applying your change.", installation_changed: "The server changed. Sign in again before continuing." };
     async function api(path, options = {}) {
         const authority = state.session, epoch = state.sessionEpoch;
         const headers = new Headers(options.headers);
@@ -31,7 +31,7 @@
                 const error = new Error(data.commit_outcome === "committed" && data.result_restricted === true
                     ? "The change was saved, but your account can no longer view its result. Refresh the workspace to see what you can access."
                     : errorMessages[data.error] || (typeof data.detail === "string" ? data.detail : data.error) || `Request failed (${response.status})`);
-                error.status = response.status;
+                error.status = response.status; error.code = data.error;
                 for (const name of ["commit_outcome", "operation_id", "result_restricted"]) error[name] = data[name];
                 if ((response.status === 401 || ["installation_changed", "csrf_rejected"].includes(data.error)) && authority) loginView();
                 throw error;
@@ -70,12 +70,51 @@
     function selection() {
         $("selectionBar").hidden = state.selected.size === 0;
         $("selectionCount").textContent = `${state.selected.size} image${state.selected.size === 1 ? "" : "s"} selected`;
-        $("assign").hidden = $("assigneeLabel").hidden = state.view !== "incoming";
+        $("assign").hidden = state.view !== "incoming"; $("assigneeLabel").hidden = true; $("assign").textContent = "Create tranche from selection";
         $("approveSelected").hidden = state.view !== "submitted";
-        $("assign").disabled = !$("assignee").value;
+        $("assign").disabled = state.selected.size === 0;
         window.dispatchEvent(new Event("tator:hosted-selection"));
     }
-    function clearSelection() { state.selected.clear(); document.querySelectorAll(".hosted-card input").forEach((input) => { input.checked = false; }); selection(); }
+    function clearSelection() { state.selected.clear(); state.selectionAnchor = null; document.querySelectorAll(".hosted-card input").forEach((input) => { input.checked = false; }); selection(); }
+    function invalidateImages() {
+        ++state.sequence; clearSelection(); state.images = []; state.cursor = null;
+        $("imageGrid").replaceChildren(); $("imageMatchCount").textContent = ""; $("more").hidden = true;
+        return {sequence: state.sequence, dataset: $("datasetChoice").value, view: state.view};
+    }
+    function currentImages(capture) { return capture.sequence === state.sequence && capture.dataset === $("datasetChoice").value && capture.view === state.view; }
+    function selectable(image) { return state.view === "incoming" ? image.state === "unassigned" && !image.tranche_id : state.view === "submitted" ? image.state === "submitted" : image.state === "confirmed"; }
+    function queueQuery(limit = 100) {
+        const q = new URLSearchParams({dataset_id: $("datasetChoice").value, limit: String(limit), include_total: "true", queue: state.view === "incoming" ? state.filters.incoming : state.view === "submitted" ? "review" : "confirmed"});
+        if (state.filters.q) q.set("q", state.filters.q);
+        if (state.view === "submitted") { if (state.filters.tranche) q.set("tranche_id", state.filters.tranche); if (state.filters.annotator) q.set("annotator_id", state.filters.annotator); }
+        return q;
+    }
+    function syncChecks() { document.querySelectorAll("#imageGrid input[data-image]").forEach(input => { input.checked = state.selected.has(input.dataset.image); }); selection(); }
+    async function selectMatching() {
+        const authority = state.session, captured = {sequence: state.sequence, dataset: $("datasetChoice").value, view: state.view}, filters = JSON.stringify(state.filters), query = queueQuery(500);
+        if (state.view === "incoming") query.set("queue", "unallocated");
+        const result = await api(`/queue?${query}`);
+        if (authority !== state.session || !currentImages(captured) || filters !== JSON.stringify(state.filters)) return;
+        if (result.total > 500 || result.next_cursor) throw new Error(`${result.total} eligible images match. Narrow the search to at most 500 for one exact selection.`);
+        if (!window.confirm(`Select all ${result.images.length} eligible matching images, including those not yet displayed?`)) return;
+        if (authority !== state.session || !currentImages(captured) || filters !== JSON.stringify(state.filters)) return;
+        state.selected = new Map(result.images.map(image => [image.id, image])); syncChecks();
+    }
+    async function prepareFilters() {
+        const isAdmin = state.session?.user.role === "admin", flat = !["tranches", "mine"].includes(state.view);
+        $("imageFilters").hidden = !isAdmin || !flat;
+        $("incomingFilterLabel").hidden = state.view !== "incoming";
+        $("reviewTrancheLabel").hidden = $("reviewAnnotatorLabel").hidden = state.view !== "submitted";
+        if (!isAdmin || state.view !== "submitted") return;
+        $("reviewAnnotator").replaceChildren(new Option("All annotators", ""), ...state.users.map(user => new Option(user.username, user.id)));
+        $("reviewAnnotator").value = state.filters.annotator;
+        const sequence = state.sequence, dataset = $("datasetChoice").value, tranches = []; let cursor = null;
+        if (!dataset) return;
+        do { const q = new URLSearchParams({dataset_id: dataset, limit: "100"}); if (cursor) q.set("cursor", cursor); const page = await api(`/tranches?${q}`); if (sequence !== state.sequence || dataset !== $("datasetChoice").value) return; tranches.push(...page.tranches); cursor = page.next_cursor; } while (cursor);
+        $("reviewTranche").replaceChildren(new Option("All tranches", ""), ...tranches.map(t => new Option(t.name, t.id)));
+        if (!tranches.some(t => t.id === state.filters.tranche)) state.filters.tranche = "";
+        $("reviewTranche").value = state.filters.tranche;
+    }
     async function refreshUsers() {
         const sequence = ++state.userSequence, previous = $("assignee").value;
         const result = await api("/users");
@@ -89,41 +128,54 @@
     }
     function drawCard(image) {
         const card = node("article", undefined, "hosted-card");
-        const link = node("a"); link.href = `/annotate?image=${encodeURIComponent(image.id)}`;
+        const link = node("a"), route = new URLSearchParams({image: image.id});
+        // Incoming includes every intake state; let the server derive each
+        // image's actual tranche scope instead of widening its canvas queue.
+        if (state.view !== "incoming") { route.set("queue", state.view === "submitted" ? "review" : "confirmed"); if (state.view === "submitted" && state.filters.tranche) route.set("tranche", state.filters.tranche); }
+        link.href = `/annotate?${route}`;
         const photo = node("img"); photo.src = `/api/hosted/images/${encodeURIComponent(image.id)}/media`; photo.alt = image.filename; photo.loading = "lazy";
         const info = node("div", undefined, "card-info"); info.append(node("strong", image.filename));
         const labels = { confirmed: "Confirmed", assigned: "Assigned", returned: "Changes requested", submitted: "Ready for review", unassigned: "Not assigned" };
         info.append(node("small", `${labels[image.state] || image.state}${image.negative ? " · No target objects" : ""}`));
+        if (image.tranche_name) info.append(node("small", `Tranche: ${image.tranche_name}${image.assignee_name ? ` · ${image.assignee_name}` : ""}`));
         link.append(photo, info); card.append(link);
-        if (state.session.user.role === "admin" && ["unassigned", "submitted", "confirmed"].includes(image.state)) {
+        if (state.session.user.role === "admin" && selectable(image)) {
             const check = node("input"); check.type = "checkbox"; check.setAttribute("aria-label", `Select ${image.filename}`);
-            check.onchange = () => { if (check.checked) state.selected.set(image.id, image); else state.selected.delete(image.id); selection(); }; card.append(check);
+            check.dataset.image = image.id; check.checked = state.selected.has(image.id);
+            check.onclick = event => { const at = state.images.findIndex(row => row.id === image.id), previous = state.images.findIndex(row => row.id === state.selectionAnchor); const rows = event.shiftKey && previous >= 0 ? state.images.slice(Math.min(at, previous), Math.max(at, previous) + 1) : [image]; for (const row of rows.filter(selectable)) { if (check.checked) state.selected.set(row.id, row); else state.selected.delete(row.id); } state.selectionAnchor = image.id; syncChecks(); }; card.append(check);
         }
         return card;
     }
     async function loadImages(append = false) {
         const sequence = ++state.sequence;
-        const id = $("datasetChoice").value;
+        const id = $("datasetChoice").value, captured = {sequence, dataset: id, view: state.view}, filters = JSON.stringify(state.filters);
+        $("classes").disabled = !id || Boolean(state.datasets.find(d => d.id === id)?.metadata_only);
+        const grouped = ["tranches", "mine"].includes(state.view);
+        $("imageGrid").hidden = grouped; $("more").hidden = grouped; $("empty").hidden = grouped;
+        if (grouped) { clearSelection(); state.images = []; await window.TatorHostedTranches?.show(); return; }
+        window.TatorHostedTranches?.hide();
+        if (!append) state.cursor = null;
         if (!append) { clearSelection(); state.images = []; $("imageGrid").replaceChildren(); }
-        $("classes").disabled = !id;
         if (!id) { $("empty").hidden = false; $("empty").textContent = state.session.user.role === "admin" ? "Create a dataset, then add images to Incoming." : "No editable work is currently assigned to you."; $("more").hidden = true; return; }
-        const query = new URLSearchParams({ dataset_id: id, limit: "100", offset: String(append ? state.images.length : 0) });
-        if (state.view !== "mine") query.set("state", state.view);
-        const result = await api(`/images?${query}`);
-        if (sequence !== state.sequence) return;
+        const query = queueQuery();
+        if (append && state.cursor) query.set("cursor", state.cursor);
+        const result = await api(`/queue?${query}`);
+        if (!currentImages(captured) || filters !== JSON.stringify(state.filters)) return;
         state.images.push(...result.images);
         for (const image of result.images) $("imageGrid").append(drawCard(image));
         $("empty").hidden = state.images.length !== 0;
         $("empty").textContent = state.view === "submitted" ? "No images are waiting for review." : state.view === "confirmed" ? "No confirmed images yet. Add and approve Incoming images to build this dataset." : "No images in this view.";
-        $("more").hidden = result.images.length < 100;
+        state.cursor = result.next_cursor; $("more").hidden = !state.cursor;
+        $("imageMatchCount").textContent = `${result.total} matching images · Shift-click to select a range${state.view === "incoming" ? " · Only unallocated images can be selected" : ""}`;
     }
     async function view(value) {
         state.view = value;
-        const copy = { confirmed: ["Confirmed images", "Approved images used by analysis, training and dataset exports."], incoming: ["Incoming", "Prepare and assign new images. They join the dataset only after approval."], submitted: ["Review", "Check submitted work, return feedback, or approve it into the dataset."], mine: ["My work", "Open an assigned image to annotate it. Submit finished images individually."] }[value];
+        const captured = invalidateImages();
+        const copy = { confirmed: ["Confirmed images", "Approved images used by analysis, training and dataset exports."], incoming: ["Incoming", "Prepare and assign new images. They join the dataset only after approval."], submitted: ["Review", "Check submitted work, return feedback, or approve it into the dataset."], tranches: ["Annotation tranches", "Prepare a named group of Incoming images, assign it to one annotator, and review finished images as they arrive."], mine: ["My tranches", "Open a tranche to continue your work. Submit each image when it is ready; the remaining images stay with you."] }[value];
         $("workspaceTitle").textContent = copy[0]; $("workspaceExplanation").textContent = copy[1];
         for (const button of $("views").children) button.setAttribute("aria-current", button.dataset.view === value ? "page" : "false");
         $("import").hidden = state.session.user.role !== "admin" || value !== "incoming";
-        await loadImages();
+        await prepareFilters(); if (!currentImages(captured)) return; await loadImages();
         if (state.session?.user.role === "annotator") await loadSubmissions();
     }
     async function workspace() {
@@ -134,17 +186,32 @@
         const isAdmin = state.session.user.role === "admin";
         $("submissionPanel").hidden = isAdmin; $("classes").textContent = isAdmin ? "Classes" : "Classes & requests";
         $("createDataset").hidden = !isAdmin; $("people").hidden = !isAdmin; $("views").replaceChildren();
-        for (const [key, label] of isAdmin ? [["confirmed", "Dataset"], ["incoming", "Incoming"], ["submitted", "Review"]] : [["mine", "My work"]]) {
-            const button = node("button", label); button.type = "button"; button.dataset.view = key; button.onclick = () => action(button, () => view(key)); $("views").append(button);
+        for (const [key, label] of isAdmin ? [["confirmed", "Dataset"], ["incoming", "Incoming"], ["tranches", "Tranches"], ["submitted", "Review"]] : [["mine", "My tranches"]]) {
+            const button = node("button", label); button.type = "button"; button.dataset.view = key; button.onclick = () => action(button, () => { history.replaceState(null, "", `/?${new URLSearchParams({dataset: $("datasetChoice").value, view: key})}`); return view(key); }); $("views").append(button);
         }
         const result = await api("/datasets");
         if (sequence !== state.workspaceSequence) return;
         state.datasets = result.datasets;
+        if (!isAdmin) {
+            // Finished tranches remain discoverable without granting access to
+            // dataset classes, guidance, pixels or other people's annotations.
+            let cursor = null;
+            do {
+                const params = new URLSearchParams({limit: "100"}); if (cursor) params.set("cursor", cursor);
+                const personal = await api(`/tranches?${params}`);
+                if (sequence !== state.workspaceSequence) return;
+                for (const tranche of personal.tranches) if (!state.datasets.some(d => d.id === tranche.dataset_id)) state.datasets.push({id: tranche.dataset_id, name: tranche.dataset_name, metadata_only: true});
+                cursor = personal.next_cursor;
+            } while (cursor);
+        }
         const previous = $("datasetChoice").value || new URLSearchParams(location.search).get("dataset"); $("datasetChoice").replaceChildren();
         for (const dataset of state.datasets) { const option = node("option", dataset.name); option.value = dataset.id; $("datasetChoice").append(option); }
         if (state.datasets.some((row) => row.id === previous)) $("datasetChoice").value = previous;
         if (isAdmin) await refreshUsers();
         if (sequence !== state.workspaceSequence) return;
+        const route = new URLSearchParams(location.search);
+        if (route.get("tranche") || route.get("view") === "tranches") state.view = "tranches";
+        else if (["incoming", "submitted", "confirmed"].includes(route.get("view"))) state.view = route.get("view");
         await view(isAdmin ? (state.view === "mine" ? "confirmed" : state.view) : "mine");
         if (sequence === state.workspaceSequence) window.dispatchEvent(new Event("tator:hosted-workspace"));
     }
@@ -257,18 +324,13 @@
     $("loginForm").onsubmit = (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); action(event.submitter, async () => { state.session = await api("/login", { method: "POST", body: { username: form.get("username"), password: form.get("password") } }); event.target.reset(); announceSession(); notice(""); await workspace(); }); };
     $("logout").onclick = () => action($("logout"), async () => { await api("/logout", { method: "POST" }); announceSession(); state.selected.clear(); state.images = []; $("imageGrid").replaceChildren(); loginView(); });
     $("refresh").onclick = () => action($("refresh"), workspace);
-    $("datasetChoice").onchange = () => Promise.all([loadImages(), loadSubmissions()]).catch((error) => { if (!error.stale) notice(error.message, true); });
+    $("datasetChoice").onchange = () => { state.filters.tranche = ""; const captured = invalidateImages(); history.replaceState(null, "", `/?${new URLSearchParams({dataset: $("datasetChoice").value, view: state.view})}`); return Promise.all([prepareFilters().then(() => currentImages(captured) ? loadImages() : undefined), loadSubmissions()]).catch((error) => { if (!error.stale) notice(error.message, true); }); };
     $("more").onclick = () => action($("more"), () => loadImages(true));
     $("clearSelection").onclick = clearSelection; $("assignee").onchange = selection;
     $("createDataset").onclick = () => $("datasetDialog").showModal();
     document.querySelectorAll("[data-close]").forEach((button) => { button.onclick = () => button.closest("dialog").close(); });
     $("datasetForm").onsubmit = (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); action(event.submitter, async () => { const created = await api("/datasets", { method: "POST", body: { name: form.get("name"), classes: String(form.get("classes")).split(/\r?\n/).map((name) => name.trim()).filter(Boolean), operation_id: op() } }); $("datasetDialog").close(); event.target.reset(); state.view = "incoming"; await workspace(); $("datasetChoice").value = created.id; await loadImages(); }); };
-    $("assign").onclick = () => action($("assign"), async () => {
-        const selected = Array.from(state.selected.values()), expected = {};
-        for (const image of selected) expected[image.id] = { expected_version: image.current_version, generation: image.generation };
-        await api(`/datasets/${encodeURIComponent($("datasetChoice").value)}/assignments`, { method: "POST", body: { image_ids: selected.map((image) => image.id), annotator_id: $("assignee").value, operation_id: op(), expected } });
-        notice(`${selected.length} images assigned.`); await loadImages();
-    });
+    $("assign").onclick = () => window.TatorHostedTranches?.create([...state.selected.values()]);
     $("approveSelected").onclick = () => action($("approveSelected"), async () => {
         const selected = Array.from(state.selected.values());
         if (!confirm(`Approve these ${selected.length} submitted images into the confirmed dataset? Only continue after checking their annotations.`)) return;
@@ -298,7 +360,11 @@
     $("inviteForm").onsubmit = (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); action(event.submitter, async () => { if (form.get("password") !== form.get("repeat")) throw new Error("The passwords do not match."); const token = new URLSearchParams(location.hash.slice(1)).get("invite"); await api("/redeem", { method: "POST", body: { token, password: form.get("password") } }); history.replaceState(null, "", "/"); event.target.reset(); $("invitePanel").hidden = true; notice("Password saved. Sign in with your username."); loginView(); }); };
     window.addEventListener("hashchange", () => { if (!invitationView() && !$("invitePanel").hidden) { $("invitePanel").hidden = true; loginView(); } });
     (async () => { if (invitationView()) return; try { state.session = await api("/session"); await workspace(); } catch (error) { if (!error.stale) { loginView(); if (error.status !== 401) notice(error.message, true); } } })();
+    $("imageFilters").onsubmit = event => { event.preventDefault(); state.filters = {q: $("imageSearch").value.trim(), incoming: $("incomingFilter").value, tranche: $("reviewTranche").value, annotator: $("reviewAnnotator").value}; action(event.submitter, () => loadImages()); };
+    $("selectVisibleImages").onclick = event => action(event.currentTarget, () => { for (const image of state.images.filter(selectable)) state.selected.set(image.id, image); syncChecks(); });
+    $("selectMatchingImages").onclick = event => action(event.currentTarget, selectMatching);
     window.TatorHostedDashboard = { api, action, notice, refresh: workspace,
-        selectDataset: async id => { if (!state.datasets.some(d => d.id === id)) throw new Error("Dataset unavailable for this account."); $("datasetChoice").value = id; await loadImages(); },
+        selectDataset: async id => { if (!state.datasets.some(d => d.id === id)) throw new Error("Dataset unavailable for this account."); $("datasetChoice").value = id; state.filters.tranche = ""; const captured = invalidateImages(); await prepareFilters(); if (currentImages(captured)) await loadImages(); },
+        showView: view, loadImages, clearSelection, get view() { return state.view; }, get users() { return state.users; },
         get session() { return state.session; }, get selectedImages() { return [...state.selected.values()]; }, get datasetId() { return $("datasetChoice").value; } };
 })();

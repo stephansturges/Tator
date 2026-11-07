@@ -5,7 +5,6 @@ a private stdout descriptor, so ordinary model logging cannot corrupt it.
 """
 from __future__ import annotations
 
-import ctypes
 import importlib
 import importlib.abc
 import json
@@ -59,17 +58,13 @@ def encode_message(value: dict[str, Any]) -> bytes:
 
 def _watch_parent(parent_pid: int) -> None:
     global _guardian
-    # Linux kills a worker even if a native model call never returns to Python.
-    if sys.platform.startswith("linux"):
-        libc = ctypes.CDLL(None, use_errno=True)
-        if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:
-            raise OSError(ctypes.get_errno(), "PR_SET_PDEATHSIG failed")
     if os.getppid() != parent_pid:
         os._exit(71)
-    # Linux PDEATHSIG kills this direct worker before a Python thread can
-    # reliably stop grandchildren. A small independent guardian in our owned
-    # group handles both worker crashes and control-process loss. It inherits
-    # no protocol pipes, loads no models and never owns a different process group.
+    # Linux PDEATHSIG follows the spawning thread, which may finish after
+    # restoring this worker at the end of a heavy job. Watch the control process
+    # instead. This independent guardian also handles native calls that hold
+    # the worker's GIL, and kills grandchildren after a worker crash. It inherits
+    # no protocol pipes, loads no models and stays in our owned process group.
     _guardian = subprocess.Popen([sys.executable, "-m", "services.hosted.worker", "--guard-group",
         str(parent_pid), str(os.getpid()), str(os.getpgrp())], stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)

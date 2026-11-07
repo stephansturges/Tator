@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Tator · Dataset workspace</title><link rel="stylesheet" href="/hosted.css"><script src="/hosted.js" defer></script><script src="/hosted_operations_ui.js" defer></script><script src="/hosted_tools_ui.js" defer></script><script src="/hosted_providers_ui.js" defer></script><script src="/hosted_import_ui.js" defer></script><script src="/hosted_dqe_ui.js" defer></script><script src="/hosted_analysis_ui.js" defer></script></head>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Tator · Dataset workspace</title><link rel="stylesheet" href="/hosted.css"><link rel="stylesheet" href="/hosted_tranches.css"><script src="/hosted.js" defer></script><script src="/hosted_tranches_ui.js" defer></script><script src="/hosted_operations_ui.js" defer></script><script src="/hosted_tools_ui.js" defer></script><script src="/hosted_providers_ui.js" defer></script><script src="/hosted_import_ui.js" defer></script><script src="/hosted_dqe_ui.js" defer></script><script src="/hosted_analysis_ui.js" defer></script></head>
 <body>
 <link rel="stylesheet" href="/hosted_admin_nav.css">
 <script src="/hosted_admin_nav.js" defer></script>
@@ -15,6 +15,13 @@
 <section id="workspace" hidden>
 <div class="hosted-workspace-title"><div><p class="eyebrow" id="workspaceEyebrow">Datasets</p><h1 id="workspaceTitle">Confirmed images</h1><p id="workspaceExplanation"></p></div><label class="dataset-choice">Dataset<select id="datasetChoice" aria-label="Dataset"></select></label></div>
 <div class="hosted-toolbar"><nav id="views" aria-label="Dataset views"></nav><div class="hosted-actions"><button id="refresh" type="button">Refresh</button><button id="classes" type="button">Classes</button><button id="createDataset" type="button" hidden>New dataset</button><button id="import" type="button" hidden>Add images</button><button id="people" type="button" hidden>People</button></div></div>
+<form id="imageFilters" class="hosted-inline-fields" hidden>
+<label>Find images<input id="imageSearch" type="search" maxlength="200" placeholder="Filename contains…"></label>
+<label id="incomingFilterLabel">Incoming images<select id="incomingFilter"><option value="incoming">All Incoming</option><option value="unallocated">Unallocated only</option></select></label>
+<label id="reviewTrancheLabel" hidden>Tranche<select id="reviewTranche"><option value="">All tranches</option></select></label>
+<label id="reviewAnnotatorLabel" hidden>Annotator<select id="reviewAnnotator"><option value="">All annotators</option></select></label>
+<button type="submit">Apply filters</button><button id="selectVisibleImages" type="button">Select visible</button><button id="selectMatchingImages" type="button">Select all matching</button><span id="imageMatchCount" role="status"></span>
+</form>
 <div id="selectionBar" class="hosted-selection" hidden><span id="selectionCount"></span><label id="assigneeLabel">Assign to<select id="assignee"></select></label><button id="assign" type="button" class="primary">Assign selected images</button><button id="approveSelected" type="button" class="primary" hidden>Approve selected images</button><button id="clearSelection" type="button">Clear selection</button></div>
 <div id="imageGrid" class="hosted-grid" aria-live="polite"></div><p id="empty" class="hosted-empty" hidden></p><button id="more" type="button" hidden>Load more images</button>
 <section id="submissionPanel" class="hosted-submissions" hidden><h2>Submitted work · all datasets</h2><p>Track your submissions here, including datasets where you have finished your work. Returned images appear in My work with the feedback below.</p><div id="submissionList" aria-live="polite"></div><button id="moreSubmissions" type="button" hidden>Load more submissions</button></section>

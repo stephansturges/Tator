@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import sys
 import uuid
 
 from services.hosted.config import RFDETR_CLASSES, verify_checkpoint
@@ -76,20 +77,24 @@ def _build_sam(model, device):
         predictor = build_predictor(model)
         return predictor, predictor.model
     verify_checkpoint(model)
-    import torch
     if model["kind"] == "sam1":
         from segment_anything import SamPredictor, sam_model_registry
         network = sam_model_registry[model["model_type"]](checkpoint=model["checkpoint"])
         network.to(device=device)
         network.eval()
         return SamPredictor(network), network
+    # The pinned SAM3 source is a nested checkout in this release. Workers
+    # deliberately do not import the legacy API, whose startup adds this path.
+    vendor_root = Path(__file__).resolve().parents[2] / "sam3"
+    if (vendor_root / "sam3" / "model_builder.py").is_file():
+        vendor_path = str(vendor_root)
+        if vendor_path not in sys.path:
+            sys.path.insert(0, vendor_path)
     from sam3.model_builder import build_sam3_image_model
-    # Build on CPU, then explicitly move to the assigned device. Do not allocate
-    # on CUDA:0 before relocating a user's stack to another GPU.
-    network = build_sam3_image_model(device="cpu", checkpoint_path=model["checkpoint"],
+    from services.sam3_descriptors import build_native_sam3_model
+    network = build_native_sam3_model(build_sam3_image_model, device=device, checkpoint_path=model["checkpoint"],
         load_from_HF=False, enable_inst_interactivity=True,
         enable_segmentation=model.get("enable_segmentation", True), bpe_path=model["bpe_path"])
-    network.to(device=torch.device(device))
     network.eval()
     predictor = getattr(network, "inst_interactive_predictor", None)
     if predictor is None or getattr(predictor, "model", None) is None:
@@ -174,6 +179,13 @@ class UserToolAdapter:
         return self.slots[name]
 
     def execute(self, operation, payload, context):
+        if self.config["model"]["kind"] == "sam3" and self.config["model"].get("backend") != "mlx":
+            from services.sam3_descriptors import native_sam3_context
+            with native_sam3_context(self.device):
+                return self._execute(operation, payload, context)
+        return self._execute(operation, payload, context)
+
+    def _execute(self, operation, payload, context):
         if context["actor_id"] != self.config["actor_id"]:
             raise ValueError("hosted_runtime_owner_mismatch")
         if operation == "sam_state":

@@ -210,6 +210,34 @@ def acquire(system, image):
     return system["store"].acquire_editor(system["alice"], image["id"], "alice-editor", expected_version=image["current_version"], generation=image["generation"])
 
 
+def test_restored_mlx_preference_is_preserved_but_unavailable_on_cuda(system):
+    controller = system['controller']
+    source = Path(controller.configuration['models']['sam']['checkpoint']).parent / 'mlx-sam3'
+    source.mkdir()
+    files = {'config.json': json.dumps({'model_type':'sam3_video','detector_config':{'model_type':'sam3'},'tracker_config':{'model_type':'sam3_tracker_video'}}),
+             'model.safetensors':'fixture', 'processor_config.json':'{}', 'tokenizer.json':'{}', 'tokenizer_config.json':'{}'}
+    for name, content in files.items():
+        (source/name).write_text(content)
+    controller.configuration['models']['mlx-sam3'] = {'kind':'sam3','backend':'mlx','model_path':str(source),
+        'files':{name:hashlib.sha256((source/name).read_bytes()).hexdigest() for name in files}}
+    install(system, 'sam')
+    install(system, 'mlx-sam3')
+    controller.configuration['user_sam']['device'] = 'mps'
+    selected = system['client'].post('/api/hosted/tools/sam',json={'model_id':'mlx-sam3','expected_revision':0,'operation_id':op()})
+    assert selected.status_code == 200, selected.text
+    controller.configuration['user_sam']['device'] = 'cuda:0'
+    catalog = system['client'].get('/api/hosted/tools/catalog').json()
+    assert catalog['sam']['model_id'] == 'mlx-sam3'
+    assert catalog['sam']['revision'] == 1 and not catalog['sam']['available']
+    assert catalog['sam_allowed_model_ids'] == ['sam']
+    assert next(row for row in catalog['models'] if row['model_id']=='mlx-sam3')['available'] is False
+    failed = system['client'].post('/api/hosted/tools/request',json=request(system['images'][0], 'sam_preload'))
+    assert failed.status_code == 503 and failed.json()['error'] == 'tool_not_configured'
+    replaced = system['client'].post('/api/hosted/tools/sam',json={'model_id':'sam','expected_revision':1,'operation_id':op()})
+    assert replaced.status_code == 200
+    assert system['client'].get('/api/hosted/tools/catalog').json()['sam']['available'] is True
+
+
 def test_saved_sam_recipe_metadata_private_cascades_and_admission(system):
     """Installed identity and private preset ownership compose with real auth/store."""
     controller, client, admin = system["controller"], system["client"], system["admin_client"]
@@ -237,7 +265,7 @@ def test_saved_sam_recipe_metadata_private_cascades_and_admission(system):
     assert metadata["sam3_recipes"][0]["class_id"] == 0
     assert metadata["sam3_recipes"][0]["clip_head"] == {"registered": True}
     assert metadata["classifiers"][0]["path"] == "classifier"
-    assert [model["id"] for model in metadata["sam_models"]] == ["sam"]  # Attached component is not a selectable user model.
+    assert [model["id"] for model in metadata["sam_models"]] == ["sam", "sam3"]  # Every installed compatible SAM is a personal tool.
     saved = {"label": "Vehicle pass", "steps": [{"recipe_id": "vehicle-recipe"}], "operation_id": op()}
     result = client.post(path + "/cascades", json=saved)
     assert result.status_code == 200, result.text

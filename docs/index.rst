@@ -11,6 +11,8 @@ Use the hosted workspace
 * `Administrator and annotator guide <hosted_workflow.rst>`_: create a dataset,
   add incoming images, assign work, submit images, return feedback and approve
   the confirmed dataset.
+* `Named annotation tranches <hosted_tranches.rst>`_: prepare work packages,
+  assign one annotator, review individual submissions and recover handoffs.
 * `Analysis and dataset extension <hosted_analysis.rst>`_: run quality analysis,
   pruning, training and incoming-data comparisons against frozen dataset inputs.
 * `Dataset pruning <dataset_pruning.rst>`_: understand similarity recipes,

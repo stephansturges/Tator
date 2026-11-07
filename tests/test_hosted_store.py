@@ -457,9 +457,11 @@ def test_assignment_override_preserves_submitted_members_and_bulk_reports_each_v
     lease = store.acquire_editor(ALICE, one["id"], "tab")
     draft = store.save(ALICE, ctx(lease, "save"), objects(ds), complete=True)
     store.submit(ALICE, ctx(draft, "submit"))
-    recovered = store.override_assignment(ADMIN, group["assignment_id"], "recover-group", captured)
+    error("assignment_member_changed", lambda: store.override_assignment(ADMIN, group["assignment_id"], "recover-group", captured))
+    assert store.image(ADMIN, two["id"])["state"] == "assigned"
+    recovered = store.override_assignment(ADMIN, group["assignment_id"], "recover-exact", {two["id"]: captured[two["id"]]})
     assert [row["id"] for row in recovered["images"]] == [two["id"]]
-    assert recovered["skipped"][0]["image_id"] == one["id"]
+    assert recovered["skipped"] == []
     assert store.image(ADMIN, one["id"])["state"] == "submitted"
     assert not store.list_images(ALICE)
     review = store.acquire_editor(ADMIN, one["id"], "tab")

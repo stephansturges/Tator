@@ -11,6 +11,17 @@
     let key = `tator.hosted.draft:${boot.instance_id}:${boot.user.user_id}:${imageId}`;
     let record, dataset, editable = false, ready = false, pending = null, saving = null, lastSaved = "", busy = false, handoff = false, recoveryRequired = false, toolState = null, retentionCommand = null;
     let rejected = null, storageFailed = false;
+    let queue = null, tranche = boot.tranche || null;
+    let scopeLeft = Boolean(boot.scope_left), originScope = boot.requested_scope || boot.scope;
+    const sameScope = (a, b) => a?.dataset_id === b?.dataset_id && (a?.tranche_id || null) === (b?.tranche_id || null) && a?.queue === b?.queue;
+    const scopeBackUrl = scope => scope?.dataset_id ? `/?${new URLSearchParams({dataset: scope.dataset_id, ...(scope.tranche_id ? {view: "tranches", tranche: scope.tranche_id} : {view: {unallocated: "incoming", confirmed: "confirmed", review: "submitted"}[scope.queue] || "tranches"})})}` : "/";
+    const backUrl = () => queue?.backUrl || scopeBackUrl(originScope);
+    async function openScope(scoped) {
+        const nextQueue = new window.HostedQueue({api, scope: scoped.scope, onAppend: (rows, options) => window.TatorHostedCanvas.appendQueue(rows, options), onReconcile: rows => window.TatorHostedCanvas.reconcileQueue(rows)});
+        const rows = await nextQueue.open(imageId);
+        queue = nextQueue; scopeLeft = false; updateTranche(scoped.tranche);
+        return rows;
+    }
     let mediaEpoch = 0, mediaCacheAllowed = false, mediaWarmTimer = null;
     const $ = (id) => document.getElementById(id);
     const mediaPrefetch = window.HostedMediaPrefetch ? new window.HostedMediaPrefetch({
@@ -35,9 +46,10 @@
         clearTimeout(mediaWarmTimer);
         // Let the current canvas paint first. No speculative decoding, labels,
         // editing reservations or durable browser storage are involved.
-        mediaWarmTimer = setTimeout(() => {
+        mediaWarmTimer = setTimeout(async () => {
             if (!ready || busy || handoff || recoveryRequired || accountChanged || !mediaCacheAllowed || document.hidden) return;
-            mediaPrefetch?.schedule(window.TatorHostedCanvas?.nextImageIds(2) || []);
+            try { await queue?.ahead(imageId, 2); } catch (_) { /* Foreground navigation will expose a queue error. */ }
+            if (ready && !busy && !handoff && !accountChanged && mediaCacheAllowed && !document.hidden) mediaPrefetch?.schedule(window.TatorHostedCanvas?.nextImageIds(2) || []);
         }, 150);
     }
     async function mediaBlobFor(id) {
@@ -87,6 +99,9 @@
     const jsonResponse = (value) => new Response(JSON.stringify(value), { status: 200, headers: { "content-type": "application/json" } });
     const node = (tag, text) => { const e = document.createElement(tag); if (text !== undefined) e.textContent = text; return e; };
     const messages = {
+        image_left_queue: "This image left the current tranche or queue. Your draft is retained. Use Back to tranche to continue.",
+        queue_scope_changed: "This tranche changed. Your draft is retained. Return to the tranche to see its current work.",
+        queue_scope_mismatch: "This image is no longer in the selected queue. Return to the tranche to continue.",
         annotation_version_changed: "This image changed on the server. Your unsaved draft is retained. Reload to compare before saving.",
         ownership_changed: "Editing ownership changed. Your draft is retained, but it cannot overwrite the new owner's work.",
         editor_lease_conflict: "This image is open in another editing tab. Close it there or explicitly take over below.",
@@ -418,7 +433,7 @@
     function context() { return { expected_version: record.current_version, generation: record.generation, editor_id: editorId, operation_id: uuid() }; }
     function draft() { return { annotations: window.TatorHostedCanvas.snapshot(), complete: record.state === "confirmed" || Boolean($("hostedComplete")?.checked), negative: Boolean($("hostedNegative")?.checked) }; }
     function journal(value) {
-        try { sessionStorage.setItem(key, JSON.stringify({ schema: 2, state: value.pending ? "pending" : value.rejected ? "rejected" : "unsent", ...value })); storageFailed = false; }
+        try { sessionStorage.setItem(key, JSON.stringify({ schema: 2, scope: queue?.scope || originScope, state: value.pending ? "pending" : value.rejected ? "rejected" : "unsent", ...value })); storageFailed = false; }
         catch (_) { storageFailed = true; throw new Error("This browser cannot retain unsent edits. Keep this tab open and free browser storage before continuing."); }
     }
     function clearJournal() {
@@ -454,14 +469,15 @@
     }
     function update() {
         for (const id of ["hostedSave", "hostedSubmit", "hostedApprove", "hostedReturn", "hostedArchive", "hostedComplete", "hostedNegative"]) {
-            if ($(id)) $(id).disabled = !editable || !ready || busy || handoff;
+            if ($(id)) $(id).disabled = !editable || !ready || busy || handoff || recoveryRequired;
         }
-        if ($("hostedReconnect")) $("hostedReconnect").hidden = editable;
+        for (const id of ["hostedRefreshQueue", "hostedMoreImages"]) if ($(id)) $(id).disabled = !queue || scopeLeft || recoveryRequired || busy;
+        if ($("hostedReconnect")) $("hostedReconnect").hidden = editable || scopeLeft || recoveryRequired;
         if ($("hostedTakeover")) $("hostedTakeover").hidden = editable || recoveryRequired || (boot.user.role === "admin" && ["assigned", "returned"].includes(record.state));
     }
     async function save({ manual = false } = {}) {
         if (saving) { await saving; if (manual) return save({ manual }); return false; }
-        if (!ready || !editable || handoff) return false;
+        if (!ready || !editable || handoff || recoveryRequired) return false;
         if (pending && !pending.path.endsWith("/save")) throw new Error("Resolve the earlier handoff before saving again.");
         const current = draft();
         if (!pending && JSON.stringify(current) === lastSaved) {
@@ -529,36 +545,58 @@
         mediaCacheAllowed = true;
         window.TatorHostedCanvas?.freeze(false); status("Connected · edits save automatically"); update();
     }
-    async function leave(next = false, destination = "/") {
+    async function leave(next = false, destination = backUrl()) {
         pauseMediaPrefetch();
         if (editable && !handoff) { if (!await save({ manual: true })) throw new Error("Save your work before leaving."); await api(`${base}/release`, context()); editable = false; }
-        if (next && dataset) {
-            const result = await api(`/api/hosted/images?dataset_id=${encodeURIComponent(dataset.id)}&limit=100${boot.user.role === "admin" ? "&state=submitted" : ""}`);
-            const image = result.images.find((item) => item.id !== imageId && (boot.user.role === "admin" || ["assigned", "returned"].includes(item.state)));
-            if (image) { location.assign(`/annotate?image=${encodeURIComponent(image.id)}`); return; }
+        if (next && queue) {
+            let image = await queue.neighbor(imageId, 1);
+            while (image) {
+                try { await queue.authorize(image.id); location.assign(queue.url(image.id)); return; }
+                catch (error) {
+                    if (![403, 404, 409].includes(error.status)) throw error;
+                    queue.remove(image.id); window.TatorHostedCanvas.removeQueue([image.id]);
+                    image = await queue.neighbor(imageId, 1);
+                }
+            }
+            const target = new URL(queue.backUrl, location.origin); target.searchParams.set("finished", queue.scope.queue); location.assign(target.pathname + target.search); return;
         }
         location.assign(destination);
     }
+    function updateTranche(value) {
+        tranche = value;
+        if ($("hostedBreadcrumb")) $("hostedBreadcrumb").textContent = tranche ? `${dataset.name} > ${tranche.name}` : dataset.name;
+        if ($("hostedBack") && (queue?.scope || originScope)?.tranche_id) $("hostedBack").textContent = "← Back to tranche";
+        const title = $("hostedTrancheTitle"), guidance = $("hostedTrancheInstructions");
+        if (title) { title.textContent = tranche ? `${tranche.name} · ${tranche.lifecycle === "draft" ? `${tranche.counts.not_assigned} in Draft` : `${tranche.counts.to_finish + tranche.counts.changes_requested} to finish`} · ${tranche.counts.awaiting_review} awaiting review` : ""; title.hidden = !tranche; }
+        if (guidance) { guidance.textContent = tranche?.instructions || ""; guidance.hidden = !tranche?.instructions; }
+    }
+    async function step(delta = 1) {
+        if (!queue || busy || handoff) return;
+        try { const target = await queue.neighbor(imageId, delta); if (target) await navigate(target.id); else status(delta > 0 ? "You reached the end of this queue." : "You reached the beginning of this queue."); }
+        catch (error) { report(error); }
+    }
     async function navigate(targetId) {
+        if (!queue || scopeLeft || recoveryRequired) throw new Error("Recover the retained draft or open its current work queue before changing images.");
         if (busy || handoff) throw new Error("Wait for the current save or handoff before changing images.");
         if (targetId === imageId) return;
         if ([...activeTools.values()].some((item) => !["sam_preload", "sam_state"].includes(item.operation))) throw new Error("Wait for the current annotation tool, or cancel it before changing images.");
         busy = true; pauseMediaPrefetch(targetId); update();
         try {
             const sessionCheck = verifySession();
-            const [, target] = await Promise.all([sessionCheck, api(`/api/hosted/images/${encodeURIComponent(targetId)}?include_review=true`)]);
+            const [, target, scoped] = await Promise.all([sessionCheck, api(`/api/hosted/images/${encodeURIComponent(targetId)}?include_review=true`), queue.authorize(targetId)]);
+            updateTranche(scoped.tranche);
             if (target.dataset_id !== dataset.id) throw new Error("Open the other dataset from the workspace.");
             if (editable) {
                 if (!await save({ manual: true })) throw new Error("Save your current image before changing images.");
                 await api(`${base}/release`, context()); editable = false;
             }
             const targetKey = `tator.hosted.draft:${boot.instance_id}:${boot.user.user_id}:${targetId}`;
-            if (sessionStorage.getItem(targetKey) || target.state !== record.state) { location.assign(`/annotate?image=${encodeURIComponent(targetId)}`); return; }
+            if (sessionStorage.getItem(targetKey) || target.state !== record.state) { location.assign(queue.url(targetId)); return; }
             ready = false; editable = false; pending = null; rejected = null; retentionCommand = null;
             imageId = targetId; base = `/api/hosted/images/${encodeURIComponent(imageId)}`; key = targetKey; record = target;
             let accessError = null;
             try { await acquire(false, false, target, sessionCheck); } catch (error) { accessError = error; editable = false; clearMediaPrefetch(); }
-            history.replaceState(null, "", `/annotate?image=${encodeURIComponent(imageId)}`);
+            history.replaceState(null, "", queue.url(imageId));
             $("hostedComplete").checked = record.complete; $("hostedNegative").checked = record.negative;
             document.querySelector(".hosted-canvas-title strong").textContent = record.filename;
             document.querySelectorAll(".hosted-review-note").forEach((item) => item.remove());
@@ -571,11 +609,17 @@
             ready = true; lastSaved = JSON.stringify(draft());
             window.TatorHostedCanvas.freeze(!editable);
             window.dispatchEvent(new Event("tator:hosted-image"));
-            history.replaceState(null, "", `/annotate?image=${encodeURIComponent(imageId)}`);
+            history.replaceState(null, "", queue.url(imageId));
             await refreshFeedback();
             if (accessError) report(accessError);
             else status("Connected · edits save automatically");
-        } catch (error) { if ([401, 403, 404, 409, 423].includes(error.status)) clearMediaPrefetch(); report(error); throw error; }
+        } catch (error) {
+            if (targetId !== imageId && ["image_left_queue", "queue_scope_mismatch"].includes(error.code)) {
+                queue.remove(targetId); window.TatorHostedCanvas.removeQueue([targetId]);
+                status("That image left this queue. Your current image and draft are unchanged.", true);
+            } else { if ([401, 403, 404, 409, 423].includes(error.status)) clearMediaPrefetch(); report(error); }
+            throw error;
+        }
         finally { busy = false; update(); scheduleMediaPrefetch(); }
     }
     async function transition(kind) {
@@ -592,6 +636,8 @@
         const operation = { path: `${base}/${kind}`, body };
         pending = operation;
         journal({ pending: operation, latest: draft() });
+        const recoveryUrl = new URL(location.href); recoveryUrl.searchParams.set("recovery", operation.body.operation_id);
+        history.replaceState(null, "", recoveryUrl.pathname + recoveryUrl.search);
         try { checkedResult(operation, await api(operation.path, operation.body)); pending = null; clearJournal(); editable = false; await leave(kind !== "archive"); }
         catch (error) {
             // A transport failure says nothing about whether the server committed.
@@ -626,18 +672,23 @@
         document.body.classList.add("hosted-canvas");
         const panel = node("aside"); panel.className = "hosted-canvas-panel"; panel.setAttribute("aria-label", "Annotation workflow");
         const header = node("div"); header.className = "hosted-canvas-header";
-        const back = addButton(header, "hostedBack", boot.user.role === "admin" ? "← Admin workspace" : "← Workspace", () => leave(false, `/?dataset=${encodeURIComponent(dataset.id)}`));
+        const back = addButton(header, "hostedBack", boot.user.role === "admin" ? "← Admin workspace" : "← Workspace", () => leave(false, backUrl()));
         back.title = boot.user.role === "admin" ? "Save and return to datasets, quality analysis, compute, people and settings" : "Save and return to your assigned work";
         const toggle = node("button", "−"); toggle.type = "button"; toggle.id = "hostedPanelToggle"; toggle.setAttribute("aria-controls", "hostedWorkflowControls");
         toggle.setAttribute("aria-expanded", "true"); toggle.setAttribute("aria-label", "Minimize annotation controls"); header.append(toggle);
         const title = node("div"); title.className = "hosted-canvas-title"; title.append(node("strong", record.filename), node("small", `${dataset.name} · ${record.state === "confirmed" ? "Confirmed" : record.state === "submitted" ? "Submitted for review" : "Incoming"} · ${boot.user.username}`));
+        const breadcrumb = node("small"); breadcrumb.id = "hostedBreadcrumb"; title.append(breadcrumb);
+        const trancheTitle = node("strong"); trancheTitle.id = "hostedTrancheTitle"; title.append(trancheTitle);
         const statusPanel = node("div"); statusPanel.className = "hosted-canvas-status";
         const state = node("span", "Loading…"); state.id = "hostedSaveState"; state.setAttribute("role", "status"); statusPanel.append(state);
         const content = node("div"); content.id = "hostedWorkflowControls";
         toggle.onclick = () => { content.hidden = !content.hidden; toggle.textContent = content.hidden ? "+" : "−"; toggle.setAttribute("aria-expanded", String(!content.hidden)); toggle.setAttribute("aria-label", content.hidden ? "Show annotation controls" : "Minimize annotation controls"); };
+        const trancheInstructions = node("p"); trancheInstructions.id = "hostedTrancheInstructions"; trancheInstructions.style.whiteSpace = "pre-wrap"; content.append(trancheInstructions);
         const notes = node("div"); notes.id = "hostedReviewNotes"; content.append(notes);
         const bar = node("div"); bar.className = "hosted-canvas-bar"; content.append(bar);
         addButton(bar, "hostedSave", "Save now", () => save({ manual: true }));
+        addButton(bar, "hostedRefreshQueue", "Refresh work list", async () => { await queue.refresh(imageId); updateTranche((await queue.authorize(imageId)).tranche); status("Work list updated. Your current annotations are unchanged."); });
+        addButton(bar, "hostedMoreImages", "Load more in this queue", async () => { await queue.more(); status(queue.next ? "More images added to the image list." : "All later images in this queue are loaded."); });
         addButton(bar, "hostedReconnect", "Reconnect editing", () => acquire());
         const check = (id, label, checked) => { const wrap = node("label"), input = node("input"); input.type = "checkbox"; input.id = id; input.checked = checked; wrap.append(input, document.createTextNode(label)); bar.append(wrap); };
         check("hostedComplete", "Annotations checked", record.complete);
@@ -660,7 +711,7 @@
             takeover.hidden = true;
             addButton(feedbackPanel, "hostedOverride", "Recover from annotator", async () => {
                 if (!confirm("Remove this image from the annotator's work? Their saved annotations are preserved; their editing access ends immediately.")) return;
-                await api(`${base}/override`, { ...context(), feedback: "Administrator recovered the image from the assignment." }); location.reload();
+                await api(`${base}/override`, { ...context(), feedback: "Administrator recovered the image from the assignment." }); location.assign(`/annotate?${new URLSearchParams({image: imageId, queue: "unallocated"})}`);
             });
         }
         addButton(feedbackPanel, "hostedClassRequest", "Request a class", () => $("hostedClassDialog").showModal());
@@ -671,6 +722,8 @@
         addButton(form, "hostedCancelClass", "Cancel", () => dialog.close()); form.onsubmit = (e) => e.preventDefault(); dialog.append(form);
         content.append(feedbackPanel); panel.append(header, title, statusPanel, content);
         document.body.append(panel, dialog);
+        updateTranche(tranche);
+        if ((queue?.scope || originScope)?.tranche_id) back.textContent = "← Back to tranche";
         window.dispatchEvent(new Event("tator:hosted-canvas"));
         update();
     }
@@ -680,26 +733,26 @@
             await sessionCheck;
             const retained = sessionStorage.getItem(key);
             const recovery = retained ? JSON.parse(retained) : null;
+            if (recovery?.scope) originScope = recovery.scope;
             if (recovery?.state === "committed_restricted") throw new Error("Your earlier change was saved, but its result is no longer available to this account. A later draft is retained in this tab. Ask an administrator to help recover it.");
             let recoveredReceipt = recovery?.pending ? await commandReceipt(recovery.pending) : null;
             if (recoveredReceipt && !recovery.pending.path.endsWith("/save")) {
-                clearJournal(); location.assign("/"); return;
+                clearJournal(); location.assign(scopeBackUrl(recovery.scope || originScope)); return;
             }
             record = await api(`${base}?include_review=true`); dataset = await api(`/api/hosted/datasets/${record.dataset_id}`);
+            const scoped = boot.scope ? {scope: boot.scope, tranche: boot.tranche} : await api(`${base}/scope`);
+            scopeLeft = scopeLeft || Boolean(recovery?.scope && !sameScope(recovery.scope, scoped.scope));
+            tranche = scoped.tranche;
+            const neighbors = scopeLeft ? [record] : await openScope(scoped);
             buildUi();
-            try { await acquire(false, false, record, sessionCheck); } catch (error) { report(error); }
-            const neighbors = [];
-            const filter = boot.user.role === "admin" ? `&state=${encodeURIComponent(record.state)}` : "";
-            const page = offset => api(`/api/hosted/images?dataset_id=${dataset.id}&limit=500&compact=true&offset=${offset}${filter}`);
-            const firstPage = await page(0); neighbors.push(...firstPage.images);
-            if (firstPage.images.length === 500) {
-                for (let offset = 500; ; offset += 2000) {
-                    // Bounded parallel reads retain server order and the full
-                    // work list without one network round trip per page.
-                    const pages = await Promise.all([0, 500, 1000, 1500].map(step => page(offset + step)));
-                    for (const result of pages) neighbors.push(...result.images);
-                    if (pages.some(result => result.images.length < 500)) break;
-                }
+            if (!retained && !scopeLeft) try { await acquire(false, false, record, sessionCheck); } catch (error) { report(error); }
+            if (scopeLeft) {
+                const notice = node("p", "This image left its previous tranche or queue. Back returns to that work list; your retained draft can be recovered only if you still have editing access and its saved version is unchanged.");
+                notice.id = "hostedScopeNotice"; $("hostedSaveState").parentElement.append(notice);
+                if (!retained) addButton($("hostedSaveState").parentElement, "hostedOpenCurrent", "Open current work queue", async () => {
+                    const current = await api(`${base}/scope`);
+                    location.assign(new window.HostedQueue({api, scope: current.scope}).url(imageId));
+                });
             }
             await window.TatorHostedCanvas.open(record, dataset, !editable, neighbors);
             const start = Date.now();
@@ -711,7 +764,7 @@
                 status("A draft from the earlier connection is retained in this tab. Recover it before continuing.", true);
                 addButton($("hostedSaveState").parentElement, "hostedResolve", "Recover my draft", async () => {
                     let receipt = recovery.pending ? await commandReceipt(recovery.pending) : null;
-                    if (receipt && !recovery.pending.path.endsWith("/save")) { clearJournal(); location.assign("/"); return; }
+                    if (receipt && !recovery.pending.path.endsWith("/save")) { clearJournal(); location.assign(scopeBackUrl(recovery.scope || originScope)); return; }
                     let rejectedByLease = false;
                     if (recovery.pending && !receipt) {
                         // A missing receipt alone does not resolve a lost reply.
@@ -725,6 +778,7 @@
                             if (!certified && !rejectedByLease) throw error;
                         }
                     }
+                    if (receipt && recovery.pending && !recovery.pending.path.endsWith("/save")) { clearJournal(); location.assign(scopeBackUrl(recovery.scope || originScope)); return; }
                     const fresh = await api(base);
                     const anchor = recovery.pending?.body || recovery.unsent?.body || recovery.rejected?.context;
                     const expected = receipt?.result.current_version || anchor?.expected_version;
@@ -733,6 +787,23 @@
                     if (!restored.annotations) throw new Error("No unsent annotations are attached to this operation. Check the workspace for its current review status.");
                     if (!confirm("Restore your retained draft on this unchanged server version? This also takes over your own previous editing tab.")) return;
                     record = fresh; await acquire(true, true);
+                    // Recovery keeps an explicit queue (including global Review)
+                    // while it remains valid. A derived scope is only a fallback
+                    // for work that actually moved before or during recovery.
+                    let replaceScope = scopeLeft || !queue;
+                    if (!replaceScope) {
+                        try { updateTranche((await queue.authorize(imageId)).tranche); }
+                        catch (error) {
+                            if (!["image_left_queue", "queue_scope_changed", "queue_scope_mismatch", "tranche_not_found"].includes(error.code)) throw error;
+                            replaceScope = true;
+                        }
+                    }
+                    if (replaceScope) {
+                        const currentScope = await api(`${base}/scope`);
+                        const neighbors = await openScope(currentScope); window.TatorHostedCanvas.reconcileQueue(neighbors);
+                    }
+                    history.replaceState(null, "", queue.url(imageId));
+                    $("hostedScopeNotice")?.remove();
                     if (rejectedByLease && record.generation <= anchor.generation) throw new Error("The earlier editing reservation has not been replaced. Your original command and draft remain retained; reconnect before trying again.");
                     window.TatorHostedCanvas.restoreDraft(restored.annotations);
                     $("hostedComplete").checked = restored.complete;
@@ -744,6 +815,7 @@
                     pending = null; await save({ manual: true });
                 });
             } else if (editable) status("Connected · edits save automatically");
+            else if (scopeLeft) status("This image left the previous queue. Open its current work queue to continue.", true);
             await refreshFeedback();
             scheduleMediaPrefetch();
         } catch (error) { if (!$("hostedSaveState")) { document.body.replaceChildren(node("p", error.message)); const back = node("a", "Return to sign in"); back.href = "/"; document.body.append(back); } else report(error); }
@@ -814,7 +886,9 @@
         mediaUrlFor: (id) => `/api/hosted/images/${encodeURIComponent(id)}/media`,
         mediaBlobFor,
         get mediaPrefetchState() { return mediaPrefetch?.stats || {entries: 0, bytes: 0, inFlight: 0}; },
-        get datasetId() { return dataset?.id; }, api,
+        get datasetId() { return dataset?.id; }, api, step,
+        get queueScope() { return queue?.scope; }, nextQueuedIds: count => queue?.peek(imageId, count) || [],
+        async loadMoreQueue() { await queue?.more(); },
         async capturePaidBatchContext() {
             if (!window.TatorHosted.editable) throw new Error("Reconnect editing before preparing a paid caption batch.");
             busy = true; update();
@@ -906,8 +980,16 @@
     }, 2000);
     setInterval(async () => {
         if (!record || !editable || busy || saving || handoff) return;
-        try { await verifySession(); await api(`${base}/editor`, { editor_id: editorId, expected_version: record.current_version, generation: record.generation }); }
-        catch (error) { report(error); }
+        const origin = {imageId, generation: record.generation};
+        const current = () => imageId === origin.imageId && record?.generation === origin.generation && !busy && !handoff && !accountChanged;
+        try {
+            await verifySession(); if (!current()) return;
+            const scoped = await queue.authorize(origin.imageId); if (!current()) return;
+            if (scoped.tranche && scoped.tranche.revision !== tranche?.revision) await queue.refresh(origin.imageId, current);
+            if (!current()) return;
+            updateTranche(scoped.tranche);
+            await api(`${base}/editor`, { editor_id: editorId, expected_version: record.current_version, generation: record.generation });
+        } catch (error) { if (current()) report(error); }
     }, 30000);
     window.addEventListener("beforeunload", (event) => {
         // Undo may reach the saved baseline before the next autosave tick.

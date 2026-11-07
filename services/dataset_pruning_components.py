@@ -19,6 +19,7 @@ from fastapi import HTTPException
 from services.dataset_pruning import digest
 from services.dataset_pruning_cache import file_state
 from services.data_ingestion import normalize_rows
+from services.sam3_descriptors import descriptor_backend, descriptor_status, native_runtime_identity
 from services.dataset_pruning_correction import adjust_component_to_memmap, validate_strength
 from utils.class_analysis_quality import resolve_quality_recipe
 
@@ -60,8 +61,7 @@ def inherited_components(api, cfg):
                          'status': 'existing DQE producer; cached components reused where content and producer are attested'}
             components.append(component)
             if identifier == 'sam3':
-                from services.mlx_sam3 import mlx_sam3_status
-                component['model'] = mlx_sam3_status('mlx-bf16')['model_id']
+                component['model'] = descriptor_status(api)['model_id']
                 component['pooling'] = 'mask_multiscale'
             if identifier == 'salad':
                 component['status'] = 'Historical DQE crop head was not persisted: resolve an identical persisted version or train one new consistent head and encode every current crop'
@@ -106,62 +106,68 @@ def object_records(api, images, preprocessing):
 def raw_component_recipe(api, component, preprocessing, cfg):
     base = component['encoder']
     if base == 'sam3':
-        import importlib.metadata
-        import dataclasses
-        import platform
-        import sys
-        import services.mlx_sam3 as sam_runtime
-        from services.mlx_sam3 import mlx_sam3_status
-        runtime = {'backend': 'mlx-bf16', 'descriptor_scales': 3, 'dimension': 768,
-                   'policy': 'full_source_image_mask_pool_or_bbox_fallback', 'status': mlx_sam3_status('mlx-bf16')}
-        model_path = Path(runtime['status'].get('model_path') or '')
-        files = [model_path] if model_path.is_file() else sorted(model_path.glob('*.safetensors')) + sorted(model_path.glob('config.json')) if model_path.is_dir() else []
-        runtime['checkpoint_artifacts'] = [{'name': path.name, 'sha256': api._class_analysis_file_sha256_cached(path), 'bytes': path.stat().st_size} for path in files]
-        runtime['library_versions'] = {}
-        runtime['library_versions']['python'] = platform.python_version()
-        for package in ['mlx', 'mlx-vlm', 'Pillow', 'numpy']:
-            try: runtime['library_versions'][package] = importlib.metadata.version(package)
-            except importlib.metadata.PackageNotFoundError: runtime['library_versions'][package] = 'unavailable'
-        dependencies = [Path(sam_runtime.__file__)]
-        try:
-            package_root = Path(importlib.metadata.distribution('mlx-vlm').locate_file('mlx_vlm/models/sam3'))
-            dependencies.extend(sorted(package_root.rglob('*.py')))
-        except importlib.metadata.PackageNotFoundError: pass
-        runtime['implementation_files'] = [{'path': str(path), 'sha256': api._class_analysis_file_sha256_cached(path)} for path in dependencies]
-        loaded = {}
-        for module_name, module in list(sys.modules.items()):
-            if module_name != 'services.mlx_sam3' and not module_name.startswith('mlx_vlm.models.sam3'): continue
-            module_path = Path(getattr(module, '__file__', '') or '')
-            expected = {}
-            if module_path.suffix == '.py' and module_path.is_file():
-                def collect_code(code):
-                    expected[code.co_qualname] = code
-                    for child in code.co_consts:
-                        if inspect.iscode(child): collect_code(child)
-                collect_code(compile(module_path.read_bytes(), str(module_path), 'exec', dont_inherit=True))
-            for name, value in vars(module).items():
-                functions = [(name, value)] if inspect.isfunction(value) else [(name+'.'+key, member) for key, member in vars(value).items() if inspect.isfunction(member)] if inspect.isclass(value) and getattr(value, '__module__', None) == module_name else []
-                for label, function in functions:
-                    if getattr(function, '__module__', None) == module_name:
-                        code = inspect.unwrap(function).__code__
-                        generated_dataclass = (inspect.isclass(value) and dataclasses.is_dataclass(value)
-                            and code.co_filename == '<string>' and label.rsplit('.', 1)[-1] in
-                            {'__init__', '__repr__', '__eq__', '__hash__', '__setattr__', '__delattr__'})
-                        if not generated_dataclass and expected.get(code.co_qualname) != code:
-                            raise HTTPException(409, 'SAM3 implementation changed after loading ('+module_name+'.'+label+'). Restart this backend before producing reusable descriptors.')
-                        if module_name == 'services.mlx_sam3':
-                            # marshal's string-reference/intern flags vary
-                            # across otherwise code-equivalent processes. The
-                            # verified source and qualified function name are
-                            # stable; loaded-code equality above still rejects
-                            # a serving process whose implementation drifted.
-                            loaded[module_name+'.'+label] = digest({'source_sha256': api._class_analysis_file_sha256_cached(module_path),
-                                                                  'qualname': code.co_qualname,
-                                                                  'generated_dataclass': generated_dataclass,
-                                                                  'generated_code': hashlib.sha256(marshal.dumps(code, 0)).hexdigest() if generated_dataclass else None})
-        runtime['loaded_implementation'] = loaded
-        runtime['dependency_policy'] = 'Pinned package sources and versions; already-loaded package code checked against those sources. Service loaded-code identity is stable before and after model loading.'
-        runtime['persistent_cache_safe'] = bool(files)
+        if descriptor_backend() == 'torch':
+            runtime = native_runtime_identity(api)
+            if not runtime['persistent_cache_safe']:
+                runtime['process_epoch'] = api.CLASS_ANALYSIS_UNRESOLVED_RUNTIME_EPOCH
+        else:
+            import importlib.metadata
+            import dataclasses
+            import platform
+            import sys
+            import services.mlx_sam3 as sam_runtime
+            import services.sam3_descriptors as descriptor_runtime
+            from services.mlx_sam3 import mlx_sam3_status
+            runtime = {'backend': 'mlx-bf16', 'descriptor_scales': 3, 'dimension': 768,
+                       'policy': 'full_source_image_mask_pool_or_bbox_fallback', 'status': mlx_sam3_status('mlx-bf16')}
+            model_path = Path(runtime['status'].get('model_path') or '')
+            files = [model_path] if model_path.is_file() else sorted(model_path.glob('*.safetensors')) + sorted(model_path.glob('config.json')) if model_path.is_dir() else []
+            runtime['checkpoint_artifacts'] = [{'name': path.name, 'sha256': api._class_analysis_file_sha256_cached(path), 'bytes': path.stat().st_size} for path in files]
+            runtime['library_versions'] = {}
+            runtime['library_versions']['python'] = platform.python_version()
+            for package in ['mlx', 'mlx-vlm', 'Pillow', 'numpy']:
+                try: runtime['library_versions'][package] = importlib.metadata.version(package)
+                except importlib.metadata.PackageNotFoundError: runtime['library_versions'][package] = 'unavailable'
+            dependencies = [Path(sam_runtime.__file__), Path(descriptor_runtime.__file__)]
+            try:
+                package_root = Path(importlib.metadata.distribution('mlx-vlm').locate_file('mlx_vlm/models/sam3'))
+                dependencies.extend(sorted(package_root.rglob('*.py')))
+            except importlib.metadata.PackageNotFoundError: pass
+            runtime['implementation_files'] = [{'path': str(path), 'sha256': api._class_analysis_file_sha256_cached(path)} for path in dependencies]
+            loaded = {}
+            for module_name, module in list(sys.modules.items()):
+                if module_name not in {'services.mlx_sam3', 'services.sam3_descriptors'} and not module_name.startswith('mlx_vlm.models.sam3'): continue
+                module_path = Path(getattr(module, '__file__', '') or '')
+                expected = {}
+                if module_path.suffix == '.py' and module_path.is_file():
+                    def collect_code(code):
+                        expected[code.co_qualname] = code
+                        for child in code.co_consts:
+                            if inspect.iscode(child): collect_code(child)
+                    collect_code(compile(module_path.read_bytes(), str(module_path), 'exec', dont_inherit=True))
+                for name, value in vars(module).items():
+                    functions = [(name, value)] if inspect.isfunction(value) else [(name+'.'+key, member) for key, member in vars(value).items() if inspect.isfunction(member)] if inspect.isclass(value) and getattr(value, '__module__', None) == module_name else []
+                    for label, function in functions:
+                        if getattr(function, '__module__', None) == module_name:
+                            code = inspect.unwrap(function).__code__
+                            generated_dataclass = (inspect.isclass(value) and dataclasses.is_dataclass(value)
+                                and code.co_filename == '<string>' and label.rsplit('.', 1)[-1] in
+                                {'__init__', '__repr__', '__eq__', '__hash__', '__setattr__', '__delattr__'})
+                            if not generated_dataclass and expected.get(code.co_qualname) != code:
+                                raise HTTPException(409, 'SAM3 implementation changed after loading ('+module_name+'.'+label+'). Restart this backend before producing reusable descriptors.')
+                            if module_name in {'services.mlx_sam3', 'services.sam3_descriptors'}:
+                                # marshal's string-reference/intern flags vary
+                                # across otherwise code-equivalent processes. The
+                                # verified source and qualified function name are
+                                # stable; loaded-code equality above still rejects
+                                # a serving process whose implementation drifted.
+                                loaded[module_name+'.'+label] = digest({'source_sha256': api._class_analysis_file_sha256_cached(module_path),
+                                                                      'qualname': code.co_qualname,
+                                                                      'generated_dataclass': generated_dataclass,
+                                                                      'generated_code': hashlib.sha256(marshal.dumps(code, 0)).hexdigest() if generated_dataclass else None})
+            runtime['loaded_implementation'] = loaded
+            runtime['dependency_policy'] = 'Pinned package sources and versions; already-loaded package code checked against those sources. Service loaded-code identity is stable before and after model loading.'
+            runtime['persistent_cache_safe'] = bool(files)
     elif base == 'cradio':
         runtime = api.cradio_runtime_identity(component['model'], requested_backend=cfg.get('cradio_backend', 'auto'),
                   pooling=component['pooling'], output_mode='summary_only' if component['pooling'] == 'summary' else 'summary_and_spatial')
@@ -234,8 +240,7 @@ def build_recipes(adapter, request, source):
         component['model'] = component.get('model') or (api.CRADIO_DEFAULT_MODEL if identifier == 'cradio' else cfg.get('encoder_model') or api.CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL)
         component['pooling'] = component.get('pooling') or ('summary' if identifier == 'cradio' else 'pooler')
         if identifier == 'sam3':
-            from services.mlx_sam3 import mlx_sam3_status
-            component['model'] = mlx_sam3_status('mlx-bf16')['model_id']
+            component['model'] = descriptor_status(api)['model_id']
             component['pooling'] = 'mask_multiscale'
         if identifier in {'dinov3', 'cradio'}:
             if component['pooling'] not in ({'summary', 'spatial_mean', 'summary_spatial_concat'} if identifier == 'cradio' else {'pooler', 'cls', 'patch_mean', 'cls_patch_concat'}):

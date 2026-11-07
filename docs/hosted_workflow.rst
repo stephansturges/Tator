@@ -14,14 +14,17 @@ Where work lives
 ----------------
 
 An administrator's **Dataset** view is the confirmed, canonical dataset used by
-analysis, training and dataset exports. **Incoming** shows images that are not
-yet confirmed, including assigned, returned and submitted work. **Review**
-focuses on submitted images awaiting an administrator's decision. Uploading,
+analysis, training and dataset exports. **Incoming** shows all pending images,
+with their tranche and annotator where assigned. Choose **Unallocated only** to
+find images available for a new tranche. **Tranches** groups reserved and assigned
+work; **Review** filters pending submissions by tranche or annotator. Uploading,
 assigning, saving or submitting does not add an image to the canonical dataset.
 Confirmed background images are valid members of the canonical dataset even
 when they contain no boxes. Empty annotations alone do not make an image Incoming.
 
-Annotators use **My work** to open their own assigned or returned images.
+Annotators use **My tranches** to open their own assigned or returned images.
+See `Named annotation tranches <hosted_tranches.rst>`_ for the complete group
+workflow, progress definitions and ownership rules.
 **Submitted work · all datasets** tracks images they have handed over, including
 datasets where they have finished every assignment. That progress list does not
 grant access to the submitted pixels or annotations.
@@ -44,8 +47,8 @@ It freezes the confirmed input versions and schedules heavy work; it does not
 select which annotation tools users are allowed to use. A named analysis page
 shows an explicit setup message if its runtime is not configured on this server.
 
-Large work lists load compact image identifiers and filenames in bounded parallel
-requests. Annotation versions and editing ownership are checked again when an
+Large work lists load compact image identifiers and filenames in bounded pages
+within the selected queue. Annotation versions and editing ownership are checked again when an
 image is opened; faster navigation does not reuse an old permission to edit.
 SAM preloading runs only when a SAM model is configured for the hosted account.
 Image switching loads the latest review feedback with the image instead of
@@ -70,9 +73,9 @@ The normal route through the workspace is::
 
     Administrator: Add images -> Incoming (not assigned)
                                      |
-                             Assign selected images
+                       Create tranche -> assign it
                                      |
-    Annotator:                  My work -> save drafts
+    Annotator:              My tranches -> save drafts
                                      |
                                 Submit & next
                                      |
@@ -80,7 +83,7 @@ The normal route through the workspace is::
                               /               \
                   Return for changes       Approve & next
                          |                       |
-                    My work again          Dataset (confirmed)
+                    Same tranche           Dataset (confirmed)
                                                  |
                                           Frozen snapshot
                                                  |
@@ -104,7 +107,7 @@ and earlier snapshots.
      - No
    * - Assigned or returned
      - Inspect; explicitly recover ownership before editing
-     - Assigned person edits it in My work
+     - Assigned person edits it through My tranches
      - No
    * - Submitted
      - Edit, approve or return it in Review
@@ -135,9 +138,10 @@ First day: administrator
 3. Select the dataset, open **Incoming**, then **Add images**. Images alone are
    enough to start. Existing YOLO labels can accompany image uploads; use the
    reviewed migration workflow for a dataset with caption history.
-4. Select unassigned images, choose an annotator in **Assign to**, and use
-   **Assign selected images**. Assign a manageable set; the annotator can submit
-   completed images individually without finishing the whole set.
+4. Select unallocated images and create a named tranche. Add instructions and
+   choose **Save as Draft** or **Assign now** with an annotator. A tranche may
+   contain up to 10,000 unfinished images; add them in selections of at most 500.
+   The annotator can submit completed images individually.
 5. Open **Tools & models** to check installed assistance and the dataset's model
    selections. Manual annotation works when no models are configured.
 6. As submissions arrive, open **Review**. Inspect an image, make any corrections,
@@ -159,8 +163,9 @@ First day: annotator
 --------------------
 
 1. Open the invitation, set your password, and **Sign in**.
-2. Choose a dataset and open an image in **My work**. The canvas shows the dataset,
-   filename and save status. Use the image list to move through your assignments.
+2. Choose a dataset and open a group in **My tranches**. Continue into its canvas,
+   which shows the dataset, tranche, filename and save status. The image list
+   stays within that tranche.
 3. Draw or correct annotations, edit captions, and use available assistance as
    needed. Changes save automatically; **Save now** requests an immediate save.
    Check the save status before handing work over or closing the tab.
@@ -171,7 +176,7 @@ First day: annotator
    to the administrator. Other assigned images stay editable; no whole-dataset
    submission is required.
 6. Follow **Submitted work · all datasets** in the workspace. A returned image
-   reappears in **My work** with feedback. Correct it, check it and submit again.
+   reappears in its tranche with feedback. Correct it, check it and submit again.
 
 Use **Classes & requests** in the workspace, or **Request a class** in the
 canvas, when the existing list is insufficient. Choose **Send request** with a
@@ -279,8 +284,10 @@ explicit handoff. **Recover from annotator** on the image removes that assignmen
 and preserves the saved draft. For several images, open **Recall assigned work**
 in the dataset workspace, choose the annotator, select individual images or
 **Select all in this list**, enter a reason, then confirm the recall. Images
-return to unassigned Incoming for administrator editing or reassignment.
-Submitted and confirmed images are excluded from recall.
+return to unallocated Incoming for administrator editing or reassignment, and
+leave their former tranche. Submitted and confirmed images are excluded from
+ordinary recall. An administrator can explicitly withdraw a pending submission
+to Incoming with a reason, for example when its author is no longer available.
 
 Recall invalidates old editing tabs and automated results. If any selected image
 changed after the list loaded, the entire recall is rejected; refresh and review
@@ -451,8 +458,10 @@ Archive and storage cleanup
 
 Archiving removes an image or dataset from current work and current canonical
 snapshots. It keeps the bytes, annotations and historical snapshots. Restoring an
-archive restores the captured membership and version. Dataset archive requires
-the exact current member list and cannot bypass active annotator ownership.
+archive preserves the captured annotation version: confirmed images return to
+the canonical dataset; other images return to unallocated Incoming. Old tranche
+ownership and pending submissions are not reopened. Dataset archive requires the
+exact current member list and cannot bypass active annotator ownership.
 
 Physical purge is separate and manual. The minimum retention period is 30 days.
 An archived image still referenced by history, another dataset or a snapshot

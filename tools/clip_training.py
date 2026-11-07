@@ -745,8 +745,10 @@ def _load_dinov3(model_name: str, device: str) -> Tuple[Any, Any]:
         return msg
 
     try:
-        processor = AutoImageProcessor.from_pretrained(model_name)
-        model = AutoModel.from_pretrained(model_name)
+        from services.dinov3_runtime import native_dinov3_package, DinoV3RecipeProcessor
+        package = native_dinov3_package(model_name)
+        processor = DinoV3RecipeProcessor() if package else AutoImageProcessor.from_pretrained(model_name)
+        model = AutoModel.from_pretrained(str(package), local_files_only=True) if package else AutoModel.from_pretrained(model_name)
     except Exception as exc:  # noqa: BLE001
         raise TrainingError(f"Failed to load DINOv3 backbone '{model_name}': {_format_hf_error(exc)}") from exc
     model.eval()

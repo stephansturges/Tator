@@ -132,11 +132,13 @@ Plugins are trusted server code, not a sandbox for arbitrary code.
 
 The supervisor never changes the parent's CUDA environment or invokes a global
 model unload. Supply explicit devices to adapters. Workers have their own process
-groups, and cancellation only signals a group created by this supervisor. On
-Linux a parent-death signal terminates the worker if the control process dies;
-a parent watcher also handles ordinary parent loss on macOS. A separate tiny
-guardian, with no model or protocol pipes, remains in the worker's process group
-and kills that group if the worker or control process dies. This covers inherited
+groups, and cancellation only signals a group created by this supervisor. A tiny
+independent guardian, with no model or protocol pipes, remains in the worker's
+process group and kills that group if the worker or control process dies, even
+when a native model call holds the worker's Python interpreter. An additional
+parent watcher handles ordinary parent loss. Workers deliberately avoid Linux's
+parent-death signal: it follows the spawning thread, so it would kill healthy
+workers when the thread that restores tools after analysis finishes. This covers inherited
 children used by an isolated training/analysis adapter. Adapters must not launch
 detached children; this module does not provide cgroup containment.
 
@@ -187,6 +189,21 @@ metadata. Automatic SAM classification crops the predicted mask's bounding box,
 preserves calibrated probabilities and applies the existing foreground guard.
 See `Hosted annotation assistance <hosted_assistance.rst>`_ for supported encoder
 and recipe details.
+
+Check the actual saved head when preparing a new server. A pickle produced with
+NumPy 2 can fail under NumPy 1.26.0 with ``No module named numpy._core``. NumPy
+`1.26.1 added compatibility stubs
+<https://numpy.org/doc/stable/release/1.26.1-notes.html>`_; the CUDA rehearsal used
+1.26.4 to load the existing CLIP head without changing its weights or recipe.
+Install the compatible version in the service environment, then check its
+dependencies and run an actual classification. A successful import alone does
+not qualify the saved model.
+
+The native SAM3 descriptor bridge participates in the producer identity even
+for the MLX route. Upgrading to this release therefore invalidates older MLX
+SAM3 component caches: expect one recomputation, including when using the
+schema-2 release on a Mac recovery host. This does not change saved annotations
+or permit reuse across incompatible producer identities.
 
 SAM3 text, windowed text and visual prompts reuse the current user's existing
 SAM3 network through a private ``Sam3PromptRuntime``. ``sam3_text_auto`` adds

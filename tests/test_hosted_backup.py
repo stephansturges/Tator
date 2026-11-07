@@ -1,6 +1,7 @@
 """Composition uses real SQLite/files; TarTransport is NOT encryption evidence."""
 
 import hashlib
+import errno
 import io
 import json
 import shutil
@@ -70,6 +71,9 @@ def state(tmp_path):
         connection.execute("INSERT INTO editor_leases VALUES('image1','old-tab')")
         connection.execute("INSERT INTO metadata VALUES('installation_id','original-installation')")
         connection.execute("INSERT INTO receipts VALUES('operation1','v1')")
+    # sqlite's context manager commits but does not close. Close explicitly so
+    # the byte baseline below includes the WAL checkpoint before backup starts.
+    connection.close()
     return database, store, ref
 
 
@@ -78,14 +82,17 @@ def make_backup(state, tmp_path, **kwargs):
     return create_encrypted_backup(database, store, tmp_path / "composed.testarchive", recipient="test-recipient", references=references, age=kwargs.pop("age", TarTransport()), **kwargs)
 
 
-def test_composed_restore_preserves_work_revokes_authority_and_continues(state, tmp_path):
+@pytest.mark.parametrize("reuse", [False, True])
+def test_composed_restore_preserves_work_revokes_authority_and_continues(state, tmp_path, reuse):
     database, store, ref = state
     original = database.read_bytes()
     result = make_backup(state, tmp_path, metadata={"dataset": "fixture"})
-    restored = restore_encrypted_backup(result.path, tmp_path / "restored", identity="test-only", restore_hook=revoke, age=TarTransport())
+    restored = restore_encrypted_backup(result.path, tmp_path / "restored", identity="test-only", restore_hook=revoke, age=TarTransport(), artifact_cache=store if reuse else None)
     assert restored.artifact_count == 1
     assert restored.metadata == {"dataset": "fixture"}
     assert ArtifactStore(restored.artifacts_root).verify(ref) == ref
+    recovered_blob = ArtifactStore(restored.artifacts_root)._path(ref.sha256)
+    assert (recovered_blob.stat().st_ino == store._path(ref.sha256).stat().st_ino) is reuse
     with sqlite3.connect(restored.database_path) as connection:
         assert connection.execute("SELECT * FROM sessions").fetchall() == []
         assert connection.execute("SELECT * FROM editor_leases").fetchall() == []
@@ -137,7 +144,8 @@ def rewrite_archive(original, output, mutate):
 
 
 @pytest.mark.parametrize("case", ["traversal", "symlink", "duplicate", "missing", "corrupt", "extra"])
-def test_invalid_archives_never_publish_or_run_restore_hook(state, tmp_path, case):
+@pytest.mark.parametrize("reuse", [False, True])
+def test_invalid_archives_never_publish_or_run_restore_hook(state, tmp_path, case, reuse):
     good = make_backup(state, tmp_path)
     bad = tmp_path / "bad.testarchive"
 
@@ -161,7 +169,7 @@ def test_invalid_archives_never_publish_or_run_restore_hook(state, tmp_path, cas
     rewrite_archive(good.path, bad, mutate)
     calls = []
     with pytest.raises(BackupError):
-        restore_encrypted_backup(bad, tmp_path / "restored", identity="test-only", restore_hook=lambda *args: calls.append(args), age=TarTransport())
+        restore_encrypted_backup(bad, tmp_path / "restored", identity="test-only", restore_hook=lambda *args: calls.append(args), age=TarTransport(), artifact_cache=state[1] if reuse else None)
     assert calls == []
     assert not (tmp_path / "restored").exists()
     assert not (tmp_path / "escaped").exists()
@@ -190,7 +198,8 @@ def test_restore_rejects_limits_nonempty_root_and_failed_hook(state, tmp_path):
     assert list(destination.iterdir()) == []
 
 
-def test_final_decryption_failure_is_not_published(state, tmp_path):
+@pytest.mark.parametrize("reuse", [False, True])
+def test_final_decryption_failure_is_not_published(state, tmp_path, reuse):
     backup = make_backup(state, tmp_path)
 
     class AuthenticationFailure(TarTransport):
@@ -200,9 +209,66 @@ def test_final_decryption_failure_is_not_published(state, tmp_path):
 
     calls = []
     with pytest.raises(BackupError, match="authentication"):
-        restore_encrypted_backup(backup.path, tmp_path / "restored", identity="test-only", restore_hook=lambda *args: calls.append(args), age=AuthenticationFailure())
+        restore_encrypted_backup(backup.path, tmp_path / "restored", identity="test-only", restore_hook=lambda *args: calls.append(args), age=AuthenticationFailure(), artifact_cache=state[1] if reuse else None)
     assert calls == []
     assert not (tmp_path / "restored").exists()
+    assert not list(tmp_path.glob(".tator-restore-*"))
+    assert state[1].verify(state[2]) == state[2]
+
+
+def test_restore_cache_mixes_verified_links_with_archive_only_members(state, tmp_path):
+    database, source, first = state
+    second = source.put_bytes(b"new artifact missing from the recovery cache")
+    with sqlite3.connect(database) as connection:
+        connection.execute("INSERT INTO media VALUES(?,?)", (second.sha256, second.size_bytes))
+    backup = make_backup(state, tmp_path)
+    cache = ArtifactStore(tmp_path / "cache")
+    cache.put_bytes(b"immutable-image-pixels")
+    restored = restore_encrypted_backup(backup.path, tmp_path / "restored", identity="test-only", restore_hook=revoke,
+                                        age=TarTransport(), artifact_cache=cache)
+    recovered = ArtifactStore(restored.artifacts_root)
+    assert recovered.verify(first) == first and recovered.verify(second) == second
+    assert recovered._path(first.sha256).stat().st_ino == cache._path(first.sha256).stat().st_ino
+    with pytest.raises(FileNotFoundError):
+        cache.verify(second)
+    # Removing a cache entry through normal GC cannot remove the restored pin.
+    assert cache.delete_unreferenced(first.sha256, is_referenced=lambda _: False)
+    assert recovered.verify(first) == first
+    assert source.verify(first) == first and source.verify(second) == second
+
+
+@pytest.mark.parametrize("case", ["corrupt", "symlink", "cross_device"])
+def test_restore_cache_fault_is_not_a_cache_miss(state, tmp_path, monkeypatch, case):
+    backup = make_backup(state, tmp_path)
+    ref = state[2]
+    cache = ArtifactStore(tmp_path / "cache")
+    cache.put_bytes(b"immutable-image-pixels")
+    cached = cache._path(ref.sha256)
+    if case == "corrupt":
+        cached.chmod(0o600)
+        cached.write_bytes(b"X" * ref.size_bytes)
+    elif case == "symlink":
+        cached.unlink()
+        cached.symlink_to(state[1]._path(ref.sha256))
+    else:
+        import os
+        original_link = os.link
+        def cross_device(source, target, **kwargs):
+            if Path(source) == cached:
+                raise OSError(errno.EXDEV, "cross-device link")
+            return original_link(source, target, **kwargs)
+        monkeypatch.setattr(os, "link", cross_device)
+    calls = []
+    with pytest.raises((BackupError, OSError)):
+        restore_encrypted_backup(backup.path, tmp_path / "restored", identity="test-only", restore_hook=lambda *args: calls.append(args),
+                                 age=TarTransport(), artifact_cache=cache)
+    assert calls == [] and not (tmp_path / "restored").exists()
+    assert not list(tmp_path.glob(".tator-restore-*"))
+    assert state[1].verify(ref) == ref
+    if case == "corrupt":
+        assert cached.read_bytes() == b"X" * ref.size_bytes
+    if case == "symlink":
+        assert cached.is_symlink()
 
 
 def test_extended_tar_header_is_rejected_before_reading_oversized_body(tmp_path):
@@ -249,6 +315,19 @@ def test_age_is_required_without_plaintext_fallback(state, tmp_path):
     assert not list(state[1].staging.iterdir())
 
 
+@pytest.mark.parametrize("symlink", [False, True])
+def test_recovery_cli_rejects_missing_or_symlink_cache_before_initializing_it(state, tmp_path, capsys, symlink):
+    from tools.hosted_recovery import main
+    cache = tmp_path / "invalid-cache"
+    if symlink:
+        cache.symlink_to(state[1].root, target_is_directory=True)
+    assert main(["restore", "--archive", str(tmp_path / "unused"), "--destination", str(tmp_path / "restored"),
+                 "--identity", str(tmp_path / "unused-key"), "--reuse-artifacts", str(cache)]) == 1
+    assert "existing real artifact-store root" in capsys.readouterr().err
+    assert cache.is_symlink() if symlink else not cache.exists()
+    assert not (tmp_path / "restored").exists()
+
+
 def test_canonical_zip_uses_frozen_members_and_annotation_bytes(state, tmp_path):
     _, store, ref = state
     frozen = [
@@ -280,7 +359,8 @@ def test_canonical_export_rejects_unsafe_or_duplicate_members(state, tmp_path, e
 
 
 @pytest.mark.skipif(not shutil.which("age") or not shutil.which("age-keygen"), reason="Real age/age-keygen are required for cryptographic integration evidence")
-def test_real_age_encryption_roundtrip_and_wrong_identity(state, tmp_path):
+@pytest.mark.parametrize("reuse", [False, True])
+def test_real_age_encryption_roundtrip_and_wrong_identity(state, tmp_path, reuse):
     identity = tmp_path / "identity.txt"
     subprocess.run(["age-keygen", "-o", str(identity)], check=True, capture_output=True)
     recipient = subprocess.run(["age-keygen", "-y", str(identity)], check=True, text=True, capture_output=True).stdout.strip()
@@ -288,17 +368,17 @@ def test_real_age_encryption_roundtrip_and_wrong_identity(state, tmp_path):
     result = create_encrypted_backup(state[0], state[1], output, recipient=recipient, references=references)
     assert output.read_bytes().startswith(b"age-encryption.org/v1")
     assert b"immutable-image-pixels" not in output.read_bytes()
-    restored = restore_encrypted_backup(output, tmp_path / "restored", identity=identity, restore_hook=revoke)
+    restored = restore_encrypted_backup(output, tmp_path / "restored", identity=identity, restore_hook=revoke, artifact_cache=state[1] if reuse else None)
     assert ArtifactStore(restored.artifacts_root).verify(state[2]) == state[2]
     other = tmp_path / "other.txt"
     subprocess.run(["age-keygen", "-o", str(other)], check=True, capture_output=True)
     with pytest.raises((BackupError, tarfile.TarError)):
-        restore_encrypted_backup(result.path, tmp_path / "wrong-key", identity=other, restore_hook=revoke)
+        restore_encrypted_backup(result.path, tmp_path / "wrong-key", identity=other, restore_hook=revoke, artifact_cache=state[1] if reuse else None)
     assert not (tmp_path / "wrong-key").exists()
     damaged = tmp_path / "damaged.age"
     ciphertext = bytearray(output.read_bytes())
     ciphertext[-1] ^= 1
     damaged.write_bytes(ciphertext)
     with pytest.raises(BackupError):
-        restore_encrypted_backup(damaged, tmp_path / "damaged-root", identity=identity, restore_hook=revoke)
+        restore_encrypted_backup(damaged, tmp_path / "damaged-root", identity=identity, restore_hook=revoke, artifact_cache=state[1] if reuse else None)
     assert not (tmp_path / "damaged-root").exists()

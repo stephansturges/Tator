@@ -1,0 +1,60 @@
+/* Progressive, bidirectional keyset queue. No annotation or canvas state is owned here. */
+(() => {
+    "use strict";
+    class HostedQueue {
+        constructor({api, scope, onAppend, onReconcile}) { this.api = api; this.scope = Object.freeze({...scope}); this.onAppend = onAppend; this.onReconcile = onReconcile; this.rows = []; this.next = null; this.previous = null; this.loading = null; }
+        params(extra = {}) { return new URLSearchParams({...this.scope, ...(this.scope.tranche_id ? {} : {tranche_id: ""}), limit: "100", ...extra}); }
+        async fetch(extra) {
+            const page = await this.api(`/api/hosted/queue?${this.params(extra)}`);
+            if (!Array.isArray(page.images) || page.scope?.dataset_id !== this.scope.dataset_id || (page.scope.tranche_id || null) !== (this.scope.tranche_id || null) || page.scope.queue !== this.scope.queue) throw new Error("The server returned a different work queue. Return to the workspace and reopen this tranche.");
+            return page;
+        }
+        async open(imageId) {
+            const page = await this.fetch({anchor_id: imageId});
+            this.rows = page.images; this.next = page.next_cursor; this.previous = page.previous_cursor;
+            return this.rows;
+        }
+        async more(direction = "forward") {
+            // Serialize appends and prefetch preparation; a stale second click
+            // must not append the same cursor page twice or replace the canvas.
+            while (this.loading) await this.loading;
+            const cursor = direction === "backward" ? this.previous : this.next;
+            if (!cursor) return;
+            this.loading = (async () => {
+                const page = await this.fetch({cursor, direction});
+                const seen = new Set(this.rows.map(row => row.id)), added = page.images.filter(row => !seen.has(row.id));
+                if (direction === "backward") { this.rows.unshift(...added); this.previous = page.previous_cursor; }
+                else { this.rows.push(...added); this.next = page.next_cursor; }
+                this.onAppend?.(added, {prepend: direction === "backward"});
+            })();
+            try { await this.loading; } finally { this.loading = null; }
+        }
+        async refresh(id, isCurrent = () => true) {
+            while (this.loading) await this.loading;
+            this.loading = (async () => {
+                const [before, after] = await Promise.all([this.fetch({anchor_id: id, direction: "backward"}), this.fetch({anchor_id: id})]);
+                if (!isCurrent()) return;
+                const seen = new Set(), rows = [...before.images, ...after.images].filter(row => { if (seen.has(row.id)) return false; seen.add(row.id); return true; });
+                this.rows = rows; this.previous = before.previous_cursor; this.next = after.next_cursor;
+                this.onReconcile?.(rows);
+            })();
+            try { await this.loading; } finally { this.loading = null; }
+        }
+        async neighbor(id, delta = 1) {
+            let index = this.rows.findIndex(row => row.id === id);
+            if (index < 0) throw new Error("This image left the current work queue. Return to the tranche.");
+            const direction = delta < 0 ? "backward" : "forward";
+            while (index + delta < 0 && this.previous || index + delta >= this.rows.length && this.next) {
+                await this.more(direction); index = this.rows.findIndex(row => row.id === id);
+            }
+            return this.rows[index + delta] || null;
+        }
+        peek(id, count = 2) { const index = this.rows.findIndex(row => row.id === id); return index < 0 ? [] : this.rows.slice(index + 1, index + count + 1).map(row => row.id); }
+        async ahead(id, count = 2) { const index = this.rows.findIndex(row => row.id === id); if (index >= 0 && index + count >= this.rows.length && this.next) await this.more(); }
+        remove(id) { this.rows = this.rows.filter(row => row.id !== id); }
+        async authorize(id) { return this.api(`/api/hosted/images/${encodeURIComponent(id)}/scope?${new URLSearchParams({queue: this.scope.queue, ...(this.scope.tranche_id ? {tranche_id: this.scope.tranche_id} : {})})}`); }
+        url(id) { return `/annotate?${new URLSearchParams({image: id, queue: this.scope.queue, ...(this.scope.tranche_id ? {tranche: this.scope.tranche_id} : {})})}`; }
+        get backUrl() { return `/?${new URLSearchParams({dataset: this.scope.dataset_id, ...(this.scope.tranche_id ? {view: "tranches", tranche: this.scope.tranche_id} : {view: {unallocated: "incoming", confirmed: "confirmed", review: "submitted"}[this.scope.queue] || "tranches"})})}`; }
+    }
+    window.HostedQueue = HostedQueue;
+})();

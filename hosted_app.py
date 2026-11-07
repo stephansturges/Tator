@@ -34,6 +34,7 @@ from services.hosted.http_boundary import BodyLimitMiddleware
 from services.hosted.tool_api import install_tool_api
 from services.hosted.provider_api import install_provider_api
 from services.hosted.analysis_api import install_analysis_api
+from services.hosted.tranches_api import install_tranches_api
 from services.hosted.types import Actor, MutationContext
 from services.hosted.preconditions import ImagePrecondition, precondition_payload
 from services.hosted.media import HostedMedia, inspect_media
@@ -538,6 +539,7 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
     def schema(_identity: Actor = Depends(admin)):
         return app.openapi()
 
+    install_tranches_api(app, store, actor, admin)
     install_operations_api(app, store, auth, artifacts, admin, root)
     install_tool_api(app, store, auth, artifacts, actor, admin, root)
     install_provider_api(app, store, artifacts, actor, admin)
@@ -569,16 +571,43 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
             '<div id="tabDatasetPruning" class="active">' + panel + '</div></body></html>')
 
     @app.get("/annotate", response_class=HTMLResponse)
-    def annotate(image: str, request: Request, identity: Actor = Depends(actor)):
-        record = store.image(identity, image)
-        bootstrap = json.dumps({"image_id": record["id"], "user": {"user_id": identity.user_id,
+    def annotate(image: str, request: Request, tranche: str | None = None,
+                 queue: str | None = None, recovery: str | None = None,
+                 identity: Actor = Depends(actor)):
+        scope_left = False
+        requested_scope = None
+        try:
+            record = store.image(identity, image)
+        except DomainError as error:
+            # A completed submit/archive can revoke image access before its
+            # reply arrives. Only that actor's matching handoff receipt permits
+            # a data-free shell; no image, dataset or raw receipt is disclosed.
+            receipt = store.raw_receipt(identity, recovery) if recovery and error.status == 404 else None
+            result = receipt.get("result", {}) if receipt else {}
+            if not (receipt and receipt["operation"] in {"submit", "approve", "return", "archive_image"}
+                    and (result.get("id") if receipt["operation"] != "archive_image" else result.get("target_id")) == image):
+                raise
+            navigation = {"scope": None, "tranche": None}
+            scope_left = True
+        else:
+            requested_scope = {"dataset_id": record["dataset_id"], "tranche_id": tranche, "queue": queue} if queue is not None else None
+            try:
+                navigation = store.queue_scope(identity, image, tranche_id=tranche, queue=queue)
+            except DomainError as error:
+                if error.code not in {"image_left_queue", "queue_scope_changed", "queue_scope_mismatch"}:
+                    raise
+                navigation = store.queue_scope(identity, image)
+                scope_left = True
+        bootstrap = json.dumps({"image_id": image, "user": {"user_id": identity.user_id,
             "username": identity.username, "role": identity.role},
+            "scope": navigation["scope"], "tranche": navigation["tranche"],
+            "requested_scope": requested_scope, "scope_left": scope_left,
             "csrf": auth.session_csrf(request.cookies[COOKIE]), "instance_id": auth.instance_id}).replace("<", "\\u003c")
         html = (WEB_ROOT / "tator.html").read_text()
         # Hosted annotation exposes only the labeling pane. Workspace graphs
         # load Plotly separately; keep the legacy page's graph dependency intact.
         html = re.sub(r'<script src="plotly-[^"\n]+"></script>', '', html, count=1)
-        html = html.replace('<script src="canvas.min.js', '<script>window.TatorHostedBoot=' + bootstrap + ';</script>\n<script src="/hosted_media_prefetch.js"></script>\n<script src="/hosted_canvas.js"></script>\n<script src="/hosted_tools_ui.js"></script>\n<script src="canvas.min.js', 1)
+        html = html.replace('<script src="canvas.min.js', '<script>window.TatorHostedBoot=' + bootstrap + ';</script>\n<script src="/hosted_media_prefetch.js"></script>\n<script src="/hosted_queue.js"></script>\n<script src="/hosted_canvas.js"></script>\n<script src="/hosted_tools_ui.js"></script>\n<script src="canvas.min.js', 1)
         # Hide the unmanaged legacy tabs before first paint, then render the
         # role-aware navigation to hosted, snapshot-bound destinations.
         html = html.replace("<body>", '<body class="hosted-canvas">', 1)

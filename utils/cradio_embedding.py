@@ -10,11 +10,14 @@ present; CUDA/MPS/CPU Torch remains the fallback path.
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
+import importlib
 import inspect
 import os
 import platform
 import sys
 import threading
+import types
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -36,6 +39,40 @@ CRADIO_MLX_DTYPE = os.environ.get("CRADIO_MLX_DTYPE", "bfloat16")
 CRADIO_CACHE_IDENTITY_SCHEMA = "cradio-runtime-identity-v1"
 CRADIO_MLX_IMPLEMENTATION_ABI = "cradio-mlx-python-v4-compiled-native-batches"
 CRADIO_INFERENCE_LOCK = threading.RLock()
+
+
+def _cradio_native_package(model_name):
+    root = os.environ.get("CRADIO_TORCH_MODEL_ROOT")
+    if not root:
+        return None
+    if model_name not in CRADIO_SUPPORTED_MODELS:
+        raise ValueError("cradio_model_unsupported")
+    path = Path(root).expanduser() / model_name.replace("/", "--")
+    if not all((path / name).is_file() for name in ("config.json", "model.safetensors", "preprocessor_config.json")):
+        raise RuntimeError("cradio_verified_package_missing:" + model_name)
+    return path
+
+
+def _load_pinned_native_model(package):
+    """Import the entire verified package, including transitive relative files.
+
+    Transformers' dynamic local-file loader can omit second-level imports.
+    A content-derived package name keeps all imports inside the pinned source
+    directory and prevents an older loaded package from shadowing new code.
+    """
+    source_hash = hashlib.sha256()
+    for path in sorted(package.glob("*.py")):
+        source_hash.update(path.name.encode())
+        source_hash.update(path.read_bytes())
+    name = "_tator_cradio_" + source_hash.hexdigest()
+    if name not in sys.modules:
+        module = types.ModuleType(name)
+        module.__path__ = [str(package)]
+        module.__package__ = name
+        sys.modules[name] = module
+    native = importlib.import_module(name + ".hf_model")
+    config = native.RADIOConfig.from_pretrained(str(package), local_files_only=True)
+    return native.RADIOModel.from_pretrained(str(package), config=config, local_files_only=True)
 
 
 def _env_flag(name: str, *, default: bool = False) -> bool:
@@ -247,6 +284,22 @@ def cradio_runtime_identity(
                 "checkpoint_bytes": 0,
             }
         )
+        package = _cradio_native_package(resolved_model)
+        if package and status.available:
+            paths = sorted(path for path in package.iterdir() if path.is_file() and path.suffix in {".py", ".json", ".safetensors"})
+            artifacts = [{"name": path.name, "sha256": _cradio_checkpoint_sha256(str(path.resolve()), path.stat().st_size, path.stat().st_mtime_ns), "bytes": path.stat().st_size} for path in paths]
+            checkpoint = next(item for item in artifacts if item['name'] == 'model.safetensors')
+            identity.update(implementation_abi="cradio-native-pinned-input-v1", checkpoint_sha256=checkpoint['sha256'],
+                            checkpoint_bytes=checkpoint['bytes'], artifacts=artifacts, persistent_cache_safe=True,
+                            implementation_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                            input_size="preserve_equal_input_dimensions_round16_else512",
+                            math_policy={"cuda_matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
+                                         "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
+                                         "float32_matmul_precision": torch.get_float32_matmul_precision(),
+                                         "cuda_autocast_enabled": torch.is_autocast_enabled("cuda"),
+                                         **({"cuda_autocast_dtype": str(torch.get_autocast_dtype("cuda"))}
+                                            if torch.is_autocast_enabled("cuda") else {})},
+                            library_versions={name: importlib.metadata.version(name) for name in ("torch", "torchvision", "transformers", "timm", "Pillow", "numpy")})
         return identity
 
     checkpoint = _cradio_mlx_checkpoint(resolved_model)
@@ -385,8 +438,12 @@ def load_cradio_backbone(
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"cradio_transformers_unavailable:{exc}") from exc
     try:
-        processor = CLIPImageProcessor.from_pretrained(resolved_model)
-        model = AutoModel.from_pretrained(resolved_model, trust_remote_code=True)
+        package = _cradio_native_package(resolved_model)
+        source = str(package) if package else resolved_model
+        processor = CLIPImageProcessor.from_pretrained(source, local_files_only=bool(package))
+        model = _load_pinned_native_model(package) if package else AutoModel.from_pretrained(source, trust_remote_code=True)
+        if package:
+            processor._tator_preserve_input = True
         model.eval().to(target_device)
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"cradio_load_failed:{exc}") from exc
@@ -533,11 +590,14 @@ def encode_cradio_images(
             input_size=input_size,
         )
     with torch.no_grad():
-        if input_size is None:
+        if input_size is None and not getattr(processor, "_tator_preserve_input", False):
             inputs = processor(images=list(images), return_tensors="pt", do_resize=True)
         else:
-            # Explicit whole-image policy; the default path above is unchanged.
-            resized = [image.convert('RGB').resize((input_size, input_size), Image.Resampling.BICUBIC) for image in images]
+            # Qualified native packages use the same stretch/round16 policy as
+            # the MLX recipe. Unqualified historical Torch calls stay separate.
+            size = input_size if input_size is not None else _resolve_cradio_mlx_image_size(images)
+            height, width = (size, size) if isinstance(size, int) else size
+            resized = [image.convert('RGB').resize((width, height), Image.Resampling.BICUBIC) for image in images]
             try:
                 inputs = processor(images=resized, return_tensors="pt", do_resize=False, do_center_crop=False)
             finally:

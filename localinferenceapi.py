@@ -452,6 +452,7 @@ from services.sam3_runs import (
     _run_dir_for_request_impl as _run_dir_for_request_impl,
     _delete_run_scope_impl as _delete_run_scope_impl,
 )
+from services.sam3_descriptors import descriptor_backend as sam3_descriptor_backend
 from services.sam3_runtime import (
     _sam3_clear_device_pinned_caches_impl as _sam3_clear_device_pinned_caches_impl,
     _set_sam3_device_pref_impl as _set_sam3_device_pref_impl,
@@ -4791,22 +4792,19 @@ class _Sam3Backend:
             http_exception_cls=HTTPException,
             http_400=HTTP_400_BAD_REQUEST,
         )
-        device_type = str(getattr(self.device, "type", "") or "")
-        build_device_str = "cuda" if device_type == "cuda" else "cpu"
+        from services.sam3_descriptors import build_native_sam3_model
         source = (
             active_sam3_metadata.get("source") if isinstance(active_sam3_metadata, dict) else None
         )
         try:
-            model = build_sam3_image_model(
-                device=build_device_str,
+            model = build_native_sam3_model(
+                build_sam3_image_model, device=self.device,
                 checkpoint_path=active_sam3_checkpoint,
                 load_from_HF=active_sam3_checkpoint is None,
                 enable_inst_interactivity=True,
                 enable_segmentation=active_sam3_enable_segmentation,
                 bpe_path=str(SAM3_BPE_PATH),
             )
-            if self.device:
-                model = model.to(self.device)
             predictor = getattr(model, "inst_interactive_predictor", None)
             if predictor is None:
                 raise RuntimeError("sam3_interactive_predictor_missing")
@@ -4824,12 +4822,15 @@ class _Sam3Backend:
 
     def set_image(self, np_img: np.ndarray) -> None:
         arr = np.ascontiguousarray(np_img)
-        self.predictor.set_image(arr)
-        _synchronize_sam_accelerator(self.backend, self.device)
-        if SAM_DECODER_WARMUP and not self._decoder_warmed:
-            _warm_sam_decoder(self.predictor, arr)
+        from services.sam3_descriptors import native_sam3_context
+        context = native_sam3_context(self.device) if self.backend == "torch" else contextlib.nullcontext()
+        with context:
+            self.predictor.set_image(arr)
             _synchronize_sam_accelerator(self.backend, self.device)
-            self._decoder_warmed = True
+            if SAM_DECODER_WARMUP and not self._decoder_warmed:
+                _warm_sam_decoder(self.predictor, arr)
+                _synchronize_sam_accelerator(self.backend, self.device)
+                self._decoder_warmed = True
 
     def predict(self, **kwargs):
         point_coords = kwargs.get("point_coords")
@@ -4837,14 +4838,17 @@ class _Sam3Backend:
         box = kwargs.get("box")
         mask_input = kwargs.get("mask_input")
         multimask_output = kwargs.get("multimask_output", True)
-        return self.predictor.predict(
-            point_coords=point_coords,
-            point_labels=point_labels,
-            box=box,
-            mask_input=mask_input,
-            multimask_output=multimask_output,
-            return_logits=kwargs.get("return_logits", False),
-        )
+        from services.sam3_descriptors import native_sam3_context
+        context = native_sam3_context(self.device) if self.backend == "torch" else contextlib.nullcontext()
+        with context:
+            return self.predictor.predict(
+                point_coords=point_coords,
+                point_labels=point_labels,
+                box=box,
+                mask_input=mask_input,
+                multimask_output=multimask_output,
+                return_logits=kwargs.get("return_logits", False),
+            )
 
     def unload(self) -> None:
         try:
@@ -43107,14 +43111,14 @@ def _class_analysis_capabilities() -> Dict[str, Any]:
         "default_embedding_adjustment": "remove_size_bias",
         "sam3_mask_fusion": {
             "schema": CLASS_ANALYSIS_SAM3_MASK_FUSION_SCHEMA,
-            "runtime": "mlx-bf16",
+            "runtime": sam3_descriptor_backend(),
             "dino_weight": CLASS_ANALYSIS_SAM3_MASK_FUSION_DINO_WEIGHT,
             "sam_weight": CLASS_ANALYSIS_SAM3_MASK_FUSION_SAM_WEIGHT,
             "measured_purpose": "wrong_label_discrimination",
         },
         "sam3_salad_fusion": {
             "schema": CLASS_ANALYSIS_SAM3_SALAD_FUSION_SCHEMA,
-            "runtime": "local_label_free_training_plus_mlx_sam3_bf16",
+            "runtime": "local_label_free_training_plus_" + sam3_descriptor_backend(),
             "default_preset": CLASS_ANALYSIS_SALAD_DEFAULT_PRESET,
             "presets": CLASS_ANALYSIS_SALAD_PRESETS,
             "default_settings": class_analysis_salad_settings({}).to_dict(),
@@ -44932,6 +44936,9 @@ def _class_analysis_embedding_head_cache_identity(
     if head.get("crop_salad_head_id"):
         identity["selected_crop_salad"] = {"id": head["crop_salad_head_id"],
                                            "sha256": head.get("crop_salad_head_sha256")}
+    if encoder_type == "dinov3" and os.environ.get("DINOV3_TORCH_MODEL_ROOT"):
+        # Native hosted recipes must not claim old MLX/raw cache provenance.
+        identity["runtime"] = _local_salad_encoder_identity("dinov3", identity["encoder_model"], backend="torch")
     if encoder_type == "cradio":
         runtime = cradio_runtime_identity(
             identity["encoder_model"],
@@ -44955,11 +44962,16 @@ def _class_analysis_embedding_head_cache_identity(
                 "output_mode",
                 "checkpoint_sha256",
                 "checkpoint_bytes",
+                "artifacts",
+                "implementation_sha256",
+                "library_versions",
+                "math_policy",
                 "persistent_cache_safe",
                 "compile_forward",
                 "cider_fusion",
                 "cider_fusion_targets",
             )
+            if key != "math_policy" or key in runtime
         }
         if not bool(runtime.get("persistent_cache_safe")):
             cache_runtime["process_epoch"] = CLASS_ANALYSIS_UNRESOLVED_RUNTIME_EPOCH
@@ -60982,103 +60994,8 @@ def _class_analysis_sam3_mask_feature_vector(
     bbox_xyxy: Sequence[float],
     image_size: Tuple[int, int],
 ) -> Tuple[np.ndarray, bool, Optional[float]]:
-    """Pool the three SAM3 tracker maps inside a box-prompt mask."""
-
-    import mlx.core as mx
-
-    features = list(getattr(predictor, "_features", []) or [])
-    if len(features) < 3:
-        raise RuntimeError("sam3_mask_fusion_feature_maps_missing")
-    width, height = image_size
-    bbox = np.asarray(bbox_xyxy, dtype=np.float32).reshape(-1)[:4]
-    masks, scores, _logits = predictor.predict(
-        box=bbox,
-        multimask_output=True,
-    )
-    score_values = np.asarray(scores, dtype=np.float32).reshape(-1)
-    finite_scores = np.flatnonzero(np.isfinite(score_values))
-    best_index = (
-        int(finite_scores[np.argmax(score_values[finite_scores])])
-        if finite_scores.size
-        else -1
-    )
-    chosen = (
-        np.asarray(masks[best_index], dtype=bool)
-        if best_index >= 0
-        else np.zeros((height, width), dtype=bool)
-    )
-    x1, y1, x2, y2 = [int(round(float(value))) for value in bbox]
-    x1, y1 = max(0, x1), max(0, y1)
-    x2 = min(width, max(x1 + 1, x2))
-    y2 = min(height, max(y1 + 1, y2))
-    use_mask = bool(chosen.any() and chosen[y1:y2, x1:x2].any())
-    mask_image = (
-        Image.fromarray(chosen.astype(np.uint8) * 255, mode="L")
-        if use_mask
-        else None
-    )
-    components: List[np.ndarray] = []
-    for feature in features[:3]:
-        _batch, feature_height, feature_width, _channels = feature.shape
-        feature_height = int(feature_height)
-        feature_width = int(feature_width)
-        if mask_image is not None:
-            resized = np.asarray(
-                mask_image.resize(
-                    (feature_width, feature_height),
-                    Image.Resampling.BILINEAR,
-                ),
-                dtype=np.float32,
-            ) / 255.0
-            weights = mx.array(resized)[None, :, :, None]
-            pooled = mx.sum(feature * weights, axis=(1, 2)) / mx.maximum(
-                mx.sum(weights),
-                mx.array(1e-6),
-            )
-        else:
-            fx1 = max(
-                0,
-                min(
-                    feature_width - 1,
-                    int(math.floor(float(bbox[0]) / width * feature_width)),
-                ),
-            )
-            fy1 = max(
-                0,
-                min(
-                    feature_height - 1,
-                    int(math.floor(float(bbox[1]) / height * feature_height)),
-                ),
-            )
-            fx2 = max(
-                fx1 + 1,
-                min(
-                    feature_width,
-                    int(math.ceil(float(bbox[2]) / width * feature_width)),
-                ),
-            )
-            fy2 = max(
-                fy1 + 1,
-                min(
-                    feature_height,
-                    int(math.ceil(float(bbox[3]) / height * feature_height)),
-                ),
-            )
-            pooled = mx.mean(
-                feature[:, fy1:fy2, fx1:fx2, :],
-                axis=(1, 2),
-            )
-        mx.eval(pooled)
-        component = np.asarray(pooled, dtype=np.float32).reshape(-1)
-        component /= max(float(np.linalg.norm(component)), 1e-12)
-        components.append(component)
-    vector = np.concatenate(components).astype(np.float32, copy=False)
-    vector /= max(float(np.linalg.norm(vector)), 1e-12)
-    return (
-        vector,
-        not use_mask,
-        float(score_values[best_index]) if best_index >= 0 else None,
-    )
+    from services.sam3_descriptors import mask_feature_vector
+    return mask_feature_vector(predictor, bbox_xyxy, image_size)
 
 
 def _class_analysis_extract_sam3_mask_embeddings(
@@ -61089,10 +61006,17 @@ def _class_analysis_extract_sam3_mask_embeddings(
     progress_start: float = 0.42,
     progress_end: float = 0.70,
 ) -> Tuple[np.memmap, Dict[str, Any]]:
-    """Stream one MLX SAM3 image embedding per source image, without Torch fallback."""
+    """Stream the selected SAM3 producer once per image, without backend fallback."""
 
+    from services.sam3_descriptors import descriptor_backend, NativeSam3DescriptorPredictor, configure_historical_descriptor_geometry
+    backend = descriptor_backend()
     try:
-        predictor = build_mlx_sam3_predictor("mlx-bf16")
+        if backend == "mlx-bf16":
+            predictor = build_mlx_sam3_predictor("mlx-bf16")
+        else:
+            native = _Sam3Backend(runtime="torch")
+            configure_historical_descriptor_geometry(native.model)
+            predictor = NativeSam3DescriptorPredictor(native.predictor, native.model)
     except MlxSam3Unavailable as exc:
         raise HTTPException(
             status_code=HTTP_503_SERVICE_UNAVAILABLE,
@@ -61124,7 +61048,7 @@ def _class_analysis_extract_sam3_mask_embeddings(
                 job,
                 progress=progress_start,
                 message=(
-                    "Adding SAM3 BF16 mask features; each source image is "
+                    f"Adding SAM3 {backend} mask features; each source image is "
                     "encoded once ..."
                 ),
             )
@@ -61189,7 +61113,7 @@ def _class_analysis_extract_sam3_mask_embeddings(
             handle.write(json.dumps({"row": ordinal, "crop_cache_key": record.get("crop_cache_key"), **dict(record.get("sam3_mask_evidence") or {})}, sort_keys=True) + "\n")
     runtime = {"per_object_evidence_path": str(evidence_path),
         "schema": CLASS_ANALYSIS_SAM3_MASK_FUSION_SCHEMA,
-        "backend": "mlx-bf16",
+        "backend": backend,
         "object_count": len(records),
         "image_count": len(groups),
         "seconds": time.time() - started_at,
@@ -97166,6 +97090,12 @@ def _load_local_salad_head(
 def _encode_local_salad_head_np(head: Any, patch_tokens: Any, global_token: Any = None) -> np.ndarray:
     if is_mlx_local_salad_head(head):
         return encode_local_salad_mlx(head, patch_tokens, global_token=global_token)
+    # A persisted crop head may deliberately run on CPU while its frozen
+    # encoder produces CUDA tensors. Keep the head on its declared device.
+    head_device = next(head.parameters()).device
+    patch_tokens = torch.as_tensor(patch_tokens, device=head_device)
+    if global_token is not None:
+        global_token = torch.as_tensor(global_token, device=head_device)
     with torch.no_grad():
         feats = head(patch_tokens, global_token=global_token)
     return feats.detach().float().cpu().numpy().astype(np.float32)
@@ -97696,9 +97626,14 @@ def _local_salad_encoder_identity(encoder_type: str, model_name: str, *, backend
         model_root = Path(status["model_dir"])
         paths = [model_root / "config.json", model_root / "model.safetensors", Path(status["worker_path"])]
     else:
+        from services.dinov3_runtime import native_dinov3_package
+        native_package = native_dinov3_package(model_name)
+        if native_package:
+            paths = [native_package / "config.json", native_package / "model.safetensors",
+                     Path(__file__).parent / "services" / "dinov3_runtime.py"]
         try:
             from huggingface_hub import try_to_load_from_cache
-            for filename in ("config.json", "preprocessor_config.json", "model.safetensors", "pytorch_model.bin"):
+            for filename in (() if native_package else ("config.json", "preprocessor_config.json", "model.safetensors", "pytorch_model.bin")):
                 cached = try_to_load_from_cache(model_name, filename)
                 if isinstance(cached, str) and Path(cached).is_file():
                     paths.append(Path(cached))
@@ -97714,12 +97649,25 @@ def _local_salad_encoder_identity(encoder_type: str, model_name: str, *, backend
             raise HTTPException(status_code=HTTP_409_CONFLICT, detail="salad_encoder_artifact_changed")
         artifacts.append({"name": path.name, "sha256": sha, "bytes": before[2]})
     safe = any(item["name"] in {"model.safetensors", "pytorch_model.bin"} for item in artifacts)
-    transport = str(os.environ.get("MLX_DINOV3_TRANSPORT", "safetensors_pixels")) if resolved == "mlx" else "transformers_processor"
-    return {"schema": "local-salad-dinov3-producer-v1", "encoder_model": model_name,
+    qualified_native = resolved != "mlx" and bool(native_package)
+    transport = str(os.environ.get("MLX_DINOV3_TRANSPORT", "safetensors_pixels")) if resolved == "mlx" else "pinned_pil_pixels_v1" if qualified_native else "transformers_processor"
+    numerical_runtime = {}
+    if qualified_native:
+        import importlib.metadata
+        from transformers.models.dinov3_vit import modeling_dinov3_vit
+        numerical_runtime = {"library_versions": {name: importlib.metadata.version(name) for name in ("torch", "torchvision", "transformers", "numpy", "Pillow")},
+                             "model_source_sha256": salad_sha256_file(Path(modeling_dinov3_vit.__file__)),
+                             "math_policy": {"cuda_matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
+                                             "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
+                                             "float32_matmul_precision": torch.get_float32_matmul_precision(),
+                                             "cuda_autocast_enabled": torch.is_autocast_enabled("cuda"),
+                                             **({"cuda_autocast_dtype": str(torch.get_autocast_dtype("cuda"))}
+                                                if torch.is_autocast_enabled("cuda") else {})}}
+    return {"schema": "local-salad-dinov3-producer-v1", **numerical_runtime, "encoder_model": model_name,
             "resolved_backend": resolved, "artifacts": artifacts, "persistent_cache_safe": safe,
             "dtype_policy": "converted_checkpoint_native_float32_outputs" if resolved == "mlx" else "loaded_backbone_parameter_dtype_float32_tokens",
-            "transport": transport, "input_policy": {"size": [224, 224], "resample": "BILINEAR", "pixels": "uint8_RGB"} if resolved == "mlx" and transport not in {"image_paths", "legacy"} else {"policy": "persisted_processor_or_worker_image_decode"},
-            "implementation_sha256": salad_sha256_file(Path(__file__).parent / "services" / "mlx_dinov3.py"),
+            "transport": transport, "input_policy": {"size": [224, 224], "resample": "BILINEAR", "pixels": "uint8_RGB"} if qualified_native or (resolved == "mlx" and transport not in {"image_paths", "legacy"}) else {"policy": "persisted_processor_or_worker_image_decode"},
+            "implementation_sha256": salad_sha256_file(Path(__file__).parent / "services" / ("dinov3_runtime.py" if qualified_native else "mlx_dinov3.py")),
             "process_epoch": "" if safe else CLASS_ANALYSIS_UNRESOLVED_RUNTIME_EPOCH}
 
 

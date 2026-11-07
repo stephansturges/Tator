@@ -31,9 +31,10 @@ from .language_schema import validate_language_annotations
 from .preconditions import validate_precondition
 from .receipt_policy import can_disclose
 from .types import Actor, MutationContext
+from .tranches import TrancheMixin
+from .tranche_schema import SCHEMA_VERSION, migrate_store
 
 
-SCHEMA_VERSION = 1
 STATES = ("unassigned", "assigned", "returned", "submitted", "confirmed")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -55,7 +56,7 @@ def _text(value: Any, field: str, maximum: int = 1000) -> str:
     return value.strip()
 
 
-class HostedStore:
+class HostedStore(TrancheMixin):
     def __init__(self, db_path: str | Path, *, clock: Callable[[], float] = time.time,
                  lease_seconds: float = 120) -> None:
         self.path = Path(db_path)
@@ -108,7 +109,7 @@ class HostedStore:
         with closing(self._connect()) as con:
             if con.execute("SELECT 1 FROM sqlite_master WHERE name='hosted_schema'").fetchone():
                 previous = con.execute("SELECT version FROM hosted_schema WHERE component='store'").fetchone()
-                if previous and previous[0] != SCHEMA_VERSION:
+                if previous and previous[0] not in (1, SCHEMA_VERSION):
                     raise RuntimeError("Unsupported hosted store schema")
             con.execute("PRAGMA journal_mode=WAL")
             con.executescript("""
@@ -235,9 +236,10 @@ class HostedStore:
                 COMMIT;
             """)
             row = con.execute("SELECT version FROM hosted_schema WHERE component='store'").fetchone()
-            if row and row[0] != SCHEMA_VERSION:
+            if row and row[0] not in (1, SCHEMA_VERSION):
                 raise RuntimeError("Unsupported hosted store schema")
-            con.execute("INSERT OR IGNORE INTO hosted_schema VALUES ('store',?)", (SCHEMA_VERSION,))
+            con.execute("INSERT OR IGNORE INTO hosted_schema VALUES ('store',1)")
+            migrate_store(con, now=self.clock())
             for table in ("hosted_annotation_versions", "hosted_class_versions", "hosted_dataset_setting_versions", "hosted_submissions",
                           "hosted_reviews", "hosted_receipts", "hosted_events", "hosted_snapshots",
                           "hosted_import_conflicts", "hosted_import_conflict_decisions"):
@@ -616,12 +618,17 @@ class HostedStore:
             self._actor(con, actor)
             self._can_view(actor, self._image(con, image_id))
             result = self._image_result(con, image_id, content=True)
+            membership = con.execute("SELECT t.id,t.name FROM hosted_tranche_members m JOIN hosted_tranches t ON t.id=m.tranche_id WHERE m.image_id=? AND m.is_current=1", (image_id,)).fetchone()
+            result["tranche_id"] = membership["id"] if membership else None
+            result["tranche_name"] = membership["name"] if membership else None
             if include_review:
                 # Match the history view's last nonempty feedback, without
                 # transferring every past annotation version to the canvas.
                 review = con.execute(
-                    "SELECT id,version_id,action,feedback,created_at FROM hosted_reviews "
-                    "WHERE image_id=? AND feedback!='' ORDER BY rowid DESC LIMIT 1", (image_id,)).fetchone()
+                    "SELECT r.id,r.version_id,r.action,r.feedback,r.created_at FROM hosted_reviews r "
+                    "WHERE r.image_id=? AND r.feedback!='' " +
+                    ("" if actor.role == "admin" else "AND EXISTS(SELECT 1 FROM hosted_submissions s WHERE s.id=r.submission_id AND s.actor_id=?) ") +
+                    "ORDER BY r.rowid DESC LIMIT 1", (image_id,) if actor.role == "admin" else (image_id, actor.user_id)).fetchone()
                 result["review_feedback"] = dict(review) if review else None
             return result
 
@@ -846,11 +853,14 @@ class HostedStore:
             return self._image_result(con, image_id, content=True)
 
     def _handoff(self, con: sqlite3.Connection, image_id: str, state: str, *, assignee: str | None,
-                 assignment: str | None, submission: str | None = None) -> None:
+                 assignment: str | None, submission: str | None = None, actor_id: str = "system:handoff") -> None:
         image = self._image(con, image_id)
+        self._tranche_handoff(con, image, state, assignee, assignment, actor_id)
         if image["assignment_id"]:
+            previous_state = ("transferred" if assignment and assignment != image["assignment_id"]
+                              else state if state != "unassigned" else "overridden")
             con.execute("UPDATE hosted_assignment_members SET state=? WHERE assignment_id=? AND image_id=?",
-                        (state if state != "unassigned" else "overridden", image["assignment_id"], image_id))
+                        (previous_state, image["assignment_id"], image_id))
         con.execute("UPDATE hosted_images SET state=?,assignee_id=?,assignment_id=?,active_submission=?,generation=generation+1,updated_at=? WHERE id=?",
                     (state, assignee, assignment, submission, self.clock(), image_id))
         con.execute("DELETE FROM hosted_editor_leases WHERE image_id=?", (image_id,))
@@ -880,14 +890,17 @@ class HostedStore:
                 lease = con.execute("SELECT expires_at FROM hosted_editor_leases WHERE image_id=?", (image_id,)).fetchone()
                 if lease and lease[0] > self.clock():
                     raise DomainError("editor_lease_conflict", 423, {"image_id": image_id})
-            assignment_id = _id("assignment")
-            con.execute("INSERT INTO hosted_assignments VALUES (?,?,?,?,?)", (assignment_id, dataset_id, annotator_id, actor.user_id, self.clock()))
-            for image_id in image_ids:
-                image = self._image(con, image_id)
-                con.execute("INSERT INTO hosted_assignment_members VALUES (?,?,?,'assigned')", (assignment_id, image_id, image["current_version"]))
-                self._handoff(con, image_id, "assigned", assignee=annotator_id, assignment=assignment_id)
-                self._event(con, actor, dataset_id, image_id, "assigned", {"assignment_id": assignment_id, "annotator_id": annotator_id})
-            return {"assignment_id": assignment_id, "images": [self._image_result(con, image_id) for image_id in image_ids]}
+            if len(image_ids) > 10000:
+                raise DomainError("tranche_capacity_exceeded", 422, {"maximum": 10000})
+            if any(self._member(con, identifier) for identifier in image_ids):
+                raise DomainError("image_not_assignable", 409)
+            tranche = self._new_tranche(con, actor, dataset_id, "Assignment " + operation_id[:80], annotator_id=annotator_id)
+            images = [self._image(con, identifier) for identifier in image_ids]
+            self._reserve(con, actor, tranche["id"], images)
+            con.execute("UPDATE hosted_tranches SET lifecycle='active' WHERE id=?", (tranche["id"],))
+            assignment_id = self._episode(con, actor, self._tranche(con, tranche["id"]), images, annotator_id)
+            return {"assignment_id": assignment_id, "tranche_id": tranche["id"],
+                    "images": [self._image_result(con, image_id) for image_id in image_ids]}
         return self._command(actor, operation_id, "assign", dict(dataset_id=dataset_id,image_ids=image_ids,annotator_id=annotator_id,expected=expected), run, admin=True)
 
     @staticmethod
@@ -1239,7 +1252,7 @@ class HostedStore:
             self._require_complete(con, ctx.expected_version)
             submission_id = _id("submission")
             con.execute("INSERT INTO hosted_submissions VALUES (?,?,?,?,?,?)", (submission_id, ctx.image_id, ctx.expected_version, image["assignment_id"], actor.user_id, self.clock()))
-            self._handoff(con, ctx.image_id, "submitted", assignee=image["assignee_id"], assignment=image["assignment_id"], submission=submission_id)
+            self._handoff(con, ctx.image_id, "submitted", assignee=image["assignee_id"], assignment=image["assignment_id"], submission=submission_id, actor_id=actor.user_id)
             self._event(con, actor, image["dataset_id"], ctx.image_id, "submitted", {"submission_id": submission_id, "version_id": ctx.expected_version})
             return self._image_result(con, ctx.image_id)
         return self._command(actor, ctx.operation_id, "submit", asdict(ctx), run)
@@ -1279,7 +1292,7 @@ class HostedStore:
         self._require_complete(con, ctx.expected_version)
         review_id = self._review(con, actor, image, "approved", feedback)
         con.execute("UPDATE hosted_images SET confirmed_version=? WHERE id=?", (ctx.expected_version, ctx.image_id))
-        self._handoff(con, ctx.image_id, "confirmed", assignee=None, assignment=None)
+        self._handoff(con, ctx.image_id, "confirmed", assignee=None, assignment=None, actor_id=actor.user_id)
         con.execute("UPDATE hosted_datasets SET revision=revision+1 WHERE id=?", (image["dataset_id"],))
         self._event(con, actor, image["dataset_id"], ctx.image_id, "approved", {"review_id": review_id, "version_id": ctx.expected_version})
         return self._image_result(con, ctx.image_id)
@@ -1299,7 +1312,7 @@ class HostedStore:
             self._annotator(con, image["assignee_id"])
             text = _text(feedback, "feedback", 20000)
             review_id = self._review(con, actor, image, "returned", text)
-            self._handoff(con, ctx.image_id, "returned", assignee=image["assignee_id"], assignment=image["assignment_id"])
+            self._handoff(con, ctx.image_id, "returned", assignee=image["assignee_id"], assignment=image["assignment_id"], actor_id=actor.user_id)
             self._event(con, actor, image["dataset_id"], ctx.image_id, "returned", {"review_id": review_id, "feedback": text})
             return self._image_result(con, ctx.image_id)
         return self._command(actor, ctx.operation_id, "return", {"context": asdict(ctx), "feedback": feedback}, run, admin=True)
@@ -1311,7 +1324,7 @@ class HostedStore:
             if image["state"] not in ("assigned", "returned"):
                 raise DomainError("image_not_overridable", 409)
             _text(ctx.editor_id, "editor_id", 200)
-            self._handoff(con, ctx.image_id, "unassigned", assignee=None, assignment=None)
+            self._handoff(con, ctx.image_id, "unassigned", assignee=None, assignment=None, actor_id=actor.user_id)
             self._event(con, actor, image["dataset_id"], ctx.image_id, "ownership_overridden", {"previous_assignee": image["assignee_id"], "reason": reason, "version_id": ctx.expected_version})
             return self._image_result(con, ctx.image_id)
         return self._command(actor, ctx.operation_id, "override", {"context": asdict(ctx), "reason": reason}, run, admin=True)
@@ -1345,7 +1358,7 @@ class HostedStore:
                 self._expected(image, pre.get("expected_version"), pre.get("generation"))
                 captured.append(image)
             for image in captured:
-                self._handoff(con, image["id"], "unassigned", assignee=None, assignment=None)
+                self._handoff(con, image["id"], "unassigned", assignee=None, assignment=None, actor_id=actor.user_id)
                 self._event(con, actor, dataset_id, image["id"], "ownership_overridden", {
                     "assignment_id": image["assignment_id"], "previous_assignee": image["assignee_id"],
                     "reason": explanation, "version_id": image["current_version"], "operation_id": operation_id})
@@ -1360,20 +1373,21 @@ class HostedStore:
             if image["state"] != "unassigned":
                 raise DomainError("explicit_override_required", 409)
             self._annotator(con, annotator_id)
-            assignment_id = _id("assignment")
-            con.execute("INSERT INTO hosted_assignments VALUES (?,?,?,?,?)", (assignment_id, image["dataset_id"], annotator_id, actor.user_id, self.clock()))
-            con.execute("INSERT INTO hosted_assignment_members VALUES (?,?,?,'assigned')", (assignment_id, ctx.image_id, ctx.expected_version))
-            self._handoff(con, ctx.image_id, "assigned", assignee=annotator_id, assignment=assignment_id)
+            if self._member(con, ctx.image_id):
+                raise DomainError("image_not_assignable", 409)
+            tranche = self._new_tranche(con, actor, image["dataset_id"], "Reassignment " + ctx.operation_id[:80], annotator_id=annotator_id)
+            self._reserve(con, actor, tranche["id"], [image])
+            con.execute("UPDATE hosted_tranches SET lifecycle='active' WHERE id=?", (tranche["id"],))
+            assignment_id = self._episode(con, actor, self._tranche(con, tranche["id"]), [image], annotator_id)
             self._event(con, actor, image["dataset_id"], ctx.image_id, "reassigned", {"assignment_id": assignment_id, "annotator_id": annotator_id})
             return self._image_result(con, ctx.image_id)
         return self._command(actor, ctx.operation_id, "reassign", {"context": asdict(ctx), "annotator_id": annotator_id}, run, admin=True)
 
     def override_assignment(self, actor: Actor, assignment_id: str, operation_id: str,
                             expected: dict[str, dict[str, Any]], reason: str = "") -> dict[str, Any]:
-        """Recover the captured remaining members; a concurrent submission stays in review.
+        """Recover an exact captured selection; changed members reject atomically.
 
-        Members not explicitly captured never join the command later. Any stale
-        editable member rejects the transaction rather than causing a takeover.
+        Existing receipt payloads remain unchanged for pre-upgrade retries.
         """
         def run(con: sqlite3.Connection) -> dict[str, Any]:
             assignment = con.execute("SELECT * FROM hosted_assignments WHERE id=?", (assignment_id,)).fetchone()
@@ -1389,10 +1403,9 @@ class HostedStore:
                 pre = validate_precondition(pre, field=f"expected.{image_id}")
                 image = self._image(con, image_id)
                 if image["assignment_id"] != assignment_id or image["state"] not in ("assigned", "returned"):
-                    skipped.append({"image_id": image_id, "reason": "no_longer_annotator_owned"})
-                    continue
+                    raise DomainError("assignment_member_changed", 409, {"image_id": image_id})
                 self._expected(image, pre.get("expected_version", pre.get("version_id")), pre.get("generation"))
-                self._handoff(con, image_id, "unassigned", assignee=None, assignment=None)
+                self._handoff(con, image_id, "unassigned", assignee=None, assignment=None, actor_id=actor.user_id)
                 self._event(con, actor, assignment["dataset_id"], image_id, "ownership_overridden", {
                     "assignment_id": assignment_id, "previous_assignee": image["assignee_id"], "reason": reason,
                     "version_id": image["current_version"]})
@@ -1433,6 +1446,9 @@ class HostedStore:
                 value.update({"status": review["action"] if review else "awaiting_review",
                               "feedback": review["feedback"] if review else "",
                               "reviewed_at": review["created_at"] if review else None})
+                migration = con.execute("SELECT outcome,created_at FROM hosted_migration_outcomes WHERE submission_id=?", (row["submission_id"],)).fetchone()
+                if migration:
+                    value.update(status=migration["outcome"], reviewed_at=migration["created_at"], feedback="Archived during schema upgrade; restored images return to Incoming.")
                 archived = con.execute("SELECT a.reason,a.archived_at FROM hosted_archived_images i JOIN hosted_archives a ON a.id=i.archive_id WHERE i.image_id=?", (row["image_id"],)).fetchone()
                 value["archived"] = archived is not None
                 if archived:
@@ -1445,12 +1461,26 @@ class HostedStore:
             self._actor(con, actor)
             self._can_view(actor, self._image(con, image_id))
             result = {"image_id": image_id}
+            own_submissions = {row[0] for row in con.execute("SELECT id FROM hosted_submissions WHERE image_id=? AND actor_id=?", (image_id, actor.user_id))}
+            own_reviews = {row[0] for row in con.execute("SELECT r.id FROM hosted_reviews r JOIN hosted_submissions s ON s.id=r.submission_id WHERE r.image_id=? AND s.actor_id=?", (image_id, actor.user_id))}
             for key, table in (("versions", "hosted_annotation_versions"), ("submissions", "hosted_submissions"),
                                ("reviews", "hosted_reviews"), ("events", "hosted_events"), ("import_conflicts", "hosted_import_conflicts"),
                                ("import_conflict_decisions", "hosted_import_conflict_decisions")):
                 values = []
                 for row in con.execute(f"SELECT * FROM {table} WHERE image_id=? ORDER BY rowid", (image_id,)):
                     value = dict(row)
+                    if actor.role != "admin":
+                        if key in ("versions", "submissions"):
+                            allowed = value.get("actor_id") == actor.user_id
+                        elif key == "reviews":
+                            allowed = value.get("submission_id") in own_submissions
+                        elif key == "events":
+                            event = json.loads(value.get("data_json", "{}"))
+                            allowed = value.get("actor_id") == actor.user_id or event.get("review_id") in own_reviews
+                        else:
+                            allowed = False
+                        if not allowed:
+                            continue
                     for field in ("annotations_json", "data_json"):
                         if field in value:
                             value[field.removesuffix("_json")] = json.loads(value.pop(field))

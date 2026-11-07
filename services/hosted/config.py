@@ -63,6 +63,13 @@ def _native_device(device):
     return device
 
 
+def model_runtime_capability(definition, device):
+    """Installation history is durable; runtime availability is machine-specific."""
+    if definition.get("backend") == "mlx" and device != "mps":
+        return {"available": False, "unavailable_reason": "This MLX model requires an Apple Silicon server. Select a native model for this server."}
+    return {"available": True, "unavailable_reason": None}
+
+
 def validate_model_id(model_id):
     if not isinstance(model_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", model_id):
         raise ValueError("hosted_model_id_invalid")
@@ -234,6 +241,8 @@ class ModelRegistry:
         model = self.definition(model_id)
         if model["kind"] not in {"sam1", "sam3"}:
             raise ValueError("hosted_user_model_kind_invalid")
+        if not model_runtime_capability(model, device)["available"]:
+            raise ValueError("hosted_model_runtime_unavailable")
         if type(capacity) is not int or not 1 <= capacity <= 3:
             raise ValueError("hosted_predictor_capacity_invalid")
         config = {

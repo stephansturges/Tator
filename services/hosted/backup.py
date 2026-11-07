@@ -341,12 +341,16 @@ def restore_encrypted_backup(
     age: AgeTool | None = None,
     database_name: str = "hosted.sqlite3",
     limits: RestoreLimits | None = None,
+    artifact_cache: ArtifactStore | None = None,
 ) -> RestoreResult:
     """Verify/decrypt in isolation, revoke authority via hook, publish empty root.
 
     The mandatory hook must revoke sessions, auth links, editor leases; rotate
     installation identity; and reconcile interrupted jobs. Assignments/history
     remain. It runs before the new root becomes visible and inside a transaction.
+    An optional immutable artifact cache can supply verified hard links on the
+    same filesystem. Every archive member still passes through put_stream;
+    cache reuse saves permanent copies, not archive authentication or hashing.
     """
     if not callable(restore_hook):
         raise BackupError("A restore authority-revocation hook is required.")
@@ -398,6 +402,11 @@ def restore_encrypted_backup(
                     if source is None:
                         raise BackupError("Recovery member has no file content.")
                     if name.startswith("artifacts/"):
+                        if artifact_cache is not None:
+                            try:
+                                artifact_cache.pin(ref, restored_store._path(ref.sha256, create=True).parent)
+                            except FileNotFoundError:
+                                pass  # A missing cached blob is restored from the archive.
                         restored_store.put_stream(source, expected_sha256=ref.sha256, expected_size=ref.size_bytes, max_bytes=limits.max_file_bytes)
                     else:
                         target = stage / database_name
@@ -423,6 +432,10 @@ def restore_encrypted_backup(
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute("PRAGMA synchronous=FULL")
             _integrity(connection)
+            # Upgrade verified captured state before the hook opens its ordinary
+            # transaction. Startup and restore share the same table rebuild.
+            from .tranche_schema import migrate_store
+            migrate_store(connection)
             with connection:
                 restore_hook(connection, manifest)
             connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")

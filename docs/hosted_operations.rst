@@ -123,12 +123,37 @@ Use the default database filename when restoring for the hosted application.
 The optional ``--database-name`` is for package/operator integrations; the web
 service expects ``hosted.sqlite3`` under its configured state root.
 
+If another verified immutable artifact store already exists on the destination
+filesystem, add ``--reuse-artifacts /existing/state/artifacts`` to avoid keeping
+a second permanent copy of identical image and model bytes. The option accepts
+an existing real artifact-store directory; it does not create a missing cache.
+Each matching blob is hash/size verified under the cache lock and hard-linked
+into the private restore stage. Missing cache entries are restored normally.
+A corrupt cache entry, symlink or cross-filesystem link failure stops recovery;
+none is silently treated as a cache miss. Cache bytes are never overwritten.
+
+Reuse still decrypts, reads, temporarily writes and verifies every archive
+member, and checks the final encryption authentication before publication. It
+does not turn a full backup into a database-only restore. Allow space for the
+database, blobs missing from the cache, and at least the largest individual
+archive blob as temporary scratch. Deleting a cache directory later does not
+remove the restored hard links. The Python API exposes the same optional
+``artifact_cache=ArtifactStore(existing_root)`` argument; omitting it retains
+the normal independent-copy restore.
+
 Decryption, archive member validation, SHA-256 verification and SQLite integrity
 checks complete in a private staging root. Traversal paths, symlinks, hard-link
 members, duplicate members, unexpected files, missing files and oversized
 declared contents are rejected. Limits are configurable with ``RestoreLimits``
 for package callers; the defaults cap the manifest at 32 MiB, members at one
 million, individual files at 1 TiB and total captured content at 8 TiB.
+
+A captured schema-1 hosted database is upgraded to schema 2 before the restore
+hook opens its transaction. The same migration runs at normal startup; it
+preserves IDs and history, links assignments to tranches, validates foreign
+keys and normalizes archived nonconfirmed ownership. Test the upgrade on a copy
+first. Recovery uses a schema-2 application; old schema-1 binaries reject the
+upgraded state. See `Named annotation tranches <hosted_tranches.rst>`_.
 
 The required ``restore_hook(connection, manifest)`` runs before publication,
 inside a database transaction. The application hook must revoke sessions and
@@ -294,3 +319,67 @@ they do not demonstrate encryption. A separate test invokes real ``age`` and
 ``age-keygen`` when installed and otherwise skips. Production availability checks
 fail if age cannot execute. Target-machine backup/download/restore and continued
 annotation acceptance remain separate deployment checks.
+
+Native CUDA feature producers
+-----------------------------
+
+The SAM3 analysis descriptor uses three 256-channel tracker feature maps.
+The native bridge captures the first two maps before the mask decoder reduces
+them to 32 and 64 channels. It retains the predictor's existing no-memory
+embedding on the third map exactly once. Interactive mask prediction continues
+to use its ordinary projected maps. The pooled descriptor stays 768-dimensional;
+it is not padded or replaced with the decoder's smaller feature tensors.
+
+Native producer identities include checkpoint and tokenizer hashes, exact SAM3
+source hashes, the shared pooling implementation and numerical library versions.
+Loaded functions must match the final corresponding definition in those source
+files, including on Python 3.10. Lazy imports do not change an otherwise identical
+producer. A deployment without Git metadata may include ``tator-source.json``
+beside the vendored ``sam3/`` package, recording ``base_revision`` and a complete
+``python_source_sha256`` mapping of paths such as ``sam3/model_builder.py``.
+The source hashes are checked on use. The base commit provides context; local
+modifications remain part of the exact hashed implementation.
+
+Moving SAM3 pooling into the shared helper changes its MLX producer identity
+once. Historical vectors and reports remain intact, but that older identity
+does not authorize reuse under the new producer. The original trained SALAD
+heads remain unchanged. Native CUDA and MLX identities also remain distinct;
+numerical similarity alone does not permit relabeling an old raw cache.
+
+Verified native DINOv3 and C-RADIO package directories can be supplied through
+``DINOV3_TORCH_MODEL_ROOT`` and ``CRADIO_TORCH_MODEL_ROOT`` in the trusted heavy-job
+configuration. Their files must be listed in the verified model inputs.
+DINOv3 retains the established PIL resizing and ImageNet scaling. C-RADIO
+retains the crop geometry and scene-resolution policy and loads the complete
+pinned executable package. Qualify these producers with the original SALAD
+heads, frozen images, mask/descriptor comparisons and nearest-neighbor checks.
+Passing an import or a synthetic bridge test is not evidence of native model
+parity. Point, box, text and PCS inference remain separate runtime checks.
+
+Native SAM3 inference uses the assigned CUDA device explicitly, including its
+auxiliary caches and mask postprocessing, and runs in float32. The adapter
+balances the native tracker's constructor-owned BF16 autocast context so it
+cannot change the precision of later classifier or embedding work.
+Native producer identities also record CUDA matmul and cuDNN TF32 settings:
+float32 tensors alone do not specify the arithmetic used by a CUDA kernel.
+Changing these settings creates a different producer identity and prevents
+reuse of descriptors computed under the previous math policy.
+
+The historical MLX descriptor used different vision geometry from upstream
+native SAM3: LayerNorm epsilon 1e-6 instead of 1e-5, and unscaled positional
+frequencies in the four global attention blocks. It also described a box with
+two corner tokens; native SAM3 adds a third padding token. The native analysis
+adapter reproduces this geometry and the two-token box prompt only on its
+freshly loaded, dedicated descriptor model, under the explicit
+``historical_mlx_descriptor_v1`` producer profile. It validates the expected
+1008-pixel, 14-pixel-patch architecture and exact padding token before removing
+it for a single-box descriptor request. Unknown structures are rejected, and
+mask selection still uses the highest predicted score. The original checkpoint bytes and native
+annotation models are preserved. This profile describes compatibility with
+the existing recipe; it does not claim that the old MLX architecture was
+identical to the upstream native model.
+
+The source attestation is qualified against the pinned native package after
+checkpoint loading and descriptor inference. A future vendor update containing
+conditional or repeated function definitions can be rejected by the strict
+loaded-source check. Requalify that source update; do not bypass the guard.

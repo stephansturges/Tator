@@ -88052,6 +88052,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
     });
 
     function navigateImage(delta, { wrap = true } = {}) {
+        if (hostedMode && window.TatorHosted?.step) { window.TatorHosted.step(delta); return true; }
         const imageList = document.getElementById("imageList");
         if (!imageList || imageList.options.length <= 1 || !Number.isFinite(delta) || delta === 0) {
             return false;
@@ -90960,7 +90961,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             }
             updateQwenAgentButtons();
             const sam = catalog.models.find((model) => model.model_id === catalog.sam?.model_id);
-            const identity = sam ? `${sam.model_id}:${sam.checkpoint_sha256}` : null;
+            const identity = sam && catalog.sam?.available !== false ? `${sam.model_id}:${sam.checkpoint_sha256}` : null;
             if (identity !== this.samIdentity) {
                 cancelAllSamJobs({ reason: "Your SAM selection changed", announce: false });
                 cancelSamPreload(); samPreloadLastKey = null; samTokenCache.clear();
@@ -91026,18 +91027,58 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             setCurrentImage(image);
         },
         ready() { return Boolean(currentImage?.object && currentImage.annotationRelpath === hostedCanvasRecord?.id && annotationSourceState.hydratedKeys.has(currentImage.name)); },
-        nextImageIds(count = 2) {
-            const list = document.getElementById("imageList");
-            if (!this.ready() || !list || list.selectedIndex < 0) return [];
-            const ids = [];
-            for (let step = 1; step <= Math.min(count, list.options.length - 1); step++) {
-                const option = list.options[(list.selectedIndex + step) % list.options.length];
-                const next = images[getOptionImageName(option)];
-                // Visited images already have decoded pixels; don't transfer
-                // them again merely to warm the encoded-byte cache.
-                if (next?.annotationRelpath && !next.object) ids.push(next.annotationRelpath);
+        appendQueue(rows, {prepend = false} = {}) {
+            const list = document.getElementById("imageList"), selectedName = currentImage?.name;
+            const fragment = document.createDocumentFragment();
+            for (const record of rows) {
+                const cached = Object.values(images).find(item => item.annotationRelpath === record.id);
+                if (cached) {
+                    if (!Array.from(list.options).some(option => option.value === cached.name)) fragment.append(new Option(record.filename || cached.displayName, cached.name));
+                    continue;
+                }
+                const row = {split: record.split || "train", image_relpath: record.id, image_name: record.filename || record.id,
+                    image_width: 0, image_height: 0, label_lines: [], text_label: ""};
+                const key = annotationRowKey(row);
+                annotationSourceState.imageRowsByKey.set(key, row);
+                annotationSourceState.rawLabelLinesByKey.set(key, []);
+                annotationSourceState.savedSnapshotByKey.set(key, serializeAnnotationRecord({label_lines: [], text_label: ""}));
+                images[key] = {name: key, meta: {name: key, size: 0}, index: 0, width: 0, height: 0, object: undefined, dataUrl: null,
+                    sourceType: "dataset", datasetId: hostedCanvasDataset.id, annotationSplit: row.split, annotationRelpath: record.id, displayName: row.image_name};
+                bboxes[key] = {}; textLabels[key] = "";
+                fragment.append(new Option(row.image_name, key));
             }
-            return ids;
+            if (prepend) list.prepend(fragment); else list.append(fragment);
+            Array.from(list.options).forEach((option, index) => { if (images[option.value]) images[option.value].index = index; });
+            if (selectedName) syncImageSelectionToName(selectedName, {ensureVisible: false});
+            imageListIndex = list.selectedIndex;
+        },
+        reconcileQueue(rows) {
+            // Queue metadata changes do not replace the canvas, hydrated labels,
+            // decoded image or undo history. Previously visited caches survive.
+            const list = document.getElementById("imageList");
+            list.replaceChildren(); this.appendQueue(rows);
+        },
+        removeQueue(ids) {
+            const list = document.getElementById("imageList"), selectedName = currentImage?.name, removed = new Set(ids);
+            for (const option of Array.from(list.options)) {
+                const image = images[option.value];
+                // A removed current image remains on canvas for explicit draft
+                // recovery. Removing another row never clears undo or viewport.
+                if (!image || image.name === selectedName || !removed.has(image.annotationRelpath)) continue;
+                option.remove(); delete images[image.name]; delete bboxes[image.name]; delete textLabels[image.name];
+                annotationSourceState.imageRowsByKey.delete(image.name); annotationSourceState.hydratedKeys.delete(image.name);
+                annotationSourceState.rawLabelLinesByKey.delete(image.name); annotationSourceState.savedSnapshotByKey.delete(image.name);
+            }
+            Array.from(list.options).forEach((option, index) => { if (images[option.value]) images[option.value].index = index; });
+            if (selectedName) syncImageSelectionToName(selectedName, {ensureVisible: false});
+            imageListIndex = list.selectedIndex;
+        },
+        nextImageIds(count = 2) {
+            if (!this.ready()) return [];
+            return (window.TatorHosted.nextQueuedIds(count) || []).filter(id => {
+                const image = Object.values(images).find(item => item.annotationRelpath === id);
+                return image && !image.object;
+            });
         },
         snapshot() {
             if (!this.ready()) throw new Error("Wait for the image and its annotations to load.");

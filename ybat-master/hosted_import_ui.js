@@ -13,14 +13,16 @@
     }
     frameLabel.title = "Only needed when importing existing labels on photos with rotation metadata. Tator annotates the original stored pixel grid. Choose the grid your labels were drawn on; viewer coordinates will be converted without changing the original file.";
     frameLabel.append(frame); resume.after(frameLabel);
-    let resuming = false, running = false;
+    let resuming = false, running = false, destination = null;
     const storageKey = (dataset) => `tator.hosted.import:${app.session?.instance_id}:${app.session?.user.user_id}:${dataset}`;
     function read(dataset) { try { return JSON.parse(sessionStorage.getItem(storageKey(dataset)) || "null"); } catch { return null; } }
     function persist(key, batch) { sessionStorage.setItem(key, JSON.stringify(batch)); }
     function refresh() { resume.hidden = running || app.session?.user.role !== "admin" || !read(app.datasetId); frameLabel.hidden = start.hidden; frame.disabled = running; }
     function signature(file) { return JSON.stringify([file.name, file.size, file.lastModified]); }
     async function digest(file) { return [...new Uint8Array(await crypto.subtle.digest("SHA-256", await file.arrayBuffer()))].map((byte) => byte.toString(16).padStart(2, "0")).join(""); }
-    start.onclick = () => { resuming = false; app.notice("Select images and, optionally, matching YOLO .txt labels plus labelmap.txt, classes.txt or labels.txt. Labels must use existing dataset classes."); input.click(); };
+    function launch(target = null) { destination = target?.tranche_id || null; resuming = false; app.notice("Select images and, optionally, matching YOLO .txt labels plus labelmap.txt, classes.txt or labels.txt. Labels must use existing dataset classes."); input.click(); }
+    start.onclick = () => launch();
+    window.TatorHostedImport = {start: launch};
     resume.onclick = () => { resuming = true; app.notice("Select the same files again. Completed images will be skipped and interrupted uploads will use their original retry IDs."); input.click(); };
     input.onchange = async (event) => {
         const files = [...event.target.files || []], dataset = app.datasetId, authority = app.session;
@@ -34,6 +36,7 @@
         if (!batch) {
             try {
                 const images = files.filter(file => /\.(png|jpe?g|webp|tiff?|bmp)$/i.test(file.name));
+                if (destination && images.length > 500) throw new Error("Select at most 500 images when uploading into a tranche. No files were uploaded. You can add another batch afterwards.");
                 const maps = files.filter(file => /^(labelmap|classes|labels)\.txt$/i.test(file.name));
                 const sidecars = files.filter(file => /\.txt$/i.test(file.name) && !maps.includes(file));
                 if (!images.length || files.length !== images.length + maps.length + sidecars.length) throw new Error("Select supported images and matching .txt labels only.");
@@ -62,11 +65,15 @@
                     const order = names.map((name, index) => `${index}: ${name}`).join(", ");
                     if (!confirm(`Import ${sidecars.length} YOLO label file(s)? ${maps[0] ? "The selected labelmap" : "No labelmap was selected, so the current dataset order"} gives ${order || "no classes"}. Existing annotations are preserved for comparison if the images already exist.`)) { input.value = ""; return; }
                 }
-                batch = { class_names: names, expected_class_version: description?.class_version, label_coordinate_space: frame.value || null,
+                batch = { destination_id: destination, class_names: names, expected_class_version: description?.class_version, label_coordinate_space: frame.value || null,
                     labelmap_signature: maps[0] ? signature(maps[0]) : null, labelmap_digest: mapDigest,
                     entries: images.map(file => ({ signature: signature(file), name: file.name, operation_id: crypto.randomUUID(), digest: null, state: "pending",
                         label_signature: labels.has(file.name.replace(/\.[^.]+$/, "")) ? signature(labels.get(file.name.replace(/\.[^.]+$/, ""))) : null, label_digest: null })) };
             } catch (error) { app.notice(error.message, true); input.value = ""; return; }
+        }
+        if (batch.destination_id && batch.entries.length > 500) {
+            sessionStorage.removeItem(key); refresh(); input.value = "";
+            app.notice("This older import contains more than 500 images. Completed uploads remain saved. Select batches of at most 500 for attachment; no further files were uploaded.", true); return;
         }
         const work = [];
         for (const entry of batch.entries) {
@@ -82,7 +89,7 @@
             // Persist operation IDs before sending any bytes. A lost response
             // replays exactly the same server command after reselecting files.
             persist(key, batch);
-            if (batch.labelmap_signature) {
+            if (batch.labelmap_signature && work.length) {
                 const originalMap = candidates.get(batch.labelmap_signature)?.[0];
                 if (!originalMap || await digest(originalMap) !== batch.labelmap_digest) throw new Error("Reselect the unchanged original labelmap to resume this import.");
             }
@@ -110,11 +117,12 @@
                         || !(result.conflict_id === null || typeof result.conflict_id === "string")) throw new Error("The upload reply was incomplete. Resume this import to check its original result.");
                 entry.state = "complete"; entry.duplicate = result.duplicate; entry.image_id = result.id; entry.conflict_id = result.conflict_id; persist(key, batch);
             }
+            const attachment = batch.destination_id ? await window.TatorHostedTranches.attachImported(batch.destination_id, batch.entries, key) : null;
             sessionStorage.removeItem(key);
             const existing = batch.entries.filter((entry) => entry.duplicate).length;
             const conflicts = batch.entries.filter(entry => entry.conflict_id);
             await app.refresh();
-            app.notice(`${batch.entries.length - existing} new images added to Incoming. ${existing} existing copies preserved.${conflicts.length ? ` ${conflicts.length} imported label conflicts retained. Open these images and choose Imported labels to compare them: ${conflicts.map(entry => entry.name).join(", ")}.` : ""}`);
+            app.notice(`${batch.entries.length - existing} new images uploaded. ${attachment ? `${attachment.attached} images attached to the tranche.` : "Saved in Incoming."} ${existing} existing copies preserved.${attachment?.excluded.length ? ` Not attached: ${attachment.excluded.join("; ")}.` : ""}${conflicts.length ? ` ${conflicts.length} imported label conflicts retained. Open these images and choose Imported labels to compare them: ${conflicts.map(entry => entry.name).join(", ")}.` : ""}`);
         });
         running = false; input.value = ""; refresh();
     };

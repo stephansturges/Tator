@@ -344,7 +344,10 @@ class ToolController:
     def _sam_model_ids(self):
         # SAM is a personal annotation tool in every dataset. Installing a
         # trusted model makes it available; it needs no second permission list.
-        models = [row for row in self.registry.catalog() if row["kind"] in {"sam1", "sam3"}]
+        from services.hosted.config import model_runtime_capability
+        device = self.configuration.get("user_sam", {}).get("device")
+        models = [row for row in self.registry.catalog() if row["kind"] in {"sam1", "sam3"}
+                  and model_runtime_capability(row, device)["available"]]
         return [row["model_id"] for row in sorted(models, key=lambda row: (row["kind"] != "sam1", row["model_id"]))]
 
     def _sam_selection(self, actor):
@@ -356,7 +359,11 @@ class ToolController:
         if default is None:
             available = self._sam_model_ids()
             default = available[0] if available else None
-        return {"model_id": selected[0] if selected else default, "revision": selected[1] if selected else 0}
+        model_id = selected[0] if selected else default
+        available = model_id in self._sam_model_ids()
+        return {"model_id": model_id, "revision": selected[1] if selected else 0,
+                "available": available,
+                "unavailable_reason": None if available else "The saved SAM model cannot run on this server. Select an available model; your previous selection has been preserved."}
 
     def _definition(self, model_id):
         try:
@@ -455,7 +462,7 @@ class ToolController:
             policy = self.configuration.get("user_sam", {})
             model_id = selection["model_id"]
             if model_id not in self._sam_model_ids():
-                raise DomainError("tool_not_configured", 503, "No installed SAM model is selected.")
+                raise DomainError("tool_not_configured", 503, selection["unavailable_reason"])
             model = self._definition(model_id)
             if operation.startswith("sam3_") and operation not in SAM_RECIPE_OPERATIONS and model["kind"] != "sam3":
                 raise DomainError("tool_sam3_required", 503, "Select an installed SAM3 model to use this tool.")
@@ -885,7 +892,7 @@ class ToolController:
 
     def catalog(self, actor, dataset_id=None):
         from services.hosted.caption_case import CaptionSettings
-        self._sam_selection(actor)  # Verify current session, including on GET.
+        selection = self._sam_selection(actor)  # Verify current session, including on GET.
         sam_models = self._sam_model_ids()
         allowed = set(sam_models)
         allowed.update(self.configuration.get("user_qwen", {}).get("allowed_model_ids", []))
@@ -895,8 +902,11 @@ class ToolController:
             allowed.update(dataset["settings"].get("sam3_recipes", {}).get("model_ids", []))
             for recipe_id in dataset["settings"].get("sam3_recipes", {}).get("model_ids", []):
                 allowed.update(self._definition(recipe_id).get("components", {}).values())
-        installed = [row for row in self.registry.catalog() if actor.role == "admin" or row["model_id"] in allowed]
-        result = {"models": installed, "sam": self._sam_selection(actor), "implemented": sorted(SAM_OPERATIONS | DETECTOR_OPERATIONS | QWEN_OPERATIONS | EDR_OPERATIONS | SAM_RECIPE_OPERATIONS),
+        from services.hosted.config import model_runtime_capability
+        installed = [{**row, **model_runtime_capability(row, self.configuration.get("user_sam", {}).get("device"))}
+                     for row in self.registry.catalog() if actor.role == "admin" or row["model_id"] in allowed
+                     or row["model_id"] == selection["model_id"]]
+        result = {"models": installed, "sam": selection, "implemented": sorted(SAM_OPERATIONS | DETECTOR_OPERATIONS | QWEN_OPERATIONS | EDR_OPERATIONS | SAM_RECIPE_OPERATIONS),
                   "sam_allowed_model_ids": sam_models,
                   "parameters": {operation: sorted(_parameters_for(operation)) for operation in QWEN_OPERATIONS | SAM_RECIPE_OPERATIONS},
                   "caption_job_parameters": {"caption_request": sorted(_parameters_for("qwen_caption")), "settings": sorted(CaptionSettings.model_fields)},
@@ -994,7 +1004,7 @@ class ToolController:
             "sam_models": [{"id": model["model_id"], "key": model["model_id"], "path": model["model_id"],
                 "variant": "sam3" if model["kind"] == "sam3" else "sam1", "promoted": True,
                 "active": model["model_id"] == catalog["sam"]["model_id"]}
-                for model in catalog["models"] if model["kind"] in {"sam1", "sam3"}],
+                for model in catalog["models"] if model["kind"] in {"sam1", "sam3"} and model.get("available", True)],
             "labelmaps": [{"path": dataset_id, "rel_path": dataset_id, "filename": dataset["name"],
                 "classes": [row["name"] for row in dataset["classes"]], "n_classes": len(dataset["classes"])}],
             "prepass_recipes": [{"id": model["model_id"], "name": model["model_id"], "read_only": True,

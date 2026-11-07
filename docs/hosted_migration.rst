@@ -200,3 +200,59 @@ The local fixture tests exercise filesystem preservation, overlay labels,
 caption alternatives, custom artifacts and restart recovery. Importing WALDO40
 and verifying its actual counts, splits, recipes and continued annotation remain
 separate deployment steps.
+
+Prepare an independent workflow trial
+------------------------------------
+
+Use ``tools/hosted_workflow_trial.py`` to test assignment and review with a small
+copy of approved data. It reads a frozen canonical snapshot and the original
+immutable media. It does not edit the source dataset, restore old ownership or
+copy its approvals into the trial.
+
+Save the canonical snapshot JSON with schema ``hosted-canonical-snapshot-v1``;
+if the response wraps it in ``manifest``, save that object. Also save an explicit
+JSON array of source image IDs to include. Select at most 500 images. Stage them outside the
+artifact store, and keep the generated plan outside that staging directory::
+
+    python tools/hosted_workflow_trial.py \
+      --snapshot /review/canonical-manifest.json \
+      --artifacts /srv/tator/state/artifacts \
+      --destination /review/trial-inputs \
+      --plan /review/trial-plan.json \
+      --image-ids /review/trial-image-ids.json \
+      --namespace waldo40-workflow-trial
+
+The destination and plan must not already exist. The tool verifies source hashes,
+encoded dimensions, splits, classes, boxes, polygons and captions against the
+generated inventory before publishing it. Original encoded image bytes,
+including EXIF and colour profiles, are copied unchanged. Annotation coordinates
+stay in the encoded pixel grid. A selection with both unsplit images and named
+train/val/test splits is rejected; stage those groups separately.
+
+Caption records retain their text, lifecycle and review metadata, with fresh
+record IDs. The source annotations and IDs remain in provenance. Extra custom
+annotation and object fields are retained there and listed in the accompanying
+report; they are not silently interpreted as active fields. Incompatible
+geometry stops staging for review.
+
+Review the generated report, then use the normal importer::
+
+    python tools/hosted_migrate.py apply \
+      --plan /review/trial-plan.json --state-dir /srv/tator/state \
+      --name "WALDO40 workflow trial" --admin administrator --mode incoming
+
+The trial receives new dataset, image, class and object IDs. It reuses stored
+media by content hash, but its annotations and workflow are independent. All
+images start in Incoming, including background images; mark a background image
+as **No objects to label** during the trial before submitting it. Configure the
+trial's detector and any class-dependent model associations explicitly against
+its new class map.
+
+The plan contains absolute input paths. If staging on a different machine,
+regenerate the plan there from the same frozen snapshot, exact image IDs and
+namespace; compare its media hashes, geometry and provenance before applying.
+Do not edit plan paths or its digest by hand.
+
+To resume an interrupted import, repeat the exact plan, administrator, name and
+mode. Keep the staged input and plan until trial and recovery checks finish.
+Nothing in this procedure deletes or alters the canonical dataset.

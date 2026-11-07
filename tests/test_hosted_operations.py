@@ -376,7 +376,8 @@ def test_dataset_archive_requires_exact_idle_members_and_independent_image_archi
     assert "annotations" not in progress and "media_hash" not in progress
     assert_error("image_not_found", lambda: store.image(alice, third["id"]))
     ops.restore_archive(admin, archived_submission["archive_id"], "third-restore")
-    assert store.own_submission_status(alice)[0]["status"] == "awaiting_review"
+    assert store.own_submission_status(alice)[0]["status"] == "withdrawn"
+    assert store.image(admin, third["id"])["state"] == "unassigned"
 
 
 def test_materializer_and_zip_use_frozen_approved_versions_and_preserve_pixels(workspace, tmp_path):

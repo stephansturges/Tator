@@ -1,0 +1,21 @@
+[Unit]
+Description=Tator hosted dataset and annotation service (user installation)
+
+[Service]
+Type=simple
+WorkingDirectory=%h/tator/current
+EnvironmentFile=%h/.config/tator/hosted.env
+Environment=PYTHONUNBUFFERED=1
+Environment=HF_HOME=%h/.local/share/tator-hosted/model-cache
+Environment=TORCH_HOME=%h/.local/share/tator-hosted/model-cache/torch
+ExecStart=%h/tator/current/.venv/bin/python -m uvicorn hosted_app:create_app --factory --host 127.0.0.1 --port 8010 --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-access-log
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=90
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=yes
+LimitNOFILE=65536
+
+[Install]
+WantedBy=default.target

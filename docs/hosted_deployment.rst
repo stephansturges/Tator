@@ -7,16 +7,23 @@ by analysis, training and export. Read the `workspace workflow
 <hosted_workflow.rst>`_ for those roles and the `storage and recovery guide
 <hosted_operations.rst>`_ before importing existing data.
 
-Deployment acceptance remains open for the planned dual-A6000 host: actual GPU
-model behavior, WALDO40 migration, live provider execution and final cutover
-have not been qualified on that target. The steps below describe deployment;
-local implementation and test results do not establish that it has happened.
+Deployment acceptance requires actual GPU model behavior, restored data,
+continued annotation and the final network entry point to be checked on the
+chosen host. Paid-provider execution is a separate check when enabled. The steps
+below are deployment instructions; local tests do not establish target acceptance.
 
 Prepare the runtime
 -------------------
 
-Use Python 3.11–3.13, one control process, supervised model subprocesses and a
-private state directory on local disk. Production startup enforces SQLite
+Start with Python 3.11–3.13 when preparing a new control environment. Model
+dependencies may constrain that choice: the dual-A6000 deployment is being
+qualified with its existing Python 3.10 CUDA environment. That is a target
+configuration under test, not a claim that every tool supports Python 3.10.
+Qualify the control process and each enabled model in the actual service
+environment before cutover.
+
+Use one control process, supervised model subprocesses and a private state
+directory on local disk. Production startup enforces SQLite
 **3.51.3 or newer**, including its WAL fix. Check the library linked to the
 service's Python interpreter, not just the system ``sqlite3`` executable.
 Keep the live database off NFS, SMB and synchronized folders.
@@ -101,6 +108,52 @@ This creates the initial account and prompts twice for a password of at least
 12 characters. It is a first-account bootstrap, not a password-reset command.
 Keep passwords out of shell arguments and configuration examples. Later,
 invite users through **People** and deliver their invitation links yourself.
+
+Alternative: run under an existing Linux account
+-----------------------------------------------
+
+The `user service <../deployment/hosted/tator-hosted-user.service>`_ runs through
+``systemctl --user`` and needs no system-wide Tator service account. It uses the
+login account's filesystem and GPU permissions. Keep state and configuration
+private to that account, and allow its user manager to run after logout.
+
+The example expects these paths under the service account's home:
+
+* ``~/tator/current``: reviewed checkout and its ``.venv`` environment.
+* ``~/.local/share/tator-hosted``: private state and model caches.
+* ``~/.config/tator/hosted.env`` and ``models.json``: operator configuration.
+
+For a new installation, create the directories, copy the configuration examples
+and install the unit::
+
+    install -d -m 0700 ~/.local/share/tator-hosted ~/.config/tator ~/.config/systemd/user
+    install -m 0600 deployment/hosted/hosted.env.example ~/.config/tator/hosted.env
+    install -m 0600 deployment/hosted/models.example.json ~/.config/tator/models.json
+    install -m 0644 deployment/hosted/tator-hosted-user.service ~/.config/systemd/user/tator-hosted.service
+
+Edit the environment file before starting. Set ``TATOR_HOSTED_STATE_DIR`` and
+``TATOR_HOSTED_MODEL_CONFIG`` to absolute paths in this account's home; ``~`` is
+not expanded in an environment file. Set the same HTTPS origin described below.
+The unit's ``%h`` paths expand to the account's home. If the checkout or Python
+environment lives elsewhere, change ``WorkingDirectory`` and ``ExecStart``
+together. Adjust its cache variables when moving state.
+
+Bootstrap the administrator with this account's service interpreter and state
+path, without ``sudo -u tator``. A machine administrator enables persistence
+once with ``sudo loginctl enable-linger SERVICE_ACCOUNT``. Verify it with
+``loginctl show-user SERVICE_ACCOUNT -p Linger``; it should report ``Linger=yes``.
+Then, as the service account::
+
+    systemctl --user daemon-reload
+    systemctl --user enable --now tator-hosted
+    systemctl --user status tator-hosted
+    journalctl --user -u tator-hosted -n 100 --no-pager
+
+Use ``systemctl --user stop/start/restart tator-hosted`` for subsequent updates.
+Choose either this user unit or the system unit, with one writable installation.
+The same loopback binding, HTTPS proxy, origin checks, backup and runtime
+acceptance requirements apply to both layouts. The user unit has no ``User`` or
+``Group`` directive; it already runs as the account that installed it.
 
 HTTPS and startup
 -----------------
@@ -204,6 +257,8 @@ Then stop the whole service before replacing source or dependencies::
     sudo systemctl stop tator-hosted
     sudo systemctl is-active tator-hosted
 
+For the user-service layout, use ``systemctl --user`` without ``sudo`` instead.
+
 Deploy the reviewed release, install its requirements (including changes to
 ``requirements-hosted.txt``), and repeat the interpreter/SQLite and ``pip check``
 checks. Retain the same state root for a compatible upgrade. Compare shipped
@@ -212,10 +267,17 @@ if its unit changed, start the service, and repeat health, login, a small
 annotation/export workflow and the enabled tool checks before reopening work.
 
 Do not point older code at a database changed by an incompatible release. For
-rollback, stop the service and restore the matching backup into a new root
-with the matching release. Update all service state/cache paths, preserve the
-current root, and reconcile work performed since the backup. Restored sessions
-and leases are invalidated; paid providers remain paused pending reconciliation.
+rollback after the schema-2 upgrade, stop new writes and capture the newest
+recoverable state from the target. Restore it into a new root using the same
+schema-2 release on the recovery host, including work saved after cutover. Do not
+run the former schema-1 application against it. If the target's latest state
+cannot be recovered, keep the rollback blocked rather than reopen a stale
+pre-cutover copy.
+
+Update all service state/cache paths, preserve the current root and qualify the
+recovery host's tools before reopening one writable installation. Restored
+sessions and leases are invalidated; paid providers remain paused pending
+reconciliation.
 Archive through the workspace and reclaim only eligible unused objects through
 its retention checks; never delete source directories to make room for cutover.
 

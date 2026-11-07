@@ -42,6 +42,7 @@ def main(argv: list[str] | None = None) -> int:
     restore.add_argument("--destination", type=Path, required=True)
     restore.add_argument("--identity", type=Path, required=True)
     restore.add_argument("--database-name", default="hosted.sqlite3")
+    restore.add_argument("--reuse-artifacts", type=Path, help="Optional existing immutable artifact store on the destination filesystem; every archive member is still fully verified")
     restore.add_argument("--restore-hook", default="services.hosted.operations:prepare_restored_database", help="Trusted operator override of hosted schema validation and authority reset (module:function)")
     args = parser.parse_args(argv)
     age = AgeTool(args.age)
@@ -55,10 +56,17 @@ def main(argv: list[str] | None = None) -> int:
                 recipient=args.recipient, references=callback(args.references), age=age,
             ))
         else:
+            artifact_cache = None
+            if args.reuse_artifacts is not None:
+                root = args.reuse_artifacts
+                if root.is_symlink() or not root.is_dir() or not (root / "blobs" / "sha256").is_dir():
+                    raise ValueError("Artifact reuse requires an existing real artifact-store root.")
+                artifact_cache = ArtifactStore(root)
             result = dataclasses.asdict(restore_encrypted_backup(
                 args.archive, args.destination, identity=args.identity,
                 restore_hook=callback(args.restore_hook), age=age,
                 database_name=args.database_name,
+                artifact_cache=artifact_cache,
             ))
         print(json.dumps(result, default=str, sort_keys=True))
         return 0

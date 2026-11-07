@@ -10,6 +10,8 @@ import hashlib
 import io
 import json
 import os
+import re
+from urllib.parse import parse_qs, urlsplit
 from pathlib import Path
 import socket
 import shutil
@@ -75,8 +77,8 @@ def hosted_origin(tmp_path, request, monkeypatch):
         user = auth.create_user(admin, name); auth.redeem(user['invite_token'], 'test-only-fixture-password'); users[name] = user
     ds = store.create_dataset(admin, 'Hosted fixture', ['Car', 'Person'], str(uuid.uuid4()))
     first_image = None
-    for number in range(4):
-        data = io.BytesIO(); Image.new('RGB', (640, 480), (50+number*30, 70, 90)).save(data, format='PNG')
+    for number in range(605 if getattr(request, "param", None) == "tranche_queue" else 4):
+        data = io.BytesIO(); Image.new('RGB', (640, 480), ((50+number) % 256, (70+number // 256) % 256, 90)).save(data, format='PNG')
         ref = app.state.artifacts.put_bytes(data.getvalue())
         annotations = {'objects': []}
         if getattr(request, 'param', None) == 'caption_records' and number == 1:
@@ -222,6 +224,18 @@ async def sign_in(page, origin, username):
     await expect(page.locator('#workspace')).to_be_visible()
 
 
+async def open_first_image(page):
+    """Enter the grouped annotator workspace, preserving the actual UI path."""
+    if await page.evaluate("window.TatorHostedDashboard.session.user.role") == 'annotator':
+        if await page.get_by_role('button', name='Continue annotation', exact=True).count():
+            await page.get_by_role('button', name='Continue annotation', exact=True).first.click()
+            return
+        await page.locator('.tranche-card').get_by_role('button', name='Open tranche', exact=True).first.click()
+        await page.get_by_role('button', name='Continue annotation', exact=True).first.click()
+    else:
+        await page.locator('.hosted-card a').first.click()
+
+
 async def draw(page, left, top, right, bottom):
     canvas = await page.locator('#canvas').bounding_box(); assert canvas
     await page.mouse.move(canvas['x'] + canvas['width'] * left, canvas['y'] + canvas['height'] * top)
@@ -347,7 +361,7 @@ async def _restored_annotation(origin):
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page(viewport={'width': 1440, 'height': 1000})
         await sign_in(page, origin, 'alice')
-        await page.locator('.hosted-card a').first.click()
+        await open_first_image(page)
         await expect(page.locator('#hostedSave')).to_be_enabled()
         before = await page.evaluate('window.TatorHostedCanvas.snapshot()')
         assert before['caption'] == 'Draft before encrypted backup'
@@ -357,7 +371,7 @@ async def _restored_annotation(origin):
         await expect(page.locator('#hostedSaveState')).to_have_text('All changes saved')
         await page.locator('#hostedComplete').check()
         await page.locator('#hostedSubmit').click()
-        await expect(page).to_have_url(origin + '/')
+        await expect(page).to_have_url(re.compile(re.escape(origin) + r'/(?:\?.*)?$'))
         admin = await browser.new_page()
         await sign_in(admin, origin, 'admin')
         rows = await (await admin.request.get(origin + '/api/hosted/images?state=submitted')).json()
@@ -380,7 +394,7 @@ async def _hosted_pruning(origin):
         page = await browser.new_page(viewport={'width': 1440, 'height': 1000})
         errors = []; page.on('pageerror', lambda error: errors.append(str(error)))
         await sign_in(page, origin, 'admin')
-        await page.locator('.hosted-card a').first.click()
+        await open_first_image(page)
         await expect(page.locator('#hostedSave')).to_be_enabled()
         await page.get_by_role('navigation', name='Administrator tools').get_by_role('button', name='Dataset pruning', exact=True).click()
         await page.get_by_role('button', name='Open results', exact=True).click()
@@ -409,7 +423,7 @@ async def _caption_batch_review(origin):
         page = await browser.new_page(viewport={'width': 1440, 'height': 1000})
         errors = []; page.on('pageerror', lambda error: errors.append(str(error)))
         await sign_in(page, origin, 'admin')
-        await page.locator('.hosted-card a').first.click()
+        await open_first_image(page)
         await expect(page.locator('#hostedSave')).to_be_enabled()
         await page.locator('#hostedCaptionJobs').evaluate("e => { for (let p=e.parentElement;p;p=p.parentElement) if(p.tagName==='DETAILS') p.open=true; }")
         await page.locator('#hostedCaptionJobs').click()
@@ -564,11 +578,12 @@ async def _three_users(origin):
             page.on('pageerror', lambda error: errors.append(str(error)))
             await sign_in(page, origin, name)
         await alice.locator('#datasetChoice').select_option(label='Hosted fixture')
-        await expect(alice.locator('.hosted-card')).to_contain_text('frame-0.png')
-        await alice.locator('.hosted-card a').first.click()
+        await expect(alice.locator('#tranchePanel')).to_be_visible()
+        await open_first_image(alice)
         await expect(alice.locator('#hostedSave')).to_be_enabled()
         image_url = alice.url
-        image_id = image_url.split('image=')[1]
+        image_id = parse_qs(urlsplit(image_url).query)['image'][0]
+        image_url = origin + '/annotate?image=' + image_id
         assert (await contexts[2].request.get(origin + f'/api/hosted/images/{image_id}/media')).status == 404
         await admin.goto(image_url); await expect(admin.locator('#hostedSave')).to_be_disabled()
         await expect(admin.locator('#hostedOverride')).to_be_visible()
@@ -578,28 +593,28 @@ async def _three_users(origin):
         drawn = await alice.evaluate('window.TatorHostedCanvas.snapshot()')
         assert len(drawn['objects']) == 1
         await alice.locator('#hostedComplete').check(); await alice.locator('#hostedSubmit').click()
-        await expect(alice).to_have_url(origin + '/')
-        await expect(alice.locator('#datasetChoice option:checked')).to_have_text('Other assigned dataset')
+        await expect(alice).to_have_url(re.compile(re.escape(origin) + r'/(?:\?.*)?$'))
+        await expect(alice.locator('#datasetChoice option:checked')).to_have_text('Hosted fixture')
         await expect(alice.locator('#submissionList')).to_contain_text('frame-0.png')
         await expect(alice.locator('#submissionList')).to_contain_text('Awaiting review')
         await expect(alice.locator('#submissionList')).to_contain_text('Hosted fixture')
         await admin.goto(image_url); await expect(admin.locator('#hostedReturn')).to_be_enabled()
         await admin.locator('#hostedFeedback').fill('Please check the edge of the car.')
-        await admin.locator('#hostedReturn').click(); await expect(admin).to_have_url(origin + '/')
+        await admin.locator('#hostedReturn').click(); await expect(admin).to_have_url(re.compile(re.escape(origin) + r'/(?:\?.*)?$'))
         await alice.get_by_role('button', name='Refresh', exact=True).click()
         await alice.locator('#datasetChoice').select_option(label='Hosted fixture')
-        await expect(alice.locator('.hosted-card')).to_contain_text('frame-0.png')
-        await alice.locator('.hosted-card a').first.click()
+        await expect(alice.locator('#tranchePanel')).to_be_visible()
+        await open_first_image(alice)
         await expect(alice.locator('#hostedSubmit')).to_be_enabled()
         await expect(alice.locator('.hosted-review-note')).to_contain_text('Please check the edge')
-        await alice.locator('#hostedComplete').check(); await alice.locator('#hostedSubmit').click(); await expect(alice).to_have_url(origin + '/')
+        await alice.locator('#hostedComplete').check(); await alice.locator('#hostedSubmit').click(); await expect(alice).to_have_url(re.compile(re.escape(origin) + r'/(?:\?.*)?$'))
         await admin.goto(image_url); await expect(admin.locator('#hostedApprove')).to_be_enabled()
-        await admin.locator('#hostedComplete').check(); await admin.locator('#hostedApprove').click(); await expect(admin).to_have_url(origin + '/')
+        await admin.locator('#hostedComplete').check(); await admin.locator('#hostedApprove').click(); await expect(admin).to_have_url(re.compile(re.escape(origin) + r'/(?:\?.*)?$'))
         record = await (await contexts[0].request.get(origin + f'/api/hosted/images/{image_id}')).json()
         assert record['state'] == 'confirmed'
         assert record['annotations']['objects'] == drawn['objects']
         await alice.get_by_role('button', name='Refresh', exact=True).click()
-        await expect(alice.locator('#datasetChoice option:checked')).to_have_text('Other assigned dataset')
+        await expect(alice.locator('#datasetChoice option:checked')).to_have_text('Hosted fixture')
         await expect(alice.locator('#submissionList')).to_contain_text('Approved')
         assert not errors
         await browser.close()
@@ -621,7 +636,7 @@ async def _rejected_save(origin, recovery_case):
         page = await browser.new_page(viewport={'width': 1440, 'height': 1000})
         page.on('dialog', lambda dialog: dialog.accept())
         await sign_in(page, origin, 'alice')
-        await page.locator('.hosted-card a').first.click()
+        await open_first_image(page)
         await expect(page.locator('#hostedSave')).to_be_enabled()
         await page.clock.install()
         await page.clock.pause_at(datetime.now() + timedelta(milliseconds=50))
@@ -718,7 +733,7 @@ async def _reload_unknown_save(origin, replace_lease):
         page = await browser.new_page(viewport={'width': 1440, 'height': 1000})
         page.on('dialog', lambda dialog: dialog.accept())
         await sign_in(page, origin, 'alice')
-        await page.locator('.hosted-card a').first.click()
+        await open_first_image(page)
         await expect(page.locator('#hostedSave')).to_be_enabled()
         await page.clock.install()
         await page.clock.pause_at(datetime.now() + timedelta(milliseconds=50))
@@ -883,7 +898,7 @@ async def _undo_obsolete_draft(origin, case):
         page = await browser.new_page(viewport={'width': 1440, 'height': 1000})
         page.on('dialog', lambda dialog: dialog.accept())
         await sign_in(page, origin, 'alice')
-        await page.locator('.hosted-card a').first.click()
+        await open_first_image(page)
         await expect(page.locator('#hostedSave')).to_be_enabled()
         await page.clock.install(); await page.clock.pause_at(datetime.now() + timedelta(milliseconds=50))
         original = await page.evaluate('window.TatorHostedCanvas.snapshot()')
@@ -1046,7 +1061,7 @@ async def _imports_and_recovery(origin, paths):
         expected = await page.evaluate('window.TatorHostedCanvas.snapshot()')
         await page.locator('#hostedArchive').click()
         try:
-            await expect(page).to_have_url(origin + '/')
+            await expect(page).to_have_url(re.compile(re.escape(origin) + r'/(?:\?.*)?$'))
         except AssertionError:
             pytest.fail(await page.locator('#hostedSaveState').inner_text())
         assert (await context.request.get(f'{origin}/api/hosted/images/{image_id}')).status == 404
@@ -1066,7 +1081,7 @@ async def _network_ordering(origin):
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(viewport={'width': 1440, 'height': 1000})
         page = await context.new_page()
-        await sign_in(page, origin, 'alice'); await page.locator('.hosted-card a').first.click()
+        await sign_in(page, origin, 'alice'); await open_first_image(page)
         await expect(page.locator('#hostedSave')).to_be_enabled()
         started, release = asyncio.Event(), asyncio.Event()
         blocked = False
@@ -1083,7 +1098,7 @@ async def _network_ordering(origin):
         assert len((await page.evaluate('window.TatorHostedCanvas.snapshot()'))['objects']) == 2
         release.set()
         await expect(page.locator('#hostedSaveState')).to_have_text('All changes saved', timeout=12000)
-        image_id = page.url.split('image=')[1]
+        image_id = parse_qs(urlsplit(page.url).query)['image'][0]
         stored = await (await context.request.get(origin + f'/api/hosted/images/{image_id}')).json()
         assert len(stored['annotations']['objects']) == 2
         await page.unroute('**/api/hosted/images/*/save', hold_first)
@@ -1113,7 +1128,7 @@ async def _network_ordering(origin):
         await page.locator('#hostedComplete').check(); await page.locator('#hostedSubmit').click()
         await expect(page.locator('#hostedHandoffRetry')).to_be_visible()
         await expect(page.locator('#hostedSubmit')).to_be_disabled()
-        await page.locator('#hostedHandoffRetry').click(); await expect(page).to_have_url(origin + '/')
+        await page.locator('#hostedHandoffRetry').click(); await expect(page).to_have_url(re.compile(re.escape(origin) + r'/(?:\?.*)?$'))
         assert len(operation_ids) == 1
         submitted = (await (await context.request.get(origin + '/api/hosted/submissions')).json())['submissions']
         assert len(submitted) == 1
@@ -1158,7 +1173,7 @@ async def _navigation_and_captions(origin):
         other = await (await context.request.get(origin + '/api/hosted/images/' + second['id'])).json()
         assert len(other['annotations']['objects']) == 1
         assert other['annotations']['objects'] != current['objects']
-        await page.locator('#hostedBack').click(); await expect(page).to_have_url(origin + '/?dataset=' + datasets[0]['id'])
+        await page.locator('#hostedBack').click(); await expect(page).to_have_url(re.compile(re.escape(origin + '/?dataset=' + datasets[0]['id']) + r'(?:&.*)?$'))
         await page.goto(origin + '/annotate?image=' + first['id'])
         await expect(page.locator('#hostedSave')).to_be_enabled()
         assert (await page.evaluate('window.TatorHostedCanvas.snapshot()'))['alternate_captions'] == saved['annotations']['alternate_captions']
@@ -1177,7 +1192,7 @@ async def _caption_button(origin):
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(viewport={'width': 1440, 'height': 1000})
         page = await context.new_page(); errors = []; page.on('pageerror', lambda error: errors.append(str(error)))
-        await sign_in(page, origin, 'alice'); await page.locator('.hosted-card a').first.click()
+        await sign_in(page, origin, 'alice'); await open_first_image(page)
         await expect(page.locator('#hostedSave')).to_be_enabled()
         await page.locator('#qwenCaptionBuildInstructionDataset').evaluate("e => { for (let p=e.parentElement;p;p=p.parentElement) if(p.tagName==='DETAILS') p.open=true; }")
         await page.locator('#qwenCaptionSubcaptionsPerImage').fill('1')
@@ -1186,7 +1201,7 @@ async def _caption_button(origin):
         await expect(page.locator('#qwenCaptionOutput')).to_have_value('A red image.', timeout=30000)
         await page.locator('#hostedSave').click()
         await expect(page.locator('#hostedSaveState')).to_have_text('All changes saved')
-        image_id = page.url.split('image=')[1]
+        image_id = parse_qs(urlsplit(page.url).query)['image'][0]
         image = await (await context.request.get(origin + '/api/hosted/images/' + image_id)).json()
         assert image['annotations']['caption'] == 'A red image.'
         assert any(row['caption'] == 'A red image.' for row in image['annotations']['alternate_captions'])
@@ -1221,7 +1236,7 @@ async def _dqe_corrections(origin):
         page = await context.new_page(); errors = []; page.on('pageerror', lambda error: errors.append(str(error)))
         page.on('dialog', lambda dialog: dialog.accept())
         await sign_in(page, origin, 'admin')
-        await page.locator('.hosted-card a').first.click()
+        await open_first_image(page)
         await expect(page.locator('#hostedSave')).to_be_enabled()
         await page.get_by_role('navigation', name='Administrator tools').get_by_role('button', name='Data Quality Explorer', exact=True).click()
         await page.get_by_role('button', name='Open results', exact=True).click()

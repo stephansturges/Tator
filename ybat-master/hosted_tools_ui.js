@@ -43,9 +43,17 @@
             const [catalog, dataset] = await Promise.all([api(`/tools/catalog?dataset_id=${encodeURIComponent(id)}`), api(`/datasets/${encodeURIComponent(id)}`)]);
             if (generation !== epoch || datasetId() !== id || !dialog.open) return;
             const sam = section("Your segmentation model", "Installed SAM1 and SAM3 models are available in every dataset. Your choice and image cache follow your account, without changing anyone else's tools.");
-            const select = choices(sam, "SAM model", catalog.models.filter((model) => ["sam1", "sam3"].includes(model.kind)), catalog.sam?.model_id);
+            const allowed = catalog.sam_allowed_model_ids;
+            const candidates = catalog.models.filter(model => ["sam1", "sam3"].includes(model.kind) && (!Array.isArray(allowed) || allowed.includes(model.model_id)));
+            const select = choices(sam, "SAM model", candidates, catalog.sam?.model_id);
+            if (catalog.sam?.available === false) {
+                const unavailable = node("option", `${catalog.sam.model_id} · unavailable on this server`);
+                unavailable.value = catalog.sam.model_id; unavailable.disabled = true; select.append(unavailable); select.value = unavailable.value;
+                const explanation = node("p", `${catalog.sam.unavailable_reason || "Your saved segmentation model cannot run on this server. Your selection has been preserved."} Choose an available model, then click Use this SAM model.`);
+                explanation.id = "hostedSamUnavailable"; explanation.setAttribute("role", "status"); sam.append(explanation);
+            }
             action(sam, "Use this SAM model", async (valid) => {
-                if (!select.value) throw new Error("Choose an installed model.");
+                if (!select.value || !candidates.some(model => model.model_id === select.value)) throw new Error("Choose a model available on this server.");
                 await api("/tools/sam", { model_id: select.value, expected_revision: catalog.sam?.revision || 0, operation_id: crypto.randomUUID() });
                 if (!valid()) return; await render(); await poll();
             });
@@ -126,7 +134,7 @@
             if (canvas()) {
                 canvas().setToolsState(value);
                 const catalog = await api(`/tools/catalog?dataset_id=${encodeURIComponent(id)}`);
-                if (current === epoch && datasetId() === id) window.TatorHostedCanvas?.configureTools(catalog, value);
+                if (current === epoch && datasetId() === id) { window.TatorHostedCanvas?.configureTools(catalog, value); if (catalog.sam?.available === false && !phase) stateLabel.textContent = "Your saved SAM model is unavailable here. Open Tools & models to choose a compatible model."; }
             }
         } catch (error) { if (current === epoch && datasetId() === id && !error.stale) stateLabel.textContent = `Tool status unavailable: ${error.message}`; }
         finally { pendingPoll = false; }

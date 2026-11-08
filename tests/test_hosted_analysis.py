@@ -751,6 +751,22 @@ def test_hosted_pruning_reuses_actual_planner_ledger_and_retained_export(setup, 
     assert restored['review_revision'] > state['review_revision']
     # The original confirmed population is untouched by variant export/recovery.
     assert store.get_snapshot(actor, captured['snapshot_id'])['manifest']['images']
+    # After any confirmed change the review stays readable, marked with both
+    # revisions; changing or exporting its plan is refused with a clear reason.
+    from fastapi import HTTPException
+    confirmed = setup[5][0]
+    editor = store.acquire_editor(actor, confirmed['id'], 'tab')
+    store.save(actor, ctx(editor, 'stale-pruning-edit'), editor['annotations'], complete=True)
+    assert analysis.status(actor, captured['job_id'])['stale']
+    earlier = reopened.call(actor, captured['job_id'], 'result')
+    assert earlier['earlier_version'] and earlier['analysis_revision'] == captured['dataset_revision']
+    assert earlier['current_revision'] == store.get_dataset(actor, ds['id'])['revision'] > captured['dataset_revision']
+    assert earlier['image_count'] == 2
+    assert reopened.call(actor, captured['job_id'], 'review_snapshot')['review_revision'] == restored['review_revision']
+    for method, body in (('review_mutation', {'action': 'approve', 'request_id': uuid.uuid4().hex, 'selection_revision': 1}),
+                         ('export', {'request_id': uuid.uuid4().hex, 'selection_revision': 1, 'removed_count': 0})):
+        with pytest.raises(HTTPException, match='Run a new pruning analysis'):
+            reopened.call(actor, captured['job_id'], method, body)
 
 
 def test_pruning_ledger_rechecks_logout_and_canonical_revision_at_commit(setup, tmp_path):
@@ -776,4 +792,18 @@ def test_pruning_ledger_rechecks_logout_and_canonical_revision_at_commit(setup, 
             state['budget'] = 9
             editor = store.acquire_editor(actor, images[0]['id'], 'tab')
             store.save(actor, ctx(editor, 'fenced-new-version'), editor['annotations'], complete=True)
+    assert 'budget' not in ReviewLedger(path).read()
+    # Reading a review of the earlier version for the first time sets only its
+    # default ceiling: the read continues, nothing is saved. Other changes fail.
+    from services.hosted.pruning import _INSPECTING
+    adapter.job_id = 'earlier-review'
+    token = _INSPECTING.set('earlier-review')
+    try:
+        with FencedLedger(path, adapter).transaction() as state:
+            state['budget'] = 3
+        with pytest.raises(HTTPException, match='Run a new pruning analysis'):
+            with FencedLedger(path, adapter).transaction() as state:
+                state['budget'], state['pins'] = 3, {'x': {}}
+    finally:
+        _INSPECTING.reset(token)
     assert 'budget' not in ReviewLedger(path).read()

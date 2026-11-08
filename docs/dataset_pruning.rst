@@ -199,6 +199,18 @@ uses the configured ``/api/hosted/tools/heavy`` task; the mounted pruning
 creation route cannot start a new producer run. Hosted session and snapshot
 checks apply in addition to the shared review ledger.
 
+A hosted review describes one frozen confirmed revision. When the dataset
+changes afterwards, read routes (job status, result, review snapshot,
+selection, families, family members, comparisons, recipe-lab metadata and
+comparisons, crops, thumbnails, preview and export status) keep working and
+add ``earlier_version: true``, ``analysis_revision``, ``current_revision`` and
+``earlier_version_notice`` to their JSON. Opening such a review for the first
+time does not save its default removal ceiling. Routes that change the review,
+start a settings preview, calibrate, add a recipe-lab pair, prepare an export
+or download a variant are refused with HTTP 409 and a message to run a new
+pruning analysis on the current dataset. Cancelling a running preview stays
+possible.
+
 Settings previews use ``kind=settings`` and the five fields in ``PlanSettings``:
 ``policy``, ``object_weight``, ``max_removed_images``,
 ``max_affected_appearance_groups`` and

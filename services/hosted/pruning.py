@@ -5,6 +5,7 @@ and approved-only ZIP export remain services.dataset_pruning implementations.
 Only immutable input hydration, auth and recoverable storage are adapted here.
 """
 from contextlib import contextmanager, closing
+from contextvars import ContextVar
 import copy
 import hashlib
 import json
@@ -30,6 +31,24 @@ from .artifacts import ArtifactRef
 from .errors import DomainError
 from .store import _json
 from .pruning_components import RetainedComponents, recover_retained_components
+
+
+# Native methods that only read a saved review. They stay available when the
+# review describes an earlier confirmed version of the dataset; every other
+# method (review changes, plan previews, calibration, export) is refused then.
+READ_METHODS = frozenset({"status", "result", "review", "review_snapshot", "families", "family_members",
+                          "comparison", "recipe_lab", "recipe_lab_compare", "crop", "thumbnail",
+                          "settings_preview_status", "export_status"})
+# The hosted job whose read is being served in this request context.
+_INSPECTING = ContextVar("hosted_pruning_inspecting", default=None)
+
+
+def stale_message(revisions):
+    current = revisions.get("current_revision")
+    now = f"the dataset is now at revision {current}" if current is not None else "the dataset has changed since"
+    return (f"This pruning review is based on confirmed revision {revisions['analysis_revision']}; {now}. "
+            "You can still inspect it, but its removal plan cannot be changed, previewed or exported. "
+            "Run a new pruning analysis from the dataset workspace to act on the current dataset.")
 
 
 def _relative(value):
@@ -75,16 +94,31 @@ class FrozenAdapter:
             self.owner.store._actor(con, self.actor, admin=True)
             current = self.owner.store._dataset(con, self.manifest['dataset_id'])
             if current['revision'] != self.manifest['revision']:
-                raise HTTPException(409, 'The approved dataset changed before calibration commit')
+                raise HTTPException(409, 'The approved dataset changed before calibration commit. ' + stale_message(
+                    {'analysis_revision': self.manifest['revision'], 'current_revision': current['revision']}))
             yield
     @contextmanager
     def guard(self):
         self.owner.analysis.status(self.actor, self.job_id)
         yield
         self.owner.analysis.status(self.actor, self.job_id)
+    def inspecting(self):
+        """True while serving a read of this job (see HostedPruning.call)."""
+        return _INSPECTING.get() == self.job_id
+    def earlier_version(self):
+        """None while the dataset is unchanged, else both revisions."""
+        status = self.owner.analysis.status(self.actor, self.job_id)
+        if not status["stale"]:
+            return None
+        with self.owner.store.read_connection() as con:
+            row = con.execute("SELECT revision FROM hosted_datasets WHERE id=?", (self.manifest["dataset_id"],)).fetchone()
+        return {"analysis_revision": self.manifest["revision"], "current_revision": row[0] if row else None}
     def check_revision(self, source):
-        if self.owner.analysis.status(self.actor, self.job_id)["stale"]:
-            raise HTTPException(409, "The approved dataset changed. Run a new analysis before changing this pruning review.")
+        # A review of an earlier confirmed version stays readable. Anything
+        # that would change, preview or export its plan is refused.
+        earlier = None if self.inspecting() else self.earlier_version()
+        if earlier:
+            raise HTTPException(409, stale_message(earlier))
         if source["revision"] != self.manifest["revision"]:
             raise HTTPException(409, "Frozen source revision changed")
     def check_inventory(self, source, images):
@@ -149,6 +183,10 @@ class FrozenAdapter:
         self.owner.analysis.status(self.actor, self.job_id)
 
 
+class _FirstViewDefault(Exception):
+    """Rolls back the one default an inspection of an earlier version may set."""
+
+
 class FencedLedger(ReviewLedger):
     def __init__(self, path, adapter):
         super().__init__(path)
@@ -156,8 +194,10 @@ class FencedLedger(ReviewLedger):
     @contextmanager
     def transaction(self):
         fence = None
+        inspecting = getattr(self.adapter, 'job_id', None) is not None and _INSPECTING.get() == self.adapter.job_id
         try:
             with super().transaction() as state:
+                before = copy.deepcopy(state) if inspecting else None
                 yield state
                 # Only the final ledger commit holds the canonical writer
                 # fence. Expensive planning and preview work happened earlier.
@@ -168,9 +208,17 @@ class FencedLedger(ReviewLedger):
                 store._actor(con, self.adapter.actor, admin=True)
                 dataset = store._dataset(con, self.adapter.manifest['dataset_id'])
                 if dataset['revision'] != self.adapter.manifest['revision']:
-                    raise HTTPException(409, 'The approved dataset changed before review commit')
+                    # Opening a review of an earlier version for the first time
+                    # only records its default removal ceiling. Do not save it;
+                    # the read continues from the committed review.
+                    if inspecting and 'budget' not in before and {**before, 'budget': state.get('budget')} == state:
+                        raise _FirstViewDefault()
+                    raise HTTPException(409, 'The approved dataset changed before review commit. ' + stale_message(
+                        {'analysis_revision': self.adapter.manifest['revision'], 'current_revision': dataset['revision']}))
                 if con.execute('SELECT 1 FROM hosted_archived_datasets WHERE dataset_id=?', (dataset['id'],)).fetchone():
                     raise HTTPException(409, 'The approved dataset was archived before review commit')
+        except _FirstViewDefault:
+            pass
         finally:
             if fence is not None:
                 fence.__exit__(*sys.exc_info())
@@ -341,10 +389,19 @@ class HostedPruning:
                     con.execute("INSERT OR REPLACE INTO hosted_pruning_checkpoints VALUES(?,?,?)", (job_id, _json({"files": rows}), self.store.clock()))
     def call(self, actor, job_id, method, *args, **kwargs):
         service = self.service(actor, job_id)
-        with self._job_lock(job_id):
-            with service.adapter.guard():
-                value = getattr(service, method)(service.hosted_native_id, *args, **kwargs)
-            # Reads can reconcile cross-analysis Keep events; retain that state.
-            if method not in {"thumbnail", "crop", "download", "status"}:
-                self.checkpoint(job_id, service)
-            return value
+        token = _INSPECTING.set(job_id) if method in READ_METHODS else None
+        try:
+            with self._job_lock(job_id):
+                with service.adapter.guard():
+                    value = getattr(service, method)(service.hosted_native_id, *args, **kwargs)
+                # Reads can reconcile cross-analysis Keep events; retain that state.
+                if method not in {"thumbnail", "crop", "download", "status"}:
+                    self.checkpoint(job_id, service)
+        finally:
+            if token is not None:
+                _INSPECTING.reset(token)
+        earlier = service.adapter.earlier_version() if token is not None and isinstance(value, dict) else None
+        if earlier:
+            # Mark every read of an earlier version, with both revisions.
+            value = {**value, "earlier_version": True, **earlier, "earlier_version_notice": stale_message(earlier)}
+        return value

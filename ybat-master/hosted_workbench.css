@@ -31,3 +31,9 @@ html.theme-pipboy #hostedWorkbenchBar{background:var(--pip-tab-bg);color:var(--p
 html.theme-pipboy #hostedWorkbenchBar :is(a,span,#hostedWorkbenchCopy){color:var(--pip-green)}
 html.theme-pipboy #hostedWorkbenchBar button{border-color:var(--pip-border);color:var(--pip-green)}
 html.theme-pipboy #hostedWorkbenchBar button.hosted-wb-attention{background:var(--pip-amber);border-color:var(--pip-amber);color:var(--pip-bg)}
+#hostedWorkbenchBar #hostedWorkbenchCopy[data-tone=readonly]{color:#ffd58a;font-weight:600}
+.hosted-wb-copies li.deleted strong{color:#6b7a74;text-decoration:line-through}
+.hosted-wb-copies small.hosted-wb-pending{color:#5b6b65}.hosted-wb-copies small.hosted-wb-pending[data-tone=pending]{color:#8a4b00;font-weight:600}
+.hosted-wb-table tr.held td{color:#7a5a00}
+.hosted-wb-held{color:#7a5a00}
+html.theme-pipboy #hostedWorkbenchBar #hostedWorkbenchCopy[data-tone=readonly]{color:var(--pip-amber)}

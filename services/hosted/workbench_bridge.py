@@ -134,6 +134,69 @@ DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}")
 EXPORT_SPLITS = {"train": "train", "unsplit": "train", "val": "train", "test": "train"}
 OVERLAY_LIMIT = 8 * 1024 * 1024
 CHANGE_KEYS = ("relabeled", "moved", "added", "deleted")
+# Apply failures in words; the codes stay in the result for support.
+APPLY_ERRORS = {
+    "editor_lease_conflict": "someone has it open on the annotation canvas; apply again after they close it",
+    "editor_lease_expired": "its editing reservation ran out; apply again",
+    "annotation_version_changed": "it was edited in the hosted dataset during the apply; make a new copy to edit it",
+    "ownership_changed": "it changed hands in the hosted dataset during the apply; review again",
+    "image_owned_by_annotator": "it is assigned to an annotator now; apply after it is confirmed again",
+    "image_not_found": "it is no longer in the hosted dataset",
+    "invalid_class": "it uses a class that is retired; relabel or delete those objects here",
+    "annotations_too_large": "its labels are too large to save",
+}
+PER_IMAGE_FOLDERS = ("images", "labels", "segments", "annotations", "captions")
+UNSAFE_NAME = re.compile(r"[^A-Za-z0-9-]+")
+
+
+def export_stem(image: dict) -> str:
+    """The file stem of an image in a workbench copy: its original name, then its hosted ID.
+
+    The ID keeps names unique and lets review read each label file back to its
+    hosted image; the name is reduced to letters, digits and dashes so it is
+    safe on every filesystem and never contains the ``__`` separator.
+    """
+    name = str(image.get("filename") or "").replace("\\", "/").rsplit("/", 1)[-1]
+    stem = name.rsplit(".", 1)[0] if "." in name[1:] else name
+    stem = UNSAFE_NAME.sub("_", stem).strip("_")[:80].strip("_")
+    return f"{stem}__{image['id']}" if stem else image["id"]
+
+
+def image_id_for_stem(stem: str, known) -> str | None:
+    """The hosted image a workbench file stem belongs to (``<name>__<id>`` or a bare ID)."""
+    if stem in known:
+        return stem
+    index = stem.find("__")
+    while index != -1:
+        if stem[index + 2:] in known:
+            return stem[index + 2:]
+        index = stem.find("__", index + 1)
+    return None
+
+
+def _renamed(entries, stems: dict[str, str]):
+    """Name per-image export files after the original file name plus the hosted ID."""
+    from .backup import ExportEntry
+    for entry in entries:
+        parts = entry.path.split("/")
+        if len(parts) == 3 and parts[1] in PER_IMAGE_FOLDERS:
+            stem, dot, suffix = parts[2].partition(".")
+            if stem in stems:
+                yield ExportEntry(f"{parts[0]}/{parts[1]}/{stems[stem]}{dot}{suffix}", artifact=entry.artifact, data=entry.data)
+                continue
+        if entry.path == "hosted-media.json":
+            media = json.loads(entry.data)
+            for image_id, view in media.get("images", {}).items():
+                if image_id in stems and isinstance(view.get("path"), str):
+                    view["path"] = view["path"].replace(f"/{image_id}.", f"/{stems[image_id]}.", 1)
+            yield ExportEntry(entry.path, data=_json(media).encode()); continue
+        if entry.path == "captions.jsonl":
+            rows = [json.loads(line) for line in entry.data.decode().splitlines() if line.strip()]
+            for row in rows:
+                if row.get("image_id") in stems and isinstance(row.get("image_path"), str):
+                    row["image_path"] = row["image_path"].replace(f"/{row['image_id']}.", f"/{stems[row['image_id']]}.", 1)
+            yield ExportEntry(entry.path, data=("\n".join(_json(row) for row in rows) + ("\n" if rows else "")).encode()); continue
+        yield entry
 
 
 class WorkbenchBridge:
@@ -217,17 +280,56 @@ class WorkbenchBridge:
         return {key: job[key] for key in ("id", "kind", "state", "done", "total", "result", "error")}
 
     # ---- bridges --------------------------------------------------------
+    @staticmethod
+    def _present(row) -> bool:
+        """The workbench still has this copy: its folder and its library record.
+
+        Deleting a copy in the workbench's Dataset Management removes the library
+        record (with any unapplied label edits) but leaves the linked folder.
+        """
+        return Path(row["path"]).is_dir() and (Path(row["legacy_registry_root"]) / "dataset.json").is_file()
+
+    def _listed(self, row, applied) -> dict:
+        return {**{key: row[key] for key in ("id", "dataset_id", "snapshot_id", "legacy_dataset_id", "label", "image_count",
+                                             "excluded_images", "created_at")},
+                "applied_images": applied, "present": self._present(row)}
+
     def bridges(self, actor, dataset_id: str) -> list[dict]:
+        """Copies of a dataset, newest first; hosted changes for the newest one still in the workbench."""
         self._require(actor)
         with self.store.read_connection() as con:
             rows = con.execute("SELECT * FROM hosted_workbench_bridges WHERE dataset_id=? ORDER BY created_at DESC", (dataset_id,)).fetchall()
             applied = dict(con.execute("SELECT bridge_id, count(*) FROM hosted_workbench_applied GROUP BY bridge_id").fetchall())
-        listed = [{**{key: row[key] for key in ("id", "dataset_id", "snapshot_id", "legacy_dataset_id", "label", "image_count",
-                                                 "excluded_images", "created_at")},
-                   "applied_images": applied.get(row["id"], 0)} for row in rows]
-        if listed:
-            listed[0]["hosted_changes"] = self._hosted_changes(listed[0]["id"])
+        listed = [self._listed(row, applied.get(row["id"], 0)) for row in rows]
+        current = next((item for item in listed if item["present"]), None)
+        if current is not None:
+            current["hosted_changes"] = self._hosted_changes(current["id"])
         return listed
+
+    def bridge(self, actor, bridge_id: str) -> dict:
+        """One copy, found by its ID (the workbench names it hosted_<ID>), with its dataset."""
+        self._require(actor)
+        with self.store.read_connection() as con:
+            row = con.execute("SELECT b.*, d.name AS dataset_name FROM hosted_workbench_bridges b JOIN hosted_datasets d ON d.id=b.dataset_id "
+                              "WHERE b.id=?", (bridge_id,)).fetchone()
+            if row is None:
+                raise DomainError("workbench_bridge_not_found", 404, "This workbench dataset is not a copy of a hosted dataset.")
+            applied = con.execute("SELECT count(*) FROM hosted_workbench_applied WHERE bridge_id=?", (bridge_id,)).fetchone()[0]
+            newer = [r for r in con.execute("SELECT * FROM hosted_workbench_bridges WHERE dataset_id=? AND created_at>?",
+                                            (row["dataset_id"], row["created_at"]))]
+        item = {**self._listed(row, applied), "dataset_name": row["dataset_name"],
+                "newer_copies": sum(1 for other in newer if self._present(other))}
+        if item["present"]:
+            item["hosted_changes"] = self._hosted_changes(bridge_id)
+        return item
+
+    def copy_ids(self, dataset_id: str) -> list[str]:
+        """Workbench dataset IDs of a hosted dataset's copies (for the workbench page itself)."""
+        if not ID_PATTERN.fullmatch(dataset_id or ""):
+            return []
+        with self.store.read_connection() as con:
+            return [row[0] for row in con.execute("SELECT legacy_dataset_id FROM hosted_workbench_bridges WHERE dataset_id=? ORDER BY created_at DESC",
+                                                  (dataset_id,))]
 
     def _hosted_changes(self, bridge_id):
         """How the hosted dataset moved on since this copy: confirmed images edited, added or gone."""
@@ -252,6 +354,16 @@ class WorkbenchBridge:
         self._require(actor)
         if not ID_PATTERN.fullmatch(dataset_id or ""):
             raise DomainError("dataset_not_found", 404)
+        with self.store.read_connection() as con:
+            dataset = con.execute("SELECT name FROM hosted_datasets WHERE id=?", (dataset_id,)).fetchone()
+            if dataset is None:
+                raise DomainError("dataset_not_found", 404)
+            confirmed = con.execute("SELECT count(*) FROM hosted_images WHERE dataset_id=? AND state='confirmed' "
+                                    "AND id NOT IN (SELECT image_id FROM hosted_archived_images)", (dataset_id,)).fetchone()[0]
+        if not confirmed:
+            # A copy holds confirmed images only; an empty one would open as an empty workspace.
+            raise DomainError("workbench_no_confirmed_images", 409, f"{dataset['name']} has no confirmed images yet. "
+                              "Confirm images in the admin workspace before opening it in the workbench.")
         return self._start(actor, "export", self._export, (actor, dataset_id), dataset_id=dataset_id)
 
     def _real_directory(self, path: Path) -> Path:
@@ -286,7 +398,8 @@ class WorkbenchBridge:
                 shutil.rmtree(stale, ignore_errors=True)
         stage.mkdir(mode=0o700)
         try:
-            for entry in self.operations._snapshot_entries({**manifest, "images": exported}, unsplit_as_train=True):
+            stems = {image["id"]: export_stem(image) for image in exported}
+            for entry in _renamed(self.operations._snapshot_entries({**manifest, "images": exported}, unsplit_as_train=True), stems):
                 target = stage / entry.path
                 if not self._inside(target, stage) or target.resolve() == stage.resolve():
                     raise DomainError("workbench_export_path_invalid", 409)
@@ -360,6 +473,7 @@ class WorkbenchBridge:
                 manifest = json.loads(snapshot["manifest_json"])
                 classes = sorted(manifest["classes"], key=lambda item: item["position"])
                 cached = {"dataset_id": snapshot["dataset_id"], "class_ids": [item["id"] for item in classes],
+                          "class_names": {item["id"]: item["name"] for item in classes},
                           "images": {image["id"]: {"split": EXPORT_SPLITS[image["split"]], "version_id": image["version_id"]}
                                      for image in manifest["images"] if image["split"] in EXPORT_SPLITS and ID_PATTERN.fullmatch(image["id"])}}
                 with self._lock:
@@ -368,15 +482,36 @@ class WorkbenchBridge:
                     self._manifests[row["snapshot_id"]] = cached
         if cached["dataset_id"] != row["dataset_id"]:
             raise DomainError("workbench_bridge_invalid", 409)
-        if not Path(row["path"]).is_dir():
-            raise DomainError("workbench_copy_missing", 409, "This workbench copy was deleted in the workbench. Make a new copy.")
+        if not self._present(row):
+            raise DomainError("workbench_copy_missing", 409, "This workbench copy was deleted in the workbench, with any edits "
+                              "that were not applied. Make a new copy.")
         return row, cached
 
     # ---- changes and apply ------------------------------------------------
-    def _overlay(self, labels: Path, split: str, image_id: str):
+    @staticmethod
+    def _overlay_names(labels: Path, images: dict) -> dict:
+        """Label files the workbench wrote, by hosted image: {(split, image_id): file name}.
+
+        Copies name files ``<original name>__<image id>``; older copies used the bare ID.
+        """
+        found = {}
+        for split in sorted({meta["split"] for meta in images.values()}):
+            try:
+                entries = list(os.scandir(labels / split))
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            for entry in entries:
+                if not entry.name.endswith(".txt"):
+                    continue
+                image_id = image_id_for_stem(entry.name[:-4], images)
+                if image_id is not None and images[image_id]["split"] == split:
+                    found[(split, image_id)] = entry.name
+        return found
+
+    def _overlay(self, labels: Path, split: str, name: str):
         """Read one overlay file without following links. Returns bytes, None or an error text."""
         try:
-            fd = os.open(labels / split / (image_id + ".txt"), os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+            fd = os.open(labels / split / name, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
         except FileNotFoundError:
             return None
         except OSError:
@@ -396,11 +531,13 @@ class WorkbenchBridge:
             return row, bridge, plans
         if not self._inside(registry, self.root) or not all(self._inside(labels / split, registry) for split in ("train", "val")):
             raise DomainError("workbench_root_unsafe", 409, "The workbench label folder points outside its storage root.")
+        names = self._overlay_names(labels, bridge["images"])
         with self.store.read_connection() as con:
             applied = {r["image_id"]: r for r in con.execute("SELECT * FROM hosted_workbench_applied WHERE bridge_id=?", (bridge_id,))}
             active = {r["id"] for r in con.execute("SELECT id FROM hosted_classes WHERE dataset_id=? AND retired=0", (row["dataset_id"],))}
             for image_id, meta in sorted(bridge["images"].items()):
-                raw = self._overlay(labels, meta["split"], image_id)
+                name = names.get((meta["split"], image_id))
+                raw = self._overlay(labels, meta["split"], name) if name else None
                 if raw is None:
                     continue
                 digest = hashlib.sha256(raw if isinstance(raw, bytes) else raw.encode()).hexdigest()
@@ -412,7 +549,7 @@ class WorkbenchBridge:
                 # What the administrator reviews: these exact labels against this base version.
                 review = hashlib.sha256(f"{digest}:{base_version}".encode()).hexdigest()
                 plan = {"image_id": image_id, "filename": image["filename"] if image else image_id, "overlay_sha256": digest,
-                        "review_sha256": review, "base_version": base_version, "conflict": None, "stats": None, "empty": False}
+                        "review_sha256": review, "base_version": base_version, "conflict": None, "stats": None, "empty": False, "held_by": None}
                 if isinstance(raw, str):
                     plans.append({**plan, "conflict": raw}); continue
                 if image is None or image["dataset_id"] != row["dataset_id"]:
@@ -434,8 +571,18 @@ class WorkbenchBridge:
                     plan["conflict"] = "This image is not confirmed in the hosted dataset any more."
                 elif image["current_version"] != base_version:
                     plan["conflict"] = "This image was edited in the hosted workspace after the workbench copy. Make a new copy to edit it."
-                elif any(obj["class_id"] not in active for obj in result["objects"]):
-                    plan["conflict"] = "This image uses a class that was retired. Make a new copy."
+                elif retired := sorted({bridge["class_names"].get(obj["class_id"], obj["class_id"]) for obj in result["objects"]
+                                        if obj["class_id"] not in active}):
+                    # New copies keep these objects too (hosted versions keep them), so a
+                    # new copy does not help: the objects themselves have to change.
+                    plan["conflict"] = (f"Objects use the retired class{'es' if len(retired) > 1 else ''} {', '.join(f'“{n}”' for n in retired)}. "
+                                        "Relabel or delete those objects here, save, then review again.")
+                else:
+                    # Not a conflict yet: the person may close the image before Apply.
+                    lease = con.execute("SELECT l.actor_id, u.username FROM hosted_editor_leases l LEFT JOIN hosted_users u ON u.id=l.actor_id "
+                                        "WHERE l.image_id=? AND l.expires_at>?", (image_id, self.store.clock())).fetchone()
+                    if lease is not None:
+                        plan["held_by"] = lease["username"] or "another person"
                 plan["_body"], plan["_objects"], plan["_generation"] = body, result["objects"], image["generation"]
         return row, bridge, plans
 
@@ -443,15 +590,18 @@ class WorkbenchBridge:
         self._require(actor)
         row, _, plans = self._plans(bridge_id)
         visible = []
-        totals = {"images": 0, "conflicts": 0, "needs_empty_confirmation": 0, "unchanged": 0, "relabeled": 0, "moved": 0, "added": 0, "deleted": 0}
+        totals = {"images": 0, "conflicts": 0, "applicable": 0, "held": 0, "needs_empty_confirmation": 0,
+                  "unchanged": 0, "relabeled": 0, "moved": 0, "added": 0, "deleted": 0}
         for plan in plans:
             stats = plan["stats"] or {}
             totals["images"] += 1
             totals["conflicts"] += bool(plan["conflict"])
+            totals["applicable"] += not plan["conflict"]
+            totals["held"] += bool(not plan["conflict"] and plan["held_by"])
             totals["needs_empty_confirmation"] += bool(not plan["conflict"] and plan["empty"])
             for key in ("unchanged", *CHANGE_KEYS):
                 totals[key] += stats.get(key, 0)
-            visible.append({key: plan[key] for key in ("image_id", "filename", "review_sha256", "base_version", "conflict", "stats", "empty")})
+            visible.append({key: plan[key] for key in ("image_id", "filename", "review_sha256", "base_version", "conflict", "stats", "empty", "held_by")})
         return {"bridge": {key: row[key] for key in ("id", "dataset_id", "snapshot_id", "label", "image_count", "excluded_images")},
                 "totals": totals, "images": visible}
 
@@ -495,7 +645,7 @@ class WorkbenchBridge:
                 outcomes["applied"] += 1
             except DomainError as error:
                 outcomes["failed"].append({"image_id": image_id, "filename": plan["filename"], "error": error.code,
-                                           "detail": error.detail if isinstance(error.detail, str) else None})
+                                           "detail": APPLY_ERRORS.get(error.code) or (error.detail if isinstance(error.detail, str) else None)})
             finally:
                 if lease is not None:  # never leave the image reserved, saved or not
                     version, generation = (saved["current_version"], saved["generation"]) if saved else (plan["base_version"], lease["generation"])

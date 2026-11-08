@@ -30,23 +30,49 @@ When the server has a workbench, the administrator navigation opens it:
   frozen hosted snapshots as before.
 
 Each entry carries the dataset selected in the admin workspace. The workbench
-opens that dataset's newest workbench copy in the requested tab. On the first
-visit for a dataset, the workbench makes the copy itself, showing progress in
-the bar, and then opens it. If the workbench already has another dataset or a
-saved review open, it keeps it, and the bar offers **Open** for the dataset you
-came from; the open one is saved before it switches.
+opens that dataset's newest workbench copy in the requested tab, switching away
+from any other dataset that was open; the open one is saved first. Only a saved
+Data Quality Explorer review that is on screen is kept, and the bar then offers
+**Open** for the dataset you came from. A reload of the workbench page keeps
+what is open. On the first visit for a dataset, the workbench makes the copy
+itself, showing progress in the bar, and then opens it. A dataset without
+confirmed images has nothing to copy; the bar says so instead of opening an
+empty copy. Arriving never reopens the previously open copy first, and the
+saved-session restore offers only that dataset's own copies.
+
+If the newest copy was deleted in the workbench's Dataset Management, the
+newest remaining copy opens and the bar says that a newer copy was deleted.
+When no copy is left, the bar says so and offers **Make fresh copy**. Deleting
+a copy in Dataset Management deletes its unapplied label edits too, so the
+delete confirmation warns when the copy still has edits that are not applied.
 
 Tabs with their own dataset list, such as the training tabs, detection
 recipes, captions and the ingestion reference, select the open dataset until
 you pick another one in that list yourself.
 
-The bar at the top of the workbench returns to the admin workspace. It names
-the open copy and offers **Make fresh copy** and **Review edits**. The **Review
-edits** button counts the copy's edited images that are not applied yet. The
-address keeps the open tab, so a reload returns to it. Leaving the workbench
-releases its annotation lock, so returning later opens the copy for editing
-again. Every tab scrolls its own content. Without a workbench service the
-navigation shows the hosted dialogs only.
+The bar at the top of the workbench returns to the admin workspace. It always
+describes the copy that is actually open: open another copy from Dataset
+Management and the bar, **Make fresh copy**, **Review edits** and the
+**Admin workspace** link follow it to that copy's hosted dataset. When the open
+dataset is not a copy of a hosted dataset, the bar says so, disables the hosted
+actions and offers **Open** for the dataset you came from. Choosing a dataset
+in the **Hosted data** dialog only changes what the dialog lists.
+
+**Review edits** counts the edited images of the open copy that can be applied,
+and is updated after every label save, not only on arrival. **Make fresh copy**
+warns with that count. The address keeps the open tab, so a reload returns to
+it. Leaving the workbench releases its annotation lock, so returning later
+opens the copy for editing again. Every tab scrolls its own content, and the
+Label Images canvas fits the space below the bar. Browser Back returns to the
+page you came from. Without a workbench service the navigation shows the hosted
+dialogs only.
+
+A copy can still be locked by your own other tab, or by a window that closed
+without releasing it (the lock then lapses after about a minute and a half).
+Opening it then asks whether to take over editing here. Cancel opens it
+read-only, and the bar says read-only and offers **Take over editing**. A copy
+that another administrator is editing opens only read-only, or not at all if
+you cancel; the bar says which and why.
 
 A copy does not follow later hosted work. When images were edited on the
 annotation canvas, newly confirmed or taken out of the confirmed set after the
@@ -61,19 +87,30 @@ Working on a hosted dataset
 
 1. A workbench copy holds every confirmed image and its labels at the moment
    it is made, as one pool: the workbench does not make or keep split
-   decisions, and the legacy layout calls that pool train. Images are hard
+   decisions, and the legacy layout calls that pool train. Training in the
+   workbench does not validate on that pool: a YOLO, RF-DETR, SAM3 or Qwen
+   run on a copy without validation images holds out about a tenth of the
+   images for that run only, keeping capture groups together, and records the
+   split in its log; the copy's files are not changed. Images are hard
    links to the hosted image store, so a copy uses almost no extra disk space.
    Its name is the dataset name followed by "hosted copy" and the time.
+   Image and label files are named after the original file name followed by
+   ``__`` and the hosted image ID, for example ``beach_0412__image_3f2a….jpg``,
+   so names stay unique and readable. Confirmed images without objects have an
+   empty label file and count as labeled in the workbench's progress.
    Opening a tool from the admin workspace makes the first copy. **Make fresh copy** in the bar, or
    **Make workbench copy** under **Hosted data**, makes a newer one that
    includes images confirmed since.
 2. Run quality analysis, pruning reviews, training or annotation as in the
    local workbench.
 3. To bring label edits back, select **Review edits** in the bar, or open
-   **Hosted data** and select **Review changes** for a copy. The review
-   compares the workbench labels with the version each image had when it was
-   copied. It counts relabeled, moved or
-   resized, added and deleted objects per image.
+   **Hosted data** and select **Review changes** for a copy. **Hosted data**
+   lists every copy with the edits still waiting in it, so edits left in an
+   older copy stay visible, and marks copies deleted in the workbench. The
+   review compares the workbench labels with the version each image had when
+   it was copied. It counts relabeled, moved or resized, added and deleted
+   objects per image, and flags images that someone has open on the
+   annotation canvas, which apply only once they are closed.
 4. Select **Apply**. Only the edits shown in that review are applied. An image
    edited again in the workbench after the review is skipped and reported, so
    review again to include it. Each applied image is saved as a new confirmed
@@ -83,13 +120,17 @@ Working on a hosted dataset
 
 An image is not applied, and the review says why, when any of these is true:
 
-* it was edited, returned or removed in the hosted dataset after the copy;
-* its labels use a class that was retired after the copy;
-* another person holds the image open for editing;
+* it was edited, returned or removed in the hosted dataset after the copy.
+  Make a new copy to continue with it;
+* its labels use a retired class. Hosted versions keep such objects, so new
+  copies contain them too: relabel or delete those objects in the workbench,
+  save, and review again;
+* another person holds the image open for editing. Apply again once it is
+  closed;
 * a polygon object was moved or resized, because the workbench edits boxes
   only. Edit polygons on the hosted canvas.
 
-Make a new copy to continue with such images. Images left with no objects are
+Failures during the apply itself are reported in words. Images left with no objects are
 applied only after you tick the confirmation. They are then saved as
 background images. Applying the same copy again only applies edits made since
 the last apply.

@@ -1029,7 +1029,19 @@
             const lease = await dqeRequestJson(`${base}/session/start`, dqeJson("POST", { session_id: lockSessionId, editor_name: getAnnotationEditorName(), force: false }, context.controller?.signal, context.backendId));
             prepared.lock = lease.lock || {};
             prepared.readOnly = String(lease.status || "").toLowerCase() === "warning";
-            if (prepared.readOnly && !window.confirm("Another editor holds this dataset's lock. Open the saved workspace read-only?")) throw new DOMException("Read-only opening cancelled.", "AbortError");
+            if (prepared.readOnly && workbenchApiRoot && annotationLockHeldBySameWorkbenchUser(prepared.lock)) {
+                // The admin's own lock from another tab or a closed window: offer to
+                // continue editing here (the legacy takeover), else open read-only.
+                if (window.confirm("This copy is still open in another tab or a closed window. Take over editing here?\n\n"
+                    + "OK: edit here; the other tab can no longer save.\nCancel: open it read-only.")) {
+                    const taken = await dqeRequestJson(`${base}/session/start`, dqeJson("POST", { session_id: lockSessionId, editor_name: getAnnotationEditorName(), force: true }, context.controller?.signal, context.backendId));
+                    prepared.lock = taken.lock || {};
+                    prepared.readOnly = String(taken.status || "").toLowerCase() === "warning";
+                }
+            } else if (prepared.readOnly && workbenchApiRoot) {
+                const holder = annotationLockHolderLabel(prepared.lock, "Another administrator");
+                if (!window.confirm(`${holder} is editing this copy in the workbench. Open it read-only?`)) throw new DOMException(`Not opened: ${holder} is editing this copy.`, "AbortError");
+            } else if (prepared.readOnly && !window.confirm("Another editor holds this dataset's lock. Open the saved workspace read-only?")) throw new DOMException("Read-only opening cancelled.", "AbortError");
             if (!prepared.readOnly) prepared.heartbeat = setInterval(() => {
                 dqeRequestJson(`${base}/session/heartbeat`, dqeJson("POST", { session_id: lockSessionId, editor_name: getAnnotationEditorName() }, undefined, context.backendId))
                     .then((reply) => { if (String(reply.status || "").toLowerCase() === "warning") prepared.leaseLost = true; })
@@ -1587,6 +1599,22 @@
         finally { if (dqeViewerLeasePromise === protect) dqeViewerLeasePromise = null; }
     }
 
+    // Hosted admin workbench, opened from the admin view for one hosted dataset
+    // (not a reload of the workbench page itself).
+    function workbenchArrivalOpensDataset() {
+        if (!workbenchApiRoot || !window.TATOR_WORKBENCH?.dataset) return false;
+        return performance.getEntriesByType?.("navigation")?.[0]?.type !== "reload";
+    }
+
+    // On such an arrival, restoring offers only that dataset's workbench copies.
+    function dqeItemBelongsToWorkbenchArrival(item) {
+        if (!workbenchArrivalOpensDataset() || !item) return true;
+        const copies = new Set(Array.isArray(window.TATOR_WORKBENCH.copies) ? window.TATOR_WORKBENCH.copies : []);
+        const source = item.source || {};
+        const parent = String(item.parent_id || "").split(":").pop();
+        return [source.dataset_id, source.id, parent].some((value) => value && copies.has(String(value)));
+    }
+
     async function restoreDqeLibrarySession({ forceRestore = false } = {}) {
         if (classSplitState.currentJobId || classSplitState.active || dqeWorkspaceBusy) return;
         const active = dqeSessionStore.readActive();
@@ -1615,9 +1643,11 @@
             try { const payload = await dqeLibrary.request(`/items/${encodeURIComponent(active.itemId || `session:${active.jobId}`)}`); item = payload.item || payload; }
             catch (error) { if (![404, 410].includes(error.httpStatus)) throw error; }
         }
+        if (!dqeItemBelongsToWorkbenchArrival(item)) item = null;
         if (!item) {
             const payload = await dqeLibrary.request("/items?kind=session&limit=30");
-            item = (payload.items || []).find((candidate) => candidate.capabilities?.open_review || candidate.capabilities?.plot_only);
+            item = (payload.items || []).find((candidate) => (candidate.capabilities?.open_review || candidate.capabilities?.plot_only)
+                && dqeItemBelongsToWorkbenchArrival(candidate));
         }
         if (!item) { setClassSplitSessionRestoreStatus("No saved review is available. Open Datasets & sessions to browse datasets."); return; }
         setClassSplitSessionRestoreStatus(`${item.label || "Saved review"} is available. Restore it or choose another in Datasets & sessions.`);
@@ -7348,17 +7378,42 @@ const sam3TrainState = {
         return isAnnotationDatasetModeActive() && !!annotationSourceState.readOnly;
     }
 
+    const WORKBENCH_EDITOR_MARK = " (admin workbench tab ";
     function getAnnotationEditorName() {
+        let value = ANNOTATION_EDITOR_NAME;
         try {
-            let value = window.sessionStorage.getItem(ANNOTATION_EDITOR_STORAGE_KEY) || "";
+            value = window.sessionStorage.getItem(ANNOTATION_EDITOR_STORAGE_KEY) || "";
             if (!value) {
                 value = `${ANNOTATION_EDITOR_NAME}:${generateUUID().slice(0, 8)}`;
                 window.sessionStorage.setItem(ANNOTATION_EDITOR_STORAGE_KEY, value);
             }
-            return value;
         } catch (_error) {
-            return ANNOTATION_EDITOR_NAME;
+            value = ANNOTATION_EDITOR_NAME;
         }
+        // In the hosted admin workbench every administrator shares one backend;
+        // the lock names the person so their own stale locks can be told apart.
+        const workbenchUser = workbenchUserName();
+        return workbenchUser ? `${workbenchUser}${WORKBENCH_EDITOR_MARK}${value.slice(-8)})` : value;
+    }
+
+    function workbenchUserName() {
+        const name = workbenchApiRoot ? window.TATOR_WORKBENCH?.user?.name : "";
+        return typeof name === "string" ? name.trim().slice(0, 120) : "";
+    }
+
+    // The lock was taken by this administrator in another tab or a window that
+    // has since closed (its lock outlives it for a short while).
+    function annotationLockHeldBySameWorkbenchUser(lock) {
+        const name = workbenchUserName();
+        return Boolean(name) && String(lock?.holder || "").startsWith(`${name}${WORKBENCH_EDITOR_MARK}`);
+    }
+
+    function annotationLockHolderLabel(lock, fallback) {
+        const holder = String(lock?.holder || "").trim();
+        if (!holder) return fallback;
+        if (annotationLockHeldBySameWorkbenchUser(lock)) return fallback === "you" ? "you" : "you, in another tab or a closed window";
+        const mark = holder.indexOf(WORKBENCH_EDITOR_MARK);
+        return workbenchApiRoot && mark > 0 ? holder.slice(0, mark) : holder;
     }
 
     function setAnnotationHydrationState(imageKey, state) {
@@ -7449,7 +7504,7 @@ const sam3TrainState = {
         if (dqeWorkspaceBusy) return `${prefix} is unavailable while the workspace is switching.`;
         if (classSplitState.libraryRecoveryBlock) return classSplitState.libraryRecoveryBlock;
         if (isAnnotationReadOnly()) {
-            const holder = String(annotationSourceState.lock?.holder || "another editor");
+            const holder = annotationLockHolderLabel(annotationSourceState.lock, "another editor");
             return `${prefix} is disabled in read-only mode (lock held by ${holder}).`;
         }
         if (isAutoLabelUsingCurrentAnnotationSession()) {
@@ -7527,16 +7582,16 @@ const sam3TrainState = {
             if (!isAnnotationDatasetModeActive()) {
                 annotationSourceLockEl.textContent = "";
             } else if (isAnnotationReadOnly()) {
-                const holder = String(annotationSourceState.lock?.holder || "another editor");
+                const holder = annotationLockHolderLabel(annotationSourceState.lock, "another editor");
                 annotationSourceLockEl.textContent = `Read-only: lock held by ${holder}.`;
             } else if (isAutoLabelUsingCurrentAnnotationSession()) {
-                const holder = String(annotationSourceState.lock?.holder || "you");
+                const holder = annotationLockHolderLabel(annotationSourceState.lock, "you");
                 annotationSourceLockEl.textContent = `Writable: lock held by ${holder} • automatic labeling running.`;
             } else if (hydrationStatus) {
-                const holder = String(annotationSourceState.lock?.holder || "you");
+                const holder = annotationLockHolderLabel(annotationSourceState.lock, "you");
                 annotationSourceLockEl.textContent = `Writable: lock held by ${holder} • ${hydrationStatus}`;
             } else {
-                const holder = String(annotationSourceState.lock?.holder || "you");
+                const holder = annotationLockHolderLabel(annotationSourceState.lock, "you");
                 annotationSourceLockEl.textContent = `Writable: lock held by ${holder}.`;
             }
         }
@@ -9112,6 +9167,12 @@ const sam3TrainState = {
                 await openDatasetInAnnotationMode({ mode: "linked", datasetId, datasetLabel, activateLabeling: false });
                 return true;
             },
+            // What the bar shows about the open workspace.
+            openedLabel: () => (isAnnotationDatasetModeActive() ? annotationSourceState.datasetLabel || annotationSourceLabel() : ""),
+            readOnly: () => isAnnotationDatasetModeActive() && isAnnotationReadOnly(),
+            lockHolder: () => annotationLockHolderLabel(annotationSourceState.lock, "another editor"),
+            busy: () => Boolean(dqeWorkspaceSwitch?.isBusy() || dqeWorkspaceBusy || annotationSourceResumeInFlight),
+            takeOver: () => forceTakeoverAnnotationLock(),
             releaseLock() {
                 const base = getAnnotationBasePath(), sessionId = annotationSourceState.lockSessionId;
                 if (!isAnnotationDatasetModeActive() || annotationSourceState.readOnly || !base || !sessionId) return;
@@ -9242,6 +9303,10 @@ const sam3TrainState = {
     }
 
     async function resumeAnnotationSourceAfterPageRestore() {
+        // Sent from the admin view, the workbench bar opens that dataset's copy
+        // itself; reopening the copy that was open before would only take and
+        // drop its lock (or ask about a stale one) first.
+        if (workbenchArrivalOpensDataset()) return false;
         await initializeDqeLibrary();
         if (dqeLibrary && !dqeLibrary.supported() && !dqeLibrary.legacy()) return false;
         if (dqeLibrary?.supported() && dqeSessionStore.readActive().jobId) return false;
@@ -10447,7 +10512,10 @@ const sam3TrainState = {
             const confirmText = isLinked
                 ? `Delete linked dataset record "${entry.label || entry.id}"? This removes library metadata/overlays only; source files stay on disk.`
                 : `Move managed dataset "${entry.label || entry.id}" to deleted datasets? You can restore it from Dataset Management.`;
-	        const ok = window.confirm(confirmText);
+            // Admin workbench: a hosted copy's unapplied label edits go with it.
+            const hostedWarning = workbenchApiRoot && typeof window.TatorWorkbench?.datasetDeleteWarning === "function"
+                ? await window.TatorWorkbench.datasetDeleteWarning(entry).catch(() => "") : "";
+	        const ok = window.confirm(hostedWarning ? `${hostedWarning}\n\n${confirmText}` : confirmText);
 	        if (!ok) return;
         const actionKey = datasetActionKey(entry.id, "delete");
         if (datasetManagerState.actionInFlight.has(actionKey)) {

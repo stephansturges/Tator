@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from utils.io import _path_is_within_root_impl
+from utils.run_split import capture_identities, sidecar_capture_groups, split_unsplit_pool, yolo_label_classes
 
 
 def _path_identity(path: Path) -> Path:
@@ -1486,6 +1487,116 @@ def _rfdetr_remap_coco_ids_impl(src_path: Path, dest_path: Path) -> None:
     _write_json_atomic(dest_path, data)
 
 
+RUN_SPLIT_RECORD_NAME = "run_split.json"
+_RUN_SPLIT_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+
+
+def _split_images(directory: Path) -> List[Path]:
+    if not directory.is_dir():
+        return []
+    return sorted(p for p in directory.rglob("*") if p.suffix.lower() in _RUN_SPLIT_IMAGE_SUFFIXES and p.is_file())
+
+
+def _split_has_images(directory: Path) -> bool:
+    if not directory.is_dir():
+        return False
+    return any(p.suffix.lower() in _RUN_SPLIT_IMAGE_SUFFIXES and p.is_file() for p in directory.rglob("*"))
+
+
+def _run_split_annotation_dirs(roots: Sequence[Any]) -> List[Path]:
+    """Where per-image annotation sidecars (hosted copies) may carry capture metadata."""
+    dirs: List[Path] = []
+    for root in roots:
+        if root:
+            dirs.extend([Path(root) / "train" / "annotations", Path(root) / "annotations"])
+    return dirs
+
+
+def _record_run_split(
+    run_dir: Path,
+    summary: Dict[str, Any],
+    on_run_split: Optional[Callable[[Dict[str, Any]], None]],
+) -> None:
+    _write_json_atomic(run_dir / RUN_SPLIT_RECORD_NAME, summary)
+    if on_run_split is not None:
+        on_run_split(summary)
+
+
+def _rfdetr_prepare_run_split_impl(
+    dataset_root: Path,
+    run_dir: Path,
+    coco_train: str,
+    coco_val: str,
+    *,
+    remap_ids_fn: Callable[[Path, Path], None],
+    dataset_key: str,
+    metadata_roots: Sequence[Any] = (),
+    on_run_split: Optional[Callable[[Dict[str, Any]], None]] = None,
+) -> Optional[Path]:
+    """Hold out validation for a run whose dataset has no validation images.
+
+    Returns the prepared RF-DETR dataset directory, or None when the dataset
+    already has validation images, the training list cannot be read, or the
+    pool is one capture group; the caller then keeps its usual layout. The run's
+    train/ and valid/ folders link to the dataset's training files and carry
+    their own COCO lists, so nothing is written into the dataset.
+    """
+    try:
+        train_doc = json.loads(Path(coco_train).read_text(encoding="utf-8"))
+        same_file = Path(coco_val).resolve() == Path(coco_train).resolve()
+        val_doc = train_doc if same_file else json.loads(Path(coco_val).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(train_doc, dict) or not isinstance(val_doc, dict) or (not same_file and val_doc.get("images")):
+        return None
+    images = [img for img in train_doc.get("images") or [] if isinstance(img, dict) and str(img.get("file_name") or "")]
+    annotations = [ann for ann in train_doc.get("annotations") or [] if isinstance(ann, dict)]
+    classes: Dict[Any, set] = {}
+    for ann in annotations:
+        classes.setdefault(ann.get("image_id"), set()).add(ann.get("category_id"))
+    annotation_dirs = _run_split_annotation_dirs([dataset_root, *metadata_roots])
+    items = [{"id": Path(str(img["file_name"])).stem,
+              "groups": capture_identities(img) or sidecar_capture_groups(annotation_dirs, Path(str(img["file_name"])).stem),
+              "classes": classes.get(img.get("id"), set())} for img in images]
+    chosen = split_unsplit_pool(items, dataset_key)
+    if chosen is None:
+        return None
+    held, summary = chosen
+    _record_run_split(run_dir, summary, on_run_split)
+    if not any(held):
+        return None
+    dataset_root_resolved = dataset_root.resolve(strict=True)
+    train_src = dataset_root / "train" if (dataset_root / "train").exists() else dataset_root
+    if not _path_is_within_root_impl(train_src.resolve(strict=True), dataset_root_resolved):
+        raise RuntimeError("rfdetr_dataset_path_invalid")
+    dataset_dir = Path(_prepare_detector_dir(run_dir / "dataset"))
+    for name, validation in (("train", False), ("valid", True)):
+        split_dir = Path(_prepare_detector_dir(dataset_dir / name))
+        for child in sorted(train_src.iterdir()):
+            if child.name == "_annotations.coco.json":
+                continue
+            child_resolved = child.resolve(strict=True)
+            dest = split_dir / child.name
+            if not _path_is_within_root_impl(child_resolved, dataset_root_resolved) or dest.exists() or dest.is_symlink():
+                continue
+            try:
+                dest.symlink_to(child_resolved, target_is_directory=child_resolved.is_dir())
+            except Exception:
+                if child_resolved.is_dir():
+                    _copy_tree_within_root(child_resolved, dest)
+                else:
+                    shutil.copy2(child_resolved, dest)
+        members = [img for img, is_validation in zip(images, held) if is_validation == validation]
+        member_ids = {img.get("id") for img in members}
+        subset = {**train_doc, "images": members, "annotations": [ann for ann in annotations if ann.get("image_id") in member_ids]}
+        subset_path = _write_json_atomic(run_dir / f"run_split_{name}.coco.json", subset)
+        remap_ids_fn(subset_path, split_dir / "_annotations.coco.json")
+    test_dir = dataset_dir / "test"
+    if not (test_dir.exists() or test_dir.is_symlink()):
+        test_dir.symlink_to("valid", target_is_directory=True)
+    return dataset_dir
+
+
 def _rfdetr_prepare_dataset_impl(
     dataset_root: Path,
     run_dir: Path,
@@ -1493,8 +1604,23 @@ def _rfdetr_prepare_dataset_impl(
     coco_val: str,
     *,
     remap_ids_fn: Callable[[Path, Path], None],
+    run_split_key: Optional[str] = None,
+    metadata_roots: Sequence[Any] = (),
+    on_run_split: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Path:
-    """Prepare a RF-DETR-compatible dataset layout with 0-based category ids."""
+    """Prepare a RF-DETR-compatible dataset layout with 0-based category ids.
+
+    With run_split_key, a dataset without validation images gets validation
+    images chosen for this run (utils/run_split.py) instead of validating on
+    its training images.
+    """
+    if run_split_key is not None:
+        prepared = _rfdetr_prepare_run_split_impl(
+            dataset_root, run_dir, coco_train, coco_val, remap_ids_fn=remap_ids_fn,
+            dataset_key=run_split_key, metadata_roots=metadata_roots, on_run_split=on_run_split,
+        )
+        if prepared is not None:
+            return prepared
     dataset_dir = run_dir / "dataset"
     _prepare_detector_dir(dataset_dir)
     dataset_root_resolved = dataset_root.resolve(strict=True)
@@ -1548,6 +1674,9 @@ def _yolo_write_data_yaml_impl(
     yolo_load_labelmap_fn: Callable[[Path], List[str]],
     yaml_dump_fn: Callable[[Dict[str, Any]], str],
     copy_file_fn: Callable[[Path, Path], None],
+    run_split_key: Optional[str] = None,
+    metadata_roots: Sequence[Any] = (),
+    on_run_split: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Path:
     train_rel, val_rel = resolve_split_paths_fn(dataset_root, layout)
     names = []
@@ -1559,6 +1688,27 @@ def _yolo_write_data_yaml_impl(
         "val": val_rel,
         "names": names,
     }
+    if run_split_key is not None and (val_rel == train_rel or not _split_has_images(dataset_root / val_rel)):
+        # No validation images: choose them for this run (utils/run_split.py) and
+        # list them in the run directory instead of validating on training images.
+        train_dir = dataset_root / train_rel
+        images = _split_images(train_dir)
+        labels_dir = train_dir.parent / "labels" if train_dir.name == "images" else train_dir
+        annotation_dirs = _run_split_annotation_dirs([dataset_root, *metadata_roots])
+        items = [{"id": path.stem,
+                  "groups": sidecar_capture_groups(annotation_dirs, path.stem),
+                  "classes": yolo_label_classes((labels_dir / path.relative_to(train_dir)).with_suffix(".txt"))}
+                 for path in images]
+        chosen = split_unsplit_pool(items, run_split_key)
+        if chosen is not None:
+            held, summary = chosen
+            if any(held):
+                train_list = _write_text_file(run_dir / "run_split_train.txt", "".join(f"{p}\n" for p, v in zip(images, held) if not v))
+                val_list = _write_text_file(run_dir / "run_split_val.txt", "".join(f"{p}\n" for p, v in zip(images, held) if v))
+                data["train"], data["val"] = str(train_list), str(val_list)
+            else:
+                data["val"] = train_rel  # one capture group: nothing to hold out (recorded)
+            _record_run_split(run_dir, summary, on_run_split)
     data_path = run_dir / "data.yaml"
     _write_text_file(data_path, yaml_dump_fn(data))
     if labelmap_path:

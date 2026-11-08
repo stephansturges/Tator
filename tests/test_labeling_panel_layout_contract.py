@@ -8486,6 +8486,8 @@ def test_back_gesture_guard_preserves_canvas_shift_wheel_propagation():
         [
             "const assert = require('assert');",
             "const TATOR_HISTORY_GUARD_KEY = 'test_guard';",
+            "const hostedMode = false;",
+            "const workbenchApiRoot = '';",
             "class MockElement {",
             "  constructor({ id = '', parentElement = null, overflowX = 'visible', scrollLeft = 0, clientWidth = 100, scrollWidth = 100 } = {}) {",
             "    Object.assign(this, { id, parentElement, overflowX, scrollLeft, clientWidth, scrollWidth });",

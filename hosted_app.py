@@ -640,6 +640,10 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
     def workbench_bridges(dataset_id: str, identity: Actor = Depends(admin)):
         return {"bridges": bridge.bridges(identity, dataset_id), "available": bridge.available}
 
+    @app.get("/api/hosted/workbench/bridges/{bridge_id}")
+    def workbench_bridge(bridge_id: str, identity: Actor = Depends(admin)):
+        return bridge.bridge(identity, bridge_id)
+
     @app.post("/api/hosted/datasets/{dataset_id}/workbench/export")
     def workbench_export(dataset_id: str, identity: Actor = Depends(admin)):
         return bridge.start_export(identity, dataset_id)

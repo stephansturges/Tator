@@ -115,7 +115,7 @@ def install_workbench(app, *, auth, origin: str, cookie: str, web_root: Path, ur
     @app.get("/workbench", response_class=HTMLResponse)
     async def workbench_page(request: Request, tab: str = "class-split", dataset: str = ""):
         try:
-            await run_in_threadpool(administrator, request, mutation=False)
+            identity = await run_in_threadpool(administrator, request, mutation=False)
         except DomainError as error:
             if error.status == 401:
                 return RedirectResponse("/", status_code=303)
@@ -128,8 +128,14 @@ def install_workbench(app, *, auth, origin: str, cookie: str, web_root: Path, ur
             raise
         if not url:
             return _page_unavailable()
-        boot = {"tab": tab if tab in TABS else "class-split",
-                "dataset": dataset if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", dataset) else ""}
+        dataset = dataset if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", dataset) else ""
+        bridge = getattr(request.app.state, "workbench_bridge", None)
+        # The page names its administrator (to tell this person's own stale
+        # locks from someone else's) and the workbench copies of the dataset it
+        # was opened for, so restoring never offers another dataset's copy.
+        boot = {"tab": tab if tab in TABS else "class-split", "dataset": dataset,
+                "user": {"id": identity.user_id, "name": identity.username},
+                "copies": await run_in_threadpool(bridge.copy_ids, dataset) if bridge is not None and dataset else []}
         head = ('<head><base href="/"><script>window.TATOR_WORKBENCH=Object.assign('
                 + json.dumps(boot).replace("<", "\\u003c")
                 + ',{apiRoot:location.origin+"/workbench/api"});</script>'

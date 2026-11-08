@@ -505,7 +505,8 @@ async def _paid_batch_review(origin):
         await review.get_by_role('button', name='Close', exact=True).click()
         # Canvas normalization plus a genuine later annotation save must not
         # strip generated QA, human decisions, or provider evidence.
-        await draw(page, .6, .6, .8, .8)
+        # Inside the image whatever the canvas shape (the image sits beside the panel on wide screens).
+        await draw(page, .3, .3, .45, .45)
         await page.locator('#hostedSave').click()
         await expect(page.locator('#hostedSaveState')).to_have_text('All changes saved')
         later = await (await page.request.get(origin + '/api/hosted/images/' + image_id)).json()

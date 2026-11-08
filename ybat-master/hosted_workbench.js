@@ -109,9 +109,8 @@
             const button = el("button", {type: "button", textContent: "Review changes"});
             button.addEventListener("click", () => openReview(bridge).catch(showError(copyStatus)));
             const applied = bridge.applied_images ? ` · ${plural(bridge.applied_images, "image")} applied so far` : "";
-            const excluded = bridge.excluded_images ? ` · ${plural(bridge.excluded_images, "test image")} not included` : "";
             list.append(el("li", {}, el("span", {}, el("strong", {textContent: bridge.label}),
-                el("small", {textContent: `${plural(bridge.image_count, "confirmed image")}${excluded} · made ${when(bridge.created_at)}${applied}`})), button));
+                el("small", {textContent: `${plural(bridge.image_count, "confirmed image")} · made ${when(bridge.created_at)}${applied}`})), button));
         }
         copies.append(list);
     }
@@ -125,8 +124,7 @@
             await loadCopies();
             const dataset = picker.value, openHere = el("button", {type: "button", textContent: "Open it here"});
             openHere.addEventListener("click", () => reopenWith(dataset));
-            const excluded = result.excluded_images ? ` ${plural(result.excluded_images, "test-split image")} are not in the copy, because the workbench handles train and val only.` : "";
-            copyStatus.replaceChildren(`Copy ready: “${result.label}”.${excluded} `, openHere);
+            copyStatus.replaceChildren(`Copy ready: “${result.label}”. `, openHere);
             copyStatus.dataset.tone = "ok";
         } catch (error) { showError(copyStatus)(error); } finally { makeCopy.disabled = false; }
     });

@@ -78,7 +78,7 @@ def test_trial_roundtrips_original_pixels_geometry_captions_and_independent_ids(
         assert Path(plan['files'][row['file']]['path']).read_bytes() == (tmp_path / ('source-' + source['filename'].split('-')[1].split('.')[0] + '.bin')).read_bytes()
         assert row['metadata']['workflow_trial']['original_annotations'] == source['annotations']
         assert row['effective_caption'] == (source['annotations'].get('caption') or '')
-        assert row['split'] == source['split']
+        assert row['split'] == 'unsplit'  # imports never carry splits
     migrator = HostedMigrator(store, artifacts)
     imported = migrator.apply(admin, plan, name='Workflow trial', mode='incoming')
     assert migrator.apply(admin, plan, name='Workflow trial', mode='incoming') == imported

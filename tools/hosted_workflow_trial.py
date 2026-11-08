@@ -97,7 +97,7 @@ def _compare(plan, selected, keys, class_indices, source_object_ids):
             raise ValueError("Trial media differs from original encoded bytes")
         if (row["width"], row["height"]) != (source["width"], source["height"]):
             raise ValueError("Trial dimensions changed")
-        if row["split"] != source["split"]:
+        if row["split"] != "unsplit":  # imports never carry splits; they are decided later
             raise ValueError("Trial split changed")
         if len(row["objects"]) != len(original["objects"]):
             raise ValueError("Trial object count changed")

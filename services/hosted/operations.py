@@ -24,6 +24,7 @@ from .artifacts import ArtifactRef, ArtifactStore, fsync_directory
 from .auth import AuthService
 from .backup import ExportEntry, create_canonical_zip
 from .errors import DomainError
+from .geometry import clamp_polygon, clip_box
 from .store import SCHEMA_VERSION, HostedStore, _id, _json, _text
 from .types import Actor, MutationContext
 
@@ -436,11 +437,15 @@ class HostedOperations:
                 if obj["class_id"] not in mapping:
                     raise DomainError("snapshot_class_missing", 409)
                 index = mapping[obj["class_id"]]
-                x, y, w, h = obj["bbox"]
+                # Exported labels always lie inside the image; empty boxes are dropped.
+                clipped = clip_box(*obj["bbox"], width, height)
+                if clipped is None:
+                    continue
+                x, y, w, h = clipped
                 values = ((x + w / 2) / width, (y + h / 2) / height, w / width, h / height)
-                labels.append(str(index) + " " + " ".join(format(value, ".12g") for value in values))
+                labels.append(str(index) + " " + " ".join(format(min(1.0, max(0.0, value)), ".12g") for value in values))
                 if obj.get("polygon"):
-                    points = [value for point in obj["polygon"] for value in (point[0] / width, point[1] / height)]
+                    points = [value for point in clamp_polygon(obj["polygon"], width, height) for value in (point[0] / width, point[1] / height)]
                     polygons.append(str(index) + " " + " ".join(format(value, ".12g") for value in points))
             yield ExportEntry(f"{prefix}labels/{image_id}.txt", data=("\n".join(labels) + ("\n" if labels else "")).encode())
             if polygons:

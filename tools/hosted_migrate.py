@@ -23,7 +23,7 @@ def main(argv=None):
     inspect.add_argument("--source", type=Path, required=True)
     inspect.add_argument("--mapping", type=Path, help="Explicit JSON metadata/artifact preservation mapping")
     inspect.add_argument("--output", type=Path, required=True, help="New plan JSON outside the source tree; also writes a .rst report")
-    inspect.add_argument("--clip-boxes", action="store_true", help="Explicitly clamp out-of-bounds source boxes/polygons during conversion")
+    inspect.add_argument("--clip-boxes", action="store_true", help="Accepted for older scripts; boxes are always clipped to the image")
     apply = commands.add_parser("apply", help="Revalidate a reviewed inventory and resume its hosted import")
     apply.add_argument("--plan", type=Path, required=True)
     apply.add_argument("--state-dir", type=Path, required=True)
@@ -40,7 +40,7 @@ def main(argv=None):
         if output.exists() or report.exists():
             parser.error("Inventory output already exists; choose a new output path.")
         mapping = json.loads(args.mapping.read_text()) if args.mapping else None
-        plan = inventory(args.source, mapping=mapping, clip_boxes=args.clip_boxes)
+        plan = inventory(args.source, mapping=mapping)
         output.parent.mkdir(parents=True, exist_ok=True)
         with output.open("x") as stream:
             json.dump(plan, stream, ensure_ascii=False, indent=2, allow_nan=False)

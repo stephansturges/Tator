@@ -29,8 +29,15 @@ labelmaps must agree. YOLO boxes and polygons are converted to source pixels;
 invalid class indices, nonfinite coordinates and invalid geometry stop the
 inventory. Pixel extents are calculated from converted endpoints so a valid box
 touching an image edge remains inside the strict hosted bounds despite floating
-point roundoff. Out-of-bounds geometry is rejected unless ``--clip-boxes``
-explicitly authorizes clipping. Source labels are retained unchanged as artifacts.
+point roundoff. Boxes and polygons are always clipped to the image: the part
+outside is cut away, never shifted. A row left with no area inside the image,
+such as a zero-size box, is dropped and its line number recorded in the image's
+migration provenance. ``--clip-boxes`` is still accepted by the command but no
+longer needed. Source labels are retained unchanged as artifacts.
+
+Source ``train``, ``val`` and ``test`` folders are not imported as splits.
+Every image arrives unsplit, with its source path kept in its name and
+provenance; splits are decided later, after export or for internal training.
 Class names must fit on one line. Internal Unicode line separators and control
 characters that split lines are rejected as well as embedded CR/LF, so a name
 cannot become two export indices. Physical CR/LF delimiters separate labelmap
@@ -102,10 +109,13 @@ Flat-layout ``train/`` caption-record keys are
 normalized only when unambiguous. Other unmatched keys stop inventory rather
 than being attached by a guessed basename.
 
-Unknown sidecars and repeated image bytes are listed as blockers. Resolve them
-before apply. Repeated bytes cannot be silently collapsed across split/group
-boundaries. The tool does not infer the semantics of arbitrary metadata or
-follow paths inside a training YAML file.
+Unknown sidecars are listed as blockers; resolve them before apply. Repeated
+image bytes are one image: the inventory keeps one copy and lists the others
+under ``duplicates_removed``. Copies with the same labels keep the first path.
+When their labels differ, the copy with the most objects is kept and marked
+for review, so it stays unconfirmed in Incoming even in approved-baseline mode
+until a person checks it. The tool does not infer the semantics of arbitrary
+metadata or follow paths inside a training YAML file.
 
 Explicit preservation mapping
 -----------------------------
@@ -202,7 +212,7 @@ and verifying its actual counts, splits, recipes and continued annotation remain
 separate deployment steps.
 
 Prepare an independent workflow trial
-------------------------------------
+-------------------------------------
 
 Use ``tools/hosted_workflow_trial.py`` to test assignment and review with a small
 copy of approved data. It reads a frozen canonical snapshot and the original

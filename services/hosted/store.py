@@ -25,6 +25,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator
 
 from .errors import DomainError
+from .geometry import clamp_polygon, clip_box
 from .caption_semantics import caption_text
 from .class_names import validate_class_name
 from .language_schema import validate_language_annotations
@@ -569,11 +570,14 @@ class HostedStore(TrancheMixin):
             if (not isinstance(bbox, list) or len(bbox) != 4
                     or any(type(v) not in (int, float) or not math.isfinite(v) for v in bbox)):
                 raise DomainError("invalid_bbox", 422, {"object_id": object_id})
-            x, y, w, h = bbox
             if width <= 0 or height <= 0:
                 raise DomainError("image_dimensions_required", 422)
-            if x < 0 or y < 0 or w <= 0 or h <= 0 or x + w > width or y + h > height:
+            # Boxes are always clipped to the image; only an empty box is refused.
+            clipped = clip_box(*bbox, width, height)
+            if clipped is None:
                 raise DomainError("bbox_out_of_bounds", 422, {"object_id": object_id})
+            if clipped != bbox:
+                item["bbox"] = clipped
             if "polygon" in item:
                 polygon = item["polygon"]
                 if (not isinstance(polygon, list) or len(polygon) < 3 or any(
@@ -582,7 +586,7 @@ class HostedStore(TrancheMixin):
                         for point in polygon)):
                     raise DomainError("invalid_polygon", 422, {"object_id": object_id})
                 if any(not (0 <= point[0] <= width and 0 <= point[1] <= height) for point in polygon):
-                    raise DomainError("polygon_out_of_bounds", 422, {"object_id": object_id})
+                    item["polygon"] = clamp_polygon(polygon, width, height)
         return result
 
     def _version(self, con: sqlite3.Connection, actor: Actor, image_id: str, dataset_id: str,

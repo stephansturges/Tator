@@ -21393,6 +21393,41 @@ def _annotation_requested_status(payload: Dict[str, Any]) -> Optional[str]:
     return status_value or None
 
 
+def _clip_yolo_label_line(line: str) -> Optional[str]:
+    """Clip one YOLO box or polygon row to the image; None drops an empty row.
+
+    Boxes are always clipped to the image edge, never shifted; a row with no
+    area inside the image (such as a zero-size box) is dropped. Rows that are
+    not plain numeric box/polygon rows are returned unchanged.
+    """
+    fields = line.split()
+    if len(fields) < 5:
+        return line
+    try:
+        int(fields[0])
+        values = [float(value) for value in fields[1:]]
+    except ValueError:
+        return line
+    if not all(math.isfinite(value) for value in values):
+        return line
+    fmt = lambda numbers: " ".join([fields[0], *(format(value, ".6f") for value in numbers)])
+    if len(values) == 4:
+        cx, cy, w, h = values
+        x0, y0 = max(0.0, cx - w / 2), max(0.0, cy - h / 2)
+        x1, y1 = min(1.0, cx + w / 2), min(1.0, cy + h / 2)
+        if x1 <= x0 or y1 <= y0:
+            return None
+        if (x0, y0, x1, y1) == (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2):
+            return line
+        return fmt(((x0 + x1) / 2, (y0 + y1) / 2, x1 - x0, y1 - y0))
+    if len(values) >= 6 and len(values) % 2 == 0:
+        clamped = [min(1.0, max(0.0, value)) for value in values]
+        if max(clamped[0::2]) <= min(clamped[0::2]) or max(clamped[1::2]) <= min(clamped[1::2]):
+            return None
+        return line if clamped == values else fmt(clamped)
+    return line
+
+
 def _normalise_annotation_snapshot_records(
     records: Any,
 ) -> List[Tuple[str, Path, bool, List[str], bool, str]]:
@@ -21408,7 +21443,8 @@ def _normalise_annotation_snapshot_records(
         has_label_lines = isinstance(label_lines_raw, list)
         label_lines: List[str] = []
         if has_label_lines:
-            label_lines = [str(line).strip() for line in label_lines_raw if str(line).strip()]
+            label_lines = [clipped for line in label_lines_raw if str(line).strip()
+                           for clipped in [_clip_yolo_label_line(str(line).strip())] if clipped]
         has_text_label = "text_label" in raw
         text_value = str(raw.get("text_label") or "").strip() if has_text_label else ""
         normalised.append((split, rel, has_label_lines, label_lines, has_text_label, text_value))
@@ -22921,6 +22957,23 @@ def _annotation_export_freeze_plan(
     return frozen
 
 
+def _annotation_export_is_label_file(arcname: str) -> bool:
+    return arcname.endswith(".txt") and arcname != "labelmap.txt" and not arcname.startswith("text_labels/")
+
+
+def _annotation_export_clip_labels(arcname: str, data: bytes) -> bytes:
+    """Exported YOLO label files always lie inside the image (rows clipped, empty rows dropped)."""
+    if not _annotation_export_is_label_file(arcname):
+        return data
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data
+    rows = [clipped for line in text.splitlines() if line.strip() for clipped in [_clip_yolo_label_line(line.strip())] if clipped]
+    clipped_text = "\n".join(rows) + ("\n" if rows and text.endswith("\n") else "")
+    return data if clipped_text == text else clipped_text.encode("utf-8")
+
+
 def _annotation_export_write_plan(
     plan: Sequence[Mapping[str, Any]],
     destination: Path,
@@ -22948,7 +23001,7 @@ def _annotation_export_write_plan(
                 arcname = str(entry.get("arcname") or "")
                 data = entry.get("data")
                 if isinstance(data, bytes):
-                    archive.writestr(arcname, data)
+                    archive.writestr(arcname, _annotation_export_clip_labels(arcname, data))
                     entry_size = len(data)
                 else:
                     path = Path(entry.get("path"))
@@ -22958,7 +23011,12 @@ def _annotation_export_write_plan(
                             status_code=HTTP_409_CONFLICT,
                             detail="annotation_export_source_changed_retry",
                         )
-                    archive.write(path, arcname=arcname)
+                    original = path.read_bytes() if _annotation_export_is_label_file(arcname) else None
+                    clipped = _annotation_export_clip_labels(arcname, original) if original is not None else None
+                    if clipped is None or clipped is original:
+                        archive.write(path, arcname=arcname)
+                    else:
+                        archive.writestr(arcname, clipped)
                     if _annotation_export_file_state(path) != expected_state:
                         raise HTTPException(
                             status_code=HTTP_409_CONFLICT,

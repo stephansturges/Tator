@@ -59,13 +59,12 @@ data**.
 Working on a hosted dataset
 ---------------------------
 
-1. A workbench copy holds every confirmed train, validation and unsplit image
-   and its labels at the moment it is made. Unsplit images appear as train.
-   Test-split images are left out, because the workbench handles train and
-   validation only; the copy reports how many. Images are hard links to the
-   hosted image store, so a copy uses almost no extra disk space. Its name is
-   the dataset name followed by "hosted copy" and the time. Opening a tool from
-   the admin workspace makes the first copy. **Make fresh copy** in the bar, or
+1. A workbench copy holds every confirmed image and its labels at the moment
+   it is made, as one pool: the workbench does not make or keep split
+   decisions, and the legacy layout calls that pool train. Images are hard
+   links to the hosted image store, so a copy uses almost no extra disk space.
+   Its name is the dataset name followed by "hosted copy" and the time.
+   Opening a tool from the admin workspace makes the first copy. **Make fresh copy** in the bar, or
    **Make workbench copy** under **Hosted data**, makes a newer one that
    includes images confirmed since.
 2. Run quality analysis, pruning reviews, training or annotation as in the

@@ -28,6 +28,7 @@ from pathlib import Path
 import httpx
 
 from .errors import DomainError
+from .geometry import clamp_polygon, clip_box
 from .store import _json
 from .types import MutationContext
 
@@ -69,15 +70,11 @@ def parse_overlay(text: str, width: int, height: int, class_count: int) -> list[
             points = [[values[i] * width, values[i + 1] * height] for i in range(0, len(values), 2)]
             xs, ys = [p[0] for p in points], [p[1] for p in points]
             bbox, polygon = [min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)], points
-        # Clip both corners: a box partly outside the image keeps its inside part.
-        x1, y1 = max(0.0, bbox[0]), max(0.0, bbox[1])
-        x2, y2 = min(float(width), bbox[0] + bbox[2]), min(float(height), bbox[1] + bbox[3])
-        x, y, w, h = x1, y1, x2 - x1, y2 - y1
-        if polygon is not None:
-            polygon = [[min(max(px, 0.0), float(width)), min(max(py, 0.0), float(height))] for px, py in polygon]
-        if w <= 0 or h <= 0:
-            raise DomainError("workbench_label_invalid", 409, f"Label row {number} has no area inside the image.")
-        items.append({"class_index": index, "bbox": [x, y, w, h], "polygon": polygon})
+        # Clipped to the image; a row with no area inside it is dropped.
+        clipped = clip_box(*bbox, width, height)
+        if clipped is None:
+            continue
+        items.append({"class_index": index, "bbox": clipped, "polygon": clamp_polygon(polygon, width, height) if polygon is not None else None})
     return items
 
 
@@ -132,7 +129,9 @@ def plan_objects(base_objects: list[dict], items: list[dict], class_ids: list[st
 
 ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,128}")
 DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}")
-EXPORT_SPLITS = {"train": "train", "unsplit": "train", "val": "val"}  # the workbench lists train and val only
+# A workbench copy is one pool of every confirmed image: the tools do not make
+# or keep split decisions (the legacy layout calls that pool "train").
+EXPORT_SPLITS = {"train": "train", "unsplit": "train", "val": "train", "test": "train"}
 OVERLAY_LIMIT = 8 * 1024 * 1024
 CHANGE_KEYS = ("relabeled", "moved", "added", "deleted")
 
@@ -274,7 +273,7 @@ class WorkbenchBridge:
         bridge_id = "wb_" + uuid.uuid4().hex[:16]
         snapshot = self.store.create_snapshot(actor, dataset_id, "workbench-" + bridge_id, "Admin workbench copy")
         manifest = snapshot["manifest"]
-        exported = [image for image in manifest["images"] if image["split"] in EXPORT_SPLITS]
+        exported = [{**image, "split": EXPORT_SPLITS[image["split"]]} for image in manifest["images"] if image["split"] in EXPORT_SPLITS]
         excluded = len(manifest["images"]) - len(exported)
         job["total"] = len(exported)
         base = self._real_directory(self._real_directory(self.root / BRIDGE_DIR) / dataset_id)

@@ -297,13 +297,13 @@ def prepare_annotations(annotations: dict | None, info: MediaInfo | dict,
 
 def prepare_yolo_objects(label_text: str, class_names: list[str], info: MediaInfo | dict,
                          *, key: str, label_coordinate_space: str | None = None,
-                         clip: bool = False) -> tuple[list[dict], dict | None]:
+                         clip: bool = True, dropped: list | None = None) -> tuple[list[dict], dict | None]:
     from .migration import _objects
     details = _info(info)
     width, height = details["width"], details["height"]
     if label_coordinate_space == "exif_display" and details["orientation"] in (5, 6, 7, 8):
         width, height = height, width
-    objects = _objects(label_text, width, height, class_names, clip=clip, key=key)
+    objects = _objects(label_text, width, height, class_names, clip=clip, key=key, dropped=dropped)
     body = prepare_annotations({"objects": objects}, info, label_coordinate_space)
     return body["objects"], body.get("media_coordinate_provenance")
 

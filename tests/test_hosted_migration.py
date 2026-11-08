@@ -183,7 +183,9 @@ def test_reviewed_baseline_preserves_effective_labels_metadata_and_resumes_after
     assert result["state"] == "complete" and result["image_count"] == 2
     assert HostedMigrator(reopened, artifacts).apply(admin, plan, name="Legacy baseline", mode="approved-baseline", accept_existing_labels=True) == result
     snapshot = reopened.snapshot(admin, result["dataset_id"])
-    by_split = {row["split"]: row for row in snapshot["images"]}
+    # Source split folders are provenance only: every image arrives unsplit.
+    assert {row["split"] for row in snapshot["images"]} == {"unsplit"}
+    by_split = {row["filename"].split("/")[0]: row for row in snapshot["images"]}
     red = by_split["train"]["annotations"]
     assert red["objects"][0]["bbox"] == pytest.approx([6, 9, 8, 12])
     assert red["caption"] == "The current caption" and len(red["captions"]) == 2
@@ -197,7 +199,7 @@ def test_reviewed_baseline_preserves_effective_labels_metadata_and_resumes_after
     analysis = CanonicalAnalysis(reopened, artifacts, tmp_path / 'analysis')
     job = analysis.capture(admin, result['dataset_id'], 'dqe', {}, 'migration-analysis')
     rows = analysis.dqe_request(admin, job['job_id'])['workspace_manifest']['images']
-    migrated = next(row for row in rows if row['original_split'] == 'train')
+    migrated = next(row for row in rows if row['capture_metadata'].get('video_group') == 'flight-A')
     assert migrated['capture_metadata'] == {'video_group': 'flight-A', 'source_group': 'source-A', 'duplicate_group': 0}
     for field, value in migrated['capture_metadata'].items():
         assert migrated[field] == value
@@ -237,20 +239,25 @@ def test_incoming_default_unknown_metadata_and_source_hash_guard(tmp_path):
         migration.apply(admin, plan, name="Different command")
 
 
-def test_inventory_rejects_symlinks_duplicate_pixels_and_runs_without_hosted_state(tmp_path):
+def test_inventory_rejects_symlinks_resolves_duplicate_pixels_and_runs_without_hosted_state(tmp_path):
     root, mapping = source(tmp_path)
     (root / "unknown-link").symlink_to(tmp_path / "legacy-head.pt")
     with pytest.raises(DomainError, match="migration_symlink_rejected"):
         inventory(root, mapping=mapping)
     (root / "unknown-link").unlink()
+    before = len(inventory(root, mapping=mapping)["images"])
     (root / "val/images/blue.png").write_bytes((root / "train/images/red.png").read_bytes())
     plan = inventory(root, mapping=mapping)
-    assert any(item["kind"] == "duplicate_media" for item in plan["blockers"])
+    # One copy is kept; copies with differing labels stay unconfirmed for review.
+    [resolved] = plan["duplicates_removed"]
+    kept = next(row for row in plan["images"] if row["key"] == resolved["kept"])
+    assert not plan["blockers"] and len(plan["images"]) == before - 1
+    assert resolved["labels_differ"] and kept["review_required"] == "duplicate_labels_differ"
     mapping_path = tmp_path / "mapping.json"
     mapping_path.write_text(json.dumps(mapping))
     destination = tmp_path / "review/plan.json"
     result = subprocess.run([sys.executable, "tools/hosted_migrate.py", "inventory", "--source", str(root), "--mapping", str(mapping_path), "--output", str(destination)], check=True, text=True, capture_output=True)
-    assert json.loads(result.stdout)["blockers"] == 1
+    assert json.loads(result.stdout)["blockers"] == 0
     assert json.loads(destination.read_text())["plan_sha256"] == plan["plan_sha256"]
     assert destination.with_suffix(".rst").is_file()
     assert not list(tmp_path.rglob("hosted.sqlite3"))

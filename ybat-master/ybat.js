@@ -7752,6 +7752,31 @@ const sam3TrainState = {
         return "";
     }
 
+    // Clip one YOLO row to the image in normalized space: a box keeps only its
+    // part inside the image (never shifted); a row with no area inside is
+    // dropped (null). Rows that are not numeric box/polygon rows pass through.
+    function clipYoloRow(line) {
+        const fields = String(line).trim().split(/\s+/);
+        if (fields.length < 5 || !/^-?\d+$/.test(fields[0])) return line;
+        const values = fields.slice(1).map(Number);
+        if (!values.every(Number.isFinite)) return line;
+        const format = (numbers) => [fields[0], ...numbers.map((value) => String(Number(value.toFixed(6))))].join(" ");
+        if (values.length === 4) {
+            const [cx, cy, w, h] = values;
+            const x0 = Math.max(0, cx - w / 2), y0 = Math.max(0, cy - h / 2), x1 = Math.min(1, cx + w / 2), y1 = Math.min(1, cy + h / 2);
+            if (!(x1 > x0 && y1 > y0)) return null;
+            if (x0 === cx - w / 2 && y0 === cy - h / 2 && x1 === cx + w / 2 && y1 === cy + h / 2) return line;
+            return format([(x0 + x1) / 2, (y0 + y1) / 2, x1 - x0, y1 - y0]);
+        }
+        if (values.length >= 6 && values.length % 2 === 0) {
+            const clamped = values.map((value) => Math.min(1, Math.max(0, value)));
+            const xs = clamped.filter((_, index) => index % 2 === 0), ys = clamped.filter((_, index) => index % 2 === 1);
+            if (!(Math.max(...xs) > Math.min(...xs) && Math.max(...ys) > Math.min(...ys))) return null;
+            return clamped.every((value, index) => value === values[index]) ? line : format(clamped);
+        }
+        return line;
+    }
+
     function normalizeYoloNumber(value) {
         if (!Number.isFinite(value)) {
             return "0";
@@ -7799,13 +7824,16 @@ const sam3TrainState = {
                 if (!(Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(w) && Number.isFinite(h))) {
                     continue;
                 }
-                if (w <= 0 || h <= 0) {
+                // Clip to the image (cut away, never shift); a box with no area inside is not written.
+                const left = Math.max(0, x), top = Math.max(0, y);
+                const right = Math.min(image.width, x + w), bottom = Math.min(image.height, y + h);
+                if (!(right > left && bottom > top)) {
                     continue;
                 }
-                const cx = normalizeYoloNumber((x + (w / 2)) / image.width);
-                const cy = normalizeYoloNumber((y + (h / 2)) / image.height);
-                const wn = normalizeYoloNumber(w / image.width);
-                const hn = normalizeYoloNumber(h / image.height);
+                const cx = normalizeYoloNumber(((left + right) / 2) / image.width);
+                const cy = normalizeYoloNumber(((top + bottom) / 2) / image.height);
+                const wn = normalizeYoloNumber((right - left) / image.width);
+                const hn = normalizeYoloNumber((bottom - top) / image.height);
                 entries.push({
                     bbox,
                     line: `${classIdx} ${cx} ${cy} ${wn} ${hn}`,
@@ -88720,7 +88748,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                 return;
             }
             const labelName = yoloExportTextFilename(safeImageKey);
-            zip.file(labelName, getAnnotationRecordLabelLines(safeImageKey).join("\n"));
+            zip.file(labelName, getAnnotationRecordLabelLines(safeImageKey).map(clipYoloRow).filter(Boolean).join("\n"));
             exportedLabelIdentities.push({
                 image_key: safeImageKey,
                 label_name: labelName,
@@ -88881,7 +88909,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                 );
                 if (Array.isArray(importedRows) && importedGeometryUnchanged) {
                     const labelName = yoloExportTextFilename(imageName);
-                    zip.file(labelName, importedRows.join("\n"));
+                    zip.file(labelName, importedRows.map(clipYoloRow).filter(Boolean).join("\n"));
                     exportedLabelIdentities.push({
                         image_key: String(imageName || ""),
                         label_name: labelName,
@@ -88924,13 +88952,15 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                                     return `${nx} ${ny}`;
                                 })
                                 .join(" ");
-                            result.push(`${classIdx} ${coords}`);
+                            const row = clipYoloRow(`${classIdx} ${coords}`);
+                            if (row) result.push(row);
                         } else {
                             const x = (bbox.x + bbox.width / 2) / image.width;
                             const y = (bbox.y + bbox.height / 2) / image.height;
                             const w = bbox.width / image.width;
                             const h = bbox.height / image.height;
-                            result.push(`${classIdx} ${x} ${y} ${w} ${h}`);
+                            const row = clipYoloRow(`${classIdx} ${x} ${y} ${w} ${h}`);
+                            if (row) result.push(row);
                         }
                     }
                 }
@@ -90552,22 +90582,17 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
       });
     }
 
-    // Example clamp function
+    // Clip a box to the image in place: the part outside is cut away (never
+    // shifted inside). Returns false when no area is left inside the image.
     function clampBbox(bbox, imgW, imgH) {
-      // ensure x, y >= 0
-      bbox.x = Math.max(0, bbox.x);
-      bbox.y = Math.max(0, bbox.y);
-
-      // ensure x + w <= imgW
-      if (bbox.x > imgW) return false;
-      if (bbox.y > imgH) return false;
-
-      const maxW = imgW - bbox.x;
-      const maxH = imgH - bbox.y;
-      bbox.width = Math.min(bbox.width, maxW);
-      bbox.height = Math.min(bbox.height, maxH);
-
-      if (bbox.width <= 0 || bbox.height <= 0) return false;
+      const right = Math.min(imgW, bbox.x + bbox.width);
+      const bottom = Math.min(imgH, bbox.y + bbox.height);
+      const left = Math.max(0, bbox.x);
+      const top = Math.max(0, bbox.y);
+      if (!(right > left && bottom > top)) return false;
+      if (left !== bbox.x || top !== bbox.y || right - left !== bbox.width || bottom - top !== bbox.height) {
+        bbox.x = left; bbox.y = top; bbox.width = right - left; bbox.height = bottom - top;
+      }
       return true;
     }
 
@@ -91148,10 +91173,13 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                         if (previous.has(id)) result.objects.push(structuredClone(previous.get(id)));
                         continue;
                     }
+                    // Boxes are always clipped to the image; one with no area inside it is not saved.
+                    if (!clampBbox(box, currentImage.width, currentImage.height)) continue;
                     const object = { ...(previous.get(id) || {}), id, class_id: cls.id,
                         bbox: [box.x, box.y, box.width, box.height] };
                     if (Array.isArray(box.points) && box.points.length >= 3) {
-                        object.polygon = box.points.map((point) => [point.x, point.y]);
+                        object.polygon = box.points.map((point) => [
+                            Math.min(currentImage.width, Math.max(0, point.x)), Math.min(currentImage.height, Math.max(0, point.y))]);
                     } else delete object.polygon;
                     result.objects.push(object);
                 }

@@ -428,14 +428,13 @@ def test_geometry_takeover_and_transaction_failure_leave_current_version_intact(
     error("ownership_changed", lambda: store.authorize_context(ADMIN, ctx(lease, "old-request", "old")))
     error("editor_lease_conflict", lambda: store.acquire_editor(ADMIN2, image["id"], "other", switched["current_version"], switched["generation"], takeover=True))
     assert store.authorize_context(ADMIN, ctx(switched, "read", "new"))["annotations"] == {"objects": []}
-    for bbox, code in (([1, 2, 0, 5], "bbox_out_of_bounds"), ([1, 2, 100, 5], "bbox_out_of_bounds"),
+    # Boxes crossing the edge are clipped on save; only an empty box, or one
+    # entirely outside the image, is refused.
+    for bbox, code in (([1, 2, 0, 5], "bbox_out_of_bounds"), ([500, 2, 10, 5], "bbox_out_of_bounds"),
                        ([True, 2, 10, 5], "invalid_bbox"), ([1, 2, 3], "invalid_bbox")):
         body = objects(ds)
         body["objects"][0]["bbox"] = bbox
         error(code, lambda: store.save(ADMIN, ctx(switched, "invalid", "new"), body))
-    body = objects(ds)
-    body["objects"][0]["polygon"] = [[1, 2], [101, 2], [3, 3]]
-    error("polygon_out_of_bounds", lambda: store.save(ADMIN, ctx(switched, "bad-polygon", "new"), body))
     # Inject an actual SQLite commit-path failure after version insertion.
     with store.transaction() as con:
         con.execute("CREATE TRIGGER fail_save BEFORE UPDATE OF current_version ON hosted_images BEGIN SELECT RAISE(ABORT,'injected write failure'); END")

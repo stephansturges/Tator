@@ -26,9 +26,9 @@ from .store import HostedStore, _json
 from .types import Actor, MutationContext
 
 
-FORMAT = "tator-hosted-migration-v3"
+FORMAT = "tator-hosted-migration-v4"  # v4: always clipped, empty rows dropped, duplicates resolved, unsplit
 LEGACY_FORMAT = "tator-hosted-migration-v1"
-LEGACY_FORMATS = {LEGACY_FORMAT, "tator-hosted-migration-v2"}
+LEGACY_FORMATS = {LEGACY_FORMAT, "tator-hosted-migration-v2", "tator-hosted-migration-v3"}
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 ROLES = {"metadata", "groups", "recipe", "salad_weights", "salad_metadata", "caption_records"}
 
@@ -93,7 +93,11 @@ def _read(path: Path, maximum=16 * 1024 * 1024) -> str:
     return value.decode("utf-8-sig")
 
 
-def _objects(text: str, width: int, height: int, classes: list[str], *, clip: bool, key: str) -> list[dict]:
+def _objects(text: str, width: int, height: int, classes: list[str], *, clip: bool = True, key: str,
+             dropped: list | None = None) -> list[dict]:
+    """YOLO rows to pixel boxes. Boxes are always clipped to the image (``clip``
+    is kept for older callers and plans); a row left with no area inside the
+    image, such as a zero-size box, is dropped and its line number recorded."""
     result = []
     for line_number, line in enumerate(text.splitlines(), 1):
         fields = line.split()
@@ -107,8 +111,6 @@ def _objects(text: str, width: int, height: int, classes: list[str], *, clip: bo
             polygon = None
             if len(values) == 4:
                 cx, cy, w, h = values
-                if w <= 0 or h <= 0:
-                    raise ValueError("nonpositive box")
                 xmin, ymin, xmax, ymax = cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2
             elif len(values) >= 6 and len(values) % 2 == 0:
                 polygon = list(zip(values[::2], values[1::2]))
@@ -116,13 +118,11 @@ def _objects(text: str, width: int, height: int, classes: list[str], *, clip: bo
                 xmax, ymax = max(values[::2]), max(values[1::2])
             else:
                 raise ValueError("unsupported YOLO row")
-            roundoff = 8 * math.ulp(1.0)
-            if min(xmin, ymin) < -roundoff or max(xmax, ymax) > 1 + roundoff:
-                if not clip:
-                    raise ValueError("out-of-bounds geometry; explicitly enable clipping if intended")
             xmin, ymin, xmax, ymax = [min(1.0, max(0.0, value)) for value in (xmin, ymin, xmax, ymax)]
             if xmin >= xmax or ymin >= ymax:
-                raise ValueError("empty clipped box")
+                if dropped is not None:
+                    dropped.append(line_number)
+                continue
             # Convert endpoints first. Multiplying a normalized span separately
             # can reconstruct an edge just outside the image (e.g. 640 + 1 ulp).
             # Keep the store's strict pixel bounds; only round this conversion
@@ -134,7 +134,9 @@ def _objects(text: str, width: int, height: int, classes: list[str], *, clip: bo
             if y + h > height:
                 h = math.nextafter(h, 0.0)
             if w <= 0 or h <= 0:
-                raise ValueError("empty pixel box")
+                if dropped is not None:
+                    dropped.append(line_number)
+                continue
             item = {"id": "legacy-" + digest([key, line_number, fields])[:24], "class_index": label,
                     "bbox": [x, y, w, h]}
             if polygon:
@@ -145,7 +147,7 @@ def _objects(text: str, width: int, height: int, classes: list[str], *, clip: bo
     return result
 
 
-def inventory(source_root: str | Path, *, mapping: dict | None = None, clip_boxes=False) -> dict:
+def inventory(source_root: str | Path, *, mapping: dict | None = None, clip_boxes=True) -> dict:
     """Hash all declared inputs; return a reviewable plan without creating state.
 
     mapping.files assigns an explicit role/association to otherwise unknown
@@ -254,10 +256,11 @@ def inventory(source_root: str | Path, *, mapping: dict | None = None, clip_boxe
         coordinate_space = coordinate_spaces.get(key, mapping.get("label_coordinate_space"))
         if label_text.strip() and media_info.orientation != 1 and coordinate_space is None:
             coordinate_blockers.append({"kind": "label_coordinate_space_required", "images": [key], "orientation": media_info.orientation})
-            objects, coordinate_provenance = [], None
+            objects, coordinate_provenance, dropped_rows = [], None, []
         else:
+            dropped_rows = []
             objects, coordinate_provenance = prepare_yolo_objects(label_text, classes, media_info,
-                key=key, label_coordinate_space=coordinate_space, clip=clip_boxes)
+                key=key, label_coordinate_space=coordinate_space, dropped=dropped_rows)
         captions = []
         caption_paths = []
         relative_label = relative.with_suffix(".txt")
@@ -291,7 +294,9 @@ def inventory(source_root: str | Path, *, mapping: dict | None = None, clip_boxe
                     effective_caption = value.strip()  # Empty overlay deliberately clears the source caption.
                     effective_caption_file = candidate
         images.append({"key": key, "file": name, "media_hash": entry["sha256"], "size_bytes": entry["size_bytes"], "width": width, "height": height,
-                       "split": split_name, "label_file": current_label, "objects": objects, "captions": captions,
+                       # Source split folders are provenance only (in the key): splits are decided later.
+                       "split": "unsplit", "label_file": current_label, "objects": objects, "captions": captions,
+                       "dropped_label_rows": dropped_rows,
                        "media": media_info.as_dict(), "media_coordinate_provenance": coordinate_provenance,
                        "effective_caption": effective_caption,
                        "effective_caption_file": effective_caption_file,
@@ -362,18 +367,47 @@ def inventory(source_root: str | Path, *, mapping: dict | None = None, clip_boxe
             primary = min(active, key=lambda record: (not bool(record.get("is_primary")), str(record.get("created_at") or ""), str(record.get("id") or "")), default=None)
         for record in row["captions"]:
             record["is_primary"] = record is primary
-    duplicates = {}
-    for row in images:
-        duplicates.setdefault(row["media_hash"], []).append(row["key"])
-    # Membership is pixel-unique in hosted datasets. Do not silently erase a
-    # second split or source record while converting a legacy duplicate.
-    blockers = coordinate_blockers + [{"kind": "duplicate_media", "images": group} for group in duplicates.values() if len(group) > 1]
+    images, duplicates_removed = _resolve_duplicates(images)
+    blockers = list(coordinate_blockers)
     blockers.extend({"kind": "unmapped_file", "path": name} for name, entry in files.items() if entry["role"] == "unknown")
-    plan = {"format": FORMAT, "source_root": str(root), "mapping": mapping, "clip_boxes": bool(clip_boxes), "layout": layout,
-            "classes": classes, "images": images, "files": files, "blockers": blockers,
+    plan = {"format": FORMAT, "source_root": str(root), "mapping": mapping, "clip_boxes": True, "layout": layout,
+            "classes": classes, "images": images, "files": files, "blockers": blockers, "duplicates_removed": duplicates_removed,
             "missing_labels": [row["key"] for row in images if row["label_file"] is None]}
     plan["plan_sha256"] = digest(plan)
     return plan
+
+
+def _resolve_duplicates(images: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Identical pixels are one image: keep one copy of each.
+
+    Copies with the same labels need no review and the first path is kept.
+    When their labels differ, the copy with the most objects (then the first
+    path) is kept and marked for review, so a person confirms it; the other
+    copies are recorded in the plan.
+    """
+    groups: dict[str, list[dict]] = {}
+    for row in images:
+        groups.setdefault(row["media_hash"], []).append(row)
+    geometry = lambda row: sorted((obj["class_index"], *(round(value, 3) for value in obj["bbox"])) for obj in row["objects"])
+    kept, removed = [], []
+    for row in images:
+        group = groups[row["media_hash"]]
+        if len(group) == 1:
+            kept.append(row)
+            continue
+        ordered = sorted(group, key=lambda item: item["key"])
+        same = all(geometry(item) == geometry(ordered[0]) and (item["label_file"] is None) == (ordered[0]["label_file"] is None) for item in ordered)
+        keep = ordered[0] if same else max(ordered, key=lambda item: (len(item["objects"]), -ordered.index(item)))
+        if row is not keep:
+            continue
+        others = [item for item in ordered if item is not keep]
+        if not same:
+            row["review_required"] = "duplicate_labels_differ"
+        row["duplicate_keys"] = [item["key"] for item in others]
+        removed.append({"kept": row["key"], "removed": [{"key": item["key"], "label_file": item["label_file"], "objects": len(item["objects"])} for item in others],
+                        "labels_differ": not same})
+        kept.append(row)
+    return kept, removed
 
 
 class HostedMigrator:
@@ -426,7 +460,7 @@ class HostedMigrator:
             if self.store.raw_receipt(actor, operation + "-done"):
                 continue
             annotations = {"objects": [{**{key: value for key, value in obj.items() if key != "class_index"}, "class_id": ds["classes"][obj["class_index"]]["id"]} for obj in row["objects"]],
-                           "captions": row["captions"], "migration": {"run_id": run_id, "source_key": row["key"], "label_file": row["label_file"], "source_sha256": row["media_hash"], "geometry_clipping_authorized": plan["clip_boxes"], "metadata": row["metadata"]}}
+                           "captions": row["captions"], "migration": {"run_id": run_id, "source_key": row["key"], "label_file": row["label_file"], "source_sha256": row["media_hash"], "geometry_clipping_authorized": plan["clip_boxes"], "dropped_label_rows": row.get("dropped_label_rows", []), "duplicate_keys": row.get("duplicate_keys", []), "metadata": row["metadata"]}}
             active_captions = [record for record in row["captions"] if record.get("lifecycle_status", "active") == "active"]
             if row.get("media_coordinate_provenance"):
                 annotations["media_coordinate_provenance"] = row["media_coordinate_provenance"]
@@ -442,7 +476,8 @@ class HostedMigrator:
                     raise DomainError("migration_source_changed", 409)
                 imported = self.store.import_image(actor, ds["id"], view["source_sha256"], row["key"], annotations, operation + "-import", width=row["width"], height=row["height"], size_bytes=row["size_bytes"], split=row["split"])
             completed = imported
-            if mode == "approved-baseline":
+            # A duplicate whose copies disagree stays unconfirmed for a person to check.
+            if mode == "approved-baseline" and not row.get("review_required"):
                 prior_approval = self.store.raw_receipt(actor, operation + "-approve")
                 if prior_approval:
                     completed = prior_approval["result"]
@@ -498,6 +533,13 @@ def inventory_report(plan: dict) -> str:
     lines.extend(f"* {row['kind']}: {row.get('path', row.get('images', ''))}" for row in plan["blockers"])
     if not plan["blockers"]:
         lines.append("None.")
+    dropped = sum(len(row.get("dropped_label_rows", [])) for row in plan["images"])
+    removed = plan.get("duplicates_removed", [])
+    lines += ["", "Automatic clean-up", "------------------", "",
+              "* Every box is clipped to its image; source split folders are not used as splits (all images are unsplit).",
+              f"* {dropped} label rows with no area inside the image dropped.",
+              f"* {sum(len(item['removed']) for item in removed)} duplicate image copies removed; "
+              f"{sum(1 for item in removed if item['labels_differ'])} kept copies had differing labels and stay unconfirmed for review."]
     lines += ["", f"Images without label files: {len(plan['missing_labels'])}. These cannot enter approved-baseline mode.", "",
               "Apply defaults to Incoming. Approved-baseline mode requires explicit administrator acceptance of the existing labels.",
               "Recipe and SALAD files are preserved with their supplied associations; runtime activation is a separate step.", ""]

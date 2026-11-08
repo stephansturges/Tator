@@ -62,7 +62,7 @@
             const preview = await app.api(`/datasets/${datasetId}/splits/preview`, {method: "POST", body: {image_ids: selected.map(row => row.id), target_split: choice}});
             if (!valid(ticket) || target.value !== choice) return;
             previewArea.replaceChildren(node("p", `${preview.selected_count} selected images; ${preview.group_added_count} related images included to keep capture groups together. ${preview.change_count} images would change split.`));
-            const counts = node("p"); counts.textContent = ["train", "val", "test", "unsplit"].map(split => `${split === "unsplit" ? "Unassigned" : split === "val" ? "Validation" : split === "train" ? "Training" : "Test"}: ${preview.counts_before[split] || 0} → ${preview.counts_after[split] || 0}`).join(" · "); previewArea.append(counts);
+            const counts = node("p"); counts.textContent = ["train", "val", "test", "unsplit"].map(split => `${split === "unsplit" ? "Not split" : split === "val" ? "Validation" : split === "train" ? "Training" : "Test"}: ${preview.counts_before[split] || 0} → ${preview.counts_after[split] || 0}`).join(" · "); previewArea.append(counts);
             const details = node("details"), list = node("ul"); details.append(node("summary", "Images in this change"), list);
             for (const image of preview.images) list.append(node("li", `${image.filename}: ${image.split} → ${preview.assignments[image.id]}`));
             previewArea.append(details);

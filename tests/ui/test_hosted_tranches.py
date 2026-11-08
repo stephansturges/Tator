@@ -100,15 +100,15 @@ async def _named_flow(origin, output):
         await sign_in(bob, origin, "bob")
         assert (await bob.request.get(f"{origin}/api/hosted/images/{second}/media")).status == 404
         await expect(bob.locator("#tranchePanel")).not_to_contain_text("Road junctions")
-        await admin.reload(); await expect(admin.locator("#tranchePanel")).to_contain_text("1 awaiting review")
-        await admin.get_by_role("button", name="Review 1 images", exact=True).click()
+        await admin.reload(); await expect(admin.locator("#tranchePanel")).to_contain_text("1 waiting for review")
+        await admin.get_by_role("button", name="Review 1 image", exact=True).click()
         await expect(admin.locator("#hostedApprove")).to_be_enabled()
         await admin.locator("#hostedApprove").click()
         await expect(admin.locator("#workspace")).to_be_visible()
         assert f"tranche={tranche['id']}" in admin.url
-        await expect(admin.locator("#tranchePanel")).to_contain_text("1 approved")
+        await expect(admin.locator("#tranchePanel")).to_contain_text("1 confirmed")
         await alice.locator("#hostedBack").click()
-        await expect(alice.locator("#tranchePanel")).to_contain_text("1 approved")
+        await expect(alice.locator("#tranchePanel")).to_contain_text("1 confirmed")
         members = await api(alice, f"/tranches/{tranche['id']}/members")
         approved = next(m for m in members["members"] if m["image_id"] == first)
         assert not approved["can_view"] and approved["image"] is None
@@ -355,7 +355,7 @@ async def _incoming_and_review_filters(origin):
         admin.on('dialog', confirm)
         await admin.get_by_role('button', name='Select all matching', exact=True).click()
         await expect(admin.locator('#selectionCount')).to_have_text('1 image selected')
-        assert any('all 1 eligible matching images' in message for message in confirmations)
+        assert any('all 1 eligible matching image,' in message for message in confirmations)
         create_requests = []
         async def capture(route): create_requests.append(route.request.post_data_json); await route.continue_()
         await admin.route(f'**/api/hosted/datasets/{dataset}/tranches', capture)
@@ -389,7 +389,7 @@ async def _incoming_and_review_filters(origin):
         await admin.locator('#reviewTranche').select_option(target['id'])
         await admin.get_by_role('button', name='Apply filters', exact=True).click()
         await expect(admin.locator('#imageGrid .hosted-card')).to_have_count(1)
-        await expect(admin.locator('#imageMatchCount')).to_contain_text('1 matching images')
+        await expect(admin.locator('#imageMatchCount')).to_contain_text('1 matching image ')
         await admin.get_by_role('button', name='Select all matching', exact=True).click()
         await admin.get_by_role('button', name='Approve selected images', exact=True).click()
         await expect(admin.locator('#imageGrid .hosted-card')).to_have_count(0)

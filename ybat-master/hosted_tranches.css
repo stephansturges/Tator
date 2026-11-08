@@ -2,3 +2,5 @@
 .tranche-activity{display:block;color:var(--muted);margin:.6rem 0}.tranche-card>button{margin:.35rem .4rem 0 0}.tranche-picker label:has(input:checked){border-color:var(--accent);background:var(--surface-2,var(--surface))}#trancheDialog .tranche-toolbar>input[type=search]{min-width:170px;flex:1}
 .tranche-steps{margin:0 0 18px;padding:12px 16px 12px 36px;background:var(--accent-light);border-radius:8px;color:var(--text);display:grid;gap:4px;max-width:900px}
 .tranche-hint{color:var(--text);font-weight:550}
+.tranche-counts span[data-tone=warning]{color:var(--warning);font-weight:600}
+.tranche-members .hosted-card small[data-tone=warning]{color:var(--warning);font-weight:600}

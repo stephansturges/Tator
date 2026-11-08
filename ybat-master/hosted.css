@@ -53,3 +53,56 @@ button.danger{color:var(--warning);border-color:var(--warning)}button.danger:hov
 :root[data-theme=pipboy] ::selection{background:color-mix(in srgb,var(--pip) 28%,transparent);color:var(--pip-strong)}
 :root[data-theme=pipboy] :is(input,select,textarea){caret-color:var(--pip-strong)}
 :root[data-theme=pipboy] #theme{border-color:var(--pip-strong);background:color-mix(in srgb,var(--pip) 18%,transparent);color:var(--pip-strong);box-shadow:inset 0 0 14px color-mix(in srgb,var(--pip) 20%,transparent),0 0 18px color-mix(in srgb,var(--pip) 22%,transparent)}
+/* Workspace layout: dataset name and picker on top, views with counts, dataset actions, then actions for the current view. */
+.visually-hidden{position:absolute!important;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+.hosted-workspace-title{align-items:flex-start}
+.hosted-workspace-title h1{margin-top:.1rem}
+.hosted-title-text{min-width:0}
+.hosted-title-text #workspaceEyebrow{margin:0;overflow-wrap:anywhere}
+.hosted-title-text #workspaceExplanation{margin:.2rem 0}
+.hosted-dataset-picker{display:flex;align-items:flex-end;gap:.6rem;flex-wrap:wrap;margin-top:.3rem}
+.hosted-dataset-picker .dataset-choice{min-width:220px}
+.hosted-import-report{margin:.5rem 0 0;padding:.45rem .7rem;border-left:3px solid var(--accent);background:var(--accent-light);color:var(--text);border-radius:0 6px 6px 0;font-size:.9rem;max-width:none}
+.hosted-toolbar{margin:18px 0 12px}
+#views button{display:inline-flex;align-items:baseline;gap:.45rem}
+#views .view-count{font-size:.82rem;font-weight:600;color:var(--muted);font-variant-numeric:tabular-nums}
+#views button[aria-current=page] .view-count{color:inherit}
+.hosted-actions>#refresh{order:99}
+.hosted-view-actions{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;margin:0 0 16px}
+.hosted-view-actions:not(:has(>:not([hidden]))){display:none}
+.hosted-view-actions>label{flex-direction:row;align-items:center;gap:.4rem;font-size:.9rem}
+#imageFilters{margin-bottom:16px}
+.hosted-card small[data-tone=warning],.hosted-status[data-tone=warning]{color:var(--warning);font-weight:600}
+.hosted-card.hosted-highlight{outline:3px solid var(--accent);outline-offset:2px;box-shadow:0 0 0 6px var(--accent-light)}
+.hosted-more{display:flex;justify-content:center;gap:.8rem;flex-wrap:wrap;margin:28px auto}
+.hosted-more:not(:has(>:not([hidden]))){display:none}
+#more{margin:0}
+.hosted-class-guidance{border-top:1px solid var(--border);margin-top:12px;padding-top:4px}
+.hosted-glossary{margin:.4rem 0}.hosted-glossary dt{font-weight:650}.hosted-glossary dd{margin:0 0 .5rem;color:var(--muted)}
+.hosted-guidance-context{white-space:pre-wrap;color:var(--text)}
+.hosted-dialog-dataset{display:block;font-size:.8rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);margin-bottom:.2rem}
+#inviteUsername{background:var(--accent-light)}
+@media(max-width:700px){
+  main{padding:14px 12px}
+  .hosted-header{min-height:0;flex-wrap:wrap;gap:.5rem}
+  .hosted-account{gap:.4rem}.hosted-account button{padding:.4rem .6rem}
+  .hosted-workspace-title h1{font-size:1.45rem;margin:.1rem 0 .3rem}
+  .hosted-title-text #workspaceExplanation{display:none}
+  .hosted-dataset-picker{margin-top:.6rem}.hosted-dataset-picker .dataset-choice{flex:1;min-width:0;margin-top:0}
+  .hosted-toolbar{margin:12px 0 10px;gap:10px}
+  #views{flex-wrap:nowrap;overflow-x:auto;max-width:100%;padding-bottom:2px}
+  #views button,.hosted-actions button,.hosted-view-actions button{padding:.4rem .6rem;font-size:.9rem}
+  #imageFilters{gap:.5rem}#imageFilters button{padding:.4rem .6rem;font-size:.9rem}
+  #imageMatchCount{flex-basis:100%;font-size:.85rem}
+  #views button{white-space:nowrap}
+  .hosted-brand{font-size:1.1rem}
+  .hosted-dataset-picker .field-label,#imageFilters .field-label{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+  .hosted-actions{flex-wrap:nowrap;overflow-x:auto;max-width:100%;padding-bottom:2px}.hosted-actions button{white-space:nowrap}
+  .hosted-view-actions{gap:.45rem;margin-bottom:12px}
+  #imageFilters>label:first-child{flex-basis:100%}
+}
+@media(max-width:520px){#accountName{display:none}}
+.hosted-checkbox input{flex-shrink:0}
+.hosted-analysis-parameters>p{grid-column:1/-1;margin:0}
+.hosted-title-text{flex:1 1 auto}.hosted-dataset-picker{flex:0 0 auto}
+.hosted-selection-note{color:var(--muted);font-size:.9rem}.hosted-selection-note:empty{display:none}

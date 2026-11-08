@@ -13,3 +13,12 @@ html.theme-dark #hostedAdminNav [aria-current=page]{background:#203f38;color:#78
 html.theme-pipboy #hostedAdminNav,html.theme-pipboy .hosted-training-menu{background:var(--pip-tab-bg);color:var(--pip-green);border-color:var(--pip-border);font-family:var(--pip-font)}
 html.theme-pipboy #hostedAdminNav :is(button,summary){border-color:var(--pip-border);background:var(--pip-control-bg)}
 html.theme-pipboy #hostedAdminNav [aria-current=page]{background:color-mix(in srgb,var(--pip-green) 18%,transparent);color:var(--pip-green-strong);border-color:var(--pip-border-strong)}
+#hostedAdminNav .hosted-nav-toggle{display:none}
+#hostedAdminNav .hosted-nav-toggle::after{content:" ▾"}
+#hostedAdminNav .hosted-nav-toggle[aria-expanded=true]::after{content:" ▴"}
+@media(max-width:700px){
+  #hostedAdminNav{padding:6px 10px;gap:5px}
+  #hostedAdminNav .hosted-nav-toggle{display:block}
+  #hostedAdminNav[data-collapsed=true]>:not(.hosted-nav-toggle){display:none}
+  #hostedAdminNav button,#hostedAdminNav summary{padding:6px 9px}
+}

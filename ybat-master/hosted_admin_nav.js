@@ -23,7 +23,7 @@
     const moreTools = [["recipes", "Detection recipes"], ["mining", "SAM3 recipe mining"], ["vocabulary", "SAM3 vocabulary explorer"],
         ["workbench_labeling", "Workbench annotation"], ["workbench_datasets", "Workbench datasets"], ["model_settings", "Model settings"]];
     const workbench = () => Boolean(canvas ? window.TatorHostedBoot?.workbench : workspace.session?.workbench);
-    let nav, openedLink = false;
+    let nav, toggle, openedLink = false;
     function button(parent, label, callback) {
         const item = document.createElement("button"); item.type = "button"; item.textContent = label;
         item.onclick = async () => {
@@ -53,16 +53,22 @@
             await canvas.leaveFor(`/?${query}`); return;
         }
         if (destination === "profiles") { document.getElementById("hostedProfiles")?.click(); return; }
-        if (destination === "datasets") { document.querySelector("#workspace")?.scrollIntoView({block: "start"}); return; }
+        if (destination === "datasets") { document.querySelectorAll("dialog[open]").forEach(dialog => dialog.close()); window.scrollTo({top: 0}); return; }
         await window.TatorHostedAnalysis.open(destination);
     }
     function mount() {
         if (!nav) {
             nav = document.createElement("nav"); nav.id = "hostedAdminNav"; nav.setAttribute("aria-label", "Administrator tools");
+            // On a phone the strip folds behind one button so the work starts near the top.
+            toggle = document.createElement("button"); toggle.type = "button"; toggle.className = "hosted-nav-toggle"; toggle.textContent = "Administrator tools";
+            toggle.setAttribute("aria-expanded", "false"); nav.dataset.collapsed = "true";
+            toggle.onclick = () => { const open = nav.dataset.collapsed === "true"; nav.dataset.collapsed = String(!open); toggle.setAttribute("aria-expanded", String(open)); };
+            nav.append(toggle);
             if (canvas) {
                 const current = button(nav, "Annotate", () => {}); current.setAttribute("aria-current", "page");
             }
-            button(nav, "Datasets", () => open("datasets"));
+            const datasets = button(nav, "Datasets", () => open("datasets"));
+            if (!canvas) datasets.setAttribute("aria-current", "page");
             for (const [operation, label] of operations) button(nav, label, () => open(operation));
             const menu = document.createElement("details"), summary = document.createElement("summary"), list = document.createElement("div");
             summary.textContent = "Train models"; list.className = "hosted-training-menu";
@@ -86,9 +92,8 @@
             anchor?.insertAdjacentElement("afterend", nav);
         }
         nav.hidden = user()?.role !== "admin";
-        const more = nav.querySelector("#hostedMoreTools"), jobs = nav.querySelector("#hostedServerJobs");
+        const more = nav.querySelector("#hostedMoreTools");
         if (more) more.hidden = !workbench();
-        if (jobs) jobs.hidden = !workbench();
     }
     window.addEventListener("tator:hosted-canvas", mount);
     window.addEventListener("tator:hosted-session", mount);
@@ -96,7 +101,10 @@
         mount();
         const requested = new URLSearchParams(location.search).get("tool");
         const known = ["profiles", "models", "caption_export", "jobs", ...operations.map(item => item[0]), ...training.map(item => item[0])];
-        if (openedLink || !known.includes(requested) || user()?.role !== "admin" || !datasetId()) return;
+        if (openedLink || !requested) return;
+        // The link is handled once; reloading the page afterwards does not reopen it.
+        workspace.dropRouteParams?.("tool");
+        if (!known.includes(requested) || user()?.role !== "admin" || !datasetId()) return;
         openedLink = true;
         try { await open(requested); }
         catch (error) { if (!error.stale) workspace.notice(error.message, true); }

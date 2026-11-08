@@ -44,6 +44,8 @@ async def _exercise(origin, output):
 
         await assign([incoming[0]], "alice")
         await assign([incoming[1]], "bob")
+        # Recall is offered where assigned work is shown: Incoming and Tranches.
+        await admin.get_by_role("button", name="Incoming", exact=True).click()
         await admin.locator("#recallAssigned").click()
         await expect(admin.locator("#recallImages input")).to_have_count(3)
         await admin.locator("#recallAnnotator").select_option(owners["alice"])

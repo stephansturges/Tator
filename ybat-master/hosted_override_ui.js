@@ -5,9 +5,10 @@
     if (!app) return;
     const node = (tag, text) => { const element = document.createElement(tag); if (text !== undefined) element.textContent = text; return element; };
     const button = node("button", "Recall assigned work"); button.id = "recallAssigned"; button.type = "button"; button.hidden = true;
-    document.querySelector(".hosted-actions").append(button);
+    // Assigned work lives in Incoming and Tranches, so the action is shown there.
+    (document.getElementById("viewActions") || document.querySelector(".hosted-actions")).append(button);
     const dialog = node("dialog"), heading = node("h2", "Recall assigned work"); dialog.id = "recallDialog";
-    const explanation = node("p", "Return selected images to unassigned Incoming. Saved drafts and feedback stay intact. The annotators' editing tabs and pending tool results lose permission to change them. Submitted and confirmed images are excluded.");
+    const explanation = node("p", "Return selected images to Incoming as Not assigned. Saved drafts and feedback stay intact. The annotators' editing tabs and pending tool results lose permission to change them. Submitted and confirmed images are excluded.");
     const notice = node("p"); notice.className = "dialog-notice"; notice.setAttribute("role", "status"); notice.hidden = true;
     const filterLabel = node("label", "Annotator"), filter = node("select"); filter.id = "recallAnnotator"; filterLabel.append(filter);
     const selectAll = node("button", "Select all in this list"), clear = node("button", "Clear selection"), refresh = node("button", "Refresh list");
@@ -30,7 +31,8 @@
         for (const check of list.querySelectorAll("input")) check.disabled = frozen;
         submit.disabled = busy || (!pending && (!selected.size || !reason.value.trim()));
         submit.textContent = pending ? "Check and retry saved recall" : `Recall ${selected.size || "selected"} image${selected.size === 1 ? "" : "s"}`;
-        count.textContent = pending ? `${pending.body.image_ids.length} images in the saved recall. Its original selection and reason will be reused.` : `${selected.size} selected · ${filtered().length} images in this list`;
+        const images = n => `${n.toLocaleString()} image${n === 1 ? "" : "s"}`;
+        count.textContent = pending ? `${images(pending.body.image_ids.length)} in the saved recall. Its original selection and reason will be reused.` : `${selected.size.toLocaleString()} selected · ${images(filtered().length)} in this list`;
     }
     function render() {
         list.replaceChildren();
@@ -39,7 +41,7 @@
             const label = node("label"), check = node("input"); check.type = "checkbox"; check.checked = selected.has(image.id);
             check.setAttribute("aria-label", `Recall ${image.filename}`);
             check.onchange = () => { if (check.checked) selected.add(image.id); else selected.delete(image.id); update(); };
-            const title = node("span", `${image.filename} · ${image.state === "returned" ? "Changes requested" : "Assigned"}${image.editor_lease ? " · Editing tab open" : ""}`);
+            const title = node("span", `${image.filename} · ${image.state === "returned" ? "Returned for changes" : "Assigned"}${image.editor_lease ? " · Editing tab open" : ""}`);
             label.style.display = "flex"; label.style.flexDirection = "row"; label.style.alignItems = "center"; label.style.gap = "0.75rem";
             check.style.width = "auto"; check.style.flex = "0 0 auto"; label.append(check, title); list.append(label);
         }
@@ -111,7 +113,7 @@
                 throw new Error("The server reply did not identify the complete saved recall. Its result is still unconfirmed.");
             }
             sessionStorage.removeItem(storageKey); pending = null;
-            const message = `${result.images.length} images recalled to unassigned Incoming. Saved work and history were preserved.`;
+            const message = `${result.images.length.toLocaleString()} image${result.images.length === 1 ? "" : "s"} recalled to Incoming as Not assigned. Saved work and history were preserved.`;
             dialog.close(); app.notice(message);
             try { await app.refresh(); app.notice(message); }
             catch (error) { if (!error.stale) app.notice(`${message} Refresh the workspace to see the saved result.`, true); }
@@ -134,12 +136,16 @@
     button.onclick = () => app.action(button, open);
     submit.onclick = () => { commit().catch(error => tell(error.message, true)); };
     dialog.addEventListener("close", () => { ++sequence; });
-    document.getElementById("datasetChoice").addEventListener("change", () => { ++sequence; dialog.close(); updateVisibility(); });
+    const datasetChanged = () => { ++sequence; dialog.close(); updateVisibility(); };
+    document.getElementById("datasetChoice").addEventListener("change", datasetChanged);
+    window.addEventListener("tator:hosted-dataset", datasetChanged);
     function updateVisibility() {
-        button.hidden = app.session?.user.role !== "admin"; button.disabled = !app.datasetId;
-        if (identity() !== sessionKey || button.hidden) { ++sequence; dialog.close(); rows = []; selected.clear(); list.replaceChildren(); pending = null; busy = false; }
+        const admin = app.session?.user.role === "admin";
+        button.hidden = !admin || !["incoming", "tranches"].includes(app.view); button.disabled = !app.datasetId;
+        if (identity() !== sessionKey || !admin) { ++sequence; dialog.close(); rows = []; selected.clear(); list.replaceChildren(); pending = null; busy = false; }
     }
     window.addEventListener("tator:hosted-session", updateVisibility);
     window.addEventListener("tator:hosted-workspace", updateVisibility);
+    window.addEventListener("tator:hosted-view", updateVisibility);
     updateVisibility();
 })();

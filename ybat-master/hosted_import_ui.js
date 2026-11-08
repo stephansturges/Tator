@@ -7,8 +7,8 @@
     input.accept += ",.txt";
     const resume = document.createElement("button"); resume.type = "button"; resume.id = "resumeImport"; resume.textContent = "Resume image import"; resume.hidden = true; start.after(resume);
     const frameLabel = document.createElement("label"), frame = document.createElement("select");
-    frameLabel.textContent = "Imported label coordinates "; frame.id = "importLabelCoordinates";
-    for (const [value, text] of [["", "Unspecified (unrotated images only)"], ["encoded", "Original stored pixels"], ["exif_display", "Rotated photo viewer pixels"]]) {
+    frameLabel.textContent = "Label coordinates "; frame.id = "importLabelCoordinates";
+    for (const [value, text] of [["", "Unspecified (unrotated)"], ["encoded", "Stored pixels"], ["exif_display", "Rotated viewer pixels"]]) {
         const option = document.createElement("option"); option.value = value; option.textContent = text; frame.append(option);
     }
     frameLabel.title = "Only needed when importing existing labels on photos with rotation metadata. Tator annotates the original stored pixel grid. Choose the grid your labels were drawn on; viewer coordinates will be converted without changing the original file.";
@@ -122,12 +122,15 @@
             const existing = batch.entries.filter((entry) => entry.duplicate).length;
             const conflicts = batch.entries.filter(entry => entry.conflict_id);
             await app.refresh();
-            app.notice(`${batch.entries.length - existing} new images uploaded. ${attachment ? `${attachment.attached} images attached to the tranche.` : "Saved in Incoming."} ${existing} existing copies preserved.${attachment?.excluded.length ? ` Not attached: ${attachment.excluded.join("; ")}.` : ""}${conflicts.length ? ` ${conflicts.length} imported label conflicts retained. Open these images and choose Imported labels to compare them: ${conflicts.map(entry => entry.name).join(", ")}.` : ""}`);
+            const images = (n, word = "image") => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
+            app.notice(`${images(batch.entries.length - existing, "new image")} uploaded. ${attachment ? `${images(attachment.attached)} attached to the tranche.` : "Saved in Incoming."} ${existing === 1 ? "1 existing copy" : `${existing.toLocaleString()} existing copies`} preserved.${attachment?.excluded.length ? ` Not attached: ${attachment.excluded.join("; ")}.` : ""}${conflicts.length ? ` ${conflicts.length === 1 ? "1 imported label conflict" : `${conflicts.length} imported label conflicts`} retained. Open these images and choose Imported labels to compare them: ${conflicts.map(entry => entry.name).join(", ")}.` : ""}`);
         });
         running = false; input.value = ""; refresh();
     };
     window.addEventListener("tator:hosted-session", refresh);
     document.getElementById("datasetChoice").addEventListener("change", refresh);
+    window.addEventListener("tator:hosted-dataset", refresh);
+    window.addEventListener("tator:hosted-view", refresh);
     setInterval(refresh, 3000);
     refresh();
 })();

@@ -28,6 +28,7 @@ from .artifacts import open_regular
 from .errors import DomainError
 from .operations import HostedOperations
 from .store import _json
+from utils.run_split import RUN_VALIDATION_SHARE, choose_run_split
 
 
 OPERATIONS = {"statistics", "dqe", "dqe_review", "pruning", "ingestion", "salad_training", "caption_export", "yolo_training", "sam3_training", "rfdetr_training", "qwen_training", "clip_training"}
@@ -342,9 +343,6 @@ def _wait(get_status, job_id, timeout):
     raise TimeoutError("Native engine deadline exceeded")
 
 
-RUN_VALIDATION_SHARE = 0.1
-
-
 def _run_split(manifest):
     """Give unsplit images a train or validation place for this training run only.
 
@@ -354,61 +352,19 @@ def _run_split(manifest):
     and group, and the first ones take about a tenth of those images as validation,
     so the same groups tend to validate on every run. A class seen only in
     validation is moved back to training. Nothing is written back to the dataset;
-    the run records the split it used.
+    the run records the split it used. The rule lives in utils/run_split.py and is
+    shared with the legacy workbench trainers.
     """
     from .splits import capture_groups
     images = manifest["images"]
     if not any(image["split"] == "unsplit" for image in images):
         return manifest, None
-    parent = list(range(len(images)))
-    def find(index):
-        while parent[index] != index:
-            parent[index] = parent[parent[index]]
-            index = parent[index]
-        return index
-    first, names = {}, {}
-    for index, image in enumerate(images):
-        for identity in capture_groups(image["annotations"]):
-            parent[find(index)] = find(first.setdefault(identity, index))
-    for index, image in enumerate(images):
-        identities = ["=".join(identity) for identity in capture_groups(image["annotations"])] or ["image=" + image["id"]]
-        names.setdefault(find(index), []).extend(identities)
-    groups = {}
-    for index in range(len(images)):
-        groups.setdefault(find(index), []).append(index)
-    splits = [image["split"] for image in images]
-    automatic = []
-    for root, members in groups.items():
-        declared = {splits[index] for index in members} - {"unsplit"}
-        if len(declared) == 1:
-            target = declared.pop()
-            for index in members:
-                splits[index] = target if splits[index] == "unsplit" else splits[index]
-        elif not declared:
-            automatic.append((hashlib.sha256(f"{manifest['dataset_id']}:{min(names[root])}".encode()).hexdigest(), members))
-    automatic.sort()
-    pool = sum(len(members) for _, members in automatic)
-    validation, chosen = [], 0
-    for _, members in automatic:
-        goes_to_validation = chosen < RUN_VALIDATION_SHARE * pool and len(automatic) > 1
-        validation.append(goes_to_validation)
-        chosen += len(members) if goes_to_validation else 0
-    classes = lambda members: {item.get("class_id") for index in members for item in images[index]["annotations"].get("objects", [])}
-    in_training = set().union(*(classes(members) for (_, members), held in zip(automatic, validation) if not held),
-                              *(classes([index]) for index, split in enumerate(splits) if split == "train"))
-    for position, ((_, members), held) in enumerate(zip(automatic, validation)):
-        if held and classes(members) - in_training and sum(validation) > 1:
-            validation[position] = False
-            in_training |= classes(members)
-    for (_, members), held in zip(automatic, validation):
-        for index in members:
-            splits[index] = "val" if held else "train"
-    changed = [index for index, image in enumerate(images) if image["split"] == "unsplit"]
+    splits, record = choose_run_split([{"id": image["id"], "groups": capture_groups(image["annotations"]), "split": image["split"],
+                                        "classes": {item.get("class_id") for item in image["annotations"].get("objects", [])}}
+                                       for image in images], manifest["dataset_id"], share=RUN_VALIDATION_SHARE)
     result = {**manifest, "images": [{**image, "split": splits[index], "split_chosen_for_run": True} if image["split"] == "unsplit" else image
                                      for index, image in enumerate(images)]}
-    return result, {"rule": "unsplit images split for this run only; capture groups kept together; dataset splits kept",
-                    "validation_share": RUN_VALIDATION_SHARE, "images_split_for_run": len(changed),
-                    "train_images": splits.count("train"), "validation_images": splits.count("val"), "test_images": splits.count("test")}
+    return result, record
 
 
 def _training_membership(manifest):

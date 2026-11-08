@@ -34,6 +34,9 @@ Read these in order for a new installation:
 4. `Models and compute <hosted_runtime.rst>`_: installed model definitions,
    dataset detector settings, private user workers, queues and provider billing.
 
+`Release notes <hosted_release_notes.rst>`_ list what each release changed and
+how far it was tested.
+
 `Operator commands <../tools/README.md>`_ provides a short command index. Run
 maintenance commands from the repository root in the intended environment.
 

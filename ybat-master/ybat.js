@@ -2474,6 +2474,11 @@
             }
         }, { capture: true, passive: false });
 
+        // Inside the hosted server (annotation canvas or admin workbench) this
+        // page is one step of a larger site: browser Back must leave it.
+        if (hostedMode || workbenchApiRoot) {
+            return;
+        }
         const currentState = history.state && typeof history.state === "object" ? history.state : {};
         history.replaceState({ ...currentState, [TATOR_HISTORY_GUARD_KEY]: "base" }, "", window.location.href);
         history.pushState({ ...currentState, [TATOR_HISTORY_GUARD_KEY]: "sentinel" }, "", window.location.href);
@@ -85366,25 +85371,87 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
     document.addEventListener("readystatechange", bootstrapLabelingUiWhenReady);
     bootstrapLabelingUiWhenReady();
 
+    // The space the canvas may fill: the content box of its column, from the
+    // canvas top down to the bottom of the labeling container, never past the
+    // window. Measured from the layout rather than from the canvas itself, which
+    // would only ever report its current size and so could never shrink. Any
+    // bar above the page (admin workbench, hosted navigation) is accounted for
+    // because only real positions are used.
+    function measureCanvasAvailableSize() {
+        const element = canvas?.element;
+        const column = element?.parentElement;
+        if (!element || !column) {
+            return null;
+        }
+        if (annotationFocusMode) {
+            // Focus mode pins the canvas to the viewport in CSS.
+            return {
+                width: element.clientWidth || window.innerWidth,
+                height: element.clientHeight || window.innerHeight,
+            };
+        }
+        if (!column.getClientRects().length) {
+            return null; // Label Images is not shown; keep the current size.
+        }
+        const style = window.getComputedStyle(column);
+        const px = (value) => parseFloat(value) || 0;
+        const width = column.clientWidth - px(style.paddingLeft) - px(style.paddingRight);
+        const container = column.closest(".container") || column.parentElement || column;
+        const bottomLimit = Math.min(container.getBoundingClientRect().bottom, window.innerHeight || Infinity)
+            - px(style.marginBottom) - px(style.paddingBottom) - px(style.borderBottomWidth);
+        const height = bottomLimit - element.getBoundingClientRect().top;
+        return { width: Math.floor(width), height: Math.floor(height) };
+    }
+
     function ensureCanvasDimensions() {
         if (!canvas || !canvas.element) {
-            return;
+            return false;
         }
-        const parent = canvas.element.parentElement;
-        const fallbackWidth = parent ? parent.clientWidth : 0;
-        const fallbackHeight = parent ? parent.clientHeight : 0;
-        const measuredWidth = canvas.element.clientWidth || fallbackWidth || document.getElementById("right")?.clientWidth || window.innerWidth;
-        const measuredHeight = canvas.element.clientHeight || fallbackHeight || window.innerHeight - 20;
-        const targetWidth = Math.max(1, measuredWidth);
-        const targetHeight = Math.max(1, measuredHeight);
+        const available = measureCanvasAvailableSize();
+        if (!available) {
+            return false;
+        }
+        const targetWidth = Math.max(1, available.width);
+        const targetHeight = Math.max(1, available.height);
+        let changed = false;
         if (canvas.width !== targetWidth) {
             canvas.width = targetWidth;
             canvas.element.width = targetWidth;
+            changed = true;
         }
         if (canvas.height !== targetHeight) {
             canvas.height = targetHeight;
             canvas.element.height = targetHeight;
+            changed = true;
         }
+        return changed;
+    }
+
+    // Re-fit when the space changes without a window resize: a bar above the
+    // page changing height, the Label Images tab being shown, a banner.
+    function observeCanvasAvailableSpace() {
+        const column = canvas?.element?.parentElement;
+        const container = column?.closest(".container");
+        if (!column || !container || typeof ResizeObserver !== "function") {
+            return;
+        }
+        let frame = 0;
+        const refit = () => {
+            frame = 0;
+            if (annotationFocusMode) {
+                return;
+            }
+            if (ensureCanvasDimensions() && currentImage) {
+                fitZoom(currentImage, { preservePan: true });
+            }
+        };
+        const observer = new ResizeObserver(() => {
+            if (!frame) {
+                frame = requestAnimationFrame(refit);
+            }
+        });
+        observer.observe(container);
+        observer.observe(document.body);
     }
 
     const listenCanvas = () => {
@@ -85425,6 +85492,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                 fitZoom(currentImage, { preservePan: true });
             }
         });
+        observeCanvasAvailableSpace();
         canvasDrawListenerBound = true;
     };
 

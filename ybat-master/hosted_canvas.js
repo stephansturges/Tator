@@ -3,6 +3,12 @@
     "use strict";
     const boot = window.TatorHostedBoot;
     if (!boot) return;
+    // Lay the hosted page out at the device's real width, so phones get the
+    // "larger screen" notice instead of a shrunken desktop layout.
+    if (!document.querySelector('meta[name="viewport"]')) {
+        const viewport = document.createElement("meta"); viewport.name = "viewport"; viewport.content = "width=device-width, initial-scale=1";
+        document.head.append(viewport);
+    }
     const nativeFetch = window.fetch.bind(window);
     const editorId = crypto.randomUUID();
     let accountChanged = false;
@@ -10,14 +16,18 @@
     let base = `/api/hosted/images/${encodeURIComponent(imageId)}`;
     let key = `tator.hosted.draft:${boot.instance_id}:${boot.user.user_id}:${imageId}`;
     let record, dataset, editable = false, ready = false, pending = null, saving = null, lastSaved = "", busy = false, handoff = false, recoveryRequired = false, toolState = null, retentionCommand = null;
-    let rejected = null, storageFailed = false;
+    let rejected = null, storageFailed = false, ownLeaseConflict = false;
     let queue = null, tranche = boot.tranche || null;
     let scopeLeft = Boolean(boot.scope_left), originScope = boot.requested_scope || boot.scope;
     const sameScope = (a, b) => a?.dataset_id === b?.dataset_id && (a?.tranche_id || null) === (b?.tranche_id || null) && a?.queue === b?.queue;
-    const scopeBackUrl = scope => scope?.dataset_id ? `/?${new URLSearchParams({dataset: scope.dataset_id, ...(scope.tranche_id ? {view: "tranches", tranche: scope.tranche_id} : {view: {unallocated: "incoming", confirmed: "confirmed", review: "submitted"}[scope.queue] || "tranches"})})}` : "/";
-    const backUrl = () => queue?.backUrl || scopeBackUrl(originScope);
+    // Back returns to the workspace view, search, filter and annotator the
+    // user came from, and asks it to scroll to the image they were last on.
+    const pageContext = window.HostedQueue.pageContext();
+    const scopeBackUrl = scope => window.HostedQueue.workspaceUrl(scope, pageContext, imageId);
+    const backUrl = () => queue ? queue.back(imageId) : scopeBackUrl(originScope);
     async function openScope(scoped) {
-        const nextQueue = new window.HostedQueue({api, scope: scoped.scope, onAppend: (rows, options) => window.TatorHostedCanvas.appendQueue(rows, options), onReconcile: rows => window.TatorHostedCanvas.reconcileQueue(rows)});
+        const nextQueue = new window.HostedQueue({api, scope: scoped.scope, context: pageContext, filterByAnnotator: boot.user.role === "admin",
+            onAppend: (rows, options) => window.TatorHostedCanvas.appendQueue(rows, options), onReconcile: rows => window.TatorHostedCanvas.reconcileQueue(rows)});
         const rows = await nextQueue.open(imageId);
         queue = nextQueue; scopeLeft = false; updateTranche(scoped.tranche);
         return rows;
@@ -104,13 +114,21 @@
         queue_scope_mismatch: "This image is no longer in the selected queue. Return to the tranche to continue.",
         annotation_version_changed: "This image changed on the server. Your unsaved draft is retained. Reload to compare before saving.",
         ownership_changed: "Editing ownership changed. Your draft is retained, but it cannot overwrite the new owner's work.",
-        editor_lease_conflict: "This image is open in another editing tab. Close it there or explicitly take over below.",
+        editor_lease_conflict: "Someone else is editing this image right now. You can view it; editing becomes available when they leave it.",
         editor_lease_expired: "Your editing connection expired. Your draft is retained. Reconnect before continuing.",
         login_required: "Your session ended. Sign in again; your unsent draft is retained for your account.",
         csrf_rejected: "Your account session changed in another tab. Reconnect before continuing.",
         installation_changed: "The server was restored or replaced. Reconnect before editing.",
         image_owned_by_annotator: "The assigned annotator is editing this image. You can view it, or explicitly recover it from their assignment.",
-        negative_has_objects: "This image contains annotations. Clear the empty-image check before saving.",
+        negative_has_objects: "This image has boxes. Clear the empty-image check (“No objects to label”) or delete the boxes to save.",
+        empty_annotation_requires_negative_review: "This image has no boxes. Tick “No objects to label” if there is nothing to label here, or draw the objects, then submit again.",
+        annotation_not_complete: "Tick “Annotations checked” once you have reviewed every box, then submit again.",
+        confirmed_annotation_requires_completion: "Confirmed images stay checked. Tick “Annotations checked” to save this change.",
+        image_not_submittable: "This image can no longer be submitted from here. Your work is saved; return to the workspace to see its current state.",
+        image_not_approvable: "This image can no longer be approved from here. Return to the workspace to see its current state.",
+        image_not_returnable: "This image can no longer be returned from here. Return to the workspace to see its current state.",
+        image_not_editable: "Your account can no longer edit this image. Your draft is retained in this tab.",
+        image_not_found: "This image is no longer available to your account. Your draft is retained in this tab.",
         instruction_review_requires_admin: "Only an administrator can change review decisions. Your draft is retained.",
         machine_validation_requires_server_evidence: "These QA validation labels do not match a saved server result. Your draft is retained; ask an administrator to review the affected answers.",
         machine_validation_source_changed: "The caption result belongs to an earlier image version or editing session. Your draft is retained; generate it again from the current saved image.",
@@ -125,11 +143,14 @@
         editable = false; window.TatorHostedCanvas?.freeze(); update();
         return retentionFailure;
     }
+    // Content refusals ask the user to correct the image; they never end editing.
+    const contentRejections = new Set(["empty_annotation_requires_negative_review", "annotation_not_complete", "confirmed_annotation_requires_completion", "negative_has_objects"]);
+    const offlineMessage = "The connection to the server was lost. Your work is kept in this tab and saves automatically when the connection returns.";
     function report(error) {
         if (pending && error.commit_outcome === "committed" && error.result_restricted === true && error.operation_id === pending.body.operation_id) {
             retainRestrictedCommit(pending, error);
         }
-        const retentionFailure = [401, 403, 409, 423].includes(error.status) ? freeze() : null;
+        const retentionFailure = [401, 403, 409, 423].includes(error.status) && !contentRejections.has(error.code) ? freeze() : null;
         status(retentionFailure?.message || error.message || String(error), true);
     }
     function headers(options = {}) {
@@ -141,12 +162,20 @@
         if (accountChanged) throw Object.assign(new Error("Your account changed in another tab. Reopen the workspace to continue."), {status: 401});
         const options = { method, credentials: "same-origin", headers: headers() };
         if (body !== undefined) { options.headers.set("content-type", "application/json"); options.body = JSON.stringify(body); }
-        const response = await nativeFetch(path, options);
+        let response;
+        try { response = await nativeFetch(path, options); }
+        catch (error) {
+            // A network failure says nothing about the server's state.
+            if (error?.name === "AbortError") throw error;
+            throw Object.assign(new Error(offlineMessage), {offline: true});
+        }
         let value;
         try { value = await response.json(); }
         catch (_) { throw new Error("The server reply was incomplete. Your pending change is retained; reconnect or save again to check its original result."); }
         if (accountChanged) throw Object.assign(new Error("Your account changed while this request was running. Its result is retained for the original account."), {status: 401});
-        if (!response.ok) { const error = new Error(messages[value.error] || (typeof value.detail === "string" ? value.detail : value.error) || `Request failed (${response.status}).`); error.status = response.status; error.code = value.error;
+        if (!response.ok) {
+            const fallback = value?.error ? `The server did not accept this request (${value.error}). Your work is kept in this tab.` : `Request failed (${response.status}).`;
+            const error = new Error(messages[value?.error] || (typeof value?.detail === "string" ? value.detail : fallback)); error.status = response.status; error.code = value?.error;
             for (const name of ["commit_outcome", "operation_id", "result_restricted"]) error[name] = value[name];
             throw error; }
         return value;
@@ -473,7 +502,34 @@
         }
         for (const id of ["hostedRefreshQueue", "hostedMoreImages"]) if ($(id)) $(id).disabled = !queue || scopeLeft || recoveryRequired || busy;
         if ($("hostedReconnect")) $("hostedReconnect").hidden = editable || scopeLeft || recoveryRequired;
-        if ($("hostedTakeover")) $("hostedTakeover").hidden = editable || recoveryRequired || (boot.user.role === "admin" && ["assigned", "returned"].includes(record.state));
+        // The server only lets you replace your own editing tab; never offer
+        // a takeover that would fail because another person holds the image.
+        if ($("hostedTakeover")) $("hostedTakeover").hidden = editable || recoveryRequired || !ownLeaseConflict || (boot.user.role === "admin" && ["assigned", "returned"].includes(record.state));
+    }
+    const userNames = new Map();
+    async function personName(userId) {
+        if (!userId) return null;
+        if (userId === boot.user.user_id) return "you";
+        const row = queue?.rows.find(item => item.assignee_id === userId && item.assignee_name);
+        if (row) return row.assignee_name;
+        if (boot.user.role !== "admin") return null;
+        if (!userNames.size) {
+            try { for (const user of (await api("/api/hosted/users")).users || []) userNames.set(user.id, user.display_name || user.username); }
+            catch (_) { return null; }
+        }
+        return userNames.get(userId) || null;
+    }
+    async function explainLeaseConflict(error, current) {
+        // The image record names the lease holder; the 423 reply does not.
+        const holder = current?.editor_lease?.actor_id;
+        ownLeaseConflict = holder === boot.user.user_id;
+        if (ownLeaseConflict) {
+            error.message = "This image is open in another editing tab or window of yours, possibly one you closed in the last two minutes. Taking over here is safe: unsent changes there will not overwrite this tab.";
+        } else {
+            const name = await personName(holder);
+            error.message = `${name ? name.charAt(0).toUpperCase() + name.slice(1) : "Someone else"} is editing this image right now. You can view it; editing becomes available when they leave it.`;
+        }
+        return error;
     }
     async function save({ manual = false } = {}) {
         if (saving) { await saving; if (manual) return save({ manual }); return false; }
@@ -540,7 +596,18 @@
         if (record && (record.current_version !== fresh.current_version || record.generation !== fresh.generation)) {
             const error = new Error("The server image changed. Reopen it to review the latest version before editing."); error.status = 409; throw error;
         }
-        const lease = await api(`${base}/editor`, { editor_id: editorId, expected_version: fresh.current_version, generation: fresh.generation, takeover });
+        let lease;
+        try { lease = await api(`${base}/editor`, { editor_id: editorId, expected_version: fresh.current_version, generation: fresh.generation, takeover }); }
+        catch (error) {
+            if (error.code === "editor_lease_conflict") {
+                // The reply does not say who holds the image; read it again.
+                let holder = fresh;
+                if (preparedRecord) try { holder = await api(base); } catch (_) { /* Keep the earlier record. */ }
+                await explainLeaseConflict(error, holder); update();
+            }
+            throw error;
+        }
+        ownLeaseConflict = false;
         record = { ...fresh, ...lease }; editable = true;
         mediaCacheAllowed = true;
         window.TatorHostedCanvas?.freeze(false); status("Connected · edits save automatically"); update();
@@ -558,14 +625,18 @@
                     image = await queue.neighbor(imageId, 1);
                 }
             }
-            const target = new URL(queue.backUrl, location.origin); target.searchParams.set("finished", queue.scope.queue); location.assign(target.pathname + target.search); return;
+            // Nothing left here: say so briefly, then return to the same view.
+            status(queue.scope.tranche_id ? "Tranche finished · returning to the workspace…" : "Queue finished · returning to the workspace…");
+            const target = queue.back(imageId);
+            await new Promise(resolve => setTimeout(resolve, 900));
+            location.assign(target); return;
         }
         location.assign(destination);
     }
     function updateTranche(value) {
         tranche = value;
         if ($("hostedBreadcrumb")) $("hostedBreadcrumb").textContent = tranche ? `${dataset.name} > ${tranche.name}` : dataset.name;
-        if ($("hostedBack") && (queue?.scope || originScope)?.tranche_id) $("hostedBack").textContent = "← Back to tranche";
+        if ($("hostedBack")) $("hostedBack").textContent = backLabel();
         const title = $("hostedTrancheTitle"), guidance = $("hostedTrancheInstructions");
         if (title) { title.textContent = tranche ? `${tranche.name} · ${tranche.lifecycle === "draft" ? `${tranche.counts.not_assigned} in Draft` : `${tranche.counts.to_finish + tranche.counts.changes_requested} to finish`} · ${tranche.counts.awaiting_review} awaiting review` : ""; title.hidden = !tranche; }
         if (guidance) { guidance.textContent = tranche?.instructions || ""; guidance.hidden = !tranche?.instructions; }
@@ -599,6 +670,7 @@
             history.replaceState(null, "", queue.url(imageId));
             $("hostedComplete").checked = record.complete; $("hostedNegative").checked = record.negative;
             document.querySelector(".hosted-canvas-title strong").textContent = record.filename;
+            if ($("hostedStateLine")) $("hostedStateLine").textContent = `${dataset.name} · ${stateText()} · ${boot.user.username}`;
             document.querySelectorAll(".hosted-review-note").forEach((item) => item.remove());
             window.TatorHostedCanvas.activate(record, dataset);
             const began = Date.now();
@@ -626,7 +698,15 @@
         if (window.TatorHostedCanvas.hasPendingTools() || [...activeTools.values()].some((item) => !["sam_preload", "sam_state"].includes(item.operation))) throw new Error("Wait for the annotation tool to finish, or cancel it before handing over this image.");
         if (pending && !pending.path.endsWith("/save")) throw new Error("Check the earlier handoff before submitting again.");
         if (!["return", "archive"].includes(kind)) {
-            if (!$("hostedComplete").checked && !$("hostedNegative").checked) throw new Error("Confirm that you checked the annotations, or mark this as an empty image.");
+            // Check what the server will require before handing the image over,
+            // so a refusal never strands the image mid-handoff.
+            const objects = window.TatorHostedCanvas.snapshot().objects || [];
+            const negative = $("hostedNegative").checked;
+            if (!objects.length && !negative) throw new Error(messages.empty_annotation_requires_negative_review);
+            if (objects.length && negative) throw new Error(messages.negative_has_objects);
+            // Confirming an empty image is itself the check.
+            if (negative && !$("hostedComplete").checked) $("hostedComplete").checked = true;
+            if (!$("hostedComplete").checked) throw new Error(messages.annotation_not_complete);
         }
         if (!await save({ manual: true })) throw new Error("Save before handing over this image.");
         const body = context();
@@ -638,17 +718,44 @@
         journal({ pending: operation, latest: draft() });
         const recoveryUrl = new URL(location.href); recoveryUrl.searchParams.set("recovery", operation.body.operation_id);
         history.replaceState(null, "", recoveryUrl.pathname + recoveryUrl.search);
-        try { checkedResult(operation, await api(operation.path, operation.body)); pending = null; clearJournal(); editable = false; await leave(kind !== "archive"); }
+        try {
+            try { checkedResult(operation, await api(operation.path, operation.body)); }
+            catch (error) { await settleRejectedTransition(operation, error); throw error; }
+            pending = null; clearJournal(); editable = false; await leave(kind !== "archive");
+        }
         catch (error) {
             // A transport failure says nothing about whether the server committed.
             // Retain the exact command until its receipt or replay resolves it.
-            if (!$("hostedHandoffRetry")) addButton($("hostedSaveState").parentElement, "hostedHandoffRetry", "Check handoff result", async () => {
+            if (!error.rejectedTransition && !$("hostedHandoffRetry")) addButton($("hostedSaveState").parentElement, "hostedHandoffRetry", "Check handoff result", async () => {
                 const receipt = await commandReceipt(operation);
-                if (!receipt) checkedResult(operation, await api(operation.path, operation.body));
+                if (!receipt) {
+                    try { checkedResult(operation, await api(operation.path, operation.body)); }
+                    catch (error) { await settleRejectedTransition(operation, error); throw error; }
+                }
                 pending = null; clearJournal(); editable = false; await leave(kind !== "archive");
             });
+            if (error.offline) error.message = "The connection was lost while handing over this image. Your work is kept; when the connection returns, use “Check handoff result”.";
             throw error;
         }
+    }
+    function definitiveRefusal(error) {
+        // A Tator error code in a 4xx reply is the server refusing the command.
+        return Boolean(error?.code) && error.status >= 400 && error.status < 500 && error.status !== 401 && !error.result_restricted && error.commit_outcome !== "committed";
+    }
+    async function settleRejectedTransition(operation, error) {
+        // Only a refusal with no receipt for this exact operation proves it
+        // never committed. Then the handoff is over: editing continues on the
+        // saved draft, and recovery will not replay the refused command.
+        if (!definitiveRefusal(error)) return false;
+        let receipt;
+        try { receipt = await commandReceipt(operation); } catch (_) { return false; }
+        if (receipt !== null || pending !== operation) return false;
+        pending = null; handoff = false; error.rejectedTransition = true;
+        try { retainDraft(); } catch (retentionError) { status(retentionError.message, true); }
+        const url = new URL(location.href); url.searchParams.delete("recovery"); history.replaceState(null, "", url.pathname + url.search);
+        $("hostedHandoffRetry")?.remove();
+        update();
+        return true;
     }
     function addButton(parent, id, label, callback) { const button = node("button", label); button.type = "button"; button.id = id; button.onclick = () => run(button, callback); parent.append(button); return button; }
     function showFeedback(feedback) {
@@ -672,21 +779,32 @@
         document.body.classList.add("hosted-canvas");
         const panel = node("aside"); panel.className = "hosted-canvas-panel"; panel.setAttribute("aria-label", "Annotation workflow");
         const header = node("div"); header.className = "hosted-canvas-header";
-        const back = addButton(header, "hostedBack", boot.user.role === "admin" ? "← Admin workspace" : "← Workspace", () => leave(false, backUrl()));
-        back.title = boot.user.role === "admin" ? "Save and return to datasets, quality analysis, compute, people and settings" : "Save and return to your assigned work";
+        const back = addButton(header, "hostedBack", backLabel(), () => leave(false, backUrl()));
+        back.title = boot.user.role === "admin" ? "Save and return to the workspace view you came from" : "Save and return to your assigned work";
         const toggle = node("button", "−"); toggle.type = "button"; toggle.id = "hostedPanelToggle"; toggle.setAttribute("aria-controls", "hostedWorkflowControls");
-        toggle.setAttribute("aria-expanded", "true"); toggle.setAttribute("aria-label", "Minimize annotation controls");
         // The page's own theme button (light/dark, double-click for Pip-Boy) lives in the hidden tab bar; keep it reachable here.
         const headerTools = node("div"); headerTools.className = "hosted-canvas-header-tools";
         const themeButton = document.getElementById("themeToggleButton"); if (themeButton) headerTools.append(themeButton);
         headerTools.append(toggle); header.append(headerTools);
-        const title = node("div"); title.className = "hosted-canvas-title"; title.append(node("strong", record.filename), node("small", `${dataset.name} · ${record.state === "confirmed" ? "Confirmed" : record.state === "submitted" ? "Submitted for review" : "Incoming"} · ${boot.user.username}`));
+        const stateLine = node("small", `${dataset.name} · ${stateText()} · ${boot.user.username}`); stateLine.id = "hostedStateLine";
+        const title = node("div"); title.className = "hosted-canvas-title"; title.append(node("strong", record.filename), stateLine);
         const breadcrumb = node("small"); breadcrumb.id = "hostedBreadcrumb"; title.append(breadcrumb);
         const trancheTitle = node("strong"); trancheTitle.id = "hostedTrancheTitle"; title.append(trancheTitle);
         const statusPanel = node("div"); statusPanel.className = "hosted-canvas-status";
         const state = node("span", "Loading…"); state.id = "hostedSaveState"; state.setAttribute("role", "status"); statusPanel.append(state);
         const content = node("div"); content.id = "hostedWorkflowControls";
-        toggle.onclick = () => { content.hidden = !content.hidden; toggle.textContent = content.hidden ? "+" : "−"; toggle.setAttribute("aria-expanded", String(!content.hidden)); toggle.setAttribute("aria-label", content.hidden ? "Show annotation controls" : "Minimize annotation controls"); };
+        // Minimized is a small pill. The choice survives Submit & next, which
+        // loads a new page, for the rest of this browser tab.
+        const minimize = (value, remember = true) => {
+            content.hidden = value; panel.classList.toggle("is-minimized", value); document.body.classList.toggle("hosted-panel-minimized", value);
+            toggle.textContent = value ? "+" : "−"; toggle.setAttribute("aria-expanded", String(!value));
+            toggle.setAttribute("aria-label", value ? "Show annotation controls" : "Minimize annotation controls"); toggle.title = toggle.getAttribute("aria-label");
+            if (remember) try { sessionStorage.setItem("tator.hosted.panelMinimized", value ? "1" : "0"); } catch (_) { /* Per-tab convenience only. */ }
+            window.dispatchEvent(new Event("resize"));
+        };
+        toggle.onclick = () => minimize(!content.hidden);
+        let startMinimized = false;
+        try { startMinimized = sessionStorage.getItem("tator.hosted.panelMinimized") === "1"; } catch (_) { /* Default to expanded. */ }
         const trancheInstructions = node("p"); trancheInstructions.id = "hostedTrancheInstructions"; trancheInstructions.style.whiteSpace = "pre-wrap"; content.append(trancheInstructions);
         const notes = node("div"); notes.id = "hostedReviewNotes"; content.append(notes);
         const bar = node("div"); bar.className = "hosted-canvas-bar"; content.append(bar);
@@ -725,11 +843,43 @@
         addButton(form, "hostedSendClass", "Send request", async () => { if (!form.reportValidity()) return; await api(`/api/hosted/datasets/${dataset.id}/class-requests`, { name: name.value, reason: reason.value, operation_id: uuid() }); dialog.close(); status("Class request sent. Existing classes remain available."); });
         addButton(form, "hostedCancelClass", "Cancel", () => dialog.close()); form.onsubmit = (e) => e.preventDefault(); dialog.append(form);
         content.append(feedbackPanel); panel.append(header, title, statusPanel, content);
-        document.body.append(panel, dialog);
+        const narrow = node("div"); narrow.className = "hosted-narrow-notice"; narrow.setAttribute("role", "note");
+        narrow.append(node("strong", "Annotation needs a larger screen"), node("p", "Open this image on a computer or a tablet at least 768 pixels wide. Your saved work is kept."));
+        addButton(narrow, "hostedNarrowBack", "← Back to the workspace", () => $("hostedBack").click());
+        document.body.append(panel, dialog, narrow);
+        minimize(startMinimized, false);
         updateTranche(tranche);
-        if ((queue?.scope || originScope)?.tranche_id) back.textContent = "← Back to tranche";
         window.dispatchEvent(new Event("tator:hosted-canvas"));
+        trackAdminNavHeight();
         update();
+    }
+    function trackAdminNavHeight() {
+        // Lay the canvas out under the administrator navigation strip.
+        const nav = $("hostedAdminNav"), root = document.documentElement;
+        const sync = () => { root.style.setProperty("--hosted-nav-height", `${nav && !nav.hidden ? nav.getBoundingClientRect().height : 0}px`); window.dispatchEvent(new Event("resize")); };
+        sync();
+        if (nav && window.ResizeObserver) new ResizeObserver(sync).observe(nav);
+    }
+    function stateText(value = record) {
+        const row = queue?.row(value.id);
+        if (value.state === "confirmed") return "Confirmed";
+        if (value.state === "submitted") return "Waiting for review";
+        if (value.state === "returned") return value.assignee_id && value.assignee_id !== boot.user.user_id && row?.assignee_name ? `Returned for changes to ${row.assignee_name}` : "Returned for changes";
+        if (value.state === "assigned") {
+            if (value.assignee_id === boot.user.user_id || boot.user.role !== "admin") return "Assigned to you";
+            return row?.assignee_name ? `Assigned to ${row.assignee_name}` : "Assigned to an annotator";
+        }
+        return value.tranche_id || row?.tranche_id ? "Not assigned" : "Incoming";
+    }
+    function backLabel() {
+        const scope = queue?.scope || originScope;
+        if (boot.user.role !== "admin") return scope?.tranche_id ? "← Back to tranche" : "← Workspace";
+        const view = pageContext.view || (scope?.tranche_id ? "tranches" : {unallocated: "incoming", incoming: "incoming", confirmed: "confirmed", review: "submitted"}[scope?.queue]);
+        if (view === "incoming") return "← Back to Incoming";
+        if (view === "confirmed") return "← Back to Confirmed";
+        if (view === "submitted" || view === "review") return "← Back to review";
+        if (view === "tranches") return scope?.tranche_id ? "← Back to tranche" : "← Back to tranches";
+        return "← Admin workspace";
     }
     async function start() {
         try {
@@ -769,7 +919,7 @@
                 addButton($("hostedSaveState").parentElement, "hostedResolve", "Recover my draft", async () => {
                     let receipt = recovery.pending ? await commandReceipt(recovery.pending) : null;
                     if (receipt && !recovery.pending.path.endsWith("/save")) { clearJournal(); location.assign(scopeBackUrl(recovery.scope || originScope)); return; }
-                    let rejectedByLease = false;
+                    let rejectedByLease = false, refusedHandoff = null;
                     if (recovery.pending && !receipt) {
                         // A missing receipt alone does not resolve a lost reply.
                         // Replay the original command before considering a new
@@ -779,7 +929,12 @@
                         catch (error) {
                             const certified = error.status === 422 && error.commit_outcome === "rejected" && error.operation_id === original.body.operation_id;
                             rejectedByLease = [409, 423].includes(error.status) && ["editor_lease_expired", "editor_lease_conflict", "ownership_changed", "annotation_version_changed"].includes(error.code);
-                            if (!certified && !rejectedByLease) throw error;
+                            // A refused submit/approve/return never committed once its
+                            // receipt is still absent: restore the draft for correction
+                            // instead of replaying the same refusal forever.
+                            if (!certified && !rejectedByLease && !original.path.endsWith("/save") && definitiveRefusal(error)
+                                && await commandReceipt(original).then(value => value === null, () => false)) refusedHandoff = error;
+                            if (!certified && !rejectedByLease && !refusedHandoff) throw error;
                         }
                     }
                     if (receipt && recovery.pending && !recovery.pending.path.endsWith("/save")) { clearJournal(); location.assign(scopeBackUrl(recovery.scope || originScope)); return; }
@@ -817,6 +972,7 @@
                     // not the old recovery journal, as their source of truth.
                     recoveryRequired = false; $("hostedResolve").remove();
                     pending = null; await save({ manual: true });
+                    if (refusedHandoff) status(`Your draft is restored. ${refusedHandoff.message}`, true);
                 });
             } else if (editable) status("Connected · edits save automatically");
             else if (scopeLeft) status("This image left the previous queue. Open its current work queue to continue.", true);
@@ -929,6 +1085,14 @@
                 "Caption saved · earlier captions preserved", "tator:caption-applied", "hostedCaptionRetry");
         },
         setToolsState(value) { toolState = value; },
+        objectAdded() {
+            // Drawing on an image marked empty means it is no longer empty.
+            const negative = $("hostedNegative");
+            if (!negative?.checked || !ready || !editable) return;
+            negative.checked = false;
+            status("“No objects to label” was cleared because this image now has a box.");
+        },
+        notice(text, error = false) { status(text, error); },
         get samConfigured() { return Boolean(toolState?.capabilities?.sam_point?.configured); },
         get sam3PromptUnavailable() {
             const capability = toolState?.capabilities?.sam3_text;

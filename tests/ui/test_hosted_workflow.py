@@ -620,6 +620,68 @@ async def _three_users(origin):
         await browser.close()
 
 
+def test_refused_handoff_reopens_editing_and_recovery_does_not_replay_it(hosted_origin):
+    asyncio.run(_refused_handoff(hosted_origin))
+
+
+async def _refused_handoff(origin):
+    """A submit the server refuses must not strand the image mid-handoff."""
+    from playwright.async_api import async_playwright, expect
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page(viewport={'width': 1440, 'height': 1000})
+        errors = []; page.on('pageerror', lambda error: errors.append(str(error)))
+        page.on('dialog', lambda dialog: dialog.accept())
+        journal = "JSON.parse(sessionStorage.getItem(Object.keys(sessionStorage).find(k => k.startsWith('tator.hosted.draft:'))) || 'null')"
+        await sign_in(page, origin, 'alice'); await open_first_image(page)
+        await expect(page.locator('#hostedSave')).to_be_enabled()
+        # Saved as checked but empty: the real server refuses to submit this version.
+        await page.locator('#hostedComplete').check()
+        await page.get_by_role('button', name='Save now', exact=True).click()
+        await expect(page.locator('#hostedSaveState')).to_have_text('All changes saved')
+        record = await page.evaluate("window.TatorHosted.api('/api/hosted/images/' + window.TatorHosted.imageId)")
+        # A tab closed while its submit was in flight keeps the command and its lease.
+        await page.route('**/release', lambda route: route.abort())
+        await page.evaluate("""record => {
+            const key = `tator.hosted.draft:${window.TatorHosted.instanceId}:${window.TatorHostedBoot.user.user_id}:${window.TatorHosted.imageId}`;
+            const latest = {annotations: window.TatorHostedCanvas.snapshot(), complete: true, negative: false};
+            const pending = {path: `/api/hosted/images/${window.TatorHosted.imageId}/submit`, body: {expected_version: record.current_version,
+                generation: record.generation, editor_id: window.TatorHosted.editorId, operation_id: crypto.randomUUID()}};
+            window.addEventListener('pagehide', () => sessionStorage.setItem(key, JSON.stringify({schema: 2, scope: window.TatorHosted.queueScope, state: 'pending', pending, latest})));
+        }""", record)
+        await page.reload()
+        await page.locator('#hostedResolve').click()
+        # The replay is refused (empty and not marked empty): restore, never loop.
+        await expect(page.locator('#hostedSaveState')).to_contain_text('Your draft is restored')
+        await expect(page.locator('#hostedSaveState')).to_contain_text('No objects to label')
+        await expect(page.locator('#hostedResolve')).to_have_count(0)
+        await expect(page.locator('#hostedSubmit')).to_be_enabled()
+        assert not (await page.evaluate(journal) or {}).get('pending')
+        await page.unroute('**/release')
+        # The same mistake is now caught before anything is sent.
+        sent = []
+        async def refuse(route):
+            sent.append(route.request.post_data_json)
+            await route.fulfill(status=409, json={'error': 'empty_annotation_requires_negative_review', 'detail': None})
+        await page.route('**/submit', refuse)
+        await page.locator('#hostedSubmit').click()
+        await expect(page.locator('#hostedSaveState')).to_contain_text('This image has no boxes')
+        assert not sent
+        # A refusal the canvas did not foresee ends the handoff and keeps editing open.
+        await page.locator('#hostedNegative').check()
+        await page.locator('#hostedSubmit').click()
+        await expect(page.locator('#hostedSaveState')).to_contain_text('This image has no boxes')
+        assert len(sent) == 1
+        await expect(page.locator('#hostedSubmit')).to_be_enabled()
+        await expect(page.locator('#hostedHandoffRetry')).to_have_count(0)
+        assert 'recovery=' not in page.url and not (await page.evaluate(journal) or {}).get('pending')
+        await page.unroute('**/submit')
+        await page.locator('#hostedSubmit').click()
+        await expect(page).to_have_url(re.compile(re.escape(origin) + r'/(?:\?.*)?$'))
+        assert not errors
+        await browser.close()
+
+
 def test_new_edits_survive_old_reply_and_lost_submission_reply(hosted_origin):
     asyncio.run(_network_ordering(hosted_origin))
 

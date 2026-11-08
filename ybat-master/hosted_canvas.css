@@ -1,8 +1,33 @@
 .hosted-canvas .tab-bar,.hosted-canvas #imagesSelect,.hosted-canvas label[for=images],.hosted-canvas #cropImages,.hosted-canvas #classesSelect,.hosted-canvas #saveBboxes,.hosted-canvas #annotationTakeoverBtn,.hosted-canvas #annotationReloadBtn,.hosted-canvas #annotationCloseBtn{display:none!important}
 .hosted-canvas [data-tab-panel]:not([data-tab-panel=labeling]){display:none!important}
 .hosted-canvas #annotationSourcePanel{display:none!important}
-.hosted-canvas-panel{position:fixed;right:max(16px,env(safe-area-inset-right));bottom:max(16px,env(safe-area-inset-bottom));z-index:1040;width:348px;max-width:calc(100vw - 32px);max-height:calc(100dvh - 32px);box-sizing:border-box;display:flex;flex-direction:column;gap:10px;padding:12px;border:1px solid var(--border-color,#738299);border-radius:12px;background:var(--panel-bg,#142331);color:var(--text-color,#f1f5f9);box-shadow:0 8px 32px #0005;font:13px/1.4 system-ui}
+/* The page fits the viewport under the optional admin navigation. The canvas
+   fills its container, which ends where the expanded panel's strip begins on
+   wide screens; the canvas code sizes itself from that container. */
+html:has(body.hosted-canvas){height:100%;overflow:hidden}
+body.hosted-canvas{display:flex;flex-direction:column;height:100vh;height:100dvh;overflow:hidden}
+.hosted-canvas .tab-shell{flex:1 1 auto;min-height:0;height:auto}
+.hosted-canvas #tabLabeling .right{position:absolute;inset:10px 10px 10px calc(24% + 10px);margin:0;padding:0;overflow:hidden}
+.hosted-canvas #canvas{display:block;width:100%;height:100%}
+@media(min-width:1360px){.hosted-canvas:not(.hosted-panel-minimized) #tabLabeling .right{right:calc(348px + 26px)}}
+.hosted-canvas-panel{position:fixed;right:max(16px,env(safe-area-inset-right));bottom:max(16px,env(safe-area-inset-bottom));z-index:1040;width:348px;max-width:calc(100vw - 32px);max-height:calc(100dvh - 32px - var(--hosted-nav-height,0px));box-sizing:border-box;display:flex;flex-direction:column;gap:10px;padding:12px;border:1px solid var(--border-color,#738299);border-radius:12px;background:var(--panel-bg,#142331);color:var(--text-color,#f1f5f9);box-shadow:0 8px 32px #0005;font:13px/1.4 system-ui}
+/* Minimized: a small pill with the save state and the expand button. */
+.hosted-canvas-panel.is-minimized{width:auto;max-width:min(320px,calc(100vw - 32px));flex-direction:row-reverse;align-items:center;gap:8px;padding:5px 6px 5px 12px;border-radius:999px}
+.hosted-canvas-panel.is-minimized :is(.hosted-canvas-title,#hostedBack,#themeToggleButton){display:none!important}
+.hosted-canvas-panel.is-minimized .hosted-canvas-status{display:block;min-width:0;flex:1 1 auto;overflow:hidden}
+.hosted-canvas-panel.is-minimized .hosted-canvas-status>:not(#hostedSaveState){display:none}
+.hosted-canvas-panel.is-minimized #hostedSaveState{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.hosted-canvas-panel.is-minimized #hostedPanelToggle{width:28px;height:28px;font-size:18px;border-radius:999px}
+/* Annotation is not offered on phones; tablets from 768 px keep the canvas. */
+.hosted-narrow-notice{display:none}
+@media(max-width:767px){
+  .hosted-narrow-notice{position:fixed;inset:0;z-index:1060;display:flex;flex-direction:column;justify-content:center;gap:12px;padding:24px;background:var(--panel-bg,#142331);color:var(--text-color,#f1f5f9);font:16px/1.5 system-ui}
+  .hosted-narrow-notice strong{font-size:20px}.hosted-narrow-notice p{margin:0}
+  .hosted-narrow-notice button{align-self:flex-start;padding:10px 14px;border:1px solid #788d9f;border-radius:8px;background:#eef6fc;color:#182c3d;font:inherit;cursor:pointer}
+  .hosted-canvas-panel,.hosted-canvas #hostedAdminNav{display:none!important}
+}
 .hosted-canvas-panel [hidden]{display:none!important}
+.hosted-canvas-panel{user-select:none}.hosted-canvas-panel :is(textarea,input,#hostedTrancheInstructions,.hosted-review-note,#hostedSaveState){user-select:text}
 .hosted-canvas-panel button{border:1px solid #788d9f;border-radius:6px;background:#eef6fc;color:#182c3d;padding:7px 10px;cursor:pointer;font:inherit;white-space:normal}
 .hosted-canvas-panel button:disabled{opacity:.45;cursor:default}
 .hosted-canvas-panel button:focus-visible{outline:2px solid #48b8ec;outline-offset:2px}
@@ -30,6 +55,8 @@
 #hostedToolsDialog section{border-top:1px solid #788d9f;padding:12px 0}#hostedToolsDialog label{display:grid;gap:5px;margin:8px 0}#hostedToolsDialog select{max-width:100%;padding:7px}#hostedToolsDialog button{padding:7px 12px;border:1px solid #788d9f;border-radius:6px;cursor:pointer}#hostedToolsState{font:12px/1.4 system-ui;max-width:360px}#hostedToolsDialog [role=alert]{color:#d64c36}
 .hosted-model-mapping{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px}
 
+.hosted-canvas .hosted-tool-unavailable{display:none!important}
+.hosted-canvas .hosted-tool-reason{margin:6px 0 10px;font-style:italic}
 .hosted-canvas .active-fallback{display:none!important}
 .hosted-canvas :is(#hostedCaptionDialog,#hostedPaidBatchDialog){width:min(1000px,calc(100% - 32px));max-height:85vh;overflow:auto;border:1px solid var(--border-color,#788d9f);border-radius:12px;padding:24px;background:var(--panel-bg,#fff);color:var(--text-color,#182c3d);font:14px/1.5 system-ui}
 :is(#hostedCaptionDialog,#hostedPaidBatchDialog)>section{border-top:1px solid var(--border-color,#788d9f);padding:16px 0}
@@ -53,3 +80,5 @@ html.theme-pipboy .hosted-canvas-panel button:hover{background:var(--pip-control
 html.theme-pipboy .hosted-canvas :is(#hostedSubmit,#hostedApprove){background:color-mix(in srgb,var(--pip-green) 22%,transparent);border-color:var(--pip-border-strong);color:var(--pip-green-strong)}
 html.theme-pipboy .hosted-review-note{background:var(--pip-panel-3);color:var(--pip-amber)}
 html.theme-pipboy :is(.hosted-canvas-bar,.hosted-canvas-feedback){border-top-color:var(--pip-border)}
+html.theme-pipboy .hosted-narrow-notice{background:var(--pip-panel);color:var(--pip-green);font-family:var(--pip-font)}
+html.theme-pipboy .hosted-narrow-notice button{background:var(--pip-control-bg);border-color:var(--pip-border);color:var(--pip-green)}

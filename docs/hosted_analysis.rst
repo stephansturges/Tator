@@ -244,6 +244,21 @@ Qwen conversion restores explicit negative images omitted by the legacy
 converter, and checks the resulting membership. SAM3's generated configuration
 and child working directory use a private copy of the training source tree.
 
+The split rule lives in ``utils/run_split.py`` and the legacy workbench trainers
+use it too. A workbench dataset without validation images, such as a hosted
+copy, which is one pool under ``train/``, gets validation images chosen for
+each YOLO, YOLO head-graft, RF-DETR, SAM3 or Qwen run. The rule reads capture
+groups from the copy's per-image annotation files; with none, each image is its
+own group. The run's lists live in its own directory (``run_split_train.txt``
+and ``run_split_val.txt`` for YOLO, ``dataset/`` for RF-DETR, the job's split
+directory for SAM3 and Qwen). The training log says how many images went to
+training and to validation, and the run's configuration or split metadata keeps
+the ``run_split`` record. Dataset files are not changed. Datasets that have
+validation images keep them. SAM3's and Qwen's **Random split** option keeps
+its own split. The class predictor holds out its own share of images, so it is
+unchanged. If the pool is a single capture group, nothing can be held out, and
+the log says so.
+
 The child waits for native job finalization. After it exits, the parent seals
 SQLite WAL state and hashes the final output files. A small hashed receipt
 crosses IPC. ``publish_native_result`` validates it, retains all

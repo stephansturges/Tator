@@ -16733,6 +16733,12 @@ CLASS_ANALYSIS_REFINEMENT_V33_FREQUENT_OVERLAP_FIT_ELIGIBILITY_CONTRACT = (
     "exclude-stage1-rough-labels-both-directed-roles-v1"
 )
 from utils.capture_metadata import CAPTURE_METADATA_FIELDS, portable_capture_metadata
+from utils.run_split import (
+    capture_identities as _run_split_capture_identities,
+    describe_run_split,
+    sidecar_capture_groups as _run_split_sidecar_capture_groups,
+    split_unsplit_pool as _run_split_unsplit_pool,
+)
 
 CLASS_ANALYSIS_CAPTURE_METADATA_FIELDS = CAPTURE_METADATA_FIELDS
 
@@ -101656,6 +101662,16 @@ def _materialize_yolo_training_annotation_view(
     }
 
 
+def _record_training_run_split(
+    config: Dict[str, Any],
+    summary: Dict[str, Any],
+    log_fn: Callable[[str], None],
+) -> None:
+    """Keep the validation split a run chose (utils/run_split.py) in its config and log."""
+    config["run_split"] = dict(summary)
+    log_fn(describe_run_split(summary))
+
+
 def _resolve_yolo_training_dataset(payload) -> Dict[str, Any]:
     dataset_info = _yolo_training_dataset_base_resolver(payload)
     dataset_id = str(getattr(payload, "dataset_id", None) or "").strip()
@@ -101730,6 +101746,8 @@ def _resolve_rfdetr_training_dataset(payload) -> Dict[str, Any]:
                 "coco_val_json": coco_val,
                 "type": dataset_type,
                 "source": "annotation_overlay",
+                # Capture metadata (hosted annotation sidecars) stays in the source.
+                "source_dataset_root": meta.get("source_dataset_root"),
             }
     return _rfdetr_training_dataset_base_resolver(payload)
 
@@ -104912,7 +104930,15 @@ def _prepare_qwen_training_split(
     val_percent: float,
     split_seed: int,
     log_messages: Optional[List[str]] = None,
+    run_split_key: Optional[str] = None,
 ) -> Path:
+    """Write a job-private train/val split of a Qwen dataset.
+
+    By default the train and val entries are pooled and split at random
+    (random_split). With run_split_key, the dataset's own split is kept unless it
+    has no validation entries; then validation images are chosen for this run by
+    the shared grouped rule (utils/run_split.py). The dataset is never changed.
+    """
     dataset_root = dataset_root.resolve()
 
     def _annotation_entries(split_name: str) -> List[Tuple[Dict[str, Any], Path]]:
@@ -104940,19 +104966,50 @@ def _prepare_qwen_training_split(
                 entries.append((payload, source))
         return entries
 
-    entries = _annotation_entries("train") + _annotation_entries("val")
-    if len(entries) < 2:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_training_split_empty")
-    rnd = random.Random(int(split_seed))
-    rnd.shuffle(entries)
+    run_split: Optional[Dict[str, Any]] = None
     vp = max(0.0, min(float(val_percent), 0.9))
-    val_count = int(len(entries) * vp)
-    if val_count <= 0:
-        val_count = 1
-    if val_count >= len(entries):
-        val_count = len(entries) - 1
-    val_entries = entries[:val_count]
-    train_entries = entries[val_count:]
+    if run_split_key is not None:
+        if _annotation_entries("val"):
+            return dataset_root
+        entries = _annotation_entries("train")
+        annotation_dirs = [dataset_root / "train" / "annotations"]
+        chosen = _run_split_unsplit_pool(
+            [
+                {
+                    "id": Path(str(payload.get("image"))).stem,
+                    "groups": _run_split_capture_identities(payload)
+                    or _run_split_capture_identities(payload.get("capture_metadata") or {})
+                    or _run_split_sidecar_capture_groups(annotation_dirs, Path(str(payload.get("image"))).stem),
+                    "classes": {
+                        str(det.get("label"))
+                        for det in (payload.get("detections") or [])
+                        if isinstance(det, dict)
+                    },
+                }
+                for payload, _source in entries
+            ],
+            run_split_key,
+        )
+        if chosen is None or not any(chosen[0]):
+            if chosen is not None and log_messages is not None:
+                log_messages.append(describe_run_split(chosen[1]))
+            return dataset_root
+        held, run_split = chosen
+        val_entries = [entry for entry, is_val in zip(entries, held) if is_val]
+        train_entries = [entry for entry, is_val in zip(entries, held) if not is_val]
+    else:
+        entries = _annotation_entries("train") + _annotation_entries("val")
+        if len(entries) < 2:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_training_split_empty")
+        rnd = random.Random(int(split_seed))
+        rnd.shuffle(entries)
+        val_count = int(len(entries) * vp)
+        if val_count <= 0:
+            val_count = 1
+        if val_count >= len(entries):
+            val_count = len(entries) - 1
+        val_entries = entries[:val_count]
+        train_entries = entries[val_count:]
     if not train_entries or not val_entries:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_training_split_empty")
 
@@ -104996,19 +105053,25 @@ def _prepare_qwen_training_split(
         "train_count": train_count,
         "val_count": val_count_written,
         "image_count": train_count + val_count_written,
-        "random_split": True,
+        "random_split": run_split is None,
         "split_seed": int(split_seed),
         "val_percent": float(vp),
         "signature": _compute_dir_signature_impl(split_root),
         "type": source_meta.get("type") or "bbox",
     }
+    if run_split is not None:
+        meta["run_split"] = run_split
+        meta.pop("split_seed", None)
+        meta.pop("val_percent", None)
     _qwen_training_write_text_within_root(
         split_root / QWEN_METADATA_FILENAME,
         split_root,
         json.dumps(meta, ensure_ascii=False, indent=2),
     )
     summary = (
-        f"Qwen split: {train_count} train / {val_count_written} val "
+        f"Qwen {describe_run_split(run_split)} (src={dataset_root}) -> {split_root}"
+        if run_split is not None
+        else f"Qwen split: {train_count} train / {val_count_written} val "
         f"(seed={int(split_seed)}, val_percent={vp:.2f}, src={dataset_root}) -> {split_root}"
     )
     logger.info(summary)
@@ -105132,6 +105195,17 @@ def _build_qwen_config(
             val_percent=_qwen_train_float(payload.val_percent, 0.2, minimum=0.0, maximum=0.9),
             split_seed=_qwen_train_int(payload.split_seed, 42, minimum=0, maximum=2**32 - 1),
             log_messages=prep_logs,
+        )
+    else:
+        # The dataset's split is kept; without validation entries the run holds
+        # out validation images by the shared grouped rule (job-private copy).
+        dataset_root = _prepare_qwen_training_split(
+            dataset_root,
+            job_id,
+            val_percent=0.0,
+            split_seed=0,
+            log_messages=prep_logs,
+            run_split_key=str(payload.dataset_id or dataset_root.name).strip(),
         )
     train_jsonl = _qwen_training_annotation_path(dataset_root, "train")
     val_jsonl = _qwen_training_annotation_path(dataset_root, "val")
@@ -108683,10 +108757,20 @@ def _prepare_sam3_training_split(
     val_limit: Optional[int] = None,
     log_messages: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    if not random_split:
-        return meta
     coco_train_path = Path(meta.get("coco_train_json", ""))
     coco_val_path = Path(meta.get("coco_val_json", ""))
+    if not random_split:
+        # Keep the dataset's own split; only a dataset without validation images
+        # gets validation images chosen for this run (utils/run_split.py).
+        try:
+            with coco_val_path.open("r", encoding="utf-8") as handle:
+                if (json.load(handle) or {}).get("images"):
+                    return meta
+            with coco_train_path.open("r", encoding="utf-8") as handle:
+                if len((json.load(handle) or {}).get("images") or []) < 2:
+                    return meta
+        except Exception:  # noqa: BLE001
+            return meta
     if not coco_train_path.exists() or not coco_val_path.exists():
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_coco_split_missing")
     try:
@@ -108704,6 +108788,8 @@ def _prepare_sam3_training_split(
             {"id": idx + 1, "name": name} for idx, name in enumerate(meta.get("classes", []))
         ]
     if not categories:
+        if not random_split:
+            return meta
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_categories_missing")
     images: Dict[int, Dict[str, Any]] = {}
     ann_by_image: Dict[int, List[Dict[str, Any]]] = {}
@@ -108722,22 +108808,53 @@ def _prepare_sam3_training_split(
             ann_by_image.setdefault(img_id, []).append(ann)
     image_ids = list(images.keys())
     if not image_ids:
+        if not random_split:
+            return meta
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_training_no_images")
-    rnd = random.Random(split_seed)
-    rnd.shuffle(image_ids)
-    total = len(image_ids)
+    run_split: Optional[Dict[str, Any]] = None
     vp = max(0.0, min(float(val_percent), 0.9))
-    val_count = int(total * vp)
-    if val_count <= 0 and total > 1:
-        val_count = 1
-    if val_limit is not None and val_limit > 0:
-        val_count = min(
-            val_limit, val_count if val_count > 0 else val_limit, total - 1 if total > 1 else total
+    if not random_split:
+        annotation_dirs = [
+            Path(root) / "train" / "annotations"
+            for root in (dataset_root, meta.get("source_dataset_root"))
+            if root
+        ]
+        chosen = _run_split_unsplit_pool(
+            [
+                {
+                    "id": Path(images[img_id]["file_name"]).stem,
+                    "groups": _run_split_capture_identities(images[img_id])
+                    or _run_split_sidecar_capture_groups(
+                        annotation_dirs, Path(images[img_id]["file_name"]).stem
+                    ),
+                    "classes": {ann.get("category_id") for ann in ann_by_image.get(img_id, [])},
+                }
+                for img_id in image_ids
+            ],
+            str(meta.get("id") or dataset_root.name),
         )
-    val_ids = image_ids[:val_count]
-    train_ids = image_ids[val_count:]
-    if train_limit is not None and train_limit > 0:
-        train_ids = train_ids[:train_limit]
+        if chosen is None or not any(chosen[0]):
+            if chosen is not None and log_messages is not None:
+                log_messages.append(describe_run_split(chosen[1]))
+            return meta
+        held, run_split = chosen
+        val_ids = [img_id for img_id, is_val in zip(image_ids, held) if is_val]
+        train_ids = [img_id for img_id, is_val in zip(image_ids, held) if not is_val]
+    else:
+        rnd = random.Random(split_seed)
+        rnd.shuffle(image_ids)
+        total = len(image_ids)
+        val_count = int(total * vp)
+        if val_count <= 0 and total > 1:
+            val_count = 1
+        if val_limit is not None and val_limit > 0:
+            val_count = min(
+                val_limit, val_count if val_count > 0 else val_limit, total - 1 if total > 1 else total
+            )
+        val_ids = image_ids[:val_count]
+        train_ids = image_ids[val_count:]
+        if train_limit is not None and train_limit > 0:
+            train_ids = train_ids[:train_limit]
     if not train_ids or not val_ids:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_training_split_empty")
     split_root = _sam3_training_split_root(job_id)
@@ -108815,6 +108932,8 @@ def _prepare_sam3_training_split(
         "signature": _compute_dir_signature_impl(split_root),
         "source": meta.get("source", "resplit"),
     }
+    if run_split is not None:
+        new_meta["run_split"] = run_split
     _persist_sam3_dataset_metadata_impl(
         split_root,
         new_meta,
@@ -108822,7 +108941,9 @@ def _prepare_sam3_training_split(
         logger=logger,
     )
     summary = (
-        f"SAM3 split: {train_count} train / {val_count} val "
+        f"SAM3 {describe_run_split(run_split)} (src={dataset_root}) -> {split_root}"
+        if run_split is not None
+        else f"SAM3 split: {train_count} train / {val_count} val "
         f"(seed={split_seed}, val_percent={vp:.2f}, src={dataset_root}) -> {split_root}"
     )
     logger.info(summary)
@@ -109924,6 +110045,11 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
             yolo_load_labelmap_fn=_yolo_load_labelmap_impl,
             yaml_dump_fn=lambda data: yaml.safe_dump(data, sort_keys=False),
             copy_file_fn=_copy2_if_different,
+            run_split_key=str(dataset_info.get("dataset_id") or dataset_root.name),
+            metadata_roots=[dataset_info.get("dataset_root")],
+            on_run_split=lambda summary: _record_training_run_split(
+                config, summary, lambda line: _yolo_job_log(job, line)
+            ),
         )
         from_scratch = bool(config.get("from_scratch"))
         base_weights = config.get("base_weights")
@@ -110351,15 +110477,21 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
                     "dataset_id": config.get("dataset_id"),
                 },
             )
+            graft_dataset_root = Path(dataset_info.get("prepared_root") or dataset_info.get("dataset_root") or "")
             data_yaml = _yolo_write_data_yaml_impl(
                 run_dir,
-                Path(dataset_info.get("prepared_root") or dataset_info.get("dataset_root") or ""),
+                graft_dataset_root,
                 dataset_info.get("yolo_layout"),
                 dataset_info.get("yolo_labelmap_path"),
                 resolve_split_paths_fn=_yolo_resolve_split_paths_impl,
                 yolo_load_labelmap_fn=_yolo_load_labelmap_impl,
                 yaml_dump_fn=lambda data: yaml.safe_dump(data, sort_keys=False),
                 copy_file_fn=_copy2_if_different,
+                run_split_key=str(dataset_info.get("dataset_id") or graft_dataset_root.name),
+                metadata_roots=[dataset_info.get("dataset_root")],
+                on_run_split=lambda summary: _record_training_run_split(
+                    config, summary, lambda line: _yolo_head_graft_job_log(job, line)
+                ),
             )
             variant_base_yaml_fn = lambda variant, task, run_dir=None: _yolo_variant_base_yaml_impl(
                 variant,
@@ -110741,6 +110873,11 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                 coco_train,
                 coco_val,
                 remap_ids_fn=_rfdetr_remap_coco_ids_impl,
+                run_split_key=str(dataset_info.get("dataset_id") or dataset_root.name),
+                metadata_roots=[dataset_info.get("source_dataset_root")],
+                on_run_split=lambda summary: _record_training_run_split(
+                    config, summary, lambda line: _rfdetr_job_log(job, line)
+                ),
             )
             _rfdetr_job_log(job, f"RF-DETR dataset prepared at {prepared_root}")
             total_epochs = max(1, int(config.get("epochs") or 100))

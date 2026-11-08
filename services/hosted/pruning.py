@@ -33,12 +33,13 @@ from .store import _json
 from .pruning_components import RetainedComponents, recover_retained_components
 
 
-# Native methods that only read a saved review. They stay available when the
-# review describes an earlier confirmed version of the dataset; every other
-# method (review changes, plan previews, calibration, export) is refused then.
+# Native methods that only read a saved review or an already-prepared (frozen)
+# variant. They stay available when the review describes an earlier confirmed
+# version of the dataset; every other method (review changes, plan previews,
+# calibration, adding a pair, preparing a new variant) is refused then.
 READ_METHODS = frozenset({"status", "result", "review", "review_snapshot", "families", "family_members",
                           "comparison", "recipe_lab", "recipe_lab_compare", "crop", "thumbnail",
-                          "settings_preview_status", "export_status"})
+                          "settings_preview_status", "export_status", "download"})
 # The hosted job whose read is being served in this request context.
 _INSPECTING = ContextVar("hosted_pruning_inspecting", default=None)
 
@@ -400,8 +401,24 @@ class HostedPruning:
         finally:
             if token is not None:
                 _INSPECTING.reset(token)
-        earlier = service.adapter.earlier_version() if token is not None and isinstance(value, dict) else None
-        if earlier:
+        if method == "download" and callable(getattr(value, "validate", None)):
+            # The response revalidates while it streams, after this call ends;
+            # that check is still a read of the prepared variant.
+            check = value.validate
+            def validate():
+                inner = _INSPECTING.set(job_id)
+                try:
+                    check()
+                finally:
+                    _INSPECTING.reset(inner)
+            value.validate = validate
+        marked = token is not None and (isinstance(value, dict) or method == "download")
+        earlier = service.adapter.earlier_version() if marked else None
+        if earlier and isinstance(value, dict):
             # Mark every read of an earlier version, with both revisions.
             value = {**value, "earlier_version": True, **earlier, "earlier_version_notice": stale_message(earlier)}
+        elif earlier and method == "download":
+            value.headers.update({"X-Tator-Earlier-Version": "true",
+                                  "X-Tator-Analysis-Revision": str(earlier["analysis_revision"]),
+                                  "X-Tator-Current-Revision": str(earlier["current_revision"])})
         return value

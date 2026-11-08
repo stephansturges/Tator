@@ -204,12 +204,14 @@ changes afterwards, read routes (job status, result, review snapshot,
 selection, families, family members, comparisons, recipe-lab metadata and
 comparisons, crops, thumbnails, preview and export status) keep working and
 add ``earlier_version: true``, ``analysis_revision``, ``current_revision`` and
-``earlier_version_notice`` to their JSON. Opening such a review for the first
-time does not save its default removal ceiling. Routes that change the review,
-start a settings preview, calibrate, add a recipe-lab pair, prepare an export
-or download a variant are refused with HTTP 409 and a message to run a new
-pruning analysis on the current dataset. Cancelling a running preview stays
-possible.
+``earlier_version_notice`` to their JSON. An already-prepared variant is a
+frozen file: its status stays readable and its download stays available, with
+the ``X-Tator-Earlier-Version``, ``X-Tator-Analysis-Revision`` and
+``X-Tator-Current-Revision`` response headers. Opening such a review for the
+first time does not save its default removal ceiling. Routes that change the
+review, start a settings preview, calibrate, add a recipe-lab pair or prepare a
+new variant are refused with HTTP 409 and a message to run a new pruning
+analysis on the current dataset. Cancelling a running preview stays possible.
 
 Settings previews use ``kind=settings`` and the five fields in ``PlanSettings``:
 ``policy``, ``object_weight``, ``max_removed_images``,

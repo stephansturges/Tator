@@ -740,6 +740,22 @@ def test_hosted_pruning_reuses_actual_planner_ledger_and_retained_export(setup, 
     import zipfile
     with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
         assert len([name for name in archive.namelist() if '/images/' in name]) == 1
+    # After any confirmed change the review stays readable, marked with both
+    # revisions. An already-prepared variant is a frozen file: its status and
+    # download stay available; preparing a new variant is refused.
+    confirmed = setup[5][0]
+    editor = store.acquire_editor(actor, confirmed['id'], 'tab')
+    store.save(actor, ctx(editor, 'stale-pruning-edit'), editor['annotations'], complete=True)
+    assert analysis.status(actor, captured['job_id'])['stale']
+    prepared = ok(client.get(base + '/exports/' + export['export_id']))
+    assert prepared['status'] == 'completed' and prepared['earlier_version']
+    assert prepared['analysis_revision'] == captured['dataset_revision']
+    frozen = client.get(base + '/exports/' + export['export_id'] + '/download')
+    assert frozen.status_code == 200 and frozen.content == download.content
+    assert frozen.headers['x-tator-analysis-revision'] == str(captured['dataset_revision'])
+    refused = client.post(base + '/exports', json={'request_id': uuid.uuid4().hex, 'selection_revision': 1, 'removed_count': 1,
+        'plan_revision': state['plan_revision'], 'expected_review_revision': state['review_revision']})
+    assert refused.status_code == 409 and 'Run a new pruning analysis' in refused.text
     # Whole recovery closure reconstructs the review without native outputs.
     facade = app.state.hosted_pruning
     for service in facade.services.values():
@@ -751,13 +767,9 @@ def test_hosted_pruning_reuses_actual_planner_ledger_and_retained_export(setup, 
     assert restored['review_revision'] > state['review_revision']
     # The original confirmed population is untouched by variant export/recovery.
     assert store.get_snapshot(actor, captured['snapshot_id'])['manifest']['images']
-    # After any confirmed change the review stays readable, marked with both
-    # revisions; changing or exporting its plan is refused with a clear reason.
+    # The restored review of the earlier version stays readable too; changing
+    # or exporting its plan is refused with a clear reason.
     from fastapi import HTTPException
-    confirmed = setup[5][0]
-    editor = store.acquire_editor(actor, confirmed['id'], 'tab')
-    store.save(actor, ctx(editor, 'stale-pruning-edit'), editor['annotations'], complete=True)
-    assert analysis.status(actor, captured['job_id'])['stale']
     earlier = reopened.call(actor, captured['job_id'], 'result')
     assert earlier['earlier_version'] and earlier['analysis_revision'] == captured['dataset_revision']
     assert earlier['current_revision'] == store.get_dataset(actor, ds['id'])['revision'] > captured['dataset_revision']

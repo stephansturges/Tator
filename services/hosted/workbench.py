@@ -119,6 +119,12 @@ def install_workbench(app, *, auth, origin: str, cookie: str, web_root: Path, ur
         except DomainError as error:
             if error.status == 401:
                 return RedirectResponse("/", status_code=303)
+            if error.code == "administrator_required" and "text/html" in request.headers.get("accept", ""):
+                return HTMLResponse('<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Tator · For administrators</title>'
+                                    '<link rel="stylesheet" href="/hosted.css"></head><body><main class="hosted-login">'
+                                    '<h1>For administrators</h1><p>The workbench is for administrators. Your assigned images '
+                                    'are in the dataset workspace.</p><p><a href="/">Back to the dataset workspace</a></p></main></body></html>',
+                                    status_code=403)
             raise
         if not url:
             return _page_unavailable()

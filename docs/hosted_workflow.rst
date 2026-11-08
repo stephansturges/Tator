@@ -447,6 +447,14 @@ Existing train/validation splits are preserved; the exporter does not invent a
 new split. Downloads are administrator-only. Retrying export returns the same
 durable artifact rather than rebuilding it from the current dataset.
 
+Dataset pruning reviews one frozen confirmed version. After a later approval or
+edit, its page stays open for inspection: results, families and pairs remain
+readable, the header shows the analysis revision and the current revision, and
+each read response carries ``earlier_version``, ``analysis_revision`` and
+``current_revision``. Changing, previewing or exporting its removal plan is
+refused with a message to run a new pruning analysis. **← Dataset workspace**
+returns to the same dataset and its analysis result.
+
 The snapshot materializer produces the same fixed input in an isolated directory
 for analysis or training adapters. Every adapter must explicitly use this
 snapshot; a legacy consumer that scans a live source folder is not automatically

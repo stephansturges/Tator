@@ -13,9 +13,10 @@ import re
 import sqlite3
 from contextlib import asynccontextmanager
 import fcntl
+from html import escape
 from pathlib import Path
 from typing import Literal
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
@@ -640,30 +641,78 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
     def index():
         return (WEB_ROOT / "hosted.html").read_text()
 
+    page_messages = {
+        "login_required": ("Sign in to continue", "You are not signed in, or your session has ended. Sign in, then open this link again.", "Sign in"),
+        "administrator_required": ("For administrators", "This page is for administrators. Your assigned images are in the dataset workspace.", None),
+        "image_not_found": ("Image not available", "This image is not available to your account. It may have been submitted, reassigned, confirmed or archived.", None),
+        "analysis_not_found": ("Analysis not found", "This analysis does not exist or is no longer available.", None),
+        "analysis_consumer_mismatch": ("Not a pruning analysis", "This analysis is not a dataset pruning run. Open it from Dataset analysis in the workspace.", None),
+    }
+
+    def page_refusal(request: Request, error: DomainError) -> HTMLResponse:
+        """A readable page for a browser navigation; API callers keep JSON."""
+        if "text/html" not in request.headers.get("accept", ""):
+            raise error
+        title, message, link = page_messages.get(error.code, (
+            "This page cannot be opened",
+            error.detail if isinstance(error.detail, str) and error.detail else "This page cannot be opened from this link.", None))
+        return HTMLResponse('<!doctype html><html lang="en"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            f'<title>Tator · {escape(title)}</title><link rel="stylesheet" href="/hosted.css"></head>'
+            f'<body><main class="hosted-login"><h1>{escape(title)}</h1><p>{escape(message)}</p>'
+            f'<p><a href="/">{escape(link or "Back to the dataset workspace")}</a></p></main></body></html>',
+            status_code=error.status)
+
     @app.get("/pruning", response_class=HTMLResponse)
-    def pruning(job: str, request: Request, identity: Actor = Depends(admin)):
-        status = app.state.tools.analysis.status(identity, job)
-        if status["consumer"] != "pruning":
-            raise DomainError("analysis_consumer_mismatch", 409)
+    def pruning(request: Request, job: str = "", view: str = ""):
+        try:
+            identity = actor(request)
+            auth.require_admin(identity)
+            status = app.state.tools.analysis.status(identity, job)
+            if status["consumer"] != "pruning":
+                raise DomainError("analysis_consumer_mismatch", 409)
+        except DomainError as error:
+            return page_refusal(request, error)
         bootstrap = json.dumps({"job_id": job, "user_id": identity.user_id,
             "csrf": auth.session_csrf(request.cookies[COOKIE]), "instance_id": auth.instance_id}).replace("<", "\\u003c")
         source = (WEB_ROOT / "tator.html").read_text()
         start = source.index('<main id="datasetPruning"')
         panel = source[start:source.index("</main>", start) + len("</main>")]
+        # Return to the same dataset and the analysis result this page was
+        # opened from, not to whichever dataset the workspace shows first.
+        back = {"dataset": status["dataset_id"], "analysis": job}
+        if view in {"incoming", "submitted", "confirmed", "tranches"}:
+            back["view"] = view
+        revision = status["dataset_revision"]
+        version = f"Confirmed dataset snapshot · revision {revision}"
+        if status["stale"]:
+            try:
+                current = store.get_dataset(identity, status["dataset_id"])["revision"]
+            except DomainError:
+                current = None
+            version = (f"Earlier confirmed version · revision {revision}"
+                       + (f" · the dataset is now at revision {current}" if current is not None else "")
+                       + " · read-only")
         return ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
             '<title>Tator · Dataset pruning</title><link rel="stylesheet" href="/hosted.css">'
             '<link rel="stylesheet" href="/dataset_pruning.css">'
             '<script>window.TatorPruningBoot=' + bootstrap + ';</script>'
             '<script src="/dataset_pruning.js" defer></script><script src="/hosted_pruning_ui.js" defer></script>'
-            '</head><body><header class="hosted-header"><a class="hosted-brand" href="/">← Dataset workspace</a>'
-            '<span>Confirmed dataset snapshot</span></header><p id="hostedPruningNotice" role="status"></p>'
+            f'</head><body><header class="hosted-header"><a class="hosted-brand" href="{escape("/?" + urlencode(back))}">← Dataset workspace</a>'
+            f'<span>{escape(version)}</span></header><p id="hostedPruningNotice" role="status"></p>'
             '<div id="tabDatasetPruning" class="active">' + panel + '</div></body></html>')
 
     @app.get("/annotate", response_class=HTMLResponse)
-    def annotate(image: str, request: Request, tranche: str | None = None,
-                 queue: str | None = None, recovery: str | None = None,
-                 identity: Actor = Depends(actor)):
+    def annotate(request: Request, image: str = "", tranche: str | None = None,
+                 queue: str | None = None, recovery: str | None = None):
+        try:
+            return annotate_page(request, actor(request), image, tranche, queue, recovery)
+        except DomainError as error:
+            return page_refusal(request, error)
+
+    def annotate_page(request: Request, identity: Actor, image: str, tranche: str | None,
+                      queue: str | None, recovery: str | None) -> str:
         scope_left = False
         requested_scope = None
         try:

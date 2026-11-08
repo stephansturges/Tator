@@ -223,9 +223,31 @@ class WorkbenchBridge:
         with self.store.read_connection() as con:
             rows = con.execute("SELECT * FROM hosted_workbench_bridges WHERE dataset_id=? ORDER BY created_at DESC", (dataset_id,)).fetchall()
             applied = dict(con.execute("SELECT bridge_id, count(*) FROM hosted_workbench_applied GROUP BY bridge_id").fetchall())
-        return [{**{key: row[key] for key in ("id", "dataset_id", "snapshot_id", "legacy_dataset_id", "label", "image_count",
-                                               "excluded_images", "created_at")},
-                 "applied_images": applied.get(row["id"], 0)} for row in rows]
+        listed = [{**{key: row[key] for key in ("id", "dataset_id", "snapshot_id", "legacy_dataset_id", "label", "image_count",
+                                                 "excluded_images", "created_at")},
+                   "applied_images": applied.get(row["id"], 0)} for row in rows]
+        if listed:
+            listed[0]["hosted_changes"] = self._hosted_changes(listed[0]["id"])
+        return listed
+
+    def _hosted_changes(self, bridge_id):
+        """How the hosted dataset moved on since this copy: confirmed images edited, added or gone."""
+        try:
+            row, bridge = self._bridge(bridge_id)
+        except DomainError:
+            return None
+        with self.store.read_connection() as con:
+            current = {image_id: (split, version) for image_id, split, version in con.execute(
+                "SELECT id, split, confirmed_version FROM hosted_images WHERE dataset_id=? AND state='confirmed' "
+                "AND id NOT IN (SELECT image_id FROM hosted_archived_images)", (row["dataset_id"],))
+                if split in EXPORT_SPLITS}
+            # Versions this copy applied itself are its own edits, not hosted changes.
+            own = dict(con.execute("SELECT image_id, version_id FROM hosted_workbench_applied WHERE bridge_id=?", (bridge_id,)).fetchall())
+        frozen = bridge["images"]
+        return {"edited": sum(1 for image_id, (_split, version) in current.items()
+                              if image_id in frozen and version not in (frozen[image_id]["version_id"], own.get(image_id))),
+                "added": sum(1 for image_id in current if image_id not in frozen),
+                "removed": sum(1 for image_id in frozen if image_id not in current)}
 
     def start_export(self, actor, dataset_id: str) -> dict:
         self._require(actor)

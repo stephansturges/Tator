@@ -643,6 +643,12 @@ body {
     display: block;
 }
 
+/* Every tool tab scrolls its own content (the page itself never scrolls);
+   Label Images keeps its fixed canvas layout with scrolling side columns. */
+.tab-panel:not([data-tab-panel="labeling"]) {
+    overflow-y: auto;
+}
+
 .tab-panel[data-tab-panel="training"] {
     overflow-y: auto;
 }

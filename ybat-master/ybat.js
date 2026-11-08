@@ -9061,7 +9061,9 @@ const sam3TrainState = {
         window.TatorLegacyWorkbench = {
             openedDataset: () => (annotationSourceState.mode === "linked" ? annotationSourceState.datasetId
                 : annotationSourceState.mode !== "none" ? annotationSourceState.mode : classSplitState.currentJobId ? "review" : ""),
-            // Opens the dataset unless something else is open; replace switches (after saving) anyway.
+            // replace: false keeps anything open, "dataset" switches away from another
+            // plain dataset but keeps a displayed review, "any" always switches.
+            // A switch saves the open workspace first.
             async openDataset(datasetId, datasetLabel, { replace = false } = {}) {
                 // Let a restore or switch already under way finish, then open only if still needed.
                 for (let waited = 0; ; waited += 250) {
@@ -9073,7 +9075,7 @@ const sam3TrainState = {
                 }
                 const opened = window.TatorLegacyWorkbench.openedDataset();
                 if (opened === datasetId) return true;
-                if (opened && !replace) return false;
+                if (opened && (!replace || (replace === "dataset" && classSplitState.currentJobId))) return false;
                 await openDatasetInAnnotationMode({ mode: "linked", datasetId, datasetLabel, activateLabeling: false });
                 return true;
             },

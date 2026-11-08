@@ -36,11 +36,25 @@ the bar, and then opens it. If the workbench already has another dataset or a
 saved review open, it keeps it, and the bar offers **Open** for the dataset you
 came from; the open one is saved before it switches.
 
+Tabs with their own dataset list, such as the training tabs, detection
+recipes, captions and the ingestion reference, select the open dataset until
+you pick another one in that list yourself.
+
 The bar at the top of the workbench returns to the admin workspace. It names
-the open copy and offers **Make fresh copy** and **Review edits**. The address
-keeps the open tab, so a reload returns to it. Leaving the workbench releases
-its annotation lock, so returning later opens the copy for editing again.
-Without a workbench service the navigation shows the hosted dialogs only.
+the open copy and offers **Make fresh copy** and **Review edits**. The **Review
+edits** button counts the copy's edited images that are not applied yet. The
+address keeps the open tab, so a reload returns to it. Leaving the workbench
+releases its annotation lock, so returning later opens the copy for editing
+again. Every tab scrolls its own content. Without a workbench service the
+navigation shows the hosted dialogs only.
+
+A copy does not follow later hosted work. When images were edited on the
+annotation canvas, newly confirmed or taken out of the confirmed set after the
+copy was made, the bar says how many and offers **Update copy**. Updating
+makes a fresh copy and opens it. Edits that the workbench applied itself do not
+count as hosted changes. Apply pending workbench edits before updating;
+otherwise they stay in the older copy, which remains reviewable under **Hosted
+data**.
 
 Working on a hosted dataset
 ---------------------------

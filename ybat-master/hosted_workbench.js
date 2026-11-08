@@ -19,6 +19,8 @@
     bar.append(back, el("strong", {textContent: "Admin workbench"}), copyInfo, copyActions, dataButton, note);
     document.body.prepend(bar);
     document.body.classList.add("hosted-workbench");
+    const fitBar = () => document.documentElement.style.setProperty("--hosted-wb-bar", `${bar.offsetHeight}px`);
+    fitBar(); if (window.ResizeObserver) new ResizeObserver(fitBar).observe(bar);
 
     // Keep the active tab in the address so a reload returns to it.
     document.addEventListener("click", (event) => {
@@ -202,9 +204,20 @@
             say(copyInfo, `Opening ${dataset.name}…`);
             reopenWith(dataset.id); return;
         }
-        const describe = () => say(copyInfo, `${dataset.name} · workbench copy of ${plural(bridge.image_count, "confirmed image")} from ${when(bridge.created_at)}`);
-        const fresh = action("Make fresh copy", async () => {
-            if (!window.confirm(`Make a new workbench copy of ${dataset.name} from its confirmed images as they are now? Edits in the current copy stay available under Review edits.`)) return;
+        // Hosted edits made after the copy (on the annotation canvas, say) are not in it.
+        const moved = bridge.hosted_changes || {edited: 0, added: 0, removed: 0};
+        const changed = moved.edited + moved.added + moved.removed;
+        const since = [moved.edited && `${moved.edited} edited`, moved.added && `${moved.added} newly confirmed`,
+            moved.removed && `${moved.removed} no longer confirmed`].filter(Boolean).join(", ");
+        const describe = () => {
+            say(copyInfo, `${dataset.name} · workbench copy of ${plural(bridge.image_count, "confirmed image")} from ${when(bridge.created_at)}`
+                + (changed ? ` · since then ${since} in the hosted dataset` : ""));
+            copyInfo.dataset.tone = changed ? "stale" : "";
+        };
+        let pending = 0;
+        const fresh = action(changed ? "Update copy" : "Make fresh copy", async () => {
+            const waiting = pending ? ` ${plural(pending, "image")} edited in the current copy ${pending === 1 ? "is" : "are"} not applied yet. Apply ${pending === 1 ? "it" : "them"} first with Review edits; otherwise ${pending === 1 ? "it stays" : "they stay"} in the current copy, reviewable under Hosted data.` : "";
+            if (!window.confirm(`Make a new workbench copy of ${dataset.name} from its confirmed images as they are now?${waiting}`)) return;
             fresh.disabled = true;
             try { await makeCopyOf(dataset.id, copyInfo); reopenWith(dataset.id); }
             catch (error) { showError(copyInfo)(error); fresh.disabled = false; }
@@ -213,22 +226,65 @@
             dialog.showModal(); hostedDataset = dataset.id;
             loadDatasets().then(() => openReview(bridge)).catch(showError(copyStatus));
         });
+        if (changed) fresh.classList.add("hosted-wb-attention");
         copyActions.replaceChildren(fresh, reviewEdits);
+        hosted(`/api/hosted/workbench/bridges/${encodeURIComponent(bridge.id)}/changes`).then((result) => {
+            pending = result.totals.images;
+            if (pending) reviewEdits.textContent = `Review edits (${pending})`;
+        }).catch(() => {});
         await pageLoaded;
         const legacy = window.TatorLegacyWorkbench;
         if (!legacy) { describe(); return; }
-        // Never replaces what the page restored by itself (a saved review, say); the button does.
-        const openButton = action(`Open ${dataset.name}`, () => open(true));
+        // Coming from the admin view switches to this dataset, but a reload keeps
+        // what is open, and a displayed review is only replaced by the button.
+        const arriving = performance.getEntriesByType?.("navigation")?.[0]?.type !== "reload";
+        const openButton = action(`Open ${dataset.name}`, () => open("any"));
         async function open(replace) {
             say(copyInfo, `Opening ${dataset.name}…`); openButton.remove();
             try {
-                if (await legacy.openDataset(bridge.legacy_dataset_id, bridge.label, {replace})) { describe(); return; }
+                if (await legacy.openDataset(bridge.legacy_dataset_id, bridge.label, {replace})) { describe(); followPickers(bridge.legacy_dataset_id); return; }
                 say(copyInfo, "Another dataset or saved review is open here.");
             } catch (error) { showError(copyInfo)(error); }
             copyActions.prepend(openButton);
         }
-        await open(false);
+        await open(arriving ? "dataset" : false);
     }
+
+    // ---- dataset pickers follow the open dataset ---------------------------
+    // Tabs with their own dataset list (training, recipes, captions, ingestion
+    // reference...) select the dataset open in the workbench until you pick
+    // another one there yourself.
+    const PICKERS = ["qwenCaptionDataset", "dataIngestionReferenceDataset", "qwenAgentDataset", "qwenCalibrationDataset", "trainDatasetSelect",
+        "qwenDatasetSelect", "sam3DatasetSelect", "yoloDatasetSelect", "yoloHeadGraftDataset", "rfdetrDatasetSelect", "agentDatasetSelect",
+        "promptHelperDatasetSelect", "datasetGlossaryDataset", "segBuilderDatasetSelect"];
+    const pickedHere = new Set();
+    let fallbackDataset = "";
+    function syncPickers() {
+        const open = window.TatorLegacyWorkbench?.openedDataset?.() || "";
+        const target = open && !["transient", "review"].includes(open) ? open : fallbackDataset;
+        if (!target) return;
+        for (const id of PICKERS) {
+            const select = document.getElementById(id);
+            if (!select || pickedHere.has(id) || select.value === target || ![...select.options].some((option) => option.value === target)) continue;
+            select.value = target;
+            select.dispatchEvent(new Event("change", {bubbles: true}));
+        }
+    }
+    function followPickers(datasetId) {
+        fallbackDataset = datasetId;
+        for (const id of PICKERS) {
+            const select = document.getElementById(id);
+            if (!select || select.dataset.hostedFollow) continue;
+            select.dataset.hostedFollow = "1";
+            select.addEventListener("change", (event) => { if (event.isTrusted) pickedHere.add(id); });
+            new MutationObserver(syncPickers).observe(select, {childList: true});
+        }
+        syncPickers();
+    }
+    document.addEventListener("click", (event) => {
+        if (!fallbackDataset || !event.target.closest?.(".tab-bar [data-tab]")) return;
+        for (const delay of [400, 2000]) setTimeout(syncPickers, delay);
+    }, true);
     arrive().catch(showError(copyInfo));
     window.TatorWorkbench = {get hostedDataset() { return hostedDataset; }, bar, dialog};
 })();

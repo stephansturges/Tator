@@ -1,4 +1,4 @@
-#hostedWorkbenchBar{position:sticky;top:0;z-index:1000;display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:8px 16px;background:#0f3b31;color:#e9f6f1;font:14px/1.4 system-ui,-apple-system,sans-serif}
+#hostedWorkbenchBar{position:relative;display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:8px 16px;background:#0f3b31;color:#e9f6f1;font:14px/1.4 system-ui,-apple-system,sans-serif}
 #hostedWorkbenchBar a{color:#9fe3c9;font-weight:600;text-decoration:none}#hostedWorkbenchBar a:hover{text-decoration:underline}
 #hostedWorkbenchBar span{color:#bcd8cf;font-size:13px}
 #hostedWorkbenchBar #hostedWorkbenchCopy{color:#e9f6f1}#hostedWorkbenchBar #hostedWorkbenchCopy[data-tone=error]{color:#ffb4a8}
@@ -21,3 +21,9 @@
 .hosted-wb-table table{width:100%;border-collapse:collapse}.hosted-wb-table th,.hosted-wb-table td{text-align:left;padding:4px 8px;border-bottom:1px solid #eef3f1;vertical-align:top}
 .hosted-wb-table tr.conflict td{color:#8a4b00}
 .hosted-wb-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:14px}
+
+/* The legacy layout fills the window; leave room for the bar (height set from the script). */
+body.hosted-workbench .tab-shell{height:calc(100vh - var(--hosted-wb-bar, 0px))}
+body.annotation-focus-mode #hostedWorkbenchBar{display:none}
+#hostedWorkbenchBar #hostedWorkbenchCopy[data-tone=stale]{color:#ffd58a}
+#hostedWorkbenchBar button.hosted-wb-attention{background:#f0b44c;border-color:#f0b44c;color:#1d1300;font-weight:600}

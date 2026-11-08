@@ -4,18 +4,30 @@
     const app = window.TatorHostedDashboard;
     if (!app) return;
     const node = (tag, text) => { const element = document.createElement(tag); if (text !== undefined) element.textContent = text; return element; };
-    const button = node("button", "Quality & compute"); button.id = "hostedAnalysis"; button.hidden = true;
-    button.title = "All analysis and training jobs. Use the named tabs above to go directly to a tool.";
-    document.querySelector(".hosted-actions").append(button);
+    const count = (value, one, many = `${one}s`) => `${Number(value || 0).toLocaleString()} ${value === 1 ? one : many}`;
+    // Opened from the administrator navigation: "Server jobs" or one named tool.
     const dialog = node("dialog"); dialog.id = "hostedAnalysisDialog";
     const notice = node("p"); notice.setAttribute("role", "status");
     const controls = node("section"), history = node("section"), content = node("section");
     const close = node("button", "Close"); close.onclick = () => dialog.close();
-    const title = node("h2", "Confirmed dataset analysis");
+    const title = node("h2", "Server jobs");
     dialog.append(title, node("p", "Every run uses a fixed copy of the confirmed image list and annotation versions. Incoming work is excluded. Heavy compute pauses annotation assistance; manual editing and saving continue."), notice, controls, history, content, close);
     document.body.append(dialog);
     let epoch = 0, datasetId = "", currentJob = null, timer = null, activeRequest = null, cancel = null, selectedOperation = null;
     const operationNames = {dqe: "Data Quality Explorer", pruning: "Dataset pruning", ingestion: "Data ingestion", clip_training: "Train class predictor", yolo_training: "Train YOLO", sam3_training: "Train SAM3", rfdetr_training: "Train RF-DETR", qwen_training: "Train Qwen", salad_training: "Train SALAD descriptor", caption_export: "Export captions for training"};
+    const consumerNames = {...operationNames, statistics: "Dataset statistics", dqe_review: "Qwen visual review"};
+    // Launcher order: the quick, read-only tasks first; exports last.
+    const taskOrder = ["statistics", "dqe", "pruning", "ingestion", "clip_training", "yolo_training", "rfdetr_training", "sam3_training", "qwen_training", "salad_training", "caption_export"];
+    const trainingTasks = new Set(["clip_training", "yolo_training", "sam3_training", "rfdetr_training", "qwen_training"]);
+    const stateNames = {admitting: "Preparing inputs", queued: "Waiting for its turn", running: "Running", completed: "Complete", complete: "Complete", captured: "Started", failed: "Failed", cancelled: "Cancelled", interrupted: "Interrupted", stale: "Out of date", unavailable: "Unavailable"};
+    const computeErrors = {native_engine_failed: "The analysis engine stopped with an error; its log is kept on the server.", worker_timeout: "The task ran past its time limit and was stopped.",
+        worker_operation_failed: "The task failed on the server; its log is kept on the server.", worker_failed: "The task failed on the server; its log is kept on the server.", worker_disconnected: "The compute worker stopped unexpectedly; its log is kept on the server.", worker_protocol_invalid: "The compute worker sent an unreadable reply; its log is kept on the server.", worker_termination_failed: "The compute worker could not be stopped cleanly; an administrator should check the server.",
+        runtime_cancelled: "The task was cancelled.", request_cancelled: "The task was cancelled.", runtime_closed: "The compute service shut down before the task finished. Start it again.", runtime_queue_full: "Too many tasks are waiting. Try again when the current task finishes.", runtime_heavy_window_busy: "Another administrator task is running. Try again when it finishes.", runtime_configuration_changed: "The server's model configuration changed. Start the task again.", runtime_authority_changed: "Your account changed while the task ran. Sign in again and restart it.", runtime_owner_limit: "You already have the maximum number of running tasks.", runtime_payload_budget_exceeded: "The task's input is too large for this server's limits.",
+        heavy_disk_insufficient: "The server does not have enough free scratch disk space for this task.", heavy_tool_not_configured: "This task is not configured on this server.", heavy_job_interrupted: "The task was interrupted, for example by a server restart. Start it again.", native_analysis_interrupted: "The task was interrupted, for example by a server restart. Start it again.", heavy_job_authority_revoked: "Your administrator access changed while the task ran.",
+        native_model_not_verified: "A model file failed verification. An administrator must reinstall it.", native_model_environment_invalid: "A model's runtime environment is not set up correctly on this server.", analysis_validation_split_required: "Training needs training and validation images; add images or capture groups so some can be held out.",
+        analysis_snapshot_stale: "The confirmed images changed since this run was prepared. Start a new run.", analysis_snapshot_identity_changed: "The confirmed images changed while the task was preparing. Start it again.", analysis_media_changed: "An image file changed while the task was preparing. Start it again.", analysis_manifest_changed: "The confirmed images changed while the task was preparing. Start it again.", analysis_materialization_changed: "The task's prepared images changed. Start it again.", native_annotation_identity_changed: "Annotations changed while the task was running. Start it again.", native_cache_input_changed: "A cached input changed while the task was running. Start it again.",
+        analysis_result_unavailable: "This result is no longer available on the server.", dqe_result_unavailable: "This result is no longer available on the server.", analysis_manifest_too_large: "This dataset is too large for this task's limits.", ingestion_salad_head_not_attached: "Attach a whole-image SALAD descriptor in Analysis presets first.", ingestion_candidate_not_unassigned_incoming: "Some selected images are no longer Not assigned in Incoming. Select them again."};
+    const computeError = code => !code ? "" : computeErrors[code] || app.errorText?.(code) || String(code).replaceAll("_", " ");
     const error = (problem) => { notice.textContent = problem.message; notice.dataset.error = "true"; };
     function act(parent, title, callback) {
         const ticket = epoch; const b = node("button", title); b.type = "button";
@@ -32,10 +44,10 @@
         history.querySelector('[data-older-analyses]')?.remove();
         if (!offset) history.replaceChildren(node("h3", "Saved analyses"));
         const allRows = result.jobs || [], rows = allRows.filter(row => !selectedOperation || row.consumer === selectedOperation);
-        if (!rows.length && !offset) history.append(node("p", "No saved results for this tool in the most recent jobs."));
+        if (!rows.length && !offset) history.append(node("p", selectedOperation ? "No saved results for this tool in the most recent jobs." : "No saved results for this dataset yet."));
         for (const row of rows) {
             const item = node("div"); item.className = "hosted-analysis-job";
-            item.append(node("strong", `${row.consumer.replaceAll("_", " ")} · ${row.state}`), node("small", `${row.confirmed_count ?? "—"} confirmed images · ${new Date(row.created_at * 1000).toLocaleString()}${row.stale ? " · earlier dataset version" : ""}`));
+            item.append(node("strong", `${consumerNames[row.consumer] || row.consumer.replaceAll("_", " ")} · ${stateNames[row.state] || row.state}`), node("small", `${Number.isFinite(row.confirmed_count) ? count(row.confirmed_count, "confirmed image") : "—"} · ${new Date(row.created_at * 1000).toLocaleString()}${row.stale ? " · earlier dataset version" : ""}${row.error ? ` · ${computeError(row.error)}` : ""}`));
             if (row.state === "complete") act(item, "Open results", () => showResult(row.id || row.job_id, ticket));
             else if (row.state === "captured" && row.runtime_request_id) act(item, "Follow this task", () => track(row.runtime_request_id, ticket));
             history.append(item);
@@ -48,7 +60,8 @@
         const progress = state.state === "admitting" && state.progress?.total ? ` · ${state.progress.done.toLocaleString()} of ${state.progress.total.toLocaleString()} images` : "";
         notice.textContent = state.state === "admitting"
             ? `Preparing inputs: ${(state.phase || "snapshot").replaceAll("_", " ")}${progress}. You can cancel until the run starts.`
-            : `Compute: ${state.state.replaceAll("_", " ")}${state.error ? " · " + state.error : ""}`;
+            : `${stateNames[state.state] || state.state.replaceAll("_", " ")}${state.error ? ": " + computeError(state.error) : ""}`;
+        notice.dataset.error = String(Boolean(state.error) || ["failed", "interrupted", "unavailable"].includes(state.state));
         if (["completed", "failed", "cancelled", "interrupted", "stale", "unavailable"].includes(state.state)) {
             activeRequest = null; cancel?.remove(); cancel = null;
             await refreshHistory(ticket);
@@ -65,7 +78,7 @@
         await watch(requestId, ticket);
     }
     function parameterControl(parent, key, value) {
-        const labels = { quality_recipe: "Object feature recipe", epochs: "Training epochs", batch_size: "Batch size", imgsz: "Training image size", device: "Device", model: "Starting model", object_weight: "Object contribution", object_threshold: "Minimum object similarity", scene_threshold: "Minimum whole-image similarity", index_threshold: "Minimum combined similarity", neighbor_k: "Candidate neighbors per branch" };
+        const labels = { quality_recipe: "Object feature recipe", epochs: "Training epochs", batch_size: "Batch size", imgsz: "Training image size", device: "Device", model: "Starting model", object_weight: "Object contribution", object_threshold: "Minimum object similarity", scene_threshold: "Minimum whole-image similarity", index_threshold: "Minimum combined similarity", neighbor_k: "Candidate neighbors per branch", qa_mix: "Question mix", answer_format: "Answer style", lr: "Learning rate", learning_rate: "Learning rate", patience: "Early-stopping patience", workers: "Data loader workers", seed: "Random seed" };
         let input;
         if (key === "quality_recipe") input = select([["thorough_quality_v1", "DQE Thorough · DINOv3 + SAM3 + crop SALAD + C-RADIO"], ["precise_compact_v1", "DQE Compact · DINOv3 + SAM3 + crop SALAD"], ["fast_map_v1", "DQE Fast · DINOv3"]]);
         else if (typeof value === "boolean") { input = node("input"); input.type = "checkbox"; input.checked = value; }
@@ -73,20 +86,28 @@
         else { input = node("input"); input.type = typeof value === "number" ? "number" : "text"; input.value = value ?? ""; if (input.type === "number") input.step = "any"; }
         if (key === "quality_recipe") input.value = value || "thorough_quality_v1";
         const captionLabels = {include_caption0_in_training: "Include primary captions", include_generated_qa_in_training: "Include generated questions and answers", include_deterministic_metadata_qa: "Include questions derived from labels", instruction_qa_restrict_speculative_language: "Reject speculative answers", require_ready_instruction_export: "Require readiness checks to pass before creating a training bundle"};
-        field(parent, labels[key] || captionLabels[key] || key.replaceAll("_", " "), input);
+        const text = labels[key] || captionLabels[key] || `${key.charAt(0).toUpperCase()}${key.slice(1).replaceAll("_", " ")}`;
+        if (input.type === "checkbox") {
+            // A checkbox sits in front of its label, on one line.
+            const wrap = node("label"); wrap.className = "hosted-checkbox"; input.id = `analysis-field-${crypto.randomUUID()}`; wrap.htmlFor = input.id;
+            wrap.append(input, node("span", text)); parent.append(wrap);
+        } else field(parent, text, input);
         return () => input.type === "checkbox" ? input.checked : typeof value === "number" ? Number(input.value) : value && typeof value === "object" ? JSON.parse(input.value) : input.value;
     }
     async function open(preferredOperation) {
         if (app.session?.user.role !== "admin") return;
         selectedOperation = operationNames[preferredOperation] ? preferredOperation : null;
-        title.textContent = operationNames[selectedOperation] || "All analysis & training jobs";
+        const name = app.datasetName;
+        title.textContent = `${operationNames[selectedOperation] || "Server jobs"}${name ? ` · ${name}` : ""}`;
         disposeGraph?.(); disposeGraph = null;
         clearTimeout(timer); currentJob = null; activeRequest = null; cancel?.remove(); cancel = null; const ticket = ++epoch; datasetId = app.datasetId;
         notice.textContent = ""; content.replaceChildren(); controls.replaceChildren(); history.replaceChildren(); dialog.showModal();
         if (!datasetId) { notice.textContent = "Choose a dataset first."; return; }
         const catalog = await api(`/tools/catalog?dataset_id=${encodeURIComponent(datasetId)}`);
         if (!valid(ticket)) return;
-        const options = Object.entries(catalog.heavy_job_options || {}).filter(([, value]) => value.operation !== "dqe_review" && (!selectedOperation || value.operation === selectedOperation));
+        const rank = value => { const index = taskOrder.indexOf(value.operation); return index < 0 ? taskOrder.length : index; };
+        const options = Object.entries(catalog.heavy_job_options || {}).filter(([, value]) => value.operation !== "dqe_review" && (!selectedOperation || value.operation === selectedOperation))
+            .sort(([, a], [, b]) => rank(a) - rank(b));
         const profiles = options.some(([, value]) => value.operation === "ingestion") ? await api(`/datasets/${datasetId}/salad-profiles`) : null;
         if (!valid(ticket)) return;
         const candidates = app.selectedImages.filter(image => image.dataset_id === datasetId && image.state === "unassigned");
@@ -106,12 +127,13 @@
                     if (value !== undefined || key === "quality_recipe") readers[key] = parameterControl(parameters, key, value);
                 }
                 if (definition.operation === "ingestion") {
-                    parameters.append(node("p", `${candidates.length} selected Incoming images will be compared with confirmed images. To change this set, close this dialog and select images in Incoming. Results are suggestions; images still need annotation and approval.`));
+                    parameters.append(node("p", `${count(candidates.length, "selected Incoming image")} will be compared with confirmed images. To change this set, close this dialog and select images in Incoming. Results are suggestions; images still need annotation and approval.`));
                     const heads = (profiles?.heads || []).filter(head => !head.archived && head.representation_scope === "whole_image" && profiles.dataset.head_ids.includes(head.id));
                     const selectedHead = field(parameters, "Trained whole-image SALAD descriptor", select(heads.map(head => [head.id, head.display_label || head.label || head.id])));
                     readers.salad_head_id = () => { if (!selectedHead.value) throw new Error("Attach a whole-image SALAD descriptor in Analysis presets, or train one first."); return selectedHead.value; };
-                    readers.candidate_image_ids = () => { if (!candidates.length) throw new Error("Select unassigned Incoming images before starting this comparison."); return candidates.map(image => image.id); };
+                    readers.candidate_image_ids = () => { if (!candidates.length) throw new Error("Select Not assigned images in Incoming before starting this comparison."); return candidates.map(image => image.id); };
                 }
+                if (trainingTasks.has(definition.operation)) parameters.append(node("p", "Splits set on the dataset are used. Unsplit images are split for this run only (about 10% validation, capture groups kept together); the dataset is not changed."));
                 if (definition.operation === "salad_training") parameters.append(node("p", "Train a whole-image descriptor on confirmed images. After training, open Analysis presets to register and attach the saved descriptor."));
                 if (definition.operation === "caption_export") parameters.append(node("p", "Build the existing Tator caption and question-answer training archive from confirmed annotations. The original readiness checks still apply. Uncheck the readiness requirement only to download a diagnostic bundle; this does not make its contents ready for training."));
                 if (!Object.keys(readers).length) parameters.append(node("p", "This task uses its server-configured recipe. The saved result records the resolved settings."));
@@ -122,8 +144,8 @@
                 const definition = catalog.heavy_job_options[recipe.value];
                 const dataset = await api(`/datasets/${encodeURIComponent(datasetId)}`);
                 if (!valid(ticket)) return;
-                const scope = definition.operation === "ingestion" ? `${candidates.length.toLocaleString()} selected Incoming images, compared with ${(dataset.counts?.confirmed || 0).toLocaleString()} confirmed images`
-                    : `all ${(dataset.counts?.confirmed || 0).toLocaleString()} confirmed images`;
+                const scope = definition.operation === "ingestion" ? `${count(candidates.length, "selected Incoming image")}, compared with ${count(dataset.counts?.confirmed || 0, "confirmed image")}`
+                    : `all ${count(dataset.counts?.confirmed || 0, "confirmed image")}`;
                 if (!window.confirm(`Start "${definition.label || definition.operation}" on ${scope} of ${dataset.name}?\n\nLarge datasets can take hours. Annotation assistance pauses for everyone while it runs, and the server needs scratch disk space roughly the size of these images. You can cancel it from this dialog.`)) return;
                 const body = { dataset_id: datasetId, job: recipe.value, operation_id: crypto.randomUUID(), parameters };
                 // Preparing a large dataset can take minutes. An exact replay of the
@@ -154,14 +176,14 @@
         if (!valid(ticket) || currentJob !== jobId) return;
         const result = response.result?.engine_result || response.result?.result || response.result || response;
         if (job.consumer === "statistics") {
-            content.append(node("p", `${result.image_count ?? job.confirmed_count} confirmed images`));
+            content.append(node("p", count(result.image_count ?? job.confirmed_count, "confirmed image")));
             const list = node("dl");
             for (const [label, count] of Object.entries(result.object_counts || {})) list.append(node("dt", label), node("dd", String(count)));
             content.append(list);
         } else if (job.consumer === "caption_export") {
             const summary = result.summary || {};
             content.append(node("strong", result.blocked_reason ? "Training readiness needs attention" : "Training readiness checks passed"));
-            content.append(node("p", `${result.image_count} confirmed images · ${summary.instruction_training_row_count || 0} training examples · ${summary.manual_review_required_count || 0} rows need review.`));
+            content.append(node("p", `${count(result.image_count, "confirmed image")} · ${count(summary.instruction_training_row_count || 0, "training example")} · ${count(summary.manual_review_required_count || 0, "row")} to review.`));
             if (result.blocked_reason) content.append(node("p", `The original export check reported: ${result.blocked_reason.replaceAll("_", " ")}. The readiness report contains the affected examples and checks.`));
             if (result.diagnostic_export) content.append(node("strong", "Diagnostic bundle — readiness checks have not passed."));
             for (const [path, title] of [[result.bundle_path, result.diagnostic_export ? "Download diagnostic bundle" : "Download caption training bundle"], [result.report_path, "Download readiness report"], [result.export_path, "Download captions and questions"]]) {
@@ -239,12 +261,13 @@
         openedLink = true;
         try {
             const job = await api(`/analysis/jobs/${encodeURIComponent(jobId)}`);
+            // Open the result in its own dataset, and keep the address in step with it.
             await app.selectDataset(job.dataset_id);
+            app.dropRouteParams?.("analysis", "panel");
             if (query.get("panel") === "profiles") document.getElementById("hostedProfiles")?.click();
-            else { await open(); await showResult(jobId, epoch); }
-        } catch (e) { if (!e.stale) app.notice(e.message, true); }
+            else { await open(job.consumer); await showResult(jobId, epoch); }
+        } catch (e) { app.dropRouteParams?.("analysis", "panel"); if (!e.stale) app.notice(e.message, true); }
     });
-    button.onclick = () => { const ticket = epoch + 1; open().catch(e => { if (valid(ticket) && !e.stale) error(e); }); };
     window.TatorHostedAnalysis = {open};
     window.addEventListener("tator:caption-export", () => {
         if (app.session?.user.role !== "admin") return;
@@ -253,7 +276,6 @@
     });
     dialog.addEventListener("close", () => { ++epoch; clearTimeout(timer); disposeGraph?.(); disposeGraph = null; });
     window.addEventListener("tator:hosted-session", () => {
-        button.hidden = app.session?.user.role !== "admin";
-        if (button.hidden) { ++epoch; clearTimeout(timer); dialog.close(); controls.replaceChildren(); history.replaceChildren(); content.replaceChildren(); }
+        if (app.session?.user.role !== "admin") { ++epoch; clearTimeout(timer); dialog.close(); controls.replaceChildren(); history.replaceChildren(); content.replaceChildren(); }
     });
 })();

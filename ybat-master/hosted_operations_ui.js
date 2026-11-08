@@ -7,7 +7,7 @@
     const button = node("button", "Export & recovery"); button.type = "button"; button.id = "operations"; button.hidden = true;
     document.querySelector(".hosted-actions").append(button);
     const dialog = node("dialog"); dialog.id = "operationsDialog";
-    const heading = node("h2", "Export and recovery");
+    const heading = node("h2", "Export & recovery");
     const notice = node("p"); notice.className = "dialog-notice"; notice.dataset.dialogNotice = ""; notice.setAttribute("role", "status"); notice.hidden = true;
     const datasetPanel = node("section"), backups = node("section"), archived = node("section"), downloads = node("div"), cleanup = node("section");
     const close = node("button", "Close"); close.type = "button"; close.onclick = () => dialog.close();
@@ -81,6 +81,7 @@
         dialog.showModal();
         storageCleanup(ticket);
         const datasetId = dashboard.datasetId;
+        heading.textContent = `Export & recovery${dashboard.datasetName ? ` · ${dashboard.datasetName}` : ""}`;
         if (datasetId) {
             const dataset = await dashboard.api(`/datasets/${datasetId}`);
             if (!current(ticket) || datasetId !== dashboard.datasetId) return;

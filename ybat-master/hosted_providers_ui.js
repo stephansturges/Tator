@@ -14,6 +14,8 @@
         dialog.showModal(); close.focus();
     }
     button.onclick = open;
-    const session = () => { button.hidden = app.session?.user.role !== "admin"; if (dialog.open) dialog.close(); };
+    // Hidden until a paid provider is actually offered here; the dialog only says "coming later".
+    const offered = false;
+    const session = () => { button.hidden = !offered || app.session?.user.role !== "admin"; if (dialog.open) dialog.close(); };
     window.addEventListener("tator:hosted-session", session); session();
 })();

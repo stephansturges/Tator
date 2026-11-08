@@ -257,12 +257,13 @@ async def _native_statistics(origin):
         errors = []; page.on('pageerror', lambda error: errors.append(str(error)))
         page.on('dialog', lambda dialog: dialog.accept())  # confirms the full-dataset run
         await sign_in(page, origin, 'admin')
-        await page.locator('#hostedAnalysis').click()
+        # One entry for server jobs: the administrator navigation strip.
+        await page.get_by_role('navigation', name='Administrator tools').get_by_role('button', name='Server jobs', exact=True).click()
         await expect(page.locator('#hostedAnalysisDialog')).to_be_visible()
         await page.get_by_role('button', name='Start task', exact=True).click()
         await expect(page.get_by_role('button', name='Open results', exact=True)).to_be_visible(timeout=45000)
         await page.get_by_role('button', name='Open results', exact=True).click()
-        await expect(page.locator('#hostedAnalysisDialog')).to_contain_text('1 confirmed images')
+        await expect(page.locator('#hostedAnalysisDialog')).to_contain_text('1 confirmed image')
         await expect(page.locator('#hostedAnalysisDialog dl')).to_contain_text('Car1')
         jobs = await (await page.request.get(origin + '/api/hosted/analysis/jobs')).json()
         assert len(jobs['jobs']) == 1 and jobs['jobs'][0]['confirmed_count'] == 1
@@ -270,7 +271,7 @@ async def _native_statistics(origin):
         assert not errors
         alice = await browser.new_page()
         await sign_in(alice, origin, 'alice')
-        await expect(alice.locator('#hostedAnalysis')).to_be_hidden()
+        await expect(alice.locator('#hostedServerJobs')).to_be_hidden()
         assert (await alice.request.get(origin + '/api/hosted/analysis/jobs')).status == 403
         await browser.close()
 
@@ -595,7 +596,7 @@ async def _three_users(origin):
         await expect(alice).to_have_url(re.compile(re.escape(origin) + r'/(?:\?.*)?$'))
         await expect(alice.locator('#datasetChoice option:checked')).to_have_text('Hosted fixture')
         await expect(alice.locator('#submissionList')).to_contain_text('frame-0.png')
-        await expect(alice.locator('#submissionList')).to_contain_text('Awaiting review')
+        await expect(alice.locator('#submissionList')).to_contain_text('Waiting for review')
         await expect(alice.locator('#submissionList')).to_contain_text('Hosted fixture')
         await admin.goto(image_url); await expect(admin.locator('#hostedReturn')).to_be_enabled()
         await admin.locator('#hostedFeedback').fill('Please check the edge of the car.')
@@ -614,7 +615,7 @@ async def _three_users(origin):
         assert record['annotations']['objects'] == drawn['objects']
         await alice.get_by_role('button', name='Refresh', exact=True).click()
         await expect(alice.locator('#datasetChoice option:checked')).to_have_text('Hosted fixture')
-        await expect(alice.locator('#submissionList')).to_contain_text('Approved')
+        await expect(alice.locator('#submissionList')).to_contain_text('Confirmed')
         assert not errors
         await browser.close()
 
@@ -800,7 +801,7 @@ async def _encoded_media(origin, source):
         await sign_in(page, origin, 'admin')
         await page.get_by_role('button', name='Incoming', exact=True).click()
         await page.locator('#uploadInput').set_input_files(str(source))
-        await expect(page.locator('#notice')).to_contain_text('1 new images uploaded')
+        await expect(page.locator('#notice')).to_contain_text('1 new image uploaded')
         rows = await page.evaluate("window.TatorHostedDashboard.api('/images?dataset_id='+document.getElementById('datasetChoice').value)")
         record = next(row for row in rows['images'] if row['filename'] == source.name)
         assert record['media_hash'] == original_hash
@@ -856,7 +857,7 @@ async def _special_pixel_modes(origin, source, mode):
         await sign_in(page, origin, 'admin')
         await page.get_by_role('button', name='Incoming', exact=True).click()
         await page.locator('#uploadInput').set_input_files(str(source))
-        await expect(page.locator('#notice')).to_contain_text('1 new images uploaded')
+        await expect(page.locator('#notice')).to_contain_text('1 new image uploaded')
         rows = await page.evaluate("window.TatorHostedDashboard.api('/images?dataset_id='+document.getElementById('datasetChoice').value)")
         image = next(row for row in rows['images'] if row['filename'] == source.name)
         await page.goto(origin + '/annotate?image=' + image['id'])
@@ -1039,12 +1040,11 @@ async def _imports_and_recovery(origin, paths):
         await expect(page.locator("#notice")).to_contain_text("2 new images uploaded")
         images = await (await context.request.get(f"{origin}/api/hosted/images?dataset_id={dataset_id}")).json()
         assert len(images["images"]) == 2 and commits[0]["id"] in {row["id"] for row in images["images"]}
-        await page.locator("#hostedTools").click()
+        await page.get_by_role("navigation", name="Administrator tools").get_by_role("button", name="Tools & models", exact=True).click()
         await expect(page.locator("#hostedToolsDialog")).to_contain_text("No server model files have been configured yet")
         await page.locator("#hostedToolsDialog").get_by_role("button", name="Close", exact=True).click()
-        await page.locator("#hostedProviders").click()
-        await expect(page.locator("#hostedProvidersDialog")).to_contain_text("coming later")
-        await page.locator("#hostedProvidersDialog").get_by_role("button", name="Close", exact=True).click()
+        # Paid services stay hidden until a provider is offered.
+        await expect(page.locator("#hostedProviders")).to_be_hidden()
         await page.locator("#operations").click()
         await page.get_by_role("button", name="Archive this dataset…", exact=True).click()
         await expect(page.locator("#operationsDialog")).not_to_be_visible()

@@ -8,7 +8,7 @@
     let epoch = 0;
     button.onclick = async () => {
         const ticket = ++epoch, datasetId = app.datasetId;
-        dialog.replaceChildren(node("h2", "Dataset guidance")); dialog.showModal();
+        dialog.replaceChildren(node("h2", `Dataset guidance${app.datasetName ? ` · ${app.datasetName}` : ""}`)); dialog.showModal();
         const message = node("p"); message.setAttribute("role", "status"); dialog.append(message);
         const close = node("button", "Close"); close.onclick = () => dialog.close(); dialog.append(close);
         const valid = () => ticket === epoch && dialog.open && app.datasetId === datasetId && app.session?.user.role === "admin";
@@ -16,7 +16,7 @@
         try {
             const dataset = await app.api(`/datasets/${datasetId}`); if (!valid()) return;
             const form = node("form"); dialog.insertBefore(form, close);
-            form.append(node("p", "Describe the dataset and the meaning of its classes. These defaults help annotation tools use consistent language. They do not change annotations or earlier analysis results."));
+            form.append(node("p", "Describe the dataset and what each class means. Annotators see this in their Classes dialog, and assistance tools and analyses use the same wording. Saving changes no annotations or earlier results."));
             function field(title, value, rows) { const label = node("label", title), area = node("textarea"); area.value = value; area.rows = rows; area.setAttribute("aria-label", title); label.append(area); form.append(label); return area; }
             const context = field("Dataset context", dataset.settings.context || "", 4); context.maxLength = 32000;
             const glossary = field("Class glossary", dataset.settings.labelmap_glossary || "", 7); glossary.maxLength = 64000;
@@ -51,7 +51,7 @@
                 event.preventDefault(); if (!valid()) return; save.disabled = true;
                 try {
                     const saved = await app.api(`/datasets/${datasetId}/guidance`, {method: "POST", body: {context: context.value, labelmap_glossary: glossary.value, expected_revision: dataset.revision, operation_id: crypto.randomUUID()}});
-                    if (valid()) { dataset.revision = saved.revision; message.textContent = "Guidance saved for future tool requests and analyses."; }
+                    if (valid()) { dataset.revision = saved.revision; message.textContent = "Guidance saved. Annotators see it in Classes; new tool requests and analyses use it."; }
                 } catch (e) { if (valid() && !e.stale) message.textContent = e.message; }
                 finally { if (valid()) save.disabled = false; }
             };

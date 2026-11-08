@@ -4,12 +4,14 @@
     const app = window.TatorHostedDashboard;
     if (!app) return;
     const node = (tag, text) => { const e = document.createElement(tag); if (text !== undefined) e.textContent = text; return e; };
+    // Opened from the administrator navigation strip ("Analysis presets"), which clicks this hidden button.
     const button = node("button", "Analysis presets"); button.id = "hostedProfiles"; button.hidden = true;
     document.querySelector(".hosted-actions").append(button);
     const dialog = node("dialog"), notice = node("p"), catalog = node("section"), list = node("section"), recipes = node("details"), sources = node("section");
     dialog.id = "hostedProfilesDialog"; notice.setAttribute("role", "status");
     const close = node("button", "Close"); close.onclick = () => dialog.close();
-    dialog.append(node("h2", "Analysis presets & trained descriptors"), node("p", "Use the established Data Quality Explorer presets across datasets. Keep trained SALAD descriptors attached to the dataset they describe; completed analyses retain their original recipe."), notice, catalog, list, recipes, sources, close); document.body.append(dialog);
+    const title = node("h2", "Analysis presets");
+    dialog.append(title, node("p", "Use the established Data Quality Explorer presets across datasets. Keep trained SALAD descriptors attached to the dataset they describe; completed analyses retain their original recipe."), notice, catalog, list, recipes, sources, close); document.body.append(dialog);
     let epoch = 0, datasetId, snapshot, authority, pending = false;
     const valid = ticket => epoch === ticket && dialog.open && app.datasetId === datasetId && app.session === authority && app.session?.user.role === "admin";
     const api = (path, body) => app.api(`/datasets/${encodeURIComponent(datasetId)}/salad-profiles${path}`, body === undefined ? {} : {method: "POST", body});
@@ -179,10 +181,10 @@
         if (result.next_offset !== null) { const more = action(sources, "More retained outputs", () => discover(ticket, result.next_offset)); more.dataset.more = ""; }
     }
     button.onclick = async () => {
-        const ticket = ++epoch; datasetId = app.datasetId; authority = app.session; snapshot = null; notice.textContent = ""; catalog.replaceChildren(); list.replaceChildren(); recipes.replaceChildren(); recipes.open = false; recipes.hidden = !datasetId; sources.replaceChildren(); dialog.showModal();
+        const ticket = ++epoch; datasetId = app.datasetId; authority = app.session; snapshot = null; title.textContent = `Analysis presets${app.datasetName ? ` · ${app.datasetName}` : ""}`; notice.textContent = ""; catalog.replaceChildren(); list.replaceChildren(); recipes.replaceChildren(); recipes.open = false; recipes.hidden = !datasetId; sources.replaceChildren(); dialog.showModal();
         try { await renderCatalog(ticket); if (!datasetId) { notice.textContent = "Select a dataset to manage its trained descriptors or pruning overrides."; return; } await render(ticket); if (valid(ticket)) action(sources, "Discover retained SALAD training outputs", () => discover(ticket)); }
         catch (e) { if (valid(ticket) && !e.stale) notice.textContent = e.message; }
     };
     dialog.addEventListener("close", () => { ++epoch; });
-    window.addEventListener("tator:hosted-session", () => { button.hidden = app.session?.user.role !== "admin"; if (dialog.open || button.hidden) { ++epoch; dialog.close(); list.replaceChildren(); recipes.replaceChildren(); sources.replaceChildren(); } });
+    window.addEventListener("tator:hosted-session", () => { button.hidden = true; if (dialog.open || app.session?.user.role !== "admin") { ++epoch; dialog.close(); list.replaceChildren(); recipes.replaceChildren(); sources.replaceChildren(); } });
 })();

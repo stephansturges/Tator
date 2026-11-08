@@ -2,7 +2,7 @@
 (() => {
     "use strict";
     const node = (tag, text) => { const element = document.createElement(tag); if (text !== undefined) element.textContent = text; return element; };
-    let dialog, content, notice, button, stateLabel, epoch = 0, pendingPoll = false;
+    let dialog, title, content, notice, button, stateLabel, epoch = 0, pendingPoll = false;
     const canvas = () => window.TatorHosted;
     const dashboard = () => window.TatorHostedDashboard;
     const datasetId = () => canvas()?.datasetId || dashboard()?.datasetId;
@@ -42,17 +42,23 @@
         try {
             const [catalog, dataset] = await Promise.all([api(`/tools/catalog?dataset_id=${encodeURIComponent(id)}`), api(`/datasets/${encodeURIComponent(id)}`)]);
             if (generation !== epoch || datasetId() !== id || !dialog.open) return;
+            title.textContent = `Tools & models · ${dataset.name}`;
             const sam = section("Your segmentation model", "Installed SAM1 and SAM3 models are available in every dataset. Your choice and image cache follow your account, without changing anyone else's tools.");
             const allowed = catalog.sam_allowed_model_ids;
             const candidates = catalog.models.filter(model => ["sam1", "sam3"].includes(model.kind) && (!Array.isArray(allowed) || allowed.includes(model.model_id)));
-            const select = choices(sam, "SAM model", candidates, catalog.sam?.model_id);
-            if (catalog.sam?.available === false) {
+            if (!candidates.length && !catalog.sam?.model_id) {
+                // Nothing installed is not a lost choice: say so plainly, with no saved-model alarm.
+                const none = node("p", user()?.role === "admin" ? "No SAM model is installed on this server. Install one under Add a configured model below; manual annotation works without it." : "No SAM model is installed on this server. Manual annotation works without it.");
+                none.id = "hostedSamNone"; none.setAttribute("role", "status"); sam.append(none);
+            }
+            const select = candidates.length || catalog.sam?.model_id ? choices(sam, "SAM model", candidates, catalog.sam?.model_id) : null;
+            if (select && catalog.sam?.available === false && catalog.sam.model_id) {
                 const unavailable = node("option", `${catalog.sam.model_id} · unavailable on this server`);
                 unavailable.value = catalog.sam.model_id; unavailable.disabled = true; select.append(unavailable); select.value = unavailable.value;
                 const explanation = node("p", `${catalog.sam.unavailable_reason || "Your saved segmentation model cannot run on this server. Your selection has been preserved."} Choose an available model, then click Use this SAM model.`);
                 explanation.id = "hostedSamUnavailable"; explanation.setAttribute("role", "status"); sam.append(explanation);
             }
-            action(sam, "Use this SAM model", async (valid) => {
+            if (select) action(sam, "Use this SAM model", async (valid) => {
                 if (!select.value || !candidates.some(model => model.model_id === select.value)) throw new Error("Choose a model available on this server.");
                 await api("/tools/sam", { model_id: select.value, expected_revision: catalog.sam?.revision || 0, operation_id: crypto.randomUUID() });
                 if (!valid()) return; await render(); await poll();
@@ -139,25 +145,28 @@
             if (canvas()) {
                 canvas().setToolsState(value);
                 const catalog = await api(`/tools/catalog?dataset_id=${encodeURIComponent(id)}`);
-                if (current === epoch && datasetId() === id) { window.TatorHostedCanvas?.configureTools(catalog, value); if (catalog.sam?.available === false && !phase) stateLabel.textContent = "Your saved SAM model is unavailable here. Open Tools & models to choose a compatible model."; }
+                // Only a saved choice that cannot run here is an alarm; no installed SAM model is not.
+                if (current === epoch && datasetId() === id) { window.TatorHostedCanvas?.configureTools(catalog, value); if (catalog.sam?.available === false && catalog.sam?.model_id && !phase) stateLabel.textContent = "Your saved SAM model is unavailable here. Open Tools & models to choose a compatible model."; }
             }
         } catch (error) { if (current === epoch && datasetId() === id && !error.stale) stateLabel.textContent = `Tool status unavailable: ${error.message}`; }
         finally { pendingPoll = false; }
     }
+    // Administrators reach this dialog from the navigation strip on the workspace page.
+    const hide = () => !user() || (!canvas() && user()?.role === "admin");
     function mount() {
-        if (button) { button.hidden = !user(); return; }
+        if (button) { button.hidden = stateLabel.hidden = hide(); return; }
         const parent = document.querySelector(".hosted-canvas-feedback") || document.querySelector(".hosted-actions");
         if (!parent) return;
         button = node("button", "Tools & models"); button.type = "button"; button.id = "hostedTools";
         stateLabel = node("span"); stateLabel.id = "hostedToolsState"; stateLabel.setAttribute("role", "status"); parent.append(button, stateLabel);
-        dialog = node("dialog"); dialog.id = "hostedToolsDialog"; dialog.append(node("h2", "Annotation tools"));
+        dialog = node("dialog"); dialog.id = "hostedToolsDialog"; title = node("h2", "Tools & models"); dialog.append(title);
         notice = node("p"); notice.setAttribute("role", "alert"); notice.hidden = true;
         content = node("div"); dialog.append(notice, content);
         const close = node("button", "Close"); close.type = "button"; close.onclick = () => dialog.close();
         const closeRow = node("div"); closeRow.className = "dialog-actions"; closeRow.append(close); dialog.append(closeRow); document.body.append(dialog);
         dialog.addEventListener("close", () => { epoch++; });
-        button.onclick = () => { dialog.showModal(); render(); };
-        button.hidden = !user(); poll();
+        button.onclick = () => { title.textContent = "Tools & models"; dialog.showModal(); render(); };
+        button.hidden = stateLabel.hidden = hide(); poll();
     }
     window.addEventListener("tator:hosted-canvas", mount);
     window.addEventListener("tator:hosted-session", () => { epoch++; dialog?.close(); content?.replaceChildren(); if (stateLabel) stateLabel.textContent = ""; mount(); });

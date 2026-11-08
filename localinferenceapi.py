@@ -20326,6 +20326,35 @@ def _annotation_effective_label_lines(
     return list(payload.get("label_lines") or [])
 
 
+HOSTED_WORKBENCH_COPY_MARKER = "hosted-bridge.json"
+
+
+def _annotation_empty_label_file_counts(entry: Mapping[str, Any]) -> bool:
+    """Whether an empty label file means "labeled, no objects" for this dataset.
+
+    Hosted admin-workbench copies hold confirmed images only, each with a label
+    file; an empty one is an image confirmed to contain no objects, so it counts
+    as labeled. Elsewhere an empty file keeps its legacy meaning (not labeled).
+    """
+    root = str(entry.get("dataset_root") or "").strip()
+    if not root:
+        return False
+    try:
+        marker = Path(root) / HOSTED_WORKBENCH_COPY_MARKER
+        return marker.is_file() and not marker.is_symlink()
+    except OSError:
+        return False
+
+
+def _annotation_effective_label_counts(
+    entry: Dict[str, Any], split: str, image_relpath: Path, *, empty_file_counts: bool
+) -> bool:
+    payload = _annotation_effective_label_payload(entry, split, image_relpath)
+    if any(str(line).strip() for line in payload.get("label_lines") or []):
+        return True
+    return bool(empty_file_counts and payload.get("label_source_present"))
+
+
 ANNOTATION_IMAGE_LABEL_REVISION_SCHEMA = "annotation-image-label-revision-v1"
 ANNOTATION_IMAGE_SOURCE_IDENTITY_SCHEMA = "annotation-image-source-identity-v1"
 CLASS_ANALYSIS_DUAL_BBOX_ANNOTATION_COMMIT_SCHEMA = (
@@ -20544,7 +20573,9 @@ def _annotation_collect_images(entry: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
-def _annotation_progress_from_rows(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+def _annotation_progress_from_rows(
+    rows: Sequence[Dict[str, Any]], *, empty_label_file_counts: bool = False
+) -> Dict[str, Any]:
     total = len(rows)
     labeled = 0
     text_labeled = 0
@@ -20552,6 +20583,8 @@ def _annotation_progress_from_rows(rows: Sequence[Dict[str, Any]]) -> Dict[str, 
         lines = row.get("label_lines") or []
         if isinstance(lines, list) and any(str(x).strip() for x in lines):
             labeled += 1
+        elif empty_label_file_counts and row.get("label_source_present"):
+            labeled += 1  # confirmed without objects (hosted workbench copy)
         text_label = str(row.get("text_label") or "").strip()
         if text_label:
             text_labeled += 1
@@ -20887,7 +20920,10 @@ def _annotation_manifest_for_entry_unlocked(entry: Dict[str, Any]) -> Dict[str, 
                 **_class_analysis_capture_metadata(row),
             }
         )
-    progress = _annotation_progress_from_rows(manifest_rows)
+    confirmed_negatives = _annotation_empty_label_file_counts(entry)
+    progress = _annotation_progress_from_rows(
+        manifest_rows, empty_label_file_counts=confirmed_negatives
+    )
     _meta_path, meta = _annotation_load_or_create_meta(entry)
     persisted_progress = _annotation_progress_cache_value(meta)
     if persisted_progress != progress:
@@ -20907,6 +20943,7 @@ def _annotation_manifest_for_entry_unlocked(entry: Dict[str, Any]) -> Dict[str, 
         "lock": meta.get("annotation_lock") or {},
         "session_revision": int(meta.get("annotation_revision") or 0),
         "progress": progress,
+        "confirmed_negatives": confirmed_negatives,
         "images": manifest_rows,
     }
 
@@ -41755,14 +41792,15 @@ def save_dataset_annotation_snapshot(dataset_id: str, payload: Dict[str, Any]):
         # against the state left by the preceding record. An unknown cache does
         # not need presence reads at all: its safe response remains unknown.
         presence_by_key: Dict[str, Tuple[bool, bool]] = {}
+        # Hosted workbench copies count a written empty label file as labeled.
+        empty_file_counts = _annotation_empty_label_file_counts(entry)
         if progress is not None:
             for split, rel, _has_lines, _lines, _has_text, _text in normalised_records:
                 key = f"{split}:{rel.as_posix()}"
                 if key in presence_by_key:
                     continue
-                old_has_lines = any(
-                    str(line).strip()
-                    for line in _annotation_effective_label_lines(entry, split, rel)
+                old_has_lines = _annotation_effective_label_counts(
+                    entry, split, rel, empty_file_counts=empty_file_counts
                 )
                 old_has_text = bool(
                     _annotation_effective_text_label(entry, rel, split).strip()
@@ -41776,7 +41814,7 @@ def save_dataset_annotation_snapshot(dataset_id: str, payload: Dict[str, Any]):
                 key = f"{split}:{rel.as_posix()}"
                 old_has_lines, old_has_text = preview_presence[key]
                 new_has_lines = (
-                    any(str(line).strip() for line in label_lines)
+                    empty_file_counts or any(str(line).strip() for line in label_lines)
                     if has_label_lines
                     else old_has_lines
                 )
@@ -41823,7 +41861,7 @@ def save_dataset_annotation_snapshot(dataset_id: str, payload: Dict[str, Any]):
                     overlay_root,
                     "\n".join(label_lines) + ("\n" if label_lines else ""),
                 )
-                new_has_lines = any(str(line).strip() for line in label_lines)
+                new_has_lines = empty_file_counts or any(str(line).strip() for line in label_lines)
             if has_text_label:
                 text_path = _annotation_overlay_text_path(entry, rel, split=split)
                 _annotation_write_text_within_root(text_path, overlay_root, text_value)

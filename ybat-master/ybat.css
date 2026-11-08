@@ -6344,6 +6344,13 @@ details.training-card > summary::marker {
     padding-right: 18px;
 }
 
+/* The section scrolls; its cards keep their full height. A card clips its
+   overflow, so as a shrinkable flex item it would cut off its own controls
+   (Detector Selection run lists at 1280x720) instead of scrolling. */
+.training-form-section > * {
+    flex-shrink: 0;
+}
+
 .training-wrapper.two-col .training-form-section,
 .training-wrapper.two-col .training-status-section {
     flex: 1 1 50%;

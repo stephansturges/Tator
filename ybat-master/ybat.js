@@ -9018,6 +9018,7 @@ const sam3TrainState = {
                     image_width: Number.isFinite(imageWidth) && imageWidth > 0 ? imageWidth : 0,
                     image_height: Number.isFinite(imageHeight) && imageHeight > 0 ? imageHeight : 0,
                     label_lines: [...labelLines],
+                    label_source_present: Boolean(row.label_source_present),
                     text_label: textLabel,
                     annotation_record_revision: String(row.annotation_record_revision || "").trim(),
                     annotation_source_identity: String(row.annotation_source_identity || "").trim(),
@@ -25114,6 +25115,17 @@ async function cancelRfDetrTrainingJobRequest() {
             settingsElements.apiInput.value = API_ROOT;
         }
         setSettingsStatus(`Current backend: ${API_ROOT}`, "info");
+        if (workbenchApiRoot) {
+            // The hosted server runs and addresses the workbench service itself;
+            // a different address (or an SSH tunnel) cannot apply here.
+            const panel = settingsElements.apiInput?.closest(".settings-panel");
+            const intro = panel?.querySelector("h3 + p");
+            if (intro) intro.textContent = "The admin workbench is managed by the hosted server, which always connects it to the server's own workbench service. The address cannot be changed here.";
+            if (settingsElements.apiInput) settingsElements.apiInput.readOnly = true;
+            if (settingsElements.applyButton) settingsElements.applyButton.hidden = true;
+            const help = settingsElements.status?.nextElementSibling;
+            if (help?.classList.contains("settings-help")) help.hidden = true;
+        }
         if (settingsElements.applyButton) {
             settingsElements.applyButton.addEventListener("click", () => applyApiRootValue(settingsElements.apiInput?.value || ""));
         }
@@ -49828,7 +49840,16 @@ async function cancelRfDetrTrainingJobRequest() {
             const jobId = agentState.lastJob?.job_id;
             const url = jobId ? `${API_ROOT}/agent_mining/jobs/${jobId}` : `${API_ROOT}/agent_mining/results/latest`;
             const resp = await fetch(url);
-            if (!resp.ok) throw new Error(await resp.text());
+            const notFound = !jobId && resp.status === 404 ? await resp.clone().text().catch(() => "") : "";
+            if (notFound && parseApiError(notFound, "") === "agent_mining_result_not_found") {
+                // No mining run yet on this backend: an empty state, not a failure.
+                if (requestId !== agentState.latestRefreshRequestId) return;
+                setAgentResultsMessage("No recipe mining runs yet. Start one above; its results appear here.", "info");
+                if (!silent) setAgentStatus("No recipe mining runs yet.", "info");
+                stopAgentPoll();
+                return;
+            }
+            if (!resp.ok) throw new Error(parseApiError(await resp.text(), `HTTP ${resp.status}`));
             const job = await resp.json();
             // Ignore stale latest-job responses if a newer refresh superseded this one.
             if (requestId !== agentState.latestRefreshRequestId) {
@@ -50577,9 +50598,12 @@ async function cancelRfDetrTrainingJobRequest() {
         const counts = new Map(labelmap.map((className) => [className, 0]));
         let objectCount = 0;
         let labeledImageCount = 0;
+        // Hosted workbench copies hold confirmed images only: one with a label
+        // file but no objects is confirmed empty, so it counts as labeled.
+        const confirmedNegatives = Boolean(annotationSourceState.manifest?.confirmed_negatives);
         imageKeys.forEach((imageKey) => {
             const lines = getClassSplitActiveLabelLines(imageKey);
-            if (lines.length) {
+            if (lines.length || (confirmedNegatives && annotationSourceState.imageRowsByKey?.get(imageKey)?.label_source_present)) {
                 labeledImageCount += 1;
             }
             lines.forEach((line) => {

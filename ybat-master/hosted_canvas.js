@@ -642,6 +642,9 @@
         if (guidance) { guidance.textContent = tranche?.instructions || ""; guidance.hidden = !tranche?.instructions; }
     }
     async function step(delta = 1) {
+        // Next/Previous pressed while the list is loading or a save finishes
+        // waits briefly for it instead of being silently dropped.
+        for (let waited = 0; busy && !handoff && waited < 5000; waited += 50) await new Promise(resolve => setTimeout(resolve, 50));
         if (!queue || busy || handoff) return;
         try { const target = await queue.neighbor(imageId, delta); if (target) await navigate(target.id); else status(delta > 0 ? "You reached the end of this queue." : "You reached the beginning of this queue."); }
         catch (error) { report(error); }

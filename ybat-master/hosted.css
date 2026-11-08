@@ -42,3 +42,14 @@ button.danger{color:var(--warning);border-color:var(--warning)}button.danger:hov
 .hosted-password-fields{padding:.6rem;border-radius:8px;background:var(--accent-light)}
 #hostedToolsDialog .hosted-tools-action{margin-top:8px}
 #hostedToolsDialog section>button{margin-top:8px}
+:root[data-theme=pipboy]{color-scheme:dark;--pip:#84ff5b;--pip-strong:#b7ff8a;--bg:#020703;--surface:#071708;--text:#84ff5b;--muted:#58c84d;--border:#2f7d35;--accent:#b7ff8a;--accent-light:#103114;--warning:#ffd85e;--shadow:0 0 18px #84ff5b1f}
+:root[data-theme=pipboy][data-pipboy-accent=amber]{--pip:#ffbf3d;--pip-strong:#ffe28a;--bg:#080501;--surface:#1b1002;--text:#ffbf3d;--muted:#d99424;--border:#7e5818;--accent:#ffe28a;--accent-light:#3a2608;--warning:#fff2b0;--shadow:0 0 18px #ffbf3d1f}
+:root[data-theme=pipboy] body{background:radial-gradient(circle at 48% 18%,color-mix(in srgb,var(--pip) 12%,transparent),transparent 38%) fixed,var(--bg);font-family:"Share Tech Mono","OCR A Std","OCR A Extended","IBM Plex Mono","JetBrains Mono","SFMono-Regular",Menlo,Consolas,"Liberation Mono",monospace;font-variant-ligatures:none;font-feature-settings:"zero" 1;text-shadow:0 0 7px color-mix(in srgb,var(--pip) 45%,transparent)}
+:root[data-theme=pipboy] body::before,:root[data-theme=pipboy] body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:10000}
+:root[data-theme=pipboy] body::before{background:repeating-linear-gradient(0deg,color-mix(in srgb,var(--pip) 8%,transparent) 0 1px,transparent 1px 3px),linear-gradient(180deg,transparent,color-mix(in srgb,var(--pip) 10%,transparent),transparent);background-size:100% 3px,100% 220px;opacity:.34;animation:hostedPipboyScan 8s linear infinite}
+:root[data-theme=pipboy] body::after{box-shadow:inset 0 0 70px color-mix(in srgb,var(--pip) 18%,transparent),inset 0 0 190px #000000d1;background:radial-gradient(ellipse at center,transparent 54%,#0000005c 100%);opacity:.86}
+@keyframes hostedPipboyScan{from{background-position:0 0,0 -220px}to{background-position:0 0,0 220px}}
+@media(prefers-reduced-motion:reduce){:root[data-theme=pipboy] body::before{animation:none}}
+:root[data-theme=pipboy] ::selection{background:color-mix(in srgb,var(--pip) 28%,transparent);color:var(--pip-strong)}
+:root[data-theme=pipboy] :is(input,select,textarea){caret-color:var(--pip-strong)}
+:root[data-theme=pipboy] #theme{border-color:var(--pip-strong);background:color-mix(in srgb,var(--pip) 18%,transparent);color:var(--pip-strong);box-shadow:inset 0 0 14px color-mix(in srgb,var(--pip) 20%,transparent),0 0 18px color-mix(in srgb,var(--pip) 22%,transparent)}

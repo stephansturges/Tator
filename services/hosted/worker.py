@@ -131,7 +131,12 @@ def main() -> int:
                 # response. No arbitrary exception message or payload is echoed.
                 import traceback
                 traceback.print_exc(file=sys.stderr)
-                response = encode_message({"id": message["id"], "ok": False, "error_type": type(exc).__name__})
+                failure = {"id": message["id"], "ok": False, "error_type": type(exc).__name__}
+                # Tator's own error codes are fixed identifiers, safe to report.
+                code = getattr(exc, "code", None)
+                if type(exc).__name__ == "DomainError" and isinstance(code, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code):
+                    failure["error_code"] = code
+                response = encode_message(failure)
             protocol.write(response)
     except EOFError:
         return 0

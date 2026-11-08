@@ -175,7 +175,8 @@ class _ProcessWorker:
         if not isinstance(response, dict) or response.get("id") != message["id"]:
             raise RuntimeRejected("worker_protocol_invalid")
         if response.get("ok") is not True:
-            raise RuntimeRejected("worker_operation_failed")
+            code = response.get("error_code")
+            raise RuntimeRejected(code if isinstance(code, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code) else "worker_operation_failed")
         return response
 
     def initialize(self):

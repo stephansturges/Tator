@@ -45,3 +45,11 @@
 .hosted-caption-review{margin:12px;padding:16px;border:1px solid var(--border,#bcc6cf);border-radius:10px;background:var(--surface,#fff);color:var(--text,#152536);max-height:35vh;overflow:auto}.hosted-caption-review h2{font-size:1rem;margin:0 0 8px}.hosted-caption-review label{display:block;margin:8px 0}.hosted-caption-review p{white-space:pre-wrap}
 #hostedToolsDialog .hosted-tools-action{margin-top:8px}
 #hostedToolsDialog section>button{margin-top:8px}
+.hosted-canvas-header-tools{display:flex;align-items:center;gap:6px;flex-shrink:0}
+.hosted-canvas-panel #themeToggleButton{min-width:0;min-height:32px;padding:4px 10px;font-size:12px;font-weight:650}
+html.theme-pipboy .hosted-canvas-panel,html.theme-pipboy .hosted-canvas :is(#hostedClassDialog,#hostedToolsDialog,#hostedCaptionDialog,#hostedPaidBatchDialog){background:var(--pip-panel);border-color:var(--pip-border);color:var(--pip-green);font-family:var(--pip-font);box-shadow:0 0 24px color-mix(in srgb,var(--pip-green) 16%,transparent)}
+html.theme-pipboy .hosted-canvas-panel button,html.theme-pipboy .hosted-canvas :is(#hostedClassDialog,#hostedToolsDialog,#hostedCaptionDialog,#hostedPaidBatchDialog) button{background:var(--pip-control-bg);border-color:var(--pip-border);color:var(--pip-green)}
+html.theme-pipboy .hosted-canvas-panel button:hover{background:var(--pip-control-hover-bg);border-color:var(--pip-border-strong)}
+html.theme-pipboy .hosted-canvas :is(#hostedSubmit,#hostedApprove){background:color-mix(in srgb,var(--pip-green) 22%,transparent);border-color:var(--pip-border-strong);color:var(--pip-green-strong)}
+html.theme-pipboy .hosted-review-note{background:var(--pip-panel-3);color:var(--pip-amber)}
+html.theme-pipboy :is(.hosted-canvas-bar,.hosted-canvas-feedback){border-top-color:var(--pip-border)}

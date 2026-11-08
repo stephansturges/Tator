@@ -342,11 +342,80 @@ def _wait(get_status, job_id, timeout):
     raise TimeoutError("Native engine deadline exceeded")
 
 
+RUN_VALIDATION_SHARE = 0.1
+
+
+def _run_split(manifest):
+    """Give unsplit images a train or validation place for this training run only.
+
+    Datasets do not have to carry splits. Splits set on the dataset are kept, and
+    unsplit members of a capture group (sequence, video, flight, ...) follow their
+    group's split. Wholly unsplit groups are ordered by a stable hash of the dataset
+    and group, and the first ones take about a tenth of those images as validation,
+    so the same groups tend to validate on every run. A class seen only in
+    validation is moved back to training. Nothing is written back to the dataset;
+    the run records the split it used.
+    """
+    from .splits import capture_groups
+    images = manifest["images"]
+    if not any(image["split"] == "unsplit" for image in images):
+        return manifest, None
+    parent = list(range(len(images)))
+    def find(index):
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+    first, names = {}, {}
+    for index, image in enumerate(images):
+        for identity in capture_groups(image["annotations"]):
+            parent[find(index)] = find(first.setdefault(identity, index))
+    for index, image in enumerate(images):
+        identities = ["=".join(identity) for identity in capture_groups(image["annotations"])] or ["image=" + image["id"]]
+        names.setdefault(find(index), []).extend(identities)
+    groups = {}
+    for index in range(len(images)):
+        groups.setdefault(find(index), []).append(index)
+    splits = [image["split"] for image in images]
+    automatic = []
+    for root, members in groups.items():
+        declared = {splits[index] for index in members} - {"unsplit"}
+        if len(declared) == 1:
+            target = declared.pop()
+            for index in members:
+                splits[index] = target if splits[index] == "unsplit" else splits[index]
+        elif not declared:
+            automatic.append((hashlib.sha256(f"{manifest['dataset_id']}:{min(names[root])}".encode()).hexdigest(), members))
+    automatic.sort()
+    pool = sum(len(members) for _, members in automatic)
+    validation, chosen = [], 0
+    for _, members in automatic:
+        goes_to_validation = chosen < RUN_VALIDATION_SHARE * pool and len(automatic) > 1
+        validation.append(goes_to_validation)
+        chosen += len(members) if goes_to_validation else 0
+    classes = lambda members: {item.get("class_id") for index in members for item in images[index]["annotations"].get("objects", [])}
+    in_training = set().union(*(classes(members) for (_, members), held in zip(automatic, validation) if not held),
+                              *(classes([index]) for index, split in enumerate(splits) if split == "train"))
+    for position, ((_, members), held) in enumerate(zip(automatic, validation)):
+        if held and classes(members) - in_training and sum(validation) > 1:
+            validation[position] = False
+            in_training |= classes(members)
+    for (_, members), held in zip(automatic, validation):
+        for index in members:
+            splits[index] = "val" if held else "train"
+    changed = [index for index, image in enumerate(images) if image["split"] == "unsplit"]
+    result = {**manifest, "images": [{**image, "split": splits[index], "split_chosen_for_run": True} if image["split"] == "unsplit" else image
+                                     for index, image in enumerate(images)]}
+    return result, {"rule": "unsplit images split for this run only; capture groups kept together; dataset splits kept",
+                    "validation_share": RUN_VALIDATION_SHARE, "images_split_for_run": len(changed),
+                    "train_images": splits.count("train"), "validation_images": splits.count("val"), "test_images": splits.count("test")}
+
+
 def _training_membership(manifest):
     from .splits import capture_groups
     membership = {image["id"]: image["split"] for image in manifest["images"]}
     if "unsplit" in membership.values() or not {"train", "val"}.issubset(membership.values()):
-        raise RuntimeError("Training requires explicit train/validation membership for every image")
+        raise RuntimeError("Training needs training and validation images; add images or capture groups so some can be held out for validation")
     groups = {}
     for image in manifest["images"]:
         for identity in capture_groups(image['annotations']):
@@ -638,7 +707,7 @@ def _run_native(request, manifest, dataset, source, directory):
         return {"native_job_id": created["job_id"], "status": status, "result": service.result(created["job_id"])}
     splits = {row["original_split"] for row in source["images"]}
     if not {"train", "val"}.issubset(splits):
-        raise RuntimeError("An explicit train/validation split is required")
+        raise RuntimeError("Training needs training and validation images; add images or capture groups so some can be held out for validation")
     if operation in {"yolo_training", "rfdetr_training"}:
         model = api.YoloTrainRequest if operation == "yolo_training" else api.RfDetrTrainRequest
         payload = model(**{**parameters, "dataset_id": dataset_id, "dataset_root": None})
@@ -722,8 +791,13 @@ def _child(directory):
     if request["operation"] == "caption_export":
         from .language_schema import validate_instruction_manifest
         validate_instruction_manifest(manifest)
+    run_split = None
+    if request["operation"].endswith("_training") and request["operation"] != "salad_training":
+        manifest, run_split = _run_split(manifest)
     dataset, source, inputs = _materialize(manifest, directory)
     result = _run_native(request, manifest, dataset, source, directory)
+    if run_split is not None:
+        result = {**result, "run_split": run_split} if isinstance(result, dict) else result
     _verify_inputs(dataset, inputs)
     _write_json(directory / "result.json", {"snapshot_id": manifest["snapshot_id"], "dataset_id": manifest["dataset_id"], "revision": manifest["revision"],
         "class_version": manifest["class_version"], "settings_version": manifest["settings_version"], "settings": manifest["settings"],

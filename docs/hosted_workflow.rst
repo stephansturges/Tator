@@ -41,6 +41,12 @@ When the server runs the `admin workbench <hosted_workbench.rst>`_, these
 entries open the full original tools instead, and **More tools** and **Server
 jobs** appear. The administrator navigation is never shown to annotators.
 
+The theme button, in the workspace header and in the annotation panel, switches
+between light and dark. Double-click it for the Pip-Boy theme; a click then
+switches its green and amber colors, and another double-click leaves it. The
+choice is kept in the browser and applies to the workspace, the annotation
+canvas and the workbench.
+
 **Admin workspace** returns to the selected dataset, where **People**, **Classes**,
 **Dataset guidance** and **Export & recovery** provide administration controls.
 **Quality & compute** remains an advanced list of all analysis and training jobs.
@@ -405,10 +411,14 @@ The complete selection commits together. If a captured version, ownership
 generation or dataset revision changed, or an image has an active editor, the
 change is rejected. Existing annotation versions and older snapshots remain
 intact. A lost reply can be recovered with **Check pending split change**, even
-after navigating away or losing the original selection. Training
-requires explicit train and validation populations and rejects unsplit images
-or capture groups spread across those populations. Migration retains source
-split assignments; this editor can deliberately revise them later.
+after navigating away or losing the original selection.
+
+Setting splits is optional. Training keeps the splits set here and gives every
+unsplit image a train or validation place for that run only, keeping capture
+groups together and holding out about a tenth of the images; the run records
+the split it used and the dataset is unchanged. Training rejects capture groups
+spread across splits set here. Migration does not keep source split
+assignments: every imported image starts unassigned.
 
 Snapshots, analysis and dataset downloads
 -----------------------------------------

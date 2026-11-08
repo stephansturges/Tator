@@ -7,3 +7,9 @@
 #hostedAdminNav button:focus-visible,#hostedAdminNav summary:focus-visible{outline:2px solid #48b8ec;outline-offset:2px}
 #hostedAdminNav details{position:relative}
 .hosted-training-menu{position:absolute;top:calc(100% + 6px);left:0;min-width:190px;display:grid;gap:6px;padding:10px;border:1px solid var(--border-color,var(--border,#bdcbd4));border-radius:8px;background:var(--panel-bg,var(--surface,#fff));box-shadow:0 8px 24px #0003}
+html.theme-dark #hostedAdminNav,html.theme-dark .hosted-training-menu{background:#1c2933;color:#edf3f7;border-color:#3b4e5c}
+html.theme-dark #hostedAdminNav :is(button,summary){border-color:#3b4e5c}
+html.theme-dark #hostedAdminNav [aria-current=page]{background:#203f38;color:#78dbc0}
+html.theme-pipboy #hostedAdminNav,html.theme-pipboy .hosted-training-menu{background:var(--pip-tab-bg);color:var(--pip-green);border-color:var(--pip-border);font-family:var(--pip-font)}
+html.theme-pipboy #hostedAdminNav :is(button,summary){border-color:var(--pip-border);background:var(--pip-control-bg)}
+html.theme-pipboy #hostedAdminNav [aria-current=page]{background:color-mix(in srgb,var(--pip-green) 18%,transparent);color:var(--pip-green-strong);border-color:var(--pip-border-strong)}

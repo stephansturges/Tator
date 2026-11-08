@@ -84,3 +84,17 @@ def test_split_admission_rejects_pending_foreign_roles_and_changed_dataset(store
     store.add_class(ADMIN, ds['id'], 'Bus', 'new-class', expected_class_version=ds['class_version'])
     error('dataset_revision_changed', lambda: commit(store, ds, plan, 'changed-dataset'))
     assert store.image(ADMIN, a['id'])['split'] == 'train'
+
+
+def test_training_splits_unsplit_images_for_the_run_only():
+    from services.hosted.native_analysis import _run_split
+    image = lambda i, split='unsplit', cls='car', video=None: {'id': f'image_{i:04d}', 'split': split, 'annotations': {
+        'objects': [{'id': 'o', 'class_id': cls}], **({'capture_metadata': {'video_id': video}} if video else {})}}
+    manifest = {'dataset_id': 'ds', 'images': [image(i) for i in range(60)] + [image(100 + i, video='flight') for i in range(20)]
+                + [image(200, cls='rare'), image(201, 'val'), image(202, 'test')]}
+    chosen, record = _run_split(manifest)
+    splits = {row['id']: row['split'] for row in chosen['images']}
+    assert _training_membership(chosen) and record['images_split_for_run'] == 81
+    assert len({splits[f'image_{100 + i:04d}'] for i in range(20)}) == 1 and splits['image_0200'] == 'train'
+    assert splits['image_0201'] == 'val' and splits['image_0202'] == 'test' and record['validation_images'] > 1
+    assert all(row['split'] == 'unsplit' for row in manifest['images'][:60]) and _run_split(manifest)[0] == chosen

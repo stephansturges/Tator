@@ -675,7 +675,11 @@
         const back = addButton(header, "hostedBack", boot.user.role === "admin" ? "← Admin workspace" : "← Workspace", () => leave(false, backUrl()));
         back.title = boot.user.role === "admin" ? "Save and return to datasets, quality analysis, compute, people and settings" : "Save and return to your assigned work";
         const toggle = node("button", "−"); toggle.type = "button"; toggle.id = "hostedPanelToggle"; toggle.setAttribute("aria-controls", "hostedWorkflowControls");
-        toggle.setAttribute("aria-expanded", "true"); toggle.setAttribute("aria-label", "Minimize annotation controls"); header.append(toggle);
+        toggle.setAttribute("aria-expanded", "true"); toggle.setAttribute("aria-label", "Minimize annotation controls");
+        // The page's own theme button (light/dark, double-click for Pip-Boy) lives in the hidden tab bar; keep it reachable here.
+        const headerTools = node("div"); headerTools.className = "hosted-canvas-header-tools";
+        const themeButton = document.getElementById("themeToggleButton"); if (themeButton) headerTools.append(themeButton);
+        headerTools.append(toggle); header.append(headerTools);
         const title = node("div"); title.className = "hosted-canvas-title"; title.append(node("strong", record.filename), node("small", `${dataset.name} · ${record.state === "confirmed" ? "Confirmed" : record.state === "submitted" ? "Submitted for review" : "Incoming"} · ${boot.user.username}`));
         const breadcrumb = node("small"); breadcrumb.id = "hostedBreadcrumb"; title.append(breadcrumb);
         const trancheTitle = node("strong"); trancheTitle.id = "hostedTrancheTitle"; title.append(trancheTitle);

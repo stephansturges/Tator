@@ -204,7 +204,7 @@ The following existing entrypoints implement the actual numerical work:
   ``localinferenceapi.create_*_training_job`` functions. YOLO's dataset resolver
   is already independently reusable; the launchers still depend on process-local
   registries and job state. CLIP/classifier training calls
-  ``tools.clip_training.train_clip_from_yolo`` with the frozen train/validation
+  ``tools.clip_training.train_clip_from_yolo`` with the run's train/validation
   membership. Its native feature construction, correction and fitting remain
   unchanged; the adapter replaces only random split selection.
 
@@ -226,11 +226,18 @@ keys, dimensions and native recipe qualification remain unchanged. Fitted
 transforms still require the original population and native validity checks.
 
 Native pruning substitutes only source authority with the frozen manifest and
-uses the existing component producers and planner. Training requires explicit
-train/validation membership and refuses unsplit examples. A separate polygon
-view is created for segmentation, leaving canonical box labels untouched.
-Classifier training requires every validation class to be represented in
-training. Supervised training rejects capture groups crossing declared splits.
+uses the existing component producers and planner. Datasets do not need splits
+for training. Splits set on the dataset are kept; unsplit images get a train or
+validation place for that run only (``_run_split``), and nothing is written back
+to the dataset. Unsplit members of a capture group follow their group. Wholly
+unsplit groups are ordered by a stable hash of the dataset and group, and the
+first ones take about a tenth of those images as validation, so the same groups
+tend to validate on every run. A class seen only in validation moves back to
+training. The run result records the split it used under ``run_split``. A later
+version is meant to choose these splits with the diversity scoring engine. A
+separate polygon view is created for segmentation, leaving canonical box labels
+untouched. Classifier training requires every validation class to be represented
+in training. Supervised training rejects capture groups crossing declared splits.
 Self-supervised SALAD training uses the confirmed images and does not require
 an artificial train/validation split.
 Qwen conversion restores explicit negative images omitted by the legacy

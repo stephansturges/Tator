@@ -49,9 +49,32 @@
         try { await refresh(); notice(message); }
         catch (error) { if (!error.stale) notice(`${message} The view could not refresh; use Refresh to load the saved state.`, true); }
     }
-    function applyTheme(dark) { document.documentElement.dataset.theme = dark ? "dark" : "light"; $("theme").textContent = dark ? "Light mode" : "Dark mode"; localStorage.setItem("tator.hosted.theme", dark ? "dark" : "light"); }
-    $("theme").onclick = () => applyTheme(document.documentElement.dataset.theme !== "dark");
-    applyTheme(localStorage.getItem("tator.hosted.theme") === "dark" || (!localStorage.getItem("tator.hosted.theme") && matchMedia("(prefers-color-scheme: dark)").matches));
+    // Light or dark; double-click the button for the Pip-Boy theme, where a click switches green and amber.
+    // The keys are the annotation canvas and workbench ones, so the choice follows the person across the app.
+    (() => {
+        const read = key => { try { return localStorage.getItem(key); } catch (_) { return null; } };
+        const write = (key, value) => { try { localStorage.setItem(key, value); } catch (_) {} };
+        const saved = read("tator.themeMode"), older = read("tator.hosted.theme");
+        let mode = ["light", "dark", "pipboy"].includes(saved) ? saved : ["light", "dark"].includes(older) ? older : matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        let classic = ["light", "dark"].includes(read("tator.classicThemeMode")) ? read("tator.classicThemeMode") : mode === "dark" ? "dark" : "light";
+        let accent = read("tator.pipboyAccent") === "amber" ? "amber" : "green", clickTimer = null;
+        function apply(next, persist) {
+            mode = next; if (mode !== "pipboy") classic = mode;
+            const root = document.documentElement, button = $("theme"), pip = mode === "pipboy";
+            root.dataset.theme = mode; if (pip) root.dataset.pipboyAccent = accent; else delete root.dataset.pipboyAccent;
+            button.textContent = pip ? `Pip ${accent === "amber" ? "Amber" : "Green"}` : mode === "dark" ? "Light mode" : "Dark mode";
+            button.title = pip ? `Switch Pip-Boy color to ${accent === "amber" ? "green" : "amber"}; double-click to leave Pip-Boy` : "";
+            if (!persist) return;
+            write("tator.themeMode", mode); write("tator.darkMode", mode === "dark" ? "1" : "0"); write("tator.pipboyAccent", accent);
+            if (!pip) write("tator.classicThemeMode", mode);
+        }
+        $("theme").onclick = () => {
+            clearTimeout(clickTimer);
+            clickTimer = setTimeout(() => { clickTimer = null; if (mode === "pipboy") accent = accent === "amber" ? "green" : "amber"; apply(mode === "pipboy" ? mode : mode === "dark" ? "light" : "dark", true); }, 320);
+        };
+        $("theme").ondblclick = () => { clearTimeout(clickTimer); clickTimer = null; apply(mode === "pipboy" ? classic : "pipboy", true); };
+        apply(mode, false);
+    })();
     function announceSession() { try { localStorage.setItem("tator.hosted.session-event", crypto.randomUUID()); } catch (_) {} }
     window.addEventListener("storage", event => { if (event.key === "tator.hosted.session-event" && state.session) { loginView(); notice("The signed-in account changed in another tab. Sign in or reload to continue."); } });
     function loginView() {

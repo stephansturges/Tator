@@ -40,6 +40,7 @@ from services.hosted.workbench import PREFIX as WORKBENCH_PREFIX, UPLOAD_LIMIT a
 from services.hosted.types import Actor, MutationContext
 from services.hosted.preconditions import ImagePrecondition, precondition_payload
 from services.hosted.media import HostedMedia, inspect_media
+from services.hosted.migration import import_reports
 from services.hosted.thumbnails import DEFAULT_THUMBNAIL_SIZE, THUMBNAIL_SIZES, Thumbnails
 from services.hosted.static_assets import PublicStaticAssets
 
@@ -393,7 +394,11 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
 
     @app.get("/api/hosted/datasets/{dataset_id}")
     def dataset(dataset_id: str, identity: Actor = Depends(actor)):
-        return store.get_dataset(identity, dataset_id)
+        record = store.get_dataset(identity, dataset_id)
+        # What each import did (newest first). Source paths are server-side
+        # provenance, so only administrators see them.
+        record["import_reports"] = import_reports(store, record) if identity.role == "admin" else []
+        return record
 
     @app.post("/api/hosted/datasets/{dataset_id}/guidance")
     def dataset_guidance(dataset_id: str, body: DatasetGuidance, identity: Actor = Depends(admin)):

@@ -13,6 +13,7 @@ import math
 import os
 from pathlib import Path, PurePosixPath
 import re
+import sqlite3
 import stat
 from typing import Any
 
@@ -26,9 +27,12 @@ from .store import HostedStore, _json
 from .types import Actor, MutationContext
 
 
-FORMAT = "tator-hosted-migration-v4"  # v4: always clipped, empty rows dropped, duplicates resolved, unsplit
+# v4: always clipped, empty rows dropped, duplicate copies resolved, unsplit.
+# v5: also drops exact duplicate rows, records clipped rows, and imports the
+# labels of a removed duplicate copy as an import conflict for a person to pick.
+FORMAT = "tator-hosted-migration-v5"
 LEGACY_FORMAT = "tator-hosted-migration-v1"
-LEGACY_FORMATS = {LEGACY_FORMAT, "tator-hosted-migration-v2", "tator-hosted-migration-v3"}
+LEGACY_FORMATS = {LEGACY_FORMAT, "tator-hosted-migration-v2", "tator-hosted-migration-v3", "tator-hosted-migration-v4"}
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 ROLES = {"metadata", "groups", "recipe", "salad_weights", "salad_metadata", "caption_records"}
 
@@ -94,11 +98,16 @@ def _read(path: Path, maximum=16 * 1024 * 1024) -> str:
 
 
 def _objects(text: str, width: int, height: int, classes: list[str], *, clip: bool = True, key: str,
-             dropped: list | None = None) -> list[dict]:
+             dropped: list | None = None, clipped: list | None = None,
+             duplicates: list | None = None) -> list[dict]:
     """YOLO rows to pixel boxes. Boxes are always clipped to the image (``clip``
-    is kept for older callers and plans); a row left with no area inside the
-    image, such as a zero-size box, is dropped and its line number recorded."""
+    is kept for older callers and plans). Line numbers are recorded in the
+    optional lists: ``dropped`` for a row left with no area inside the image,
+    such as a zero-size box; ``duplicates`` for a row with the same class and
+    the same clipped geometry as an earlier row (only the first is kept); and
+    ``clipped`` for a kept row that crossed the image edge."""
     result = []
+    seen = set()
     for line_number, line in enumerate(text.splitlines(), 1):
         fields = line.split()
         if not fields:
@@ -118,7 +127,11 @@ def _objects(text: str, width: int, height: int, classes: list[str], *, clip: bo
                 xmax, ymax = max(values[::2]), max(values[1::2])
             else:
                 raise ValueError("unsupported YOLO row")
-            xmin, ymin, xmax, ymax = [min(1.0, max(0.0, value)) for value in (xmin, ymin, xmax, ymax)]
+            edges = (xmin, ymin, xmax, ymax)
+            xmin, ymin, xmax, ymax = [min(1.0, max(0.0, value)) for value in edges]
+            # Count a row as clipped when it really crossed the edge, not when
+            # centre/size arithmetic lands one float step past a touching edge.
+            crossed = any(value < -1e-9 or value > 1 + 1e-9 for value in (values if polygon else edges))
             if xmin >= xmax or ymin >= ymax:
                 if dropped is not None:
                     dropped.append(line_number)
@@ -137,10 +150,20 @@ def _objects(text: str, width: int, height: int, classes: list[str], *, clip: bo
                 if dropped is not None:
                     dropped.append(line_number)
                 continue
+            points = ([[min(1.0, max(0.0, x)) * width, min(1.0, max(0.0, y)) * height] for x, y in polygon]
+                      if polygon else None)
+            identity = (label, x, y, w, h, tuple(map(tuple, points)) if points else None)
+            if identity in seen:
+                if duplicates is not None:
+                    duplicates.append(line_number)
+                continue
+            seen.add(identity)
+            if crossed and clipped is not None:
+                clipped.append(line_number)
             item = {"id": "legacy-" + digest([key, line_number, fields])[:24], "class_index": label,
                     "bbox": [x, y, w, h]}
-            if polygon:
-                item["polygon"] = [[min(1.0, max(0.0, x)) * width, min(1.0, max(0.0, y)) * height] for x, y in polygon]
+            if points:
+                item["polygon"] = points
             result.append(item)
         except (ValueError, OverflowError) as error:
             raise DomainError("migration_label_invalid", 422, {"image": key, "line": line_number, "reason": str(error)}) from error
@@ -254,13 +277,14 @@ def inventory(source_root: str | Path, *, mapping: dict | None = None, clip_boxe
         current_label = next((candidate for candidate in found if candidate.startswith(active_overlay) or candidate == source_label.as_posix()), None)
         label_text = _read(Path(files[current_label]["path"])) if current_label else ""
         coordinate_space = coordinate_spaces.get(key, mapping.get("label_coordinate_space"))
+        dropped_rows, clipped_rows, duplicate_rows = [], [], []
         if label_text.strip() and media_info.orientation != 1 and coordinate_space is None:
             coordinate_blockers.append({"kind": "label_coordinate_space_required", "images": [key], "orientation": media_info.orientation})
-            objects, coordinate_provenance, dropped_rows = [], None, []
+            objects, coordinate_provenance = [], None
         else:
-            dropped_rows = []
             objects, coordinate_provenance = prepare_yolo_objects(label_text, classes, media_info,
-                key=key, label_coordinate_space=coordinate_space, dropped=dropped_rows)
+                key=key, label_coordinate_space=coordinate_space, dropped=dropped_rows,
+                clipped=clipped_rows, duplicates=duplicate_rows)
         captions = []
         caption_paths = []
         relative_label = relative.with_suffix(".txt")
@@ -296,7 +320,10 @@ def inventory(source_root: str | Path, *, mapping: dict | None = None, clip_boxe
         images.append({"key": key, "file": name, "media_hash": entry["sha256"], "size_bytes": entry["size_bytes"], "width": width, "height": height,
                        # Source split folders are provenance only (in the key): splits are decided later.
                        "split": "unsplit", "label_file": current_label, "objects": objects, "captions": captions,
-                       "dropped_label_rows": dropped_rows,
+                       # Line numbers: rows with no area and exact duplicate rows
+                       # (both dropped), and kept rows clipped to the image.
+                       "dropped_label_rows": dropped_rows, "duplicate_label_rows": duplicate_rows,
+                       "clipped_label_rows": clipped_rows,
                        "media": media_info.as_dict(), "media_coordinate_provenance": coordinate_provenance,
                        "effective_caption": effective_caption,
                        "effective_caption_file": effective_caption_file,
@@ -382,8 +409,9 @@ def _resolve_duplicates(images: list[dict]) -> tuple[list[dict], list[dict]]:
 
     Copies with the same labels need no review and the first path is kept.
     When their labels differ, the copy with the most objects (then the first
-    path) is kept and marked for review, so a person confirms it; the other
-    copies are recorded in the plan.
+    path) is kept and marked for review. Each other copy keeps its own objects
+    in the plan; apply imports them as an import conflict on the kept image,
+    so a person compares the copies and picks one.
     """
     groups: dict[str, list[dict]] = {}
     for row in images:
@@ -404,10 +432,125 @@ def _resolve_duplicates(images: list[dict]) -> tuple[list[dict], list[dict]]:
         if not same:
             row["review_required"] = "duplicate_labels_differ"
         row["duplicate_keys"] = [item["key"] for item in others]
-        removed.append({"kept": row["key"], "removed": [{"key": item["key"], "label_file": item["label_file"], "objects": len(item["objects"])} for item in others],
-                        "labels_differ": not same})
+        copies = []
+        for item in others:
+            copy = {"key": item["key"], "label_file": item["label_file"], "objects": len(item["objects"])}
+            if not same:
+                copy["conflict"] = {"objects": item["objects"], "media_coordinate_provenance": item.get("media_coordinate_provenance"),
+                                    **{field: item.get(field, []) for field in ("dropped_label_rows", "duplicate_label_rows", "clipped_label_rows")}}
+            copies.append(copy)
+        removed.append({"kept": row["key"], "removed": copies, "labels_differ": not same})
         kept.append(row)
     return kept, removed
+
+
+def _row_count(images: list[dict], field: str) -> int:
+    return sum(len(row.get(field, [])) for row in images)
+
+
+def run_report(plan: dict, run_id: str, mode: str, created_at: float) -> dict:
+    """What one import did, stored with the dataset so an admin can read it later.
+
+    ``dropped_rows`` counts every source row that was not imported;
+    ``duplicate_rows`` is the part of it that exactly repeated an earlier row.
+    """
+    images = plan["images"]
+    review = sum(1 for row in images if row.get("review_required"))
+    confirmed = len(images) - review if mode == "approved-baseline" else 0
+    removed = plan.get("duplicates_removed", [])
+    duplicates = _row_count(images, "duplicate_label_rows")
+    return {"run_id": run_id, "source": plan["source_root"], "created_at": created_at, "format": plan["format"],
+            "mode": mode, "derived": False, "images": len(images), "confirmed": confirmed,
+            "incoming": len(images) - confirmed, "without_label_file": len(plan["missing_labels"]),
+            "clipped_rows": _row_count(images, "clipped_label_rows"),
+            "dropped_rows": _row_count(images, "dropped_label_rows") + duplicates, "duplicate_rows": duplicates,
+            "duplicate_copies_removed": sum(len(item["removed"]) for item in removed),
+            "duplicate_conflicts": sum(1 for item in removed for copy in item["removed"] if copy.get("conflict")),
+            "review_required": review}
+
+
+# Plan-derived counts of finished runs never change; read each plan once.
+_PLAN_COUNTS: dict[str, dict] = {}
+
+
+def _plan_counts(con, run_id: str) -> dict:
+    """Counts an older plan holds, read with SQLite's JSON functions so the
+    (possibly very large) plan is never loaded into Python."""
+    top = con.execute(
+        "SELECT json_extract(manifest_json,'$.source_root'),json_extract(manifest_json,'$.format'),"
+        "json_array_length(manifest_json,'$.missing_labels'),json_type(manifest_json,'$.duplicates_removed') "
+        "FROM hosted_migration_runs WHERE id=?", (run_id,)).fetchone()
+    rows = con.execute(
+        "SELECT SUM(json_array_length(j.value,'$.dropped_label_rows')),SUM(json_array_length(j.value,'$.duplicate_label_rows')),"
+        "SUM(json_array_length(j.value,'$.clipped_label_rows')),SUM(json_type(j.value,'$.review_required') IS NOT NULL),COUNT(*) "
+        "FROM hosted_migration_runs r, json_each(r.manifest_json,'$.images') j WHERE r.id=?", (run_id,)).fetchone()
+    copies = con.execute(
+        "SELECT SUM(json_array_length(j.value,'$.removed')) FROM hosted_migration_runs r, "
+        "json_each(r.manifest_json,'$.duplicates_removed') j WHERE r.id=?", (run_id,)).fetchone()
+    no_area, duplicates = rows[0], rows[1]
+    return {"source": top[0], "format": top[1], "without_label_file": top[2], "plan_images": rows[4],
+            "clipped_rows": rows[2], "duplicate_rows": duplicates,
+            "dropped_rows": None if no_area is None else no_area + (duplicates or 0),
+            "duplicate_copies_removed": (copies[0] or 0) if top[3] is not None else None,
+            "review_required": rows[3] or 0}
+
+
+def _confirmed_by_run(con, actor_id: str, run_id: str) -> int:
+    """Approvals made under this run's operation IDs: the importer's own
+    baseline approvals and a baseline confirmation run with the run ID."""
+    return con.execute("SELECT COUNT(*) FROM hosted_receipts WHERE actor_id=? AND operation_id>? AND operation_id<? "
+                       "AND substr(operation_id,-8)='-approve'", (actor_id, run_id + "-", run_id + ".")).fetchone()[0]
+
+
+def import_reports(store: HostedStore, dataset: dict) -> list[dict]:
+    """Import reports for one dataset, newest first; read-only.
+
+    Imports applied with this version store their report in the dataset
+    settings. For older imports the report is derived from the run, item,
+    receipt and conflict records; counts an older plan did not record are null.
+    ``confirmed`` always counts approvals made under the run's own operation
+    IDs, so a later baseline confirmation step is included.
+    """
+    settings = dataset.get("settings") or {}
+    reports = {item["run_id"]: dict(item) for item in settings.get("import_reports", [])
+               if isinstance(item, dict) and isinstance(item.get("run_id"), str)}
+    with store.read_connection() as con:
+        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='hosted_migration_runs'").fetchone():
+            runs = con.execute("SELECT id,actor_id,mode,state FROM hosted_migration_runs WHERE dataset_id=?", (dataset["id"],)).fetchall()
+        else:
+            runs = []
+        for run in runs:
+            report = reports.get(run["id"])
+            try:
+                images = con.execute("SELECT COUNT(*) FROM hosted_migration_items WHERE run_id=?", (run["id"],)).fetchone()[0]
+                confirmed = _confirmed_by_run(con, run["actor_id"], run["id"])
+                if report is None:
+                    counts = _PLAN_COUNTS.get(run["id"]) or _plan_counts(con, run["id"])
+                    if run["state"] == "complete":
+                        _PLAN_COUNTS[run["id"]] = counts
+                    start = con.execute("SELECT created_at FROM hosted_receipts WHERE actor_id=? AND operation_id=?",
+                                        (run["actor_id"], run["id"] + "-start")).fetchone()
+                    conflicts = con.execute(
+                        "SELECT COUNT(*) FROM hosted_import_conflicts c JOIN hosted_images i ON i.id=c.image_id "
+                        "WHERE i.dataset_id=? AND json_extract(c.annotations_json,'$.migration.run_id')=?",
+                        (dataset["id"], run["id"])).fetchone()[0]
+                    report = {"run_id": run["id"], "source": counts["source"], "created_at": start[0] if start else None,
+                              "format": counts["format"], "mode": run["mode"], "derived": True,
+                              "without_label_file": counts["without_label_file"], "clipped_rows": counts["clipped_rows"],
+                              "dropped_rows": counts["dropped_rows"], "duplicate_rows": counts["duplicate_rows"],
+                              "duplicate_copies_removed": counts["duplicate_copies_removed"],
+                              "duplicate_conflicts": conflicts, "review_required": counts["review_required"]}
+            except sqlite3.Error:
+                report = report or {"run_id": run["id"], "mode": run["mode"], "derived": True}
+                images = confirmed = None
+            if images is not None:
+                report.update(images=images, confirmed=confirmed, incoming=images - confirmed)
+            report["state"] = run["state"]
+            reports[run["id"]] = report
+    keys = ("run_id", "source", "created_at", "images", "confirmed", "incoming", "without_label_file", "clipped_rows",
+            "dropped_rows", "duplicate_rows", "duplicate_copies_removed", "duplicate_conflicts", "review_required")
+    result = [{**{key: None for key in keys}, **report} for report in reports.values()]
+    return sorted(result, key=lambda item: (item["created_at"] or 0, item["run_id"]), reverse=True)
 
 
 class HostedMigrator:
@@ -455,12 +598,23 @@ class HostedMigrator:
                 reference = self.artifacts.put_file(_safe_path(source["path"]), expected_sha256=source["sha256"], expected_size=source["size_bytes"])
                 self.operations.register_artifact(actor, reference, "migration_" + source["role"], ds["id"], run_id + "-file-" + digest(filename)[:32])
             associations.append({"source_file": filename, "role": source["role"], "sha256": reference.sha256, "size_bytes": reference.size_bytes, "association": source.get("association", {})})
+        def class_objects(objects):
+            return [{**{key: value for key, value in obj.items() if key != "class_index"}, "class_id": ds["classes"][obj["class_index"]]["id"]} for obj in objects]
+        row_fields = ("dropped_label_rows", "duplicate_label_rows", "clipped_label_rows")
+        # Removed duplicate copies whose labels differ, by the key that was kept.
+        conflict_copies = {item["kept"]: [copy for copy in item["removed"] if copy.get("conflict")]
+                           for item in plan.get("duplicates_removed", [])}
         for row in plan["images"]:
             operation = run_id + "-image-" + digest(row["key"])[:24]
             if self.store.raw_receipt(actor, operation + "-done"):
                 continue
-            annotations = {"objects": [{**{key: value for key, value in obj.items() if key != "class_index"}, "class_id": ds["classes"][obj["class_index"]]["id"]} for obj in row["objects"]],
-                           "captions": row["captions"], "migration": {"run_id": run_id, "source_key": row["key"], "label_file": row["label_file"], "source_sha256": row["media_hash"], "geometry_clipping_authorized": plan["clip_boxes"], "dropped_label_rows": row.get("dropped_label_rows", []), "duplicate_keys": row.get("duplicate_keys", []), "metadata": row["metadata"]}}
+            provenance = {"run_id": run_id, "source_key": row["key"], "label_file": row["label_file"], "source_sha256": row["media_hash"],
+                          "geometry_clipping_authorized": plan["clip_boxes"], **{field: row.get(field, []) for field in row_fields},
+                          "duplicate_keys": row.get("duplicate_keys", []), "metadata": row["metadata"]}
+            if row.get("review_required"):
+                # The reason a person must decide travels with the image itself.
+                provenance["review_required"] = row["review_required"]
+            annotations = {"objects": class_objects(row["objects"]), "captions": row["captions"], "migration": provenance}
             active_captions = [record for record in row["captions"] if record.get("lifecycle_status", "active") == "active"]
             if row.get("media_coordinate_provenance"):
                 annotations["media_coordinate_provenance"] = row["media_coordinate_provenance"]
@@ -475,6 +629,20 @@ class HostedMigrator:
                 if view["source_sha256"] != source["sha256"] or view["source_size_bytes"] != source["size_bytes"]:
                     raise DomainError("migration_source_changed", 409)
                 imported = self.store.import_image(actor, ds["id"], view["source_sha256"], row["key"], annotations, operation + "-import", width=row["width"], height=row["height"], size_bytes=row["size_bytes"], split=row["split"])
+                # Each removed copy with other labels arrives as an import
+                # conflict on the kept image: "Keep current labels" or "Use
+                # imported objects" is a person's choice, and both stay in history.
+                for copy in conflict_copies.get(row["key"], []):
+                    conflict = copy["conflict"]
+                    body = {"objects": class_objects(conflict["objects"]),
+                            "migration": {"run_id": run_id, "source_key": copy["key"], "label_file": copy["label_file"],
+                                          "source_sha256": row["media_hash"], "duplicate_of": row["key"],
+                                          "geometry_clipping_authorized": plan["clip_boxes"],
+                                          **{field: conflict.get(field, []) for field in row_fields}}}
+                    if conflict.get("media_coordinate_provenance"):
+                        body["media_coordinate_provenance"] = conflict["media_coordinate_provenance"]
+                    self.store.import_image(actor, ds["id"], view["source_sha256"], copy["key"], body, operation + "-copy-" + digest(copy["key"])[:24],
+                                            width=row["width"], height=row["height"], size_bytes=row["size_bytes"], split=row["split"])
             completed = imported
             # A duplicate whose copies disagree stays unconfirmed for a person to check.
             if mode == "approved-baseline" and not row.get("review_required"):
@@ -519,7 +687,10 @@ class HostedMigrator:
                     "artifacts_manifest": {"format": manifest_format, **manifest.as_dict()},
                 }
             current = self.store.get_dataset(actor, ds["id"])
-            self.store.patch_dataset_settings(actor, ds["id"], {"migration": migration_settings}, current["revision"], settings_operation)
+            started = self.store.raw_receipt(actor, run_id + "-start")["committed_at"]
+            reports = [run_report(plan, run_id, mode, started), *current["settings"].get("import_reports", [])]
+            self.store.patch_dataset_settings(actor, ds["id"], {"migration": migration_settings, "import_reports": reports},
+                                              current["revision"], settings_operation)
         def finish(con):
             con.execute("UPDATE hosted_migration_runs SET state='complete' WHERE id=?", (run_id,))
             return {"run_id": run_id, "dataset_id": ds["id"], "mode": mode, "image_count": len(plan["images"]), "artifact_count": len(associations), "plan_sha256": plan["plan_sha256"], "state": "complete"}
@@ -533,13 +704,18 @@ def inventory_report(plan: dict) -> str:
     lines.extend(f"* {row['kind']}: {row.get('path', row.get('images', ''))}" for row in plan["blockers"])
     if not plan["blockers"]:
         lines.append("None.")
-    dropped = sum(len(row.get("dropped_label_rows", [])) for row in plan["images"])
+    dropped = _row_count(plan["images"], "dropped_label_rows")
+    duplicates = _row_count(plan["images"], "duplicate_label_rows")
     removed = plan.get("duplicates_removed", [])
+    conflicts = sum(1 for item in removed for copy in item["removed"] if copy.get("conflict"))
     lines += ["", "Automatic clean-up", "------------------", "",
               "* Every box is clipped to its image; source split folders are not used as splits (all images are unsplit).",
-              f"* {dropped} label rows with no area inside the image dropped.",
+              f"* {_row_count(plan['images'], 'clipped_label_rows')} label rows crossed the image edge and were clipped to it.",
+              f"* {dropped + duplicates} label rows dropped: {dropped} with no area inside the image, "
+              f"{duplicates} exact duplicates of an earlier row in the same file (same class and box).",
               f"* {sum(len(item['removed']) for item in removed)} duplicate image copies removed; "
-              f"{sum(1 for item in removed if item['labels_differ'])} kept copies had differing labels and stay unconfirmed for review."]
+              f"{sum(1 for item in removed if item['labels_differ'])} kept copies had differing labels and stay unconfirmed for review. "
+              f"The labels of {conflicts} removed copies are imported as conflicts on the kept image, so a person can compare and choose."]
     lines += ["", f"Images without label files: {len(plan['missing_labels'])}. These cannot enter approved-baseline mode.", "",
               "Apply defaults to Incoming. Approved-baseline mode requires explicit administrator acceptance of the existing labels.",
               "Recipe and SALAD files are preserved with their supplied associations; runtime activation is a separate step.", ""]

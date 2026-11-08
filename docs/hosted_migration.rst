@@ -31,13 +31,24 @@ inventory. Pixel extents are calculated from converted endpoints so a valid box
 touching an image edge remains inside the strict hosted bounds despite floating
 point roundoff. Boxes and polygons are always clipped to the image: the part
 outside is cut away, never shifted. A row left with no area inside the image,
-such as a zero-size box, is dropped and its line number recorded in the image's
-migration provenance. ``--clip-boxes`` is still accepted by the command but no
-longer needed. Source labels are retained unchanged as artifacts.
+such as a zero-size box, is dropped. A row with the same class and the same
+clipped geometry as an earlier row of the same file is an exact duplicate; only
+the first is kept. The image's migration provenance records the line numbers in
+``dropped_label_rows`` (no area), ``duplicate_label_rows`` (exact duplicates)
+and ``clipped_label_rows`` (kept rows that crossed the image edge by more than
+floating-point roundoff). ``--clip-boxes`` is still accepted by the command but
+no longer needed. Source labels are retained unchanged as artifacts. Browser
+YOLO imports use the same label preparation and return ``clipped_rows``,
+``dropped_rows`` (every row not imported) and ``duplicate_rows`` (the part of
+``dropped_rows`` that repeated an earlier row) in the upload response.
 
 Source ``train``, ``val`` and ``test`` folders are not imported as splits.
 Every image arrives unsplit, with its source path kept in its name and
 provenance; splits are decided later, after export or for internal training.
+The stored name keeps the leading source folder (for example ``test/car.jpg``)
+on purpose: it keeps names unique when two source folders reuse a file name,
+lets administrators find the source test images by name, and is the name that
+analyses and caption cases already show.
 Class names must fit on one line. Internal Unicode line separators and control
 characters that split lines are rejected as well as embedded CR/LF, so a name
 cannot become two export indices. Physical CR/LF delimiters separate labelmap
@@ -114,7 +125,15 @@ image bytes are one image: the inventory keeps one copy and lists the others
 under ``duplicates_removed``. Copies with the same labels keep the first path.
 When their labels differ, the copy with the most objects is kept and marked
 for review, so it stays unconfirmed in Incoming even in approved-baseline mode
-until a person checks it. The tool does not infer the semantics of arbitrary
+until a person checks it. The kept image records the reason in
+``annotations.migration.review_required`` (``duplicate_labels_differ``) and the
+removed paths in ``annotations.migration.duplicate_keys``. Each removed copy's
+objects are imported as an import conflict on the kept image, named by the
+removed path and carrying ``migration.duplicate_of``. In the canvas,
+**Imported labels** compares the copies; **Keep current labels** or **Use
+imported objects** is the administrator's choice, and both versions stay in
+history. Captions of a removed copy are not merged; its source files remain
+retained artifacts. The tool does not infer the semantics of arbitrary
 metadata or follow paths inside a training YAML file.
 
 Explicit preservation mapping
@@ -197,14 +216,35 @@ plan and source tree until migration and recovery acceptance are complete.
 After upgrading the importer, regenerate and review an inventory before starting
 a new migration; an older inventory with different resolved annotations is
 rejected instead of silently being reinterpreted.
-The current inventory format is ``tator-hosted-migration-v3``. Unfinished v1/v2
-plans return ``migration_plan_requires_review``; regenerate and review their
+The current inventory format is ``tator-hosted-migration-v5``: v4 added
+clipping, empty-row drops, duplicate-copy resolution and unsplit import; v5
+also drops exact duplicate rows, records clipped rows and imports removed
+duplicate copies as import conflicts. Unfinished v1 to v4 plans return
+``migration_plan_requires_review``; regenerate and review their
 resolved captions, class names and media/coordinate decisions before starting a
 new run. Existing partial memberships and history remain in their original run;
 the regenerated plan creates a separate dataset and does not adopt or replace
-those memberships. Completed v1/v2/v3 runs retain their exact finish receipt and
+those memberships. Completed v1 to v4 runs retain their exact finish receipt and
 can replay it without rereading or changing their original source tree. A
 different command still requires a fresh inventory.
+
+Import report
+-------------
+
+Apply stores a summary of the run in the dataset settings
+(``import_reports``). ``GET /api/hosted/datasets/{id}`` returns
+``import_reports`` to administrators, newest first, each with ``run_id``,
+``source``, ``created_at``, ``mode``, ``state``, ``format``, ``images``,
+``confirmed``, ``incoming``, ``without_label_file``, ``clipped_rows``,
+``dropped_rows``, ``duplicate_rows``, ``duplicate_copies_removed``,
+``duplicate_conflicts`` and ``review_required``. ``confirmed`` counts approvals
+made under the run's own operation IDs, including a later baseline
+confirmation step that used the run ID; ``incoming`` is the rest. For a dataset
+imported before reports were stored, the report is derived on read from the
+run, item, receipt and conflict records and the plan kept with the run
+(``derived: true``); nothing is written. Counts an older plan did not record
+are ``null``: a v4 import shows ``clipped_rows`` and ``duplicate_rows`` as
+``null`` and ``duplicate_conflicts`` as 0.
 
 The local fixture tests exercise filesystem preservation, overlay labels,
 caption alternatives, custom artifacts and restart recovery. Importing WALDO40

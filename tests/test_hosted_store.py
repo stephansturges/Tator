@@ -542,10 +542,12 @@ def test_yolo_import_freezes_class_mapping_and_conflict_choice_preserves_other_c
     leased = store.acquire_editor(ADMIN, image['id'], 'tab')
     current = store.save(ADMIN, ctx(leased, 'caption-before-import'), {'objects': [], 'caption': 'Human caption', 'alternate_captions': [{'caption': 'Earlier caption'}]})
     payload = dict(actor=ADMIN, dataset_id=ds['id'], media_hash=image['media_hash'], filename=image['filename'],
-                   label_text='0 0.5 0.5 0.2 0.25\n', class_names=['Bus', 'Car'], expected_class_version=ds['class_version'],
+                   label_text='0 0.5 0.5 0.2 0.25\n0 0.5 0.5 0.2 0.25\n', class_names=['Bus', 'Car'], expected_class_version=ds['class_version'],
                    operation_id='label-import', width=100, height=80, size_bytes=100)
     imported_labels = store.import_yolo_image(**payload)
     assert imported_labels['duplicate'] and imported_labels['conflict_id']
+    # The repeated row (same class and box) is dropped and reported.
+    assert (imported_labels['dropped_rows'], imported_labels['duplicate_rows'], imported_labels['clipped_rows']) == (1, 1, 0)
     assert store.image(ADMIN, image['id'])['current_version'] == current['current_version']
     conflict = store.history(ADMIN, image['id'])['import_conflicts'][0]
     assert conflict['annotations']['objects'][0]['class_id'] == ds['classes'][1]['id']

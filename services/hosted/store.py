@@ -776,23 +776,31 @@ class HostedStore(TrancheMixin):
                 raise DomainError('import_classes_missing', 422, {'classes': missing})
             from .migration import _objects
             provenance = None
+            # Line numbers of rows dropped (no area / exact duplicate) or clipped.
+            rows = {'dropped': [], 'duplicates': [], 'clipped': []}
             if media_info is not None:
                 from .media import prepare_yolo_objects
                 self._check_media_info(media_info, media_hash, width, height, size_bytes)
                 objects, provenance = prepare_yolo_objects(label_text, names, media_info,
-                    key=filename, label_coordinate_space=label_coordinate_space)
+                    key=filename, label_coordinate_space=label_coordinate_space, **rows)
             else:
                 if label_coordinate_space is not None:
                     raise DomainError('media_coordinate_information_required', 422)
-                objects = _objects(label_text, width, height, names, clip=False, key=filename)
+                objects = _objects(label_text, width, height, names, clip=False, key=filename, **rows)
             annotations = {'objects': [{**{key: value for key, value in item.items() if key != 'class_index'},
                                         'class_id': known[names[item['class_index']].casefold()]} for item in objects],
                            'import_provenance': {'format': 'yolo', 'filename': filename, 'label_text': label_text,
-                                                 'class_names': names, 'class_version': expected_class_version}}
+                                                 'class_names': names, 'class_version': expected_class_version,
+                                                 'dropped_label_rows': rows['dropped'], 'duplicate_label_rows': rows['duplicates'],
+                                                 'clipped_label_rows': rows['clipped']}}
             if provenance is not None:
                 annotations['media_coordinate_provenance'] = provenance
-            return self._import_image(con, actor, dataset_id=dataset_id, media_hash=media_hash, filename=filename,
-                                      annotations=annotations, width=width, height=height, size_bytes=size_bytes, split=split)
+            result = self._import_image(con, actor, dataset_id=dataset_id, media_hash=media_hash, filename=filename,
+                                        annotations=annotations, width=width, height=height, size_bytes=size_bytes, split=split)
+            # dropped_rows counts every row not imported; duplicate_rows is the
+            # part of it that exactly repeated an earlier row (same class and box).
+            return {**result, 'clipped_rows': len(rows['clipped']), 'duplicate_rows': len(rows['duplicates']),
+                    'dropped_rows': len(rows['dropped']) + len(rows['duplicates'])}
         return self._command(actor, operation_id, 'import_yolo_image', payload, run, admin=True)
 
     def resolve_import_conflict(self, actor: Actor, ctx: MutationContext, conflict_id: str,

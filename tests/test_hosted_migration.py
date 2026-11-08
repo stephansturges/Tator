@@ -263,6 +263,49 @@ def test_inventory_rejects_symlinks_resolves_duplicate_pixels_and_runs_without_h
     assert not list(tmp_path.rglob("hosted.sqlite3"))
 
 
+def test_removed_duplicate_copy_becomes_import_conflict_with_reason_and_import_report(tmp_path):
+    from services.hosted.migration import import_reports
+    from services.hosted.types import MutationContext
+    root, mapping = source(tmp_path)
+    # The val copy has the same pixels and other labels: a repeated row and a
+    # row crossing the right edge. The train copy's overlay has one box.
+    (root / "val/images/blue.png").write_bytes((root / "train/images/red.png").read_bytes())
+    (root / "val/labels/blue.txt").write_text("0 0.5 0.5 0.4 0.4\n0 0.5 0.5 0.4 0.4\n0 0.95 0.5 0.2 0.2\n")
+    before = hashes(root)
+    plan = inventory(root, mapping=mapping)
+    [kept] = plan["images"]
+    assert kept["key"] == "val/blue.png" and len(kept["objects"]) == 2
+    assert kept["duplicate_label_rows"] == [2] and kept["clipped_label_rows"] == [3] and kept["dropped_label_rows"] == []
+    store, artifacts, admin = authority(tmp_path)
+    result = HostedMigrator(store, artifacts).apply(admin, plan, name="Copies", mode="approved-baseline", accept_existing_labels=True)
+    [image] = store.list_images(admin, result["dataset_id"])
+    record = store.image(admin, image["id"])
+    # The copies disagree, so the image stays unconfirmed and says why.
+    assert record["state"] == "unassigned"
+    assert record["annotations"]["migration"]["review_required"] == "duplicate_labels_differ"
+    assert record["annotations"]["migration"]["duplicate_keys"] == ["train/red.png"]
+    [conflict] = store.history(admin, image["id"])["import_conflicts"]
+    assert conflict["filename"] == "train/red.png"
+    assert conflict["annotations"]["migration"]["duplicate_of"] == "val/blue.png"
+    assert conflict["annotations"]["objects"][0]["bbox"] == pytest.approx([6, 9, 8, 12])
+    # A person picks the removed copy's labels through the existing comparison.
+    lease = store.acquire_editor(admin, image["id"], "tab")
+    store.resolve_import_conflict(admin, MutationContext(image["id"], lease["current_version"], lease["generation"], "tab", "pick-copy"),
+                                  conflict["id"], "use_imported_objects")
+    assert store.image(admin, image["id"])["annotations"]["objects"] == conflict["annotations"]["objects"]
+    expected = {"images": 1, "confirmed": 0, "incoming": 1, "without_label_file": 0, "clipped_rows": 1, "dropped_rows": 1,
+                "duplicate_rows": 1, "duplicate_copies_removed": 1, "duplicate_conflicts": 1, "review_required": 1}
+    dataset = store.get_dataset(admin, result["dataset_id"])
+    [report] = import_reports(store, dataset)
+    assert {key: report[key] for key in expected} == expected
+    assert report["run_id"] == result["run_id"] and report["source"] == str(root.absolute()) and not report["derived"]
+    # An import without a stored report is derived from the database alone.
+    [derived] = import_reports(store, {**dataset, "settings": {}})
+    assert derived["derived"] and {key: derived[key] for key in expected} == expected
+    assert derived["created_at"] == report["created_at"]
+    assert hashes(root) == before
+
+
 def test_effective_caption_overlays_preserve_empty_clear_and_flat_record_keys(tmp_path):
     root = tmp_path / "flat"
     (root / "images").mkdir(parents=True)

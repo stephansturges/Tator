@@ -93,16 +93,20 @@ def install_operations_api(app, store, auth, artifacts, admin, root):
         # The durable content-addressed artifact serves retries. This additional
         # materialized download is temporary and is not a second dataset source.
         destination.unlink(missing_ok=True)
-        return {key: value for key, value in result.items() if key != "path"} | {"download_url": f"/api/hosted/exports/{result['export_id']}"}
+        return {key: value for key, value in result.items() if key != "path"} | {
+            "download_url": f"/api/hosted/exports/{result['export_id']}",
+            "filename": operations.export_download_name(identity, result["export_id"])}
 
     @router.get("/exports/{export_id}")
     def download(export_id: str, identity=Depends(admin)):
         reference = operations.export_reference(identity, export_id)
+        # Named after the dataset, its revision and the export date.
+        filename = operations.export_download_name(identity, export_id)
         def chunks():
             with artifacts.open(reference) as stream:
                 while chunk := stream.read(1024 * 1024):
                     yield chunk
-        return StreamingResponse(chunks(), media_type="application/zip", headers={"Content-Disposition": 'attachment; filename="tator-dataset.zip"'})
+        return StreamingResponse(chunks(), media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
     @router.post("/images/{image_id}/archive")
     def archive_image(image_id: str, body: ImageArchive, identity=Depends(admin)):

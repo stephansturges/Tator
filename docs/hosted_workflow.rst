@@ -446,6 +446,11 @@ captions, polygon files where present, and full annotation/provenance JSON.
 Existing train/validation splits are preserved; the exporter does not invent a
 new split. Downloads are administrator-only. Retrying export returns the same
 durable artifact rather than rebuilding it from the current dataset.
+The download is named after the dataset, the snapshot revision and the export
+date, for example ``Unidrone-r12-20261108.zip`` (letters, digits, ``.``, ``_``
+and ``-`` only). Images in the ZIP are named by their hosted image ID;
+``filenames.csv`` lists each image's ``path`` in the ZIP, its
+``original_filename`` and its ``image_id``.
 
 Dataset pruning reviews one frozen confirmed version. After a later approval or
 edit, its page stays open for inspection: results, families and pairs remain

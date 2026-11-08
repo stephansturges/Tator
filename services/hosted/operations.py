@@ -8,15 +8,19 @@ physically purged after the minimum retention period.
 
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import json
 import os
 import re
 import shutil
 import sqlite3
 import tempfile
+import unicodedata
 from collections import Counter
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterator
 
@@ -568,7 +572,7 @@ class HostedOperations:
                 raise DomainError("snapshot_dataset_mismatch", 409)
             with tempfile.TemporaryDirectory(prefix="export-", dir=self.artifacts.staging) as directory:
                 archive = Path(directory) / "dataset.zip"
-                create_canonical_zip(archive, self._snapshot_entries(manifest), artifacts=self.artifacts)
+                create_canonical_zip(archive, self._export_entries(manifest), artifacts=self.artifacts)
                 with self.artifacts.exclusive():
                     reference = self.artifacts.put_file(archive)
                     def run(con: sqlite3.Connection) -> dict[str, Any]:
@@ -581,6 +585,39 @@ class HostedOperations:
                     result = self.store._command(actor, operation_id, "export_canonical", payload, run, admin=True)
         self._copy_export(actor, ArtifactRef(result["sha256"], result["size_bytes"]), destination)
         return {**result, "path": str(destination)}
+
+    def _export_entries(self, manifest: dict[str, Any]) -> Iterator[ExportEntry]:
+        """The canonical snapshot entries plus filenames.csv, which maps each
+        exported image path to its original filename and hosted image ID.
+
+        Only the downloadable export gets the extra file; analysis inputs and
+        workbench copies keep the exact snapshot layout they verify against.
+        """
+        paths = {}
+        for entry in self._snapshot_entries(manifest):
+            parts = entry.path.split("/")
+            if len(parts) == 3 and parts[1] == "images":
+                paths[PurePosixPath(parts[2]).stem] = entry.path
+            yield entry
+        rows = io.StringIO()
+        writer = csv.writer(rows, lineterminator="\n")
+        writer.writerow(("path", "original_filename", "image_id"))
+        for image in manifest["images"]:
+            writer.writerow((paths[image["id"]], image.get("filename", ""), image["id"]))
+        yield ExportEntry("filenames.csv", data=rows.getvalue().encode())
+
+    def export_download_name(self, actor: Actor, export_id: str) -> str:
+        """``<dataset>-r<revision>-<YYYYMMDD>.zip`` with only safe characters."""
+        with self.store.read_connection() as con:
+            self.store._actor(con, actor, admin=True)
+            row = con.execute("SELECT d.name,s.revision,e.created_at FROM hosted_exports e JOIN hosted_snapshots s ON s.id=e.snapshot_id "
+                              "JOIN hosted_datasets d ON d.id=s.dataset_id WHERE e.id=?", (export_id,)).fetchone()
+            if not row:
+                raise DomainError("export_not_found", 404)
+        name = re.sub(r"[^A-Za-z0-9._-]+", "-", unicodedata.normalize("NFKD", row["name"]).encode("ascii", "ignore").decode())
+        name = name.strip("-._")[:80] or "dataset"
+        day = datetime.fromtimestamp(row["created_at"], tz=timezone.utc).strftime("%Y%m%d")
+        return f"{name}-r{row['revision']}-{day}.zip"
 
     def export_reference(self, actor: Actor, export_id: str) -> ArtifactRef:
         with self.store.read_connection() as con:

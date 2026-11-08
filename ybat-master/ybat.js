@@ -9002,7 +9002,10 @@ const sam3TrainState = {
                 textLabels[key] = textLabel;
                 const option = document.createElement("option");
                 option.value = key;
-                option.text = `${row.split || "train"}/${row.image_relpath || row.image_name || key}`;
+                // Hosted image paths are internal ids; people know images by filename.
+                option.text = hostedMode
+                    ? (row.image_name || row.image_relpath || key)
+                    : `${row.split || "train"}/${row.image_relpath || row.image_name || key}`;
                 if (idx === 0) {
                     option.selected = true;
                 }
@@ -24592,6 +24595,10 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
+    // The box the user last selected by clicking it (not one they just drew).
+    // Picking a class then changes that box's class.
+    let clickSelectedBoxUuid = null;
+
     function clearSelectedBboxes({ keepCurrent = false } = {}) {
         selectedBboxes.clear();
         negativeBboxes.clear();
@@ -35308,6 +35315,11 @@ async function cancelRfDetrTrainingJobRequest() {
 
     async function refreshQwenAgentClassifiers(selectedPath) {
         if (!qwenElements.agentClassifierId) {
+            return;
+        }
+        // Hosted classifiers belong to the open dataset; configureTools refreshes
+        // this list once the dataset's tools are known.
+        if (hostedMode && !window.TatorHosted?.datasetId) {
             return;
         }
         if (qwenAgentClassifierRefreshInFlight) {
@@ -85178,10 +85190,11 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         const normalized = Boolean(nextEnabled) && datasetType === "seg";
         polygonDrawEnabled = normalized;
         if (polygonDrawToggle) {
-            const label = normalized ? "Polygon draw: On (P)" : "Polygon draw: Off (P)";
+            // Always clickable: in box mode it switches to polygon drawing (like P).
+            const label = datasetType !== "seg" ? "Draw polygons (P)" : normalized ? "Polygon draw: On (P)" : "Polygon draw: Off (P)";
             polygonDrawToggle.textContent = label;
             polygonDrawToggle.ariaPressed = normalized ? "true" : "false";
-            polygonDrawToggle.disabled = datasetType !== "seg";
+            polygonDrawToggle.disabled = false;
         }
         if (!normalized) {
             polygonDraft = null;
@@ -85245,11 +85258,8 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                 updateMultiPointState(false);
             }
         }
-        if (polygonDrawToggle) {
-            polygonDrawToggle.disabled = !isSeg;
-            if (!isSeg) {
-                setPolygonDrawEnabled(false, { silent: true });
-            }
+        if (polygonDrawToggle && !isSeg) {
+            setPolygonDrawEnabled(false, { silent: true });
         }
         if (samStatusEl) {
             const modeNote = isSeg
@@ -86078,6 +86088,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         }
         if (shouldSelect) {
             setCurrentBboxFromCornerHit(pending, { resizing: null });
+            clickSelectedBoxUuid = currentBbox?.bbox?.uuid || null;
             if (currentBbox) {
                 updateBboxAfterTransform({ commitPointerTransform: true });
             }
@@ -86400,18 +86411,21 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                             storeNewBbox(movedWidth, movedHeight);
                             mouse.buttonL = false;
                             mouse.buttonR = false;
-                            if (samMode && autoMode) {
-                                await samBboxAutoPrompt(currentBbox.bbox);
-                            }
-                            else if (autoMode) {
-                                await autoPredictNewCrop(currentBbox.bbox);
-                            }
-                            else if (samMode) {
-                                await samBboxPrompt(currentBbox.bbox);
-                            }
-                            markCurrentBboxDirectly();
+                            // No box is created when editing is blocked or it lies outside the image.
                             if (currentBbox) {
-                                updateBboxAfterTransform();
+                                if (samMode && autoMode) {
+                                    await samBboxAutoPrompt(currentBbox.bbox);
+                                }
+                                else if (autoMode) {
+                                    await autoPredictNewCrop(currentBbox.bbox);
+                                }
+                                else if (samMode) {
+                                    await samBboxPrompt(currentBbox.bbox);
+                                }
+                                markCurrentBboxDirectly();
+                                if (currentBbox) {
+                                    updateBboxAfterTransform();
+                                }
                             }
                         }
                         else {
@@ -86503,11 +86517,19 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             polygonDraft = null;
             return;
         }
-        const pts = (polygonDraft.points || []).map(clampPointToImage);
-        if (pts.length < 3) {
+        // Repeated corners (a double-click adds one) are merged; a polygon needs
+        // three distinct corners and some area, or it is not added.
+        const pts = normalizedPolygonPoints(polygonDraft.points || [], currentImage.width, currentImage.height);
+        if (!pts) {
+            if ((polygonDraft.points || []).length) {
+                const message = "A polygon needs at least three separate corners around an area; it was not added.";
+                setSamStatus(message, { variant: "warn", duration: 4000 });
+                if (hostedMode) window.TatorHosted?.notice?.(message);
+            }
             polygonDraft = null;
             return;
         }
+        if (hostedMode) window.TatorHosted?.objectAdded?.();
         const xs = pts.map((p) => p.x);
         const ys = pts.map((p) => p.y);
         const minX = Math.max(0, Math.min(...xs));
@@ -86596,6 +86618,9 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                     } else {
                         polygonDrag = { ...hit, vertexIndex: null };
                     }
+                    // A clicked polygon is selected, so picking a class changes it.
+                    markOnlyBboxRecord(hit.bbox);
+                    clickSelectedBoxUuid = hit.bbox.uuid;
                     return true;
                 }
                 if (samActive) {
@@ -86654,7 +86679,13 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             class: currentClass,
             uuid: generateUUID()
         };
+        // Clip to the image before any tool sees the box; nothing outside it is kept.
+        if (currentImage.width > 0 && currentImage.height > 0 && !clampBbox(bbox, currentImage.width, currentImage.height)) {
+            announceRemovedGeometry(1, 0);
+            return;
+        }
         stampBboxCreation(bbox);
+        if (hostedMode) window.TatorHosted?.objectAdded?.();
         if (!bboxes[currentImage.name]) {
             bboxes[currentImage.name] = {};
         }
@@ -86700,6 +86731,19 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                 currentBbox.bbox.y -= currentBbox.bbox.height;
             }
             currentBbox.resizing = null;
+        }
+        if (currentBbox && currentImage && (commitPointerTransform || !isPolygonRecord(currentBbox.bbox))) {
+            // A finished move/resize is clipped to the image; nothing with no
+            // area inside it stays on the canvas (it would never be saved).
+            const settledBbox = currentBbox.bbox;
+            const outcome = settleRecordGeometry(currentImage.name, settledBbox, currentImage.width, currentImage.height);
+            if (outcome !== "kept") {
+                setGlobalCursor("default");
+                captureAnnotationDirtyStateForImage(currentImage.name);
+                announceRemovedGeometry(outcome === "box" ? 1 : 0, outcome === "polygon" ? 1 : 0);
+                scheduleAnnotationDiversityMetricRefresh();
+                return;
+            }
         }
         if (currentBbox) {
             currentBbox.bbox.marked = true;
@@ -86935,6 +86979,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                     currentBbox.bbox.marked = true;
                 }
                 selectBboxRecord(hit.bbox, { additive, negative });
+                if (!negative && currentBbox?.bbox === hit.bbox) clickSelectedBoxUuid = hit.bbox.uuid;
             } else {
                 if (!additive) {
                     clearSelectedBboxes();
@@ -88282,6 +88327,49 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         showAnnotationFocusHud();
     };
 
+    // Picking a class while boxes are selected (clicked) changes their class.
+    // A just-drawn box is not "selected" this way, so choosing the class for
+    // the next box right after drawing keeps working as before.
+    function reassignSelectedBoxesToClass(className) {
+        const uuid = currentBbox?.bbox?.uuid;
+        if (!currentImage || !className || !uuid || uuid !== clickSelectedBoxUuid || !selectedBboxes.has(uuid)) {
+            return 0;
+        }
+        const records = getSelectedBboxRecords({ negative: false });
+        if (!records.length || records.every((record) => record.class === className)) {
+            return 0;
+        }
+        if (!annotationEditableGuard("Change class")) {
+            return -1;
+        }
+        const buckets = bboxes[currentImage.name] || (bboxes[currentImage.name] = {});
+        let changed = 0;
+        for (const record of records) {
+            if (record.class === className || (record._hostedPending && pendingApiBboxes[record.uuid])) continue;
+            const bucket = buckets[record.class];
+            const index = Array.isArray(bucket) ? bucket.indexOf(record) : -1;
+            if (index < 0) continue;
+            bucket.splice(index, 1);
+            if (!bucket.length) delete buckets[record.class];
+            record.class = className;
+            (buckets[className] ||= []).push(record);
+            changed += 1;
+        }
+        if (!changed) return 0;
+        const selected = currentBbox.bbox;
+        currentBbox.index = buckets[className].indexOf(selected);
+        currentClass = className;
+        captureAnnotationDirtyStateForImage(currentImage.name);
+        scheduleAnnotationDiversityMetricRefresh();
+        syncQwenClassToCurrent();
+        syncSam3ClassToCurrent();
+        showAnnotationFocusHud();
+        const message = changed === 1 ? `Box changed to ${className}.` : `${changed} boxes changed to ${className}.`;
+        setSamStatus(message, { variant: "success", duration: 2500 });
+        if (hostedMode) window.TatorHosted?.notice?.(message);
+        return changed;
+    }
+
     const listenClassSelect = () => {
         if (classSelectListenerBound) {
             return;
@@ -88293,6 +88381,8 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         classSelectListenerBound = true;
         classList.addEventListener("change", () => {
             classListIndex = classList.selectedIndex;
+            const picked = classList.options[classList.selectedIndex]?.text;
+            if (reassignSelectedBoxesToClass(picked) > 0) return;
             setCurrentClass();
         });
     };
@@ -89447,7 +89537,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                 label: `Select ${label} (#${index})`,
                 description: `Select labelmap class ${index}: ${label}.`,
                 defaultBindings: [],
-                run: () => selectClassByIndex(index),
+                run: () => selectClassByIndex(index, { reassign: true }),
             };
         }
 
@@ -90047,6 +90137,9 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                 option.selected = idx === targetIndex;
             });
             classList.selectedIndex = targetIndex;
+            if (options.reassign && reassignSelectedBoxesToClass(classList.options[targetIndex].text) > 0) {
+                return true;
+            }
             setCurrentClass();
             showClassScrollIndicatorForList(classList, classListIndex, {
                 direction: Number(options.direction) || 0,
@@ -90247,7 +90340,27 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             if (annotationFocusMode) {
                 return true;
             }
+            if ((action.id === "image_next" || action.id === "image_previous") && isFocusedControlTarget(event.target)) {
+                return false;
+            }
             return !isTextEditingTarget(event.target);
+        }
+
+        // Space, Tab and the arrows belong to a focused button, checkbox, link
+        // or menu (and to the hosted panel and dialogs): never change images
+        // from there. The two labeling lists keep their keyboard navigation.
+        function isFocusedControlTarget(target) {
+            const element = target instanceof Element ? target : null;
+            if (!element || element === document.body || element.id === "canvas") {
+                return false;
+            }
+            if (element.closest(".hosted-canvas-panel, #hostedAdminNav, dialog, [role=dialog], .modal")) {
+                return true;
+            }
+            if (element.id === "imageList" || element.id === "classList") {
+                return false;
+            }
+            return Boolean(element.closest("button, a[href], select, summary, label, [role=button], input[type=checkbox], input[type=radio], input[type=range]"));
         }
 
         function runShortcutAction(event, action) {
@@ -90376,6 +90489,19 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         imageSearchListenerBound = true;
         searchInput.addEventListener("input", (event) => {
             const value = event?.target?.value || "";
+            if (hostedMode) {
+                // Hosted search only narrows the list by filename. Changing the
+                // open image stays an explicit choice (list click, Previous/Next).
+                const needle = value.trim().toLocaleLowerCase();
+                let shown = 0;
+                for (const option of Array.from(imageList.options)) {
+                    const match = !needle || option.text.toLocaleLowerCase().includes(needle) || option.selected;
+                    option.hidden = !match;
+                    if (match) shown += 1;
+                }
+                searchInput.title = needle ? `${shown} of ${imageList.options.length} loaded images shown` : "";
+                return;
+            }
             for (let imageName in images) {
                 if (imageName.indexOf(value) !== -1) {
                     imageList.selectedIndex = images[imageName].index;
@@ -90594,6 +90720,96 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         bbox.x = left; bbox.y = top; bbox.width = right - left; bbox.height = bottom - top;
       }
       return true;
+    }
+
+    // Polygon corners clipped to the image, without repeated consecutive
+    // corners. Null when fewer than three distinct corners or no area remain.
+    function normalizedPolygonPoints(points, imgW, imgH) {
+      if (!Array.isArray(points)) return null;
+      const distinct = [];
+      for (const point of points) {
+        const x = Math.min(imgW, Math.max(0, Number(point?.x)));
+        const y = Math.min(imgH, Math.max(0, Number(point?.y)));
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+        const last = distinct[distinct.length - 1];
+        if (!last || last.x !== x || last.y !== y) distinct.push({ x, y });
+      }
+      while (distinct.length > 1 && distinct[0].x === distinct[distinct.length - 1].x && distinct[0].y === distinct[distinct.length - 1].y) distinct.pop();
+      if (new Set(distinct.map((point) => `${point.x},${point.y}`)).size < 3) return null;
+      let twiceArea = 0;
+      for (let i = 0; i < distinct.length; i += 1) {
+        const a = distinct[i], b = distinct[(i + 1) % distinct.length];
+        twiceArea += a.x * b.y - b.x * a.y;
+      }
+      return Math.abs(twiceArea) > 1e-6 ? distinct : null;
+    }
+
+    function isPolygonRecord(bbox) {
+      return bbox?.type === "polygon" || (Array.isArray(bbox?.points) && bbox.points.length >= 3);
+    }
+
+    function removeBboxRecordFromImage(imageName, bbox) {
+      const buckets = imageName ? bboxes[imageName] : null;
+      const bucket = buckets && bbox ? buckets[bbox.class] : null;
+      const index = Array.isArray(bucket) ? bucket.indexOf(bbox) : -1;
+      if (index < 0) return false;
+      bucket.splice(index, 1);
+      if (!bucket.length) delete buckets[bbox.class];
+      if (bbox.uuid) {
+        selectedBboxes.delete(bbox.uuid); negativeBboxes.delete(bbox.uuid); delete pendingApiBboxes[bbox.uuid];
+      }
+      if (currentBbox?.bbox === bbox) currentBbox = null;
+      return true;
+    }
+
+    // What is drawn is what is saved: a box is clipped to the image edge and a
+    // box or polygon with no area inside the image leaves the canvas.
+    function settleRecordGeometry(imageName, bbox, imgW, imgH) {
+      if (!bbox || !(imgW > 0) || !(imgH > 0)) return "kept";
+      if (isPolygonRecord(bbox)) {
+        const points = normalizedPolygonPoints(bbox.points, imgW, imgH);
+        if (!points) return removeBboxRecordFromImage(imageName, bbox) ? "polygon" : "kept";
+        bbox.points = points;
+        const xs = points.map((point) => point.x), ys = points.map((point) => point.y);
+        bbox.x = Math.min(...xs); bbox.y = Math.min(...ys);
+        bbox.width = Math.max(...xs) - bbox.x; bbox.height = Math.max(...ys) - bbox.y;
+        return "kept";
+      }
+      if (clampBbox(bbox, imgW, imgH)) return "kept";
+      return removeBboxRecordFromImage(imageName, bbox) ? "box" : "kept";
+    }
+
+    function announceRemovedGeometry(boxes, polygons) {
+      if (!boxes && !polygons) return;
+      const parts = [];
+      if (boxes) parts.push(boxes === 1 ? "Box outside the image removed" : `${boxes} boxes outside the image removed`);
+      if (polygons) parts.push(polygons === 1 ? "Polygon without area removed" : `${polygons} polygons without area removed`);
+      const message = `${parts.join(" · ")}.`;
+      setSamStatus(message, { variant: "warn", duration: 4000 });
+      if (hostedMode) window.TatorHosted?.notice?.(message);
+    }
+
+    // Settle every finished object on the image (tool results, restored drafts).
+    // The object being dragged is left alone until the pointer is released.
+    function settleImageGeometry(imageName = currentImage?.name) {
+      const record = imageName ? images[imageName] : null;
+      const buckets = imageName ? bboxes[imageName] : null;
+      if (!record || !buckets || !(record.width > 0) || !(record.height > 0)) return { boxes: 0, polygons: 0 };
+      const active = mouse.buttonL && currentBbox ? currentBbox.bbox : null;
+      let boxes = 0, polygons = 0;
+      for (const className of Object.keys(buckets)) {
+        for (const bbox of [...(buckets[className] || [])]) {
+          if (bbox === active || (bbox._hostedPending && pendingApiBboxes[bbox.uuid])) continue;
+          const outcome = settleRecordGeometry(imageName, bbox, record.width, record.height);
+          if (outcome === "box") boxes += 1;
+          if (outcome === "polygon") polygons += 1;
+        }
+      }
+      if (boxes || polygons) {
+        captureAnnotationDirtyStateForImage(imageName);
+        announceRemovedGeometry(boxes, polygons);
+      }
+      return { boxes, polygons };
     }
 
     /**
@@ -90898,6 +91114,8 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             (buckets[cls.name] ||= []).push(box);
         }
         bboxes[key] = buckets;
+        // A dataset that uses polygons opens in polygon mode (the toggle stays visible).
+        if (datasetType !== "seg" && (hostedCanvasRecord.annotations.objects || []).some((object) => object.polygon)) setDatasetType("seg");
         textLabels[key] = hostedCanvasRecord.annotations.caption || "";
         hydrateHostedCaptions(key);
         annotationSourceState.hydratedKeys.add(key);
@@ -91103,6 +91321,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             annotationSourceState.hydratedKeys.delete(image.name);
             textLabels[image.name] = record.annotations.caption || "";
             setCurrentImage(image);
+            this.refilterList();
         },
         ready() { return Boolean(currentImage?.object && currentImage.annotationRelpath === hostedCanvasRecord?.id && annotationSourceState.hydratedKeys.has(currentImage.name)); },
         appendQueue(rows, {prepend = false} = {}) {
@@ -91129,6 +91348,11 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             Array.from(list.options).forEach((option, index) => { if (images[option.value]) images[option.value].index = index; });
             if (selectedName) syncImageSelectionToName(selectedName, {ensureVisible: false});
             imageListIndex = list.selectedIndex;
+            this.refilterList();
+        },
+        refilterList() {
+            const search = document.getElementById("imageSearch");
+            if (search?.value) search.dispatchEvent(new Event("input"));
         },
         reconcileQueue(rows) {
             // Queue metadata changes do not replace the canvas, hydrated labels,
@@ -91163,6 +91387,9 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             const result = structuredClone(hostedCanvasRecord.annotations);
             const previous = new Map((result.objects || []).map((item) => [item.id, item]));
             result.objects = [];
+            // Anything that cannot be saved leaves the canvas, with a note, so
+            // what is drawn is what is saved (the dragged object waits for release).
+            settleImageGeometry(currentImage.name);
             for (const [name, boxes] of Object.entries(bboxes[currentImage.name] || {})) {
                 const cls = hostedCanvasDataset.classes.find((item) => item.name === name);
                 if (!cls && boxes.length) throw new Error("Request a class from the administrator before using it.");
@@ -91174,12 +91401,15 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                         continue;
                     }
                     // Boxes are always clipped to the image; one with no area inside it is not saved.
-                    if (!clampBbox(box, currentImage.width, currentImage.height)) continue;
+                    // (The object being dragged is saved clipped until it is released.)
+                    const geometry = { x: box.x, y: box.y, width: box.width, height: box.height };
+                    if (!clampBbox(geometry, currentImage.width, currentImage.height)) continue;
                     const object = { ...(previous.get(id) || {}), id, class_id: cls.id,
-                        bbox: [box.x, box.y, box.width, box.height] };
-                    if (Array.isArray(box.points) && box.points.length >= 3) {
-                        object.polygon = box.points.map((point) => [
-                            Math.min(currentImage.width, Math.max(0, point.x)), Math.min(currentImage.height, Math.max(0, point.y))]);
+                        bbox: [geometry.x, geometry.y, geometry.width, geometry.height] };
+                    if (isPolygonRecord(box)) {
+                        const points = normalizedPolygonPoints(box.points, currentImage.width, currentImage.height);
+                        if (!points) continue;
+                        object.polygon = points.map((point) => [point.x, point.y]);
                     } else delete object.polygon;
                     result.objects.push(object);
                 }

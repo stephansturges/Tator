@@ -13,14 +13,58 @@ folders. Existing source files are copied into immutable storage, never edited.
 Where work lives
 ----------------
 
-An administrator's **Dataset** view is the confirmed, canonical dataset used by
-analysis, training and dataset exports. **Incoming** shows all pending images,
-with their tranche and annotator where assigned. Choose **Unallocated only** to
-find images available for a new tranche. **Tranches** groups reserved and assigned
-work; **Review** filters pending submissions by tranche or annotator. Uploading,
-assigning, saving or submitting does not add an image to the canonical dataset.
-Confirmed background images are valid members of the canonical dataset even
-when they contain no boxes. Empty annotations alone do not make an image Incoming.
+The workspace names the selected dataset above the view title, and its views
+show their counts. An administrator's **Confirmed** view is the confirmed,
+canonical dataset used by analysis, training and dataset exports. **Incoming**
+shows all pending images, with their tranche and annotator where assigned.
+**Tranches** groups reserved and assigned work; **Review** lists images waiting
+for review, filtered by tranche or annotator. Uploading, assigning, saving or
+submitting does not add an image to the canonical dataset. Confirmed background
+images are valid members of the canonical dataset even when they contain no
+boxes. Empty annotations alone do not make an image Incoming.
+
+Every image state has one name throughout the workspace:
+
+* **Incoming**: not yet confirmed.
+* **Not assigned**: in Incoming and free, in no tranche.
+* **Assigned to** a person: given to an annotator in a tranche.
+* **Waiting for review**: submitted by its annotator.
+* **Returned for changes**: sent back with feedback (shown in the warning colour).
+* **Confirmed**: approved into the dataset. The action that does this is **Approve**.
+
+**Show** in Incoming narrows the list on the server: **All Incoming**, **Not
+assigned**, **Needs a decision** (an import marked the image for review, for
+example duplicate copies with different labels, or an imported label conflict is
+open), **With labels** and **Without labels**. Search, totals and **Select all
+matching** use the same filter. When the dataset came from an import, a line
+under the title summarises the newest import, and its link shows the images that
+need a decision.
+
+**Select all matching** selects up to 5,000 eligible images, including those not
+yet displayed; only Not assigned images can be selected in Incoming. **Load more
+images** adds 100 at a time and **Load all remaining** loads the rest, with a
+warning above 2,000. Administrators can then act on the selection from the
+Incoming grid, after one confirmation that states the count:
+
+* **Approve selected** approves the selected images that have labels, as they are.
+* **Confirm as background** records the selected images without labels as having
+  no target objects, then approves them.
+
+Each image is checked like a single approval: the version and owner it had when
+selected, no open editing tab, not in a tranche and no pending decision. Each
+image has its own receipt, so a retry never approves twice. The selection is
+sent in batches of 250; skipped images are reported by reason and left unchanged.
+Use these only after checking the images.
+
+The address keeps the dataset, view, tranche and filters, so **Back** and
+**Forward** move between views and tranches and a reload returns to the same
+place. Image cards open the canvas with ``image``, ``queue`` (except in
+Incoming, where the server derives each image's tranche scope), ``dataset`` and
+``view``, plus ``tranche``, ``q`` (search), ``filter`` (the Show value) and
+``annotator`` when set. Returning with ``at=<image>`` loads pages until that
+image's card is shown, up to 20 pages, and highlights it. Switching dataset
+clears the search and filter; a tranche link for another dataset shows the
+current dataset's tranches instead.
 
 Annotators use **My tranches** to open their own assigned or returned images.
 See `Named annotation tranches <hosted_tranches.rst>`_ for the complete group
@@ -33,13 +77,17 @@ While annotating, save and review controls sit in a floating panel at the bottom
 right. Use the minus button to minimize it; save status and the workspace button
 remain visible. Workflow messages no longer push the canvas down. Administrators
 also have a top navigation bar: **Datasets**, **Data Quality Explorer**,
-**Dataset pruning**, **Data ingestion**, **Train models**, **Tools & models** and
-**Analysis presets**. Leaving annotation for an analysis saves the current image
-and releases its editing reservation first; a failed save keeps you on the image.
-These destinations use the hosted dataset and its versioned analysis results.
-When the server runs the `admin workbench <hosted_workbench.rst>`_, these
-entries open the full original tools instead, and **More tools** and **Server
-jobs** appear. The administrator navigation is never shown to annotators.
+**Dataset pruning**, **Data ingestion**, **Train models**, **Server jobs**,
+**Tools & models** and **Analysis presets**. These are the only entries for those
+tools; on a phone the bar folds behind **Administrator tools**. Leaving
+annotation for an analysis saves the current image and releases its editing
+reservation first; a failed save keeps you on the image. These destinations use
+the hosted dataset and its versioned analysis results, and every dialog names
+the dataset it opened for. When the server runs the `admin workbench
+<hosted_workbench.rst>`_, the tool entries open the full original tools instead
+and **More tools** appears. The administrator navigation is never shown to
+annotators. A link that opens a tool (``?tool=``) or a result (``?analysis=``)
+opens it once and then leaves the address, which keeps the result's dataset.
 
 The theme button, in the workspace header and in the annotation panel, switches
 between light and dark. Double-click it for the Pip-Boy theme; a click then
@@ -47,12 +95,20 @@ switches its green and amber colors, and another double-click leaves it. The
 choice is kept in the browser and applies to the workspace, the annotation
 canvas and the workbench.
 
-**Admin workspace** returns to the selected dataset, where **People**, **Classes**,
-**Dataset guidance** and **Export & recovery** provide administration controls.
-**Quality & compute** remains an advanced list of all analysis and training jobs.
-It freezes the confirmed input versions and schedules heavy work; it does not
-select which annotation tools users are allowed to use. A named analysis page
-shows an explicit setup message if its runtime is not configured on this server.
+**Admin workspace** returns to the selected dataset. **New dataset** sits beside
+the dataset picker and **People** beside the account. The toolbar holds the
+dataset's **Classes**, **Dataset guidance** and **Export & recovery**; **Add
+images** and **Recall assigned work** appear in the views where they apply
+(Incoming, and Incoming or Tranches). With no dataset yet, **New dataset** is the
+primary action and dataset actions are disabled. **Server jobs** lists all
+analysis and training jobs for the dataset and starts with the quick, read-only
+tasks; a job opened for one tool is titled with the tool and dataset. It freezes
+the confirmed input versions and schedules heavy work; it does not select which
+annotation tools users are allowed to use. A training task states its split rule:
+splits set on the dataset are used, and unsplit images are split for that run
+only. Failed jobs show a readable reason; the full log stays on the server. A
+named analysis page shows an explicit setup message if its runtime is not
+configured on this server.
 
 Large work lists load compact image identifiers and filenames in bounded pages
 within the selected queue. Annotation versions and editing ownership are checked again when an
@@ -142,11 +198,14 @@ First day: administrator
    **Create dataset**. Classes can be added later through **Classes**.
 2. Open **People** and add each person with a username, the name shown in
    Tator and a role. Either set their password yourself, or choose an invitation
-   and copy the one-time link shown at the top of the dialog to send privately.
+   and copy the one-time link shown at the top of the dialog. Tator sends no
+   email: send the link and the username privately yourself. The invitation page
+   shows the username, and after the password is saved the sign-in form is
+   filled in with it.
 3. Select the dataset, open **Incoming**, then **Add images**. Images alone are
    enough to start. Existing YOLO labels can accompany image uploads; use the
    reviewed migration workflow for a dataset with caption history.
-4. Select unallocated images and create a named tranche. Add instructions and
+4. Select Not assigned images and create a named tranche. Add instructions and
    choose **Save as Draft** or **Assign now** with an annotator. A tranche may
    contain up to 10,000 unfinished images; add them in selections of at most 500.
    The annotator can submit completed images individually.
@@ -162,8 +221,8 @@ canvas. Use it only after reviewing those images. Outcomes are recorded per
 image, so inspect reported conflicts or failures before assuming the whole
 selection was approved.
 
-In **People**, each account shows whether the person can sign in, has an unused
-invitation or has no password yet. **Save changes** applies a name, role or
+In **People**, each account shows whether the person can sign in, has an
+invitation link that is not used yet, or has no password yet. **Save changes** applies a name, role or
 **Disable access** change. **Set password** replaces their password directly;
 **New invitation link** or **Password reset link** creates a one-time link, and
 an open link can be cancelled. Password, role and access changes sign out
@@ -198,7 +257,8 @@ First day: annotator
 6. Follow **Submitted work · all datasets** in the workspace. A returned image
    reappears in its tranche with feedback. Correct it, check it and submit again.
 
-Use **Classes & requests** in the workspace, or **Request a class** in the
+**Classes & requests** in the workspace also shows the administrator's dataset
+guidance and what each class means. Use it, or **Request a class** in the
 canvas, when the existing list is insufficient. Choose **Send request** with a
 reason. Continue with the existing classes until an administrator resolves it.
 
@@ -282,8 +342,8 @@ During administrator heavy compute, the tool status can show that assistance
 is paused or reloading. Manual annotation and saving remain available. A pause
 does not approve drafts, hand work to someone else or discard their saved state.
 
-Paid captioning is not offered in the workspace yet; **Paid services** says that
-it is coming later. The server-side provider gateway and its API remain for
+Paid captioning is not offered in the workspace yet, so no **Paid services**
+entry is shown. The server-side provider gateway and its API remain for
 operators, with allowed datasets, models and spending limits; credentials stay on
 the server. An interrupted provider reply can leave a reservation unresolved;
 check the existing job or bill before starting another request. Confirming a
@@ -305,7 +365,7 @@ explicit handoff. **Recover from annotator** on the image removes that assignmen
 and preserves the saved draft. For several images, open **Recall assigned work**
 in the dataset workspace, choose the annotator, select individual images or
 **Select all in this list**, enter a reason, then confirm the recall. Images
-return to unallocated Incoming for administrator editing or reassignment, and
+return to Incoming as Not assigned for administrator editing or reassignment, and
 leave their former tranche. Submitted and confirmed images are excluded from
 ordinary recall. An administrator can explicitly withdraw a pending submission
 to Incoming with a reason, for example when its author is no longer available.
@@ -425,7 +485,7 @@ Snapshots, analysis and dataset downloads
 
 Open **Export & recovery**, then **Export confirmed dataset** for a canonical
 ZIP. The named administrator tabs open analysis and training tools;
-**Quality & compute** retains the complete job list. Dataset captioning starts
+**Server jobs** retains the complete job list. Dataset captioning starts
 in the annotation pane: expand the Qwen caption controls and choose
 **Caption whole dataset…**, beside **Caption image + Q&A**. The dialog contains
 pilot runs, whole-dataset runs, retained proposals and caption-training export.
@@ -497,7 +557,7 @@ Archive and storage cleanup
 Archiving removes an image or dataset from current work and current canonical
 snapshots. It keeps the bytes, annotations and historical snapshots. Restoring an
 archive preserves the captured annotation version: confirmed images return to
-the canonical dataset; other images return to unallocated Incoming. Old tranche
+the canonical dataset; other images return to Incoming as Not assigned. Old tranche
 ownership and pending submissions are not reopened. Dataset archive requires the
 exact current member list and cannot bypass active annotator ownership.
 

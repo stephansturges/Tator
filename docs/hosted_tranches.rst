@@ -8,7 +8,7 @@ not make another copy of them.
 
 Confirmed images belong to **Dataset** and cannot be assigned. **Incoming**
 contains all pending images, including reserved Drafts, active assignments and
-submissions awaiting review. Filter it to **Unallocated only** to prepare new work.
+submissions waiting for review. Set **Show** to **Not assigned** to prepare new work.
 Tranche and annotator labels show where each image belongs; **Tranches** and
 **Review** provide the corresponding work and review queues.
 
@@ -75,7 +75,7 @@ image with no objects is valid: use **No objects to label** before submission.
 
 Administrators may annotate and approve a Draft's reserved image directly.
 That image counts as approved without inventing an annotator submission.
-Inside a tranche, filter to **Awaiting review**, select the reviewed images and
+Inside a tranche, filter to **Waiting for review**, select the reviewed images and
 choose **Approve selected submissions**. Each image is checked against its
 captured version and ownership generation. The result identifies any rejected
 images separately. A lost reply retains the exact per-image commands for retry;
@@ -85,7 +85,7 @@ view also provides tranche and annotator filters before selection and approval.
 Revise an assignment
 ---------------------
 
-**Remove from tranche** sends the selected unfinished images back to unallocated
+**Remove from tranche** sends the selected unfinished images back as Not assigned in
 Incoming and preserves their saved annotations. **Move to another tranche**
 reserves them in a Draft or assigns them to an Active destination's annotator.
 Both changes revoke the previous editing session, so a delayed save or inference
@@ -116,16 +116,16 @@ Read the progress counts
 Each image counts once per tranche, using its latest membership there:
 
 * **Not assigned**: reserved in a Draft.
-* **To finish**: assigned work.
-* **Changes requested**: returned work.
-* **Awaiting review**: submitted work.
-* **Approved**: admitted to the canonical dataset.
+* **Assigned**: assigned work, shown as **Assigned to** the annotator on its card.
+* **Returned for changes**: returned work.
+* **Waiting for review**: submitted work.
+* **Confirmed**: approved into the canonical dataset.
 * **Removed**, **Transferred**, **Archived**: terminal outcomes shown separately.
 
 **Ever included** is the distinct total across these buckets. **Currently
 retained** excludes removed, transferred and archived images. An empty group is
 not shown as fully complete. **Complete** appears when a previously populated
-tranche has no unassigned, editable or awaiting-review images; this does not
+tranche has no Not assigned, editable or waiting-for-review images; this does not
 change its Draft / Active / Closed lifecycle. Re-adding an image does not
 inflate its total, and approval after a transfer does not change the source tranche's transferred
 outcome. Annotators see only their own work and outcomes; administrators see the

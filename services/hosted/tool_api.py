@@ -37,6 +37,8 @@ CLASSIFIER_OPERATIONS = {"sam_point_auto", "sam_point_multi_auto", "sam_bbox_aut
 DETECTOR_OPERATIONS = {"detect_full", "detect_region", "detect_windowed"}
 EDR_OPERATIONS = {"edr_prepass"}
 QWEN_OPERATIONS = {"qwen_infer", "qwen_caption", "qwen_caption_preview", "qwen_caption_case"}
+# Operations that never call SAM; they must not depend on the user's SAM choice.
+NON_SAM_OPERATIONS = QWEN_OPERATIONS | {"classify_bbox"}
 NATIVE_ANALYSIS_FACTORY = "services.hosted.native_analysis:NativeAnalysisAdapter"
 PARAMETERS = {"point_x", "point_y", "positive_points", "negative_points", "bbox_left", "bbox_top", "bbox_width", "bbox_height",
               "local_refine", "uuid", "slot", "conf", "iou", "max_det", "slice_size", "overlap", "merge_iou",
@@ -460,23 +462,33 @@ class ToolController:
             return self._dataset_pipeline_spec(actor, dataset_id, operation)
         if operation in SAM_OPERATIONS | QWEN_OPERATIONS | SAM_RECIPE_OPERATIONS:
             dataset = self.store.get_dataset(actor, dataset_id)
+            # Check the model the operation itself needs first, so a missing
+            # classifier or Qwen model is reported as such, not as a SAM problem.
+            classifier, bindings = self._dataset_model(dataset, "classifier", required=operation in CLASSIFIER_OPERATIONS)
+            qwen = self._qwen_config(actor, required=operation in QWEN_OPERATIONS)
             selection = self._sam_selection(actor)
             policy = self.configuration.get("user_sam", {})
             model_id = selection["model_id"]
-            if model_id not in self._sam_model_ids():
-                raise DomainError("tool_not_configured", 503, selection["unavailable_reason"])
+            available = self._sam_model_ids()
+            if model_id not in available:
+                if operation not in NON_SAM_OPERATIONS:
+                    raise DomainError("tool_not_configured", 503, selection["unavailable_reason"])
+                # Qwen and the class predictor do not use SAM, but they share the
+                # user's private worker, which hosts one installed SAM model. Use
+                # one without changing the user's saved (unavailable) choice.
+                if not available:
+                    raise DomainError("tool_not_configured", 503, "Your private annotation worker needs one installed SAM model on this server. Ask an administrator to install one in Tools & models.")
+                model_id = available[0]
             model = self._definition(model_id)
             if operation.startswith("sam3_") and operation not in SAM_RECIPE_OPERATIONS and model["kind"] != "sam3":
                 raise DomainError("tool_sam3_required", 503, "Select an installed SAM3 model to use this tool.")
             if model.get("backend") == "mlx" and operation in {"sam3_text", "sam3_text_auto", "sam3_visual"}:
                 raise DomainError("tool_backend_not_supported", 503,
                     "MLX SAM3 supports point and box prompts. Text and find-similar prompts need the native SAM3 model.")
-            classifier, bindings = self._dataset_model(dataset, "classifier", required=operation in CLASSIFIER_OPERATIONS)
             spec = self.registry.user_spec(actor.user_id, model_id, media_root=self.media_root,
                 device=policy.get("device"), capacity=policy.get("capacity", 3), classifier_id=classifier["model_id"] if classifier else None)
             if bindings:
                 spec = replace(spec, config={**dict(spec.config), "classifier_bindings": bindings})
-            qwen = self._qwen_config(actor, required=operation in QWEN_OPERATIONS)
             if qwen:
                 spec = replace(spec, config={**dict(spec.config), "qwen": qwen})
             try:
@@ -956,7 +968,7 @@ class ToolController:
         own = next((owner for owner in snapshot["owners"] if owner["owner"] == "user:" + actor.user_id), None)
         capabilities = {}
         if dataset_id:
-            for operation in ("sam_point", "sam_point_auto", "sam3_text", "sam3_text_auto", "sam3_recipe_chain", "detect_full", "qwen_infer", "qwen_caption", "qwen_caption_preview", "edr_prepass"):
+            for operation in ("sam_point", "sam_point_auto", "classify_bbox", "sam3_text", "sam3_text_auto", "sam3_recipe_chain", "detect_full", "qwen_infer", "qwen_caption", "qwen_caption_preview", "edr_prepass"):
                 try:
                     self._spec(actor, dataset_id, operation)
                     capabilities[operation] = {"configured": True}

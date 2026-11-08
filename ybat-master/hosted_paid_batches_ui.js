@@ -171,7 +171,9 @@
                 caption_request: pick(source.caption_request || {}, catalog.caption_job_parameters.caption_request), settings: pick(source, catalog.caption_job_parameters.settings)};
             const result = await api(base, request); return response(legacyShape(result));
         }
-        if (suffix === "/scan" || suffix === "/adopt") { await open(); return response({artifacts: [], message: "Recover server-recorded jobs in Remote caption batches using their provider Batch ID. Hosted jobs do not adopt arbitrary server folders."}); }
+        // Hosted jobs never adopt server folders; say so instead of reporting success.
+        if (suffix === "/scan" || suffix === "/adopt") return new Response(JSON.stringify({error: "hosted_batch_adopt_unavailable",
+            detail: "Hosted caption batches cannot adopt or scan server folders. An administrator recovers a recorded job in Remote dataset captions using its provider Batch ID."}), {status: 409, headers: {"content-type": "application/json"}});
         const [id, actionName] = suffix.slice(1).split("/");
         if (!id) throw new Error("Batch job is missing.");
         if (!actionName && method === "GET") return response(legacyShape(await api(`${base}/${encodeURIComponent(id)}`)));

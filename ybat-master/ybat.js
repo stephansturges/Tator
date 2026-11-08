@@ -23702,6 +23702,29 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
 
+    async function readToolErrorMessage(resp) {
+        const text = await resp.text().catch(() => "");
+        return parseApiError(text, resp.statusText || `HTTP ${resp.status}`);
+    }
+
+    // A tool that fails after the user drew a box leaves that box as drawn.
+    function keepDrawnBoxAfterToolFailure(context, label, err) {
+        const { uuid, imageName } = context || {};
+        if (uuid) {
+            delete pendingApiBboxes[uuid];
+        }
+        const box = Object.values(bboxes[imageName] || {}).flat().find((item) => item && item.uuid === uuid);
+        const reason = String(err?.message || err || "unknown error").replace(/[.\s]+$/, "");
+        const message = box
+            ? `${label} could not refine this box: ${reason}. Your box was kept as drawn.`
+            : `${label} failed: ${reason}`;
+        setSamStatus(message, { variant: "warn", duration: 6000 });
+        if (hostedMode) window.TatorHosted?.notice?.(message, true);
+        if (box && imageName) {
+            captureAnnotationDirtyStateForImage(imageName);
+        }
+    }
+
     function removePendingBbox(context) {
         const info = context || multiPointPendingBboxInfo;
         if (!info) {
@@ -47207,6 +47230,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function updateAutoModeState(checked) {
+        if (checked && hostedToolBlocked("classifier")) checked = false;
         autoMode = !!checked;
         if (autoModeCheckbox) {
             autoModeCheckbox.checked = autoMode;
@@ -47633,6 +47657,7 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function updateSamModeState(checked, options = {}) {
         const { preservePoints = false } = options;
+        if (checked && hostedToolBlocked("sam")) checked = false;
         samMode = !!checked;
         if (samModeCheckbox) {
             samModeCheckbox.checked = samMode;
@@ -83606,6 +83631,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
     };
 
     const runRegionDetect = async (region) => {
+        if (hostedToolBlocked("detector")) return;
         const mode = getRegionDetectorMode();
         if (mode === "rfdetr") {
             await runRfDetrRegionDetect(region);
@@ -83712,6 +83738,9 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
     }
 
     async function runDetectorForCurrentImage({ modeOverride = null } = {}) {
+        if (hostedToolBlocked("detector")) {
+            return { added: 0, failed: true, fatal: true, message: hostedToolGate.detector };
+        }
         if (!ensureAutomationAvailable("Detector")) {
             return { added: 0 };
         }
@@ -83780,12 +83809,13 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             if (!resp.ok) {
                 const err = await resp.json().catch(() => ({}));
                 const detail = err.detail || `${labelPrefix} detect failed (${resp.status})`;
-                throw new Error(detail);
+                throw Object.assign(new Error(detail), { status: resp.status });
             }
             const data = await resp.json();
             const detections = Array.isArray(data?.detections) ? data.detections : [];
             const warnings = Array.isArray(data?.warnings) ? data.warnings : [];
             const { added } = applyRegionDetections(detections, labelPrefix, { targetImageName: requestImageName });
+            if (hostedMode && added > 0) window.TatorHosted?.objectAdded?.();
             if (warnings.length) {
                 summarizeRegionWarnings(warnings, labelPrefix).forEach((message) => {
                     enqueueTaskNotice(message, { durationMs: 5000 });
@@ -83813,7 +83843,9 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                 enqueueTaskNotice(`${labelPrefix}: failed.`);
                 setSamStatus(`${labelPrefix} detect error: ${message}`, { variant: "error", duration: 5000 });
             }
-            return { added: 0 };
+            // Batches report this truthfully. A refusal that is not about this
+            // image (no model, no access, compute paused) stops a hosted batch.
+            return { added: 0, failed: true, message, fatal: hostedMode && [401, 403, 409, 423, 503].includes(err?.status) };
         } finally {
             endSamActionStatus(statusToken);
         }
@@ -83874,37 +83906,60 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         const batchTaskId = enqueueTask({ kind: "detector-batch", imageName: originalName, detail: { count: names.length } });
         let totalAdded = 0;
         let failedImages = 0;
+        let processedImages = 0;
+        let lastFailure = "";
         try {
             for (let idx = 0; idx < names.length; idx += 1) {
                 if (detectorBatchCancel) {
                     break;
                 }
                 const name = names[idx];
-                setSamStatus(`Detector batch ${idx + 1}/${names.length}: ${name}`, { variant: "info", duration: 0 });
                 const record = images[name];
+                const label = record?.displayName || name;
+                setSamStatus(`Detector batch ${idx + 1}/${names.length}: ${label}`, { variant: "info", duration: 0 });
                 if (!record) {
                     continue;
                 }
-                await ensureImageRecordReady(record);
-                if (!currentImage || currentImage.name !== name) {
-                    setCurrentImage(record);
+                let ready = false;
+                try {
+                    await ensureImageRecordReady(record);
+                    // Hosted images change through the server (save, release,
+                    // reserve); wait for that before running the detector.
+                    if (hostedMode && record.annotationRelpath && record.annotationRelpath !== window.TatorHosted.imageId) {
+                        await window.TatorHosted.navigate(record.annotationRelpath);
+                    } else if (!currentImage || currentImage.name !== name) {
+                        setCurrentImage(record);
+                    }
+                    ready = await waitForCurrentImageReady(name);
+                } catch (error) {
+                    lastFailure = error?.message || String(error);
                 }
-                const ready = await waitForCurrentImageReady(name);
                 if (!ready) {
-                    setSamStatus(`Detector batch ${idx + 1}/${names.length}: failed to load ${name}`, { variant: "warn", duration: 3000 });
                     failedImages += 1;
+                    lastFailure ||= `could not open ${label}`;
+                    setSamStatus(`Detector batch ${idx + 1}/${names.length}: could not open ${label}`, { variant: "warn", duration: 3000 });
+                    if (hostedMode) break;
                     continue;
                 }
                 try {
                     const result = await runDetectorForCurrentImage();
+                    if (result?.failed) {
+                        failedImages += 1;
+                        lastFailure = result.message || lastFailure;
+                        if (result.fatal || hostedMode) break;
+                        continue;
+                    }
+                    processedImages += 1;
                     totalAdded += Number(result?.added || 0);
                 } catch (error) {
                     failedImages += 1;
+                    lastFailure = error?.message || String(error);
                     console.error("Detector batch image failed", name, error);
                     setSamStatus(
-                        `Detector batch ${idx + 1}/${names.length}: failed on ${name} (${error?.message || error})`,
+                        `Detector batch ${idx + 1}/${names.length}: failed on ${label} (${lastFailure})`,
                         { variant: "warn", duration: 3500 },
                     );
+                    if (hostedMode) break;
                 }
             }
         } finally {
@@ -83912,13 +83967,25 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             updateDetectorBatchButtons();
             completeTask(batchTaskId);
             if (originalName && images[originalName] && (!currentImage || currentImage.name !== originalName)) {
-                setCurrentImage(images[originalName]);
+                // Return to the image the batch started from.
+                const original = images[originalName];
+                if (hostedMode && original.annotationRelpath) {
+                    await window.TatorHosted.navigate(original.annotationRelpath).catch((error) => {
+                        lastFailure ||= error?.message || String(error);
+                    });
+                } else {
+                    setCurrentImage(original);
+                }
             }
+            const skipped = Math.max(0, names.length - processedImages - failedImages);
+            const summary = `added ${totalAdded} box${totalAdded === 1 ? "" : "es"} on ${processedImages} image${processedImages === 1 ? "" : "s"}`;
             const doneMessage = detectorBatchCancel
-                ? "Detector batch cancelled."
-                : `Detector batch complete: added ${totalAdded} box${totalAdded === 1 ? "" : "es"}${failedImages ? ` (${failedImages} failed)` : ""}.`;
-            setSamStatus(doneMessage, { variant: detectorBatchCancel ? "warn" : "success", duration: 3500 });
-            enqueueTaskNotice(doneMessage, { durationMs: 5000 });
+                ? `Detector batch cancelled: ${summary}.`
+                : failedImages
+                    ? `Detector batch stopped: ${summary}; ${failedImages} failed${skipped ? `, ${skipped} not run` : ""}. ${lastFailure || ""}`.trim()
+                    : `Detector batch complete: ${summary}.`;
+            setSamStatus(doneMessage, { variant: detectorBatchCancel ? "warn" : failedImages ? (processedImages ? "warn" : "error") : "success", duration: failedImages ? 8000 : 3500 });
+            enqueueTaskNotice(doneMessage, { durationMs: 6000 });
         }
     }
 
@@ -84112,7 +84179,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             };
             let resp = await postSamEndpoint(`${API_ROOT}/sam_bbox`, bodyFields);
             if (!resp.ok) {
-                throw new Error("Response not OK: " + resp.statusText);
+                throw new Error(await readToolErrorMessage(resp));
             }
             const result = await resp.json();
             if (!isSamJobActive(jobHandle)) {
@@ -84192,8 +84259,10 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             console.error("sam_bbox error:", err);
             if (localRefine) {
                 setSamStatus(`Magic Tweak kept the original bbox: ${err.message || err}`, { variant: "warn", duration: 4500 });
-            } else {
-                alert("sam_bbox call failed: " + err);
+            } else if (placeholderContext) {
+                // A tool failure never costs the user the box they drew.
+                keepDrawnBoxAfterToolFailure(placeholderContext, "SAM", err);
+                return false;
             }
             if (placeholderContext) {
                 removePendingBbox(placeholderContext);
@@ -84422,8 +84491,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                 body: JSON.stringify(requestBody),
             });
             if (!resp.ok) {
-                const detail = await resp.text();
-                throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
+                throw new Error(await readToolErrorMessage(resp));
             }
             const data = await resp.json();
             console.debug("autoPredictNewCrop =>", data);
@@ -84537,7 +84605,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             }
             let resp = await postSamEndpoint(`${API_ROOT}/sam_bbox_auto`, bodyData);
             if (!resp.ok) {
-                throw new Error("sam_bbox_auto failed: " + resp.statusText);
+                throw new Error(await readToolErrorMessage(resp));
             }
             const result = await resp.json();
             console.debug("sam_bbox_auto =>", result);
@@ -84643,8 +84711,9 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             console.error("sam_bbox_auto error:", err);
             if (localRefine) {
                 setSamStatus(`Magic Tweak kept the original bbox: ${err.message || err}`, { variant: "warn", duration: 4500 });
-            } else {
-                alert("sam_bbox_auto call failed: " + err);
+            } else if (placeholderContext) {
+                keepDrawnBoxAfterToolFailure(placeholderContext, "SAM auto box", err);
+                return false;
             }
             if (placeholderContext) {
                 removePendingBbox(placeholderContext);
@@ -91194,16 +91263,74 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         if (detectorElements.labelingStatus) detectorElements.labelingStatus.textContent = selected;
         updateCaptionGlossaryControls();
     }
+
+    // Hosted tools whose model is not set up for this dataset are hidden behind
+    // one line saying why, instead of failing after the user draws or clicks.
+    const HOSTED_TOOL_GROUPS = [
+        { key: "classifier", anchor: "autoMode", controls: ["autoMode", "autoClassMarginEnabled", "autoClassMarginValue", "autoClassMarginWarn"],
+            reason: "Auto Class is off: this dataset has no class predictor yet (an administrator selects one in Tools & models)." },
+        { key: "sam", anchor: "samMode", controls: ["samMode", "samVariant", "samPreload", "pointMode", "multiPointMode"],
+            reason: "SAM is off: no segmentation model can run for your account here. Choose one in Tools & models." },
+        { key: "detector", anchor: "regionDetector", controls: ["regionDetector", "yoloRegionConf", "yoloRegionIou", "yoloRegionMaxDet", "detectorRunMode", "detectorWindowOptions",
+            "detectorRunButton", "detectorActiveLabeling", "detectorBatchCount", "detectorBatchIncludeCurrent", "detectorBatchRunButton", "detectorBatchAllButton"],
+            reason: "Detector runs are off: this dataset has no detector yet (an administrator selects one in Tools & models)." },
+        { key: "caption", anchor: "qwenCaptionRunButton", controls: ["qwenCaptionRunButton", "qwenCaptionCancelButton", "qwenCaptionPreviewInstructionProcess", "qwenCaptionBuildInstructionDataset"],
+            reason: "Captioning is off: no caption model is set up for this dataset (an administrator configures one in Tools & models)." },
+    ];
+    var hostedToolGate = {}; // var: mode toggles may consult it before this line runs.
+    function hostedToolBlocked(key) {
+        if (!hostedMode || !hostedToolGate?.[key]) return false;
+        setSamStatus(hostedToolGate[key], { variant: "warn", duration: 5000 });
+        return true;
+    }
+    function applyHostedToolAvailability(catalog, state) {
+        const capabilities = state?.capabilities || {};
+        const has = (operation, fallback) => capabilities[operation] ? Boolean(capabilities[operation].configured) : fallback;
+        const paidCaption = (catalog.paid_caption?.models || []).length > 0;
+        const configured = {
+            classifier: has("classify_bbox", Boolean(catalog.classifier?.model_id)),
+            sam: has("sam_point", catalog.sam?.available !== false),
+            detector: has("detect_full", Boolean(catalog.detector?.model_id)),
+            caption: has("qwen_caption", false) || paidCaption,
+        };
+        for (const group of HOSTED_TOOL_GROUPS) {
+            const available = configured[group.key];
+            hostedToolGate[group.key] = available ? null : group.reason;
+            // Hide the control's own one-control row, never a wider section.
+            const rowOf = (control) => control?.parentElement?.matches(".training-field, .training-actions") ? control.parentElement : control;
+            for (const id of group.controls) {
+                rowOf(document.getElementById(id))?.classList.toggle("hosted-tool-unavailable", !available);
+            }
+            const anchorRow = rowOf(document.getElementById(group.anchor));
+            let note = document.querySelector(`.hosted-tool-reason[data-hosted-tool="${group.key}"]`);
+            if (!note && anchorRow) {
+                note = document.createElement("div"); note.className = "training-help hosted-tool-reason"; note.dataset.hostedTool = group.key;
+                anchorRow.insertAdjacentElement("beforebegin", note);
+            }
+            if (note) { note.textContent = group.reason; note.hidden = available; }
+        }
+        if (hostedToolGate.classifier && autoMode) updateAutoModeState(false);
+        if (hostedToolGate.sam && samMode) updateSamModeState(false);
+        // Folder-based Batch recovery does not exist in hosted mode, and the remote
+        // Batch manager is only for datasets with a configured paid provider.
+        for (const id of ["qwenCaptionScanOpenAiBatches", "qwenCaptionAdoptOpenAiBatch", "qwenCaptionAdoptOpenAiBatchPath"]) {
+            document.getElementById(id)?.classList.add("hosted-tool-unavailable");
+        }
+        const remoteBatches = document.querySelector(".qwen-caption-remote-batch-panel");
+        remoteBatches?.classList.toggle("hosted-tool-unavailable", !(catalog.paid_batch?.models || []).length);
+    }
     if (hostedMode) window.TatorHostedCanvas = {
         imageName() { return currentImage?.name; },
         imageNameFor(id) { return Object.values(images).find((image) => image.annotationRelpath === id)?.name || null; },
         configureTools(catalog, state) {
             window.TatorHosted.setToolsState(state);
+            applyHostedToolAvailability(catalog, state);
             updateSam3TextButtons();
             updateQwenAgentButtons();
             const catalogIdentity = JSON.stringify(catalog);
             if (this.catalogIdentity === catalogIdentity) return;
             configureHostedRoles(catalog);
+            refreshQwenAgentClassifiers().catch((error) => console.debug("Agent classifier list unavailable", error));
             const paidModels = catalog.paid_caption?.models || [];
             const paidIdentity = JSON.stringify([paidModels, catalog.caption_job_capabilities?.openai_batch_transport]);
             if (paidIdentity !== this.paidIdentity) {

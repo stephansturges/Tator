@@ -262,6 +262,62 @@ def test_bulk_review_exact_replay_and_plain_reimport_preserves_labels(applicatio
     assert actual["annotations"]["caption"] == "Reviewed" and actual["state"] == "confirmed"
 
 
+def test_incoming_filters_and_bulk_confirmation_keep_single_approval_admission(application):
+    import json
+    admin = login(application)
+    ds = dataset(admin)
+    vehicle = ds["classes"][0]["id"]
+
+    def add(color, annotations=None):
+        content = io.BytesIO(); Image.new("RGB", (64, 48), color).save(content, format="PNG")
+        data = {"operation_id": op(), **({"annotations": json.dumps(annotations)} if annotations is not None else {})}
+        response = admin.post(f"/api/hosted/datasets/{ds['id']}/incoming", files={"file": (f"{color}.png", content.getvalue(), "image/png")}, data=data)
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    box = {"objects": [{"id": "o1", "class_id": vehicle, "bbox": [4, 4, 20, 20]}]}
+    labelled, open_tab, empty, flagged, changed = (add("red", box), add("green", box), add("blue"),
+                                                   add("white", {**box, "migration": {"review_required": "duplicate_labels_differ"}}), add("black"))
+
+    def queue(name, **extra):
+        query = {"dataset_id": ds["id"], "queue": name, "include_total": "true", **extra}
+        response = admin.get("/api/hosted/queue", params=query)
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    with_labels, without_labels, decisions = queue("with_labels"), queue("without_labels"), queue("needs_decision")
+    assert {row["id"] for row in with_labels["images"]} == {labelled["id"], open_tab["id"], flagged["id"]} and with_labels["total"] == 3
+    assert {row["id"] for row in without_labels["images"]} == {empty["id"], changed["id"]}
+    assert [row["id"] for row in decisions["images"]] == [flagged["id"]] and decisions["images"][0]["review_required"] == "duplicate_labels_differ"
+    assert {row["id"]: row["object_count"] for row in with_labels["images"]}[labelled["id"]] == 1
+    open_tab = {**open_tab, **acquire(admin, open_tab, "canvas-tab-editor")}  # an open canvas keeps its lock
+    stale = {**changed, "current_version": "version_from_an_older_page"}
+
+    def confirm(mode, rows):
+        body = {"operation_id": op(), "editor_id": "bulk-incoming-tab", "mode": mode,
+                "images": [{"image_id": row["id"], "expected_version": row["current_version"], "generation": row["generation"], "operation_id": op()} for row in rows]}
+        response = admin.post(f"/api/hosted/datasets/{ds['id']}/confirm-incoming", json=body)
+        assert response.status_code == 200, response.text
+        return body, {row["image_id"]: row for row in response.json()["images"]}
+
+    body, result = confirm("labelled", [labelled, open_tab, flagged, empty])
+    assert result[labelled["id"]]["status"] == "approved" and result[labelled["id"]]["result"]["state"] == "confirmed"
+    assert {key: result[key].get("error") for key in (open_tab["id"], flagged["id"], empty["id"])} == {
+        open_tab["id"]: "editor_lease_conflict", flagged["id"]: "image_needs_decision", empty["id"]: "image_has_no_labels"}
+    replay = admin.post(f"/api/hosted/datasets/{ds['id']}/confirm-incoming", json=body).json()["images"]
+    assert replay[0]["status"] == "approved" and replay[0]["result"]["confirmed_version"] == result[labelled["id"]]["result"]["confirmed_version"]
+    approved = admin.get(f"/api/hosted/images/{labelled['id']}").json()
+    assert approved["state"] == "confirmed" and approved["complete"] and approved["annotations"]["objects"] == box["objects"]
+    _, background = confirm("background", [empty, stale, flagged])
+    assert background[empty["id"]]["status"] == "approved"
+    assert background[changed["id"]]["error"] == "annotation_version_changed" and background[flagged["id"]]["error"] == "image_needs_decision"
+    record = admin.get(f"/api/hosted/images/{empty['id']}").json()
+    assert record["state"] == "confirmed" and record["negative"] and record["annotations"]["objects"] == []
+    free = queue("without_labels", not_assigned="true")
+    assert [row["id"] for row in free["images"]] == [changed["id"]] and free["total"] == 1
+    assert queue("confirmed")["total"] == 2
+
+
 def test_control_directory_rejects_second_live_process(application):
     # Separate application lifespans share a kernel flock, not an in-memory flag.
     second = create_app(application.state.root, testing=True)

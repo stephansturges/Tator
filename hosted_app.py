@@ -147,6 +147,13 @@ class BulkReview(BaseModel):
     images: list[BulkReviewItem] = Field(min_length=1, max_length=500)
 
 
+class BulkIncoming(BaseModel):
+    operation_id: str = Field(min_length=8, max_length=128)
+    editor_id: str = Field(min_length=8, max_length=128)
+    mode: Literal["labelled", "background"]
+    images: list[BulkReviewItem] = Field(min_length=1, max_length=1000)
+
+
 class Editor(BaseModel):
     editor_id: str = Field(min_length=8, max_length=128)
     expected_version: str | None = None
@@ -504,6 +511,20 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
                 results.append({"image_id": row.image_id, "status": "approved", "result": store.approve_from_review_queue(identity, ctx, dataset_id=dataset_id)})
             except DomainError as error:
                 results.append({"image_id": row.image_id, "status": "rejected", "error": error.code, "detail": error.detail})
+        return {"images": results}
+
+    @app.post("/api/hosted/datasets/{dataset_id}/confirm-incoming")
+    def confirm_incoming(dataset_id: str, body: BulkIncoming, identity: Actor = Depends(admin)):
+        # Each image is its own command and receipt; the reply lists every skip.
+        if len({row.image_id for row in body.images}) != len(body.images) or len({row.operation_id for row in body.images}) != len(body.images):
+            raise DomainError("invalid_bulk_targets", 422)
+        results = []
+        for row in body.images:
+            ctx = MutationContext(row.image_id, row.expected_version, row.generation, body.editor_id, row.operation_id)
+            try:
+                results.append({"image_id": row.image_id, "status": "approved", "result": store.confirm_incoming_image(identity, ctx, dataset_id=dataset_id, mode=body.mode)})
+            except DomainError as error:
+                results.append({"image_id": row.image_id, "status": "skipped", "error": error.code, "detail": error.detail})
         return {"images": results}
 
     @app.get("/api/hosted/images/{image_id}")

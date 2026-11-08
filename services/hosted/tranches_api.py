@@ -98,10 +98,10 @@ def install_tranches_api(app, store, actor, admin):
     def queue(dataset_id: str, tranche_id: str | None = None, queue: str = 'confirmed',
               cursor: str | None = None, limit: int = 100, anchor_id: str | None = None,
               direction: Literal['forward', 'backward'] = 'forward', q: str = '',
-              annotator_id: str | None = None, include_total: bool = False, identity=Depends(actor)):
+              annotator_id: str | None = None, include_total: bool = False, not_assigned: bool = False, identity=Depends(actor)):
         return store.image_queue(identity, dataset_id, tranche_id=tranche_id, queue=queue,
                                  cursor=cursor, limit=limit, anchor_id=anchor_id, direction=direction,
-                                 q=q, annotator_id=annotator_id, include_total=include_total)
+                                 q=q, annotator_id=annotator_id, include_total=include_total, not_assigned=not_assigned)
 
     @router.get('/images/{image_id}/scope')
     def scope(image_id: str, tranche_id: str | None = None, queue: str | None = None, identity=Depends(actor)):

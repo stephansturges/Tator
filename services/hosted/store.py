@@ -20,7 +20,7 @@ import sqlite3
 import time
 import uuid
 from contextlib import closing, contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator
 
@@ -32,7 +32,7 @@ from .language_schema import validate_language_annotations
 from .preconditions import validate_precondition
 from .receipt_policy import can_disclose
 from .types import Actor, MutationContext
-from .tranches import TrancheMixin
+from .tranches import NEEDS_DECISION, TrancheMixin
 from .tranche_schema import SCHEMA_VERSION, migrate_store
 
 
@@ -1296,6 +1296,62 @@ class HostedStore(TrancheMixin):
         if dataset_id is not None and result["dataset_id"] != dataset_id:
             raise DomainError("image_dataset_mismatch", 409)
         return result
+
+    INCOMING_CONFIRMATION_MODES = {
+        "labelled": "Approved from Incoming with its imported labels, as a bulk administrator action.",
+        "background": "Confirmed from Incoming as a background image with no target objects, as a bulk administrator action.",
+    }
+
+    def confirm_incoming_image(self, actor: Actor, ctx: MutationContext, *, dataset_id: str, mode: str) -> dict[str, Any]:
+        """Approve one idle, not-assigned Incoming image from the Incoming grid.
+
+        This is the administrator's explicit bulk action, one receipt per image.
+        ``labelled`` approves the current objects as they are; ``background``
+        records the image as reviewed, empty and negative. Single-approval
+        admission applies: the exact version and generation, no live editor
+        lease, and a complete review version (marking it complete is part of
+        this explicit action). Images in a tranche, with an open import decision,
+        or whose labels do not fit the chosen action are refused unchanged.
+        """
+        if mode not in self.INCOMING_CONFIRMATION_MODES:
+            raise DomainError("invalid_bulk_mode", 422)
+
+        def run(con: sqlite3.Connection) -> dict[str, Any]:
+            image = self._image(con, ctx.image_id)
+            if image["dataset_id"] != dataset_id:
+                raise DomainError("image_dataset_mismatch", 409)
+            if con.execute("SELECT 1 FROM hosted_archived_images WHERE image_id=?", (ctx.image_id,)).fetchone():
+                raise DomainError("image_not_found", 404)
+            self._expected(image, ctx.expected_version, ctx.generation)
+            if image["state"] != "unassigned" or self._member(con, ctx.image_id):
+                raise DomainError("image_not_assignable", 409)
+            lease = con.execute("SELECT expires_at FROM hosted_editor_leases WHERE image_id=?", (ctx.image_id,)).fetchone()
+            if lease and lease[0] > self.clock():
+                raise DomainError("editor_lease_conflict", 423)
+            if con.execute("SELECT 1 FROM hosted_images i WHERE i.id=? AND " + NEEDS_DECISION, (ctx.image_id,)).fetchone():
+                raise DomainError("image_needs_decision", 409)
+            version = con.execute("SELECT * FROM hosted_annotation_versions WHERE id=?", (image["current_version"],)).fetchone()
+            annotations = json.loads(version["annotations_json"])
+            objects = annotations.get("objects") or []
+            if mode == "labelled" and not objects:
+                raise DomainError("image_has_no_labels", 409)
+            if mode == "background" and objects:
+                raise DomainError("image_has_labels", 409)
+            negative = mode == "background"
+            approved_version = image["current_version"]
+            if not (version["complete"] and bool(version["negative"]) == negative):
+                media = con.execute("SELECT width,height FROM hosted_media WHERE sha256=?", (image["media_hash"],)).fetchone()
+                body = self._annotations(con, dataset_id, annotations, width=media["width"], height=media["height"])
+                approved_version = self._version(con, actor, ctx.image_id, dataset_id, body, parent=image["current_version"],
+                                                 kind="draft", complete=True, negative=negative)
+                con.execute("UPDATE hosted_images SET current_version=?,updated_at=? WHERE id=?", (approved_version, self.clock(), ctx.image_id))
+                self._event(con, actor, dataset_id, ctx.image_id, "annotation_saved",
+                            {"version_id": approved_version, "previous_version": image["current_version"], "bulk_confirmation": mode})
+                image = self._image(con, ctx.image_id)
+            return self._approve(con, actor, replace(ctx, expected_version=approved_version), image,
+                                 self.INCOMING_CONFIRMATION_MODES[mode])
+        return self._command(actor, ctx.operation_id, "confirm_incoming",
+                             {"context": asdict(ctx), "dataset_id": dataset_id, "mode": mode}, run, admin=True)
 
     def _approve(self, con: sqlite3.Connection, actor: Actor, ctx: MutationContext,
                  image: sqlite3.Row, feedback: str) -> dict[str, Any]:

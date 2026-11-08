@@ -20,6 +20,23 @@ _NO_REVISION = object()
 BUCKETS = {'reserved': 'not_assigned', 'assigned': 'to_finish', 'returned': 'changes_requested',
            'submitted': 'awaiting_review', 'approved': 'approved', 'withdrawn': 'removed',
            'transferred': 'transferred', 'archived': 'archived'}
+INCOMING_STATES = "i.state IN ('unassigned','assigned','returned','submitted')"
+# A current version's objects and import decisions, read in SQL so Incoming
+# filters, totals and "Select all matching" agree on one server-side scope.
+_OBJECT_COUNT = "COALESCE(json_array_length({v}.annotations_json,'$.objects'),0)"
+_REVIEW_REQUIRED = ("(json_type({v}.annotations_json,'$.migration.review_required')='true' OR "
+                    "(json_type({v}.annotations_json,'$.migration.review_required')='text' AND "
+                    "json_extract({v}.annotations_json,'$.migration.review_required')!=''))")
+_OPEN_IMPORT_CONFLICT = ('EXISTS(SELECT 1 FROM hosted_import_conflicts c WHERE c.image_id=i.id AND NOT EXISTS('
+                         'SELECT 1 FROM hosted_import_conflict_decisions d WHERE d.conflict_id=c.id))')
+NEEDS_DECISION = ('(EXISTS(SELECT 1 FROM hosted_annotation_versions qv WHERE qv.id=i.current_version AND '
+                  + _REVIEW_REQUIRED.format(v='qv') + ') OR ' + _OPEN_IMPORT_CONFLICT + ')')
+INCOMING_FILTERS = {
+    'needs_decision': NEEDS_DECISION,
+    'with_labels': 'EXISTS(SELECT 1 FROM hosted_annotation_versions qv WHERE qv.id=i.current_version AND ' + _OBJECT_COUNT.format(v='qv') + '>0)',
+    'without_labels': 'EXISTS(SELECT 1 FROM hosted_annotation_versions qv WHERE qv.id=i.current_version AND ' + _OBJECT_COUNT.format(v='qv') + '=0)',
+}
+NOT_ASSIGNED = ["i.state='unassigned'", 'NOT EXISTS(SELECT 1 FROM hosted_tranche_members m WHERE m.image_id=i.id AND m.is_current=1)']
 
 
 def _id(prefix):
@@ -513,7 +530,12 @@ class TrancheMixin:
         elif queue == 'incoming':
             if tranche:
                 raise DomainError('queue_scope_mismatch', 409)
-            conditions.append("i.state IN ('unassigned','assigned','returned','submitted')")
+            conditions.append(INCOMING_STATES)
+        elif queue in INCOMING_FILTERS:
+            # Incoming narrowed by its labels or an open import decision.
+            if tranche:
+                raise DomainError('queue_scope_mismatch', 409)
+            conditions.extend([INCOMING_STATES, INCOMING_FILTERS[queue]])
         elif queue == 'confirmed':
             if tranche:
                 raise DomainError('queue_scope_mismatch', 409)
@@ -541,7 +563,7 @@ class TrancheMixin:
             return {'scope': {'dataset_id': image['dataset_id'], 'tranche_id': tranche_id, 'queue': queue},
                     'tranche': self._tranche_result(con, actor, tranche_id) if tranche_id else None}
 
-    def image_queue(self, actor, dataset_id, *, tranche_id=None, queue='confirmed', cursor=None, limit=100, anchor_id=None, direction='forward', q='', annotator_id=None, include_total=False):
+    def image_queue(self, actor, dataset_id, *, tranche_id=None, queue='confirmed', cursor=None, limit=100, anchor_id=None, direction='forward', q='', annotator_id=None, include_total=False, not_assigned=False):
         self._pagination(limit, 0)
         if type(limit) is not int or limit > 500:
             raise DomainError('invalid_pagination', 422)
@@ -551,10 +573,15 @@ class TrancheMixin:
             raise DomainError('invalid_search', 422)
         q = q.strip()
         scope = {'dataset_id': dataset_id, 'tranche_id': tranche_id, 'queue': queue}
-        cursor_scope = [actor.user_id, 'queue', scope, q, annotator_id]
+        cursor_scope = [actor.user_id, 'queue', scope, q, annotator_id] + (['not_assigned'] if not_assigned else [])
         with self.read_connection() as con:
             self._actor(con, actor)
             conditions, args = self._queue_where(con, actor, dataset_id, tranche_id, queue)
+            if not_assigned:
+                # Only free Incoming images: what a selection can act on.
+                if tranche_id or queue not in ('incoming', 'unallocated', *INCOMING_FILTERS):
+                    raise DomainError('queue_scope_mismatch', 409)
+                conditions.extend(NOT_ASSIGNED)
             if annotator_id:
                 if actor.role != 'admin':
                     raise DomainError('admin_required', 403)
@@ -581,12 +608,18 @@ class TrancheMixin:
             rows = con.execute('''SELECT i.*,v.id AS version_id,v.complete,v.negative,v.class_version,d.revision AS dataset_revision,
                 (SELECT m.tranche_id FROM hosted_tranche_members m WHERE m.image_id=i.id AND m.is_current=1) AS tranche_id,
                 (SELECT t.name FROM hosted_tranche_members m JOIN hosted_tranches t ON t.id=m.tranche_id WHERE m.image_id=i.id AND m.is_current=1) AS tranche_name,
-                (SELECT COALESCE(u.display_name,u.username) FROM hosted_users u WHERE u.id=i.assignee_id) AS assignee_name
+                (SELECT COALESCE(u.display_name,u.username) FROM hosted_users u WHERE u.id=i.assignee_id) AS assignee_name,
+                ''' + _OBJECT_COUNT.format(v='v') + ''' AS object_count,
+                json_extract(v.annotations_json,'$.migration.review_required') AS review_required,
+                ''' + NEEDS_DECISION + ''' AS needs_decision
                 FROM hosted_images i JOIN hosted_annotation_versions v ON v.id=i.current_version JOIN hosted_datasets d ON d.id=i.dataset_id
                 WHERE ''' + where + boundary + ' ORDER BY i.created_at ' + ordering + ',i.id ' + ordering + ' LIMIT ?', [*page_args, limit]).fetchall()
             if direction == 'backward':
                 rows = list(reversed(rows))
-            images = [{**dict(row), 'complete': bool(row['complete']), 'negative': bool(row['negative']), 'editor_lease': None} for row in rows]
+            images = [{**dict(row), 'complete': bool(row['complete']), 'negative': bool(row['negative']), 'editor_lease': None,
+                       'needs_decision': bool(row['needs_decision']),
+                       'review_required': row['review_required'] if isinstance(row['review_required'], str) and row['review_required'] else
+                       ('review_required' if row['review_required'] == 1 else None)} for row in rows]
             previous = following = None
             if rows:
                 first, last = [rows[0]['created_at'], rows[0]['id']], [rows[-1]['created_at'], rows[-1]['id']]

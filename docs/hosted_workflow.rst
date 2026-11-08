@@ -74,8 +74,16 @@ datasets where they have finished every assignment. That progress list does not
 grant access to the submitted pixels or annotations.
 
 While annotating, save and review controls sit in a floating panel at the bottom
-right. Use the minus button to minimize it; save status and the workspace button
-remain visible. Workflow messages no longer push the canvas down. Administrators
+right. On screens at least 1360 pixels wide the image is laid out beside the
+expanded panel, never under it. Use the minus button to minimize the panel to a
+small pill that shows the save status; the choice is kept for the rest of the
+browser tab, including after **Submit & next**. The canvas page fits the window
+under the administrator navigation. Annotation needs a screen at least 768
+pixels wide; on a phone the page shows a short notice and a way back instead.
+The image list shows filenames, and its search box only narrows that list; it
+never changes the open image. Back returns to the workspace view, search, filter
+and annotator the image was opened from and scrolls to the last image you were
+on. Workflow messages no longer push the canvas down. Administrators
 also have a top navigation bar: **Datasets**, **Data Quality Explorer**,
 **Dataset pruning**, **Data ingestion**, **Train models**, **Server jobs**,
 **Tools & models** and **Analysis presets**. These are the only entries for those
@@ -250,10 +258,14 @@ First day: annotator
    Check the save status before handing work over or closing the tab.
 4. Inspect the complete image. Select **Annotations checked** for finished labels,
    or **No objects to label** for a reviewed negative image with no objects.
-   An empty annotation alone is not a reviewed negative example.
+   An empty annotation alone is not a reviewed negative example. Drawing a box
+   clears **No objects to label** automatically, with a note.
 5. Choose **Submit & next** for this image. It leaves your editable work and goes
    to the administrator. Other assigned images stay editable; no whole-dataset
-   submission is required.
+   submission is required. Submitting first checks what the server requires: an
+   image without boxes needs **No objects to label**. If the server still refuses
+   the handoff, the message says why and editing continues on your saved work;
+   reopening the image does not retry the refused submission.
 6. Follow **Submitted work · all datasets** in the workspace. A returned image
    reappears in its tranche with feedback. Correct it, check it and submit again.
 
@@ -267,8 +279,24 @@ Annotation tools in the first pane
 
 The image opens in the **Label Images** canvas. Available assistance depends on
 installed model packages, the dataset configuration and your current editing
-permission. **Tools & models** shows what is selected. A visible tool control
-does not guarantee that its required weights or recipe have been installed.
+permission. **Tools & models** shows what is selected. Auto Class, SAM, detector
+and caption controls whose model is not set up for the dataset are hidden behind
+one line that says what is missing. A tool that fails after you draw a box keeps
+the box as drawn, and a detector batch reports how many images ran and failed.
+Folder-based Batch recovery (**Scan recoverable artifacts**, **Adopt artifact**)
+does not exist in hosted mode, and the remote Batch manager appears only for a
+dataset with a configured paid caption provider.
+
+Boxes are clipped to the image edge when you finish drawing, moving or resizing
+them (never shifted). A box or polygon with no area inside the image is removed
+from the canvas with a short note, so what you see is what is saved. Repeated
+polygon corners are merged; a polygon needs three distinct corners around an
+area. **Draw polygons (P)** switches to polygon drawing, and an image that
+already has polygons opens in polygon mode. To change the class of an existing
+box, click it, then pick the class in the list or press its class key. Without a
+selected box, the class applies to the next box. Space, Tab and the arrow keys
+change images only when focus is not on a button, checkbox, link, menu, the
+annotation panel or a dialog.
 
 .. list-table:: Canvas assistance
    :header-rows: 1
@@ -376,7 +404,10 @@ the selection again. **Check and retry saved recall** recovers an interrupted
 reply without recalling work assigned after the original command.
 
 Use **Take over my other editing tab** only to replace your own tab's reservation.
-This does not take work from another person. If the editing reservation expires
+It is offered only when the image is open in another tab or window of yours,
+including one closed in the last two minutes; taking over is then safe. It never
+takes work from another person: when someone else is editing, the canvas names
+them when it can (otherwise "someone else") and stays view-only. If the editing reservation expires
 while you are signed in, use **Reconnect editing**. After sign-out, sign in again;
 when a retained draft is offered, recover it first as described below.
 
@@ -398,8 +429,9 @@ not replace saved annotations. Select images and their same-stem YOLO ``.txt``
 files together in the Incoming uploader. Include one ``labelmap.txt``,
 ``classes.txt`` or ``labels.txt`` to map numeric class indices by name; otherwise,
 the uploader asks you to confirm the dataset's current class order. Class names
-must already exist. Ambiguous filenames, changed class maps and out-of-bounds
-geometry are rejected rather than guessed or silently clipped. Empty sidecar
+must already exist. Ambiguous filenames and changed class maps are rejected
+rather than guessed. Boxes and polygons that cross the image edge are clipped to
+it (never shifted), and a row with no area inside the image is dropped. Empty sidecar
 files are retained as empty imported annotations, not approved negatives.
 
 For labeled images with EXIF rotation or reflection, use **Imported label
@@ -550,6 +582,11 @@ command. Another unknown response leaves it intact. If a replaced or expired
 editing lease rejects that retry, explicit draft restoration requires an
 unchanged server version and a newer editing generation. Restoring an invalid
 draft still resumes retention of subsequent edits while the user corrects it.
+A submit, approval or return that the server refuses with an error code, and for
+which no receipt exists, never committed. The canvas then ends the handoff, keeps
+editing open on the saved draft and shows a readable reason; recovery restores
+the draft for correction instead of retrying the refused command again. A lost
+connection shows that the work is kept and saves when the connection returns.
 
 Archive and storage cleanup
 ---------------------------

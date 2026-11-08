@@ -3,9 +3,10 @@
 Datasets do not have to carry splits. When a training run needs validation
 images that the dataset does not declare, it chooses them here: images are
 grouped by capture metadata (sequence, video, flight, ...), wholly unsplit
-groups are ordered by a stable hash of the dataset key and group name, and the
-first groups take about a tenth of those images as validation, only when there
-is more than one group. A group whose classes would appear only in validation
+groups are ordered by a stable hash of the dataset key and group name, and
+groups join validation in that order while they fit about a tenth of those
+images (the smallest group when none fits), only when there is more than one
+group. A group whose classes would appear only in validation
 goes back to training. The caller records the summary in its run log/metadata.
 
 Shared by the hosted native trainers (services/hosted/native_analysis.py) and
@@ -51,8 +52,9 @@ def choose_run_split(items: Sequence[Mapping[str, Any]], dataset_key: str, *,
     members of a capture group follow their group's single declared split; a
     group whose members declare different splits leaves its unsplit members
     unsplit. Wholly unsplit groups are ordered by sha256 of
-    "<dataset_key>:<smallest group name>"; the first ones take about `share` of
-    those images as validation when there is more than one such group.
+    "<dataset_key>:<smallest group name>"; in that order, groups join validation
+    while they fit `share` of those images (at least one image; the smallest group
+    when none fits), when there is more than one such group.
     """
     parent = list(range(len(items)))
 
@@ -93,11 +95,16 @@ def choose_run_split(items: Sequence[Mapping[str, Any]], dataset_key: str, *,
             automatic.append((hashlib.sha256(f"{dataset_key}:{min(names[root])}".encode()).hexdigest(), members))
     automatic.sort()
     pool = sum(len(members) for _, members in automatic)
+    # Groups join validation in hash order while they fit the target, so one long
+    # video cannot take far more than the share; if none fits, the smallest does.
+    target = max(1, round(share * pool))
     validation, chosen = [], 0
     for _, members in automatic:
-        goes_to_validation = chosen < share * pool and len(automatic) > 1
+        goes_to_validation = len(automatic) > 1 and chosen + len(members) <= target
         validation.append(goes_to_validation)
         chosen += len(members) if goes_to_validation else 0
+    if len(automatic) > 1 and not any(validation):
+        validation[min(range(len(automatic)), key=lambda position: len(automatic[position][1]))] = True
     item_classes = [set(item.get("classes") or ()) for item in items]
 
     def classes(members):

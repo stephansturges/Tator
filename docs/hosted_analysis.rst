@@ -231,7 +231,7 @@ for training. Splits set on the dataset are kept; unsplit images get a train or
 validation place for that run only (``_run_split``), and nothing is written back
 to the dataset. Unsplit members of a capture group follow their group. Wholly
 unsplit groups are ordered by a stable hash of the dataset and group, and the
-first ones take about a tenth of those images as validation, so the same groups
+groups join validation in that order while they fit about a tenth of those images (the smallest group when none fits), so the same groups
 tend to validate on every run. A class seen only in validation moves back to
 training. The run result records the split it used under ``run_split``. A later
 version is meant to choose these splits with the diversity scoring engine. A

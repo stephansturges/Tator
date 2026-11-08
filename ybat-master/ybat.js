@@ -89297,6 +89297,10 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         const classList = document.getElementById("classList");
         let modeSnapshot = null;
         let shortcutCaptureActionId = null;
+        let lastPointerDownTarget = null;
+        document.addEventListener("pointerdown", (event) => {
+            lastPointerDownTarget = event.target instanceof Element ? event.target : null;
+        }, true);
         const SHORTCUT_STORAGE_KEY = "tator.annotation.shortcuts.v1";
         const CLASS_SHORTCUT_ID_PATTERN = /^class_id_(\d+)$/;
         const MODIFIER_KEYS = new Set(["Shift", "Control", "Alt", "Meta", "OS"]);
@@ -90419,7 +90423,12 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         // or menu (and to the hosted panel and dialogs): never change images
         // from there. The two labeling lists keep their keyboard navigation.
         function isFocusedControlTarget(target) {
-            const element = target instanceof Element ? target : null;
+            let element = target instanceof Element ? target : null;
+            // A clicked button that disables itself while it works drops focus to
+            // the page; the last thing the pointer pressed still counts.
+            if ((!element || element === document.body || element === document.documentElement) && lastPointerDownTarget?.isConnected) {
+                element = lastPointerDownTarget;
+            }
             if (!element || element === document.body || element.id === "canvas") {
                 return false;
             }

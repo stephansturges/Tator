@@ -154,6 +154,29 @@
         }
         const retentionFailure = [401, 403, 409, 423].includes(error.status) && !contentRejections.has(error.code) ? freeze() : null;
         status(retentionFailure?.message || error.message || String(error), true);
+        if (error.status === 401 && !retentionFailure && !storageFailed) offerSignIn();
+        if (error.code === "ownership_changed") explainOwnership();
+    }
+    // An expired session keeps the draft in this tab; signing in again in the
+    // same tab and reopening the image offers to recover it.
+    let leavingToSignIn = false;
+    function offerSignIn() {
+        const parent = $("hostedSaveState")?.parentElement;
+        if (!parent || $("hostedSignIn")) return;
+        const button = node("button", "Sign in again"); button.type = "button"; button.id = "hostedSignIn";
+        button.title = "Your unsent draft stays in this tab. After signing in, reopen this image to recover it.";
+        button.onclick = () => { leavingToSignIn = true; location.assign(backUrl()); };
+        parent.append(button);
+    }
+    async function explainOwnership() {
+        // Taking the image over in another tab of yours ends editing here.
+        const origin = imageId;
+        try {
+            const current = await api(base);
+            if (imageId === origin && !editable && current.editor_lease?.actor_id === boot.user.user_id) {
+                status("You continued this image in another tab or window, so editing stopped here. Changes made here since then stay in this tab only; close it, or reload it to see the saved version.", true);
+            }
+        } catch (_) { /* Keep the original message. */ }
     }
     function headers(options = {}) {
         const h = new Headers(options.headers);
@@ -1345,6 +1368,7 @@
         // Undo may reach the saved baseline before the next autosave tick.
         // Reconcile that transition even when there is nothing left to send.
         try { retainDraft(); } catch (error) { status(error.message, true); }
+        if (leavingToSignIn && !storageFailed) return; // The draft is retained for recovery after sign-in.
         if (storageFailed || pending || (ready && JSON.stringify(draft()) !== lastSaved)) {
             event.preventDefault(); event.returnValue = "";
         }

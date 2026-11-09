@@ -180,7 +180,12 @@ class HostedOperations:
         self.store._pagination(limit, offset)
         with self.store.read_connection() as con:
             self.store._actor(con, actor, admin=True)
-            return [dict(row) for row in con.execute("SELECT id AS archive_id,kind,target_id,dataset_id,state,archived_at,actor_id,reason,restored_at,restored_by FROM hosted_archives ORDER BY archived_at DESC,id LIMIT ? OFFSET ?", (limit, offset))]
+            # Names let the list say what was archived instead of internal IDs.
+            return [dict(row) for row in con.execute(
+                "SELECT a.id AS archive_id,a.kind,a.target_id,a.dataset_id,a.state,a.archived_at,a.actor_id,a.reason,a.restored_at,a.restored_by,"
+                "d.name AS dataset_name,CASE WHEN a.kind='image' THEN i.filename END AS filename "
+                "FROM hosted_archives a LEFT JOIN hosted_datasets d ON d.id=a.dataset_id LEFT JOIN hosted_images i ON i.id=a.target_id "
+                "ORDER BY a.archived_at DESC,a.id LIMIT ? OFFSET ?", (limit, offset))]
 
     def restore_archive(self, actor: Actor, archive_id: str, operation_id: str) -> dict[str, Any]:
         def run(con: sqlite3.Connection) -> dict[str, Any]:

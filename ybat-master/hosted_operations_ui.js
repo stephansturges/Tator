@@ -15,7 +15,8 @@
     const current = (ticket) => ticket === generation && dialog.open && dashboard.session?.user.role === "admin";
     dialog.append(heading, notice, datasetPanel, backups, downloads, archived, cleanup, close); document.body.append(dialog);
     function action(parent, title, fn) { const ticket = generation; const control = node("button", title); control.type = "button"; control.onclick = () => { if (current(ticket)) return dashboard.action(control, fn); }; parent.append(control); return control; }
-    function link(result, name) { const a = node("a", name); a.href = result.download_url; a.download = ""; a.className = "hosted-download"; downloads.append(a); }
+    // The download appears beside the button that prepared it.
+    function link(parent, result, name) { parent.querySelector("a.hosted-download")?.remove(); const a = node("a", name); a.href = result.download_url; a.download = ""; a.className = "hosted-download"; parent.append(a); a.focus(); }
     function storageCleanup(ticket) {
         cleanup.replaceChildren(node("h3", "Unused storage"), node("p", "Find files that no image, annotation history, saved analysis or registered model uses. Files must remain unreferenced for at least 30 days before deletion. Archived dataset files remain protected."));
         const key = `tator.hosted.purge:${dashboard.session.instance_id}:${dashboard.session.user.user_id}`;
@@ -61,7 +62,8 @@
         if (!result.archives.length) { archived.append(node("p", "Nothing is archived.")); return; }
         for (const entry of result.archives) {
             const row = node("div"); row.className = "hosted-user";
-            row.append(node("span", `${entry.kind === "dataset" ? "Dataset" : "Image"} · ${entry.target_id} · ${new Date(entry.archived_at * 1000).toLocaleDateString()}${entry.reason ? ` · ${entry.reason}` : ""}`));
+            const name = entry.kind === "dataset" ? `Dataset ${entry.dataset_name || entry.target_id}` : `${entry.filename || entry.target_id}${entry.dataset_name ? ` in ${entry.dataset_name}` : ""}`;
+            row.append(node("span", `${name} · archived ${new Date(entry.archived_at * 1000).toLocaleDateString()}${entry.reason ? ` · ${entry.reason}` : ""}`));
             if (entry.state === "archived") {
                 action(row, "Restore", async () => { await dashboard.api(`/archives/${entry.archive_id}/restore`, { method: "POST", body: { operation_id: uid() } }); await archives(); await dashboard.refresh(); if (current(ticket)) dashboard.notice("Restored. Annotations and history were preserved."); });
                 action(row, "Storage details", async () => {
@@ -90,7 +92,7 @@
                 dashboard.notice("Preparing the confirmed dataset export…");
                 const result = await dashboard.api(`/datasets/${datasetId}/export`, { method: "POST", body: { operation_id: uid() } });
                 if (!current(ticket)) return;
-                link(result, `Download dataset · ${result.image_count} images`); dashboard.notice("Export ready. Your dataset has not changed.");
+                link(datasetPanel, result, `Download dataset · ${Number(result.image_count).toLocaleString()} images`); dashboard.notice("Export ready. Your dataset has not changed.");
             });
             action(datasetPanel, "Archive this dataset…", async () => {
                 const current = await dashboard.api(`/datasets/${datasetId}`), images = [];
@@ -110,7 +112,7 @@
             dashboard.notice("Creating an encrypted backup. Annotation work can continue.");
             const result = await dashboard.api("/recovery-backups", { method: "POST", body: { operation_id: uid(), recipient: recipient.value.trim() } });
             if (!current(ticket)) return;
-            link(result, "Download encrypted server backup"); dashboard.notice("Backup ready. Download it and keep your private recovery key separately.");
+            link(backups, result, "Download encrypted server backup"); dashboard.notice("Backup ready. Download it and keep your private recovery key separately.");
         });
         await archives();
     }

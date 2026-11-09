@@ -23,6 +23,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.exceptions import RequestValidationError
 from PIL import Image
 from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.concurrency import run_in_threadpool
 
@@ -278,6 +279,15 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
         # request. Never echo credentials or annotation content in errors.
         return JSONResponse({"error": "invalid_request", "detail": "Check the request fields.",
                              "fields": [{"field": ".".join(map(str, item["loc"])), "type": item["type"]} for item in error.errors()]}, status_code=422)
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(request: Request, error):
+        # Unknown addresses typed into a browser get the readable page;
+        # API and script callers keep Starlette's JSON reply.
+        if (error.status_code == 404 and "text/html" in request.headers.get("accept", "")
+                and not request.url.path.startswith(("/api/", WORKBENCH_PREFIX))):
+            return page_refusal(request, DomainError("not_found", 404))
+        return JSONResponse({"detail": error.detail}, status_code=error.status_code, headers=getattr(error, "headers", None))
 
     @app.exception_handler(ArtifactError)
     async def artifact_error(_request, _error):
@@ -666,8 +676,13 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
     def index():
         return (WEB_ROOT / "hosted.html").read_text()
 
+    # Readable pages follow the theme the person chose in the workspace (same keys as hosted.js).
+    THEME_SCRIPT = ('<script>try{const r=document.documentElement,m=localStorage.getItem("tator.themeMode");'
+                    'r.dataset.theme=["light","dark","pipboy"].includes(m)?m:matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";'
+                    'if(m==="pipboy"&&localStorage.getItem("tator.pipboyAccent")==="amber")r.dataset.pipboyAccent="amber"}catch(e){}</script>')
     page_messages = {
-        "login_required": ("Sign in to continue", "You are not signed in, or your session has ended. Sign in, then open this link again.", "Sign in"),
+        "login_required": ("Sign in to continue", "You are not signed in, or your session has ended. After you sign in, this page opens.", "Sign in"),
+        "not_found": ("Page not found", "There is no page at this address. Check the link, or start from the dataset workspace.", None),
         "administrator_required": ("For administrators", "This page is for administrators. Your assigned images are in the dataset workspace.", None),
         "image_not_found": ("Image not available", "This image is not available to your account. It may have been submitted, reassigned, confirmed or archived.", None),
         "analysis_not_found": ("Analysis not found", "This analysis does not exist or is no longer available.", None),
@@ -681,11 +696,14 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
         title, message, link = page_messages.get(error.code, (
             "This page cannot be opened",
             error.detail if isinstance(error.detail, str) and error.detail else "This page cannot be opened from this link.", None))
+        # Signing in returns to this page: the workspace accepts only its own
+        # page paths in ``next`` (see hosted.js), so this is no open redirect.
+        target = "/?" + urlencode({"next": request.url.path + (f"?{request.url.query}" if request.url.query else "")}) if error.code == "login_required" else "/"
         return HTMLResponse('<!doctype html><html lang="en"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
-            f'<title>Tator · {escape(title)}</title><link rel="stylesheet" href="/hosted.css"></head>'
+            f'<title>Tator · {escape(title)}</title><link rel="stylesheet" href="/hosted.css">{THEME_SCRIPT}</head>'
             f'<body><main class="hosted-login"><h1>{escape(title)}</h1><p>{escape(message)}</p>'
-            f'<p><a href="/">{escape(link or "Back to the dataset workspace")}</a></p></main></body></html>',
+            f'<p><a href="{escape(target)}">{escape(link or "Back to the dataset workspace")}</a></p></main></body></html>',
             status_code=error.status)
 
     @app.get("/pruning", response_class=HTMLResponse)
@@ -775,10 +793,16 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
         # Hide the unmanaged legacy tabs before first paint, then render the
         # role-aware navigation to hosted, snapshot-bound destinations.
         html = html.replace("<body>", '<body class="hosted-canvas">', 1)
-        return html.replace("</head>", '<link rel="stylesheet" href="/hosted_canvas.css"><link rel="stylesheet" href="/hosted_admin_nav.css"><script src="/hosted_admin_nav.js" defer></script><script src="/hosted_caption_ui.js" defer></script><script src="/hosted_caption_review.js" defer></script><script src="/hosted_paid_batches_ui.js" defer></script><script src="/hosted_import_conflicts_ui.js" defer></script><script src="/hosted_instruction_review.js" defer></script></head>', 1)
+        return html.replace("</head>", '<link rel="stylesheet" href="/hosted_canvas.css"><link rel="stylesheet" href="/hosted_admin_nav.css"><script src="/hosted_admin_nav.js" defer></script><script src="/hosted_caption_ui.js" defer></script><script src="/hosted_caption_review.js" defer></script><script src="/hosted_paid_batches_ui.js" defer></script><script src="/hosted_import_conflicts_ui.js" defer></script><script src="/hosted_history_ui.js" defer></script><script src="/hosted_instruction_review.js" defer></script></head>', 1)
 
     @app.api_route("/{asset_name}", methods=["GET", "HEAD"])
     def asset(asset_name: str, request: Request):
-        return public_assets.response(asset_name, request)
+        try:
+            return public_assets.response(asset_name, request)
+        except DomainError as error:
+            # A mistyped address in the browser gets a page; scripts keep JSON.
+            if error.code == "not_found":
+                return page_refusal(request, error)
+            raise
 
     return app

@@ -218,7 +218,15 @@ class AuthService:
                        (encoded, now, user_id))
             db.execute("DELETE FROM hosted_auth_links WHERE user_id=?", (user_id,))
             db.execute("DELETE FROM hosted_sessions WHERE user_id=?", (user_id,))
+            self._forget_failed_logins(db, user_id)
             return self._public(db.execute("SELECT * FROM hosted_users WHERE id=?", (user_id,)).fetchone())
+
+    @staticmethod
+    def _forget_failed_logins(db, user_id: str) -> None:
+        # Guesses against the old password no longer matter once a new one is
+        # set, so the person is not locked out right after a reset. The
+        # per-address limit is unchanged.
+        db.execute("DELETE FROM hosted_auth_attempts WHERE succeeded=0 AND username=(SELECT username FROM hosted_users WHERE id=?)", (user_id,))
 
     def cancel_links(self, actor: Actor, user_id: str) -> dict:
         with self.store.transaction() as db:
@@ -296,6 +304,7 @@ class AuthService:
             db.execute("UPDATE hosted_users SET password_hash=?,password_changed_at=?,password_state='set',authority_epoch=authority_epoch+1 WHERE id=?", (encoded, now, row["user_id"]))
             db.execute("UPDATE hosted_auth_links SET used_at=? WHERE token_hash=?", (now, _digest(token)))
             db.execute("DELETE FROM hosted_sessions WHERE user_id=?", (row["user_id"],))
+            self._forget_failed_logins(db, row["user_id"])
 
     def login(self, username: str, password: str, address: str) -> Login:
         # Record attempts before expensive hashing so parallel callers cannot
@@ -316,8 +325,12 @@ class AuthService:
             valid = len(password) <= 1024 and self.hasher.verify(encoded, password)
         except (VerificationError, InvalidHashError, TypeError):
             pass
-        if not valid or row is None or row["disabled"]:
+        if not valid or row is None:
             raise DomainError("invalid_credentials", 401, "Username or password is incorrect.")
+        if row["disabled"]:
+            # Only someone who knows the password learns that the account is
+            # disabled, so they ask an administrator instead of resetting it.
+            raise DomainError("actor_inactive", 403, "This account can no longer sign in. Ask an administrator.")
         token = secrets.token_urlsafe(32)
         csrf = _digest("tator-csrf\0" + token)
         expires_at = now + self.session_seconds

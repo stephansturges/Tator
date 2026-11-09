@@ -45,7 +45,7 @@
                 const error = new Error(data.commit_outcome === "committed" && data.result_restricted === true
                     ? "The change was saved, but your account can no longer view its result. Refresh the workspace to see what you can access."
                     : errorText(data.error, data.detail) || `Request failed (${response.status})`);
-                error.status = response.status; error.code = data.error;
+                error.status = response.status; error.code = data.error; error.detail = data.detail;
                 for (const name of ["commit_outcome", "operation_id", "result_restricted"]) error[name] = data[name];
                 if ((response.status === 401 || ["installation_changed", "csrf_rejected"].includes(data.error)) && authority) loginView();
                 throw error;
@@ -77,18 +77,28 @@
             const root = document.documentElement, button = $("theme"), pip = mode === "pipboy";
             root.dataset.theme = mode; if (pip) root.dataset.pipboyAccent = accent; else delete root.dataset.pipboyAccent;
             button.textContent = pip ? `Pip ${accent === "amber" ? "Amber" : "Green"}` : mode === "dark" ? "Light mode" : "Dark mode";
-            button.title = pip ? `Switch Pip-Boy color to ${accent === "amber" ? "green" : "amber"}; double-click to leave Pip-Boy` : "";
+            button.title = pip ? `Switch Pip-Boy color to ${accent === "amber" ? "green" : "amber"}; double-click or Shift+click to leave Pip-Boy` : "Double-click or Shift+click for the Pip-Boy theme";
             if (!persist) return;
             write("tator.themeMode", mode); write("tator.darkMode", mode === "dark" ? "1" : "0"); write("tator.pipboyAccent", accent);
             if (!pip) write("tator.classicThemeMode", mode);
         }
-        $("theme").onclick = () => {
+        $("theme").onclick = event => {
             clearTimeout(clickTimer);
+            // Shift+click (Shift+Enter from the keyboard) is the keyboard's way to the Pip-Boy theme.
+            if (event.shiftKey) { clickTimer = null; apply(mode === "pipboy" ? classic : "pipboy", true); return; }
             clickTimer = setTimeout(() => { clickTimer = null; if (mode === "pipboy") accent = accent === "amber" ? "green" : "amber"; apply(mode === "pipboy" ? mode : mode === "dark" ? "light" : "dark", true); }, 320);
         };
         $("theme").ondblclick = () => { clearTimeout(clickTimer); clickTimer = null; apply(mode === "pipboy" ? classic : "pipboy", true); };
         apply(mode, false);
     })();
+    // A page opened while signed out (?next=) opens again after signing in.
+    // Only this server's own pages qualify, so the link cannot send anyone elsewhere.
+    function nextPage() {
+        const raw = new URLSearchParams(location.search).get("next");
+        if (!raw || !raw.startsWith("/") || raw.startsWith("//") || raw.includes("\\")) return null;
+        try { const url = new URL(raw, location.origin); return url.origin === location.origin && ["/annotate", "/pruning", "/workbench"].includes(url.pathname) ? url.pathname + url.search : null; }
+        catch (_) { return null; }
+    }
     function announceSession() { try { localStorage.setItem("tator.hosted.session-event", crypto.randomUUID()); } catch (_) {} }
     window.addEventListener("storage", event => { if (event.key === "tator.hosted.session-event" && state.session) { loginView(); notice("The signed-in account changed in another tab. Sign in or reload to continue."); } });
     function loginView() {
@@ -149,7 +159,11 @@
             tranche: next === "submitted" ? route.get("tranche") || "" : "", annotator: next === "submitted" ? route.get("annotator") || "" : ""};
         syncFilterControls();
         if ($("datasetChoice").value !== previous) window.dispatchEvent(new Event("tator:hosted-dataset"));
+        // An annotator who opens an administrator's link sees their own work, and is told why.
+        const adminLink = !isAdmin && ((route.get("view") && route.get("view") !== "mine") || ["tool", "analysis", "panel"].some(key => route.has(key)));
+        if (adminLink) dropRouteParams("tool", "analysis", "panel");
         await view(next, {route: "replace", tranche: ["tranches", "mine"].includes(next) ? route.get("tranche") : null});
+        if (adminLink) notice("That link opens an administrator view, so your own work is shown instead.");
         await revealImage(route.get("at"));
     }
     async function navigate(next) {
@@ -229,7 +243,7 @@
     }
     function syncDatasetActions() {
         const isAdmin = state.session?.user.role === "admin", none = !state.datasets.length;
-        const hint = "Create a dataset first.";
+        const hint = isAdmin ? "Create a dataset first." : "Available once work is assigned to you.";
         for (const id of ["classes", "hostedGuidance", "import", "recallAssigned"]) {
             const control = $(id); if (!control) continue;
             const metadata = id === "classes" && Boolean(state.datasets.find(d => d.id === $("datasetChoice").value)?.metadata_only);
@@ -348,6 +362,10 @@
         }
         if (image.tranche_name) info.append(node("small", `Tranche: ${image.tranche_name}`));
         link.append(photo, info); card.append(link);
+        if (state.session.user.role === "admin") {
+            const history = node("button", "History", "card-history"); history.type = "button"; history.setAttribute("aria-label", `History of ${image.filename}`);
+            history.onclick = () => window.TatorHostedHistory?.open(image.id, image.filename); card.append(history);
+        }
         if (state.session.user.role === "admin" && selectable(image)) {
             const check = node("input"); check.type = "checkbox"; check.setAttribute("aria-label", `Select ${image.filename}`);
             check.dataset.image = image.id; check.checked = state.selected.has(image.id);
@@ -370,6 +388,11 @@
         syncDatasetActions();
         const grouped = ["tranches", "mine"].includes(state.view);
         $("imageGrid").hidden = grouped; $("moreRow").hidden = grouped; $("empty").hidden = grouped;
+        if (grouped && !id) {
+            clearSelection(); state.images = []; window.TatorHostedTranches?.hide(); $("empty").hidden = false;
+            $("empty").textContent = state.session.user.role === "admin" ? "Start with New dataset: name it and list its classes. Then add images to Incoming." : "Nothing is assigned to you yet. When an administrator assigns you a tranche, it appears here; use Refresh to check.";
+            return;
+        }
         if (grouped) { clearSelection(); state.images = []; await window.TatorHostedTranches?.show(); return; }
         window.TatorHostedTranches?.hide();
         if (!append) { state.cursor = null; state.total = null; clearSelection(); state.images = []; $("imageGrid").replaceChildren(); }
@@ -386,6 +409,7 @@
         const filtered = state.filters.q || (state.view === "incoming" && state.filters.incoming !== "incoming") || (state.view === "submitted" && (state.filters.tranche || state.filters.annotator));
         $("empty").textContent = filtered ? "No images match these filters." : state.view === "submitted" ? "No images are waiting for review." : state.view === "confirmed" ? "No confirmed images yet. Add images in Incoming and approve them to build this dataset." : "No images in Incoming. Use Add images to upload new ones.";
         state.cursor = result.next_cursor; state.total = result.total; $("more").hidden = !state.cursor;
+        if (!append) state.loadedAt = Date.now();
         drawMatchCount();
     }
     async function loadAll() {
@@ -423,7 +447,7 @@
     async function workspace() {
         window.dispatchEvent(new Event("tator:hosted-session"));
         const sequence = ++state.workspaceSequence;
-        $("loginPanel").hidden = true; $("invitePanel").hidden = true; $("workspace").hidden = false; $("logout").hidden = false;
+        $("invitePanel").hidden = true; $("logout").hidden = false;
         $("accountName").textContent = `${state.session.user.username} · ${state.session.user.role === "admin" ? "Administrator" : "Annotator"}`; $("logout").title = `Signed in as ${$("accountName").textContent}`;
         const isAdmin = state.session.user.role === "admin";
         $("submissionPanel").hidden = isAdmin; $("classes").textContent = isAdmin ? "Classes" : "Classes & requests";
@@ -457,6 +481,8 @@
         const previous = route.get("dataset") || before; $("datasetChoice").replaceChildren();
         for (const dataset of state.datasets) { const option = node("option", dataset.name); option.value = dataset.id; $("datasetChoice").append(option); }
         if (state.datasets.some((row) => row.id === previous)) $("datasetChoice").value = previous;
+        // Show the workspace once its datasets are known, so it never appears without them.
+        $("loginPanel").hidden = true; $("workspace").hidden = false;
         if (before && $("datasetChoice").value !== before) window.dispatchEvent(new Event("tator:hosted-dataset"));
         if (isAdmin) await refreshUsers();
         if (sequence !== state.workspaceSequence) return;
@@ -480,7 +506,7 @@
         else { parts.push("Can sign in"); if (user.link && !user.link.expired) parts.push(`reset link open until ${when(user.link.expires_at)}`); }
         if (user.self) parts.push("You");
         if (user.last_administrator) parts.push("Only active administrator");
-        if (user.open_work) parts.push(`${count(user.open_work, "open image")}`);
+        if (user.open_work) parts.push(user.disabled ? `${count(user.open_work, "open image")} still with them: use Recall assigned work in Incoming to hand them on` : `${count(user.open_work, "open image")}`);
         return parts.join(" · ");
     }
     function drawUsers() {
@@ -718,19 +744,26 @@
         await bulkApprove("review", selected);
     });
 
-    $("loginForm").onsubmit = (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); action(event.submitter, async () => { state.session = await api("/login", { method: "POST", body: { username: form.get("username"), password: form.get("password") } }); event.target.reset(); announceSession(); notice(""); await workspace(); }); };
+    $("loginForm").onsubmit = (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); action(event.submitter, async () => { state.session = await api("/login", { method: "POST", body: { username: form.get("username"), password: form.get("password") } }); event.target.reset(); announceSession(); notice(""); const next = nextPage(); if (next) { location.replace(next); return; } await workspace(); }); };
     $("logout").onclick = () => action($("logout"), async () => { await api("/logout", { method: "POST" }); announceSession(); state.selected.clear(); state.images = []; $("imageGrid").replaceChildren(); loginView(); });
     $("refresh").onclick = () => action($("refresh"), workspace);
+    // Refresh stays last after the modules add their dataset actions, in tab order as well as on screen.
+    document.addEventListener("DOMContentLoaded", () => $("refresh").parentElement.append($("refresh")));
     $("datasetChoice").onchange = () => { notice(""); switchDataset($("datasetChoice").value).catch((error) => { if (!error.stale) notice(error.message, true); }); };
     $("more").onclick = () => action($("more"), () => loadImages(true));
     $("moreAll").onclick = () => action($("moreAll"), loadAll);
     $("clearSelection").onclick = clearSelection; $("assignee").onchange = selection;
-    $("createDataset").onclick = () => $("datasetDialog").showModal();
+    $("createDataset").onclick = () => { notice(""); $("datasetDialog").showModal(); };
     document.querySelectorAll("[data-close]").forEach((button) => { button.onclick = () => button.closest("dialog").close(); });
     $("datasetForm").onsubmit = (event) => {
         event.preventDefault(); const form = new FormData(event.currentTarget);
+        const name = String(form.get("name")).trim(), classes = String(form.get("classes")).split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+        // Say which line repeats before asking the server, which compares names without capitals.
+        const seen = new Set(), repeated = classes.find(item => { const key = item.toLocaleLowerCase(); if (seen.has(key)) return true; seen.add(key); return false; });
+        if (repeated) { notice(`“${repeated}” is listed twice; class names are compared without capitals. List each class once.`, true); return; }
+        if (state.datasets.some(row => row.name.trim().toLocaleLowerCase() === name.toLocaleLowerCase()) && !window.confirm(`A dataset named “${name}” already exists. Create another one with the same name?`)) return;
         action(event.submitter, async () => {
-            const created = await api("/datasets", { method: "POST", body: { name: form.get("name"), classes: String(form.get("classes")).split(/\r?\n/).map((name) => name.trim()).filter(Boolean), operation_id: op() } });
+            const created = await api("/datasets", { method: "POST", body: { name, classes, operation_id: op() } });
             $("datasetDialog").close(); event.target.reset();
             // The new dataset opens in Incoming, where its images are added.
             history.pushState(null, "", `/?${new URLSearchParams({dataset: created.id, view: "incoming"})}`);
@@ -786,7 +819,11 @@
         });
     };
     window.addEventListener("hashchange", () => { if (!invitationView() && !$("invitePanel").hidden) { $("invitePanel").hidden = true; loginView(); } });
-    (async () => { if (invitationView()) return; try { state.session = await api("/session"); await workspace(); } catch (error) { if (!error.stale) { loginView(); if (error.status !== 401) notice(error.message, true); } } })();
+    (async () => {
+        if (invitationView()) return;
+        try { state.session = await api("/session"); const next = nextPage(); if (next) { location.replace(next); return; } await workspace(); }
+        catch (error) { if (!error.stale) { loginView(); if (error.status !== 401) notice(error.message, true); else if (nextPage()) notice("Sign in to open the page you asked for."); } }
+    })();
     const applyFilters = () => {
         state.filters = {q: $("imageSearch").value.trim(), incoming: $("incomingFilter").value, tranche: $("reviewTranche").value, annotator: $("reviewAnnotator").value};
         writeRoute("replace");
@@ -796,6 +833,20 @@
     for (const id of ["incomingFilter", "reviewTranche", "reviewAnnotator"]) $(id).addEventListener("change", () => action($(id), applyFilters));
     $("selectVisibleImages").onclick = event => action(event.currentTarget, () => { for (const image of state.images.filter(selectable)) state.selected.set(image.id, image); syncChecks(); });
     $("selectMatchingImages").onclick = event => action(event.currentTarget, selectMatching);
+    // Back in this tab: other people may have submitted, approved or recalled work meanwhile.
+    // Reload the counts, and the grid unless the person is in the middle of something here
+    // (a selection, a dialog, a long list, an import, typing) - the same rule as the Tranches views.
+    function refreshIfIdle() {
+        if (document.hidden || !state.session || $("workspace").hidden || !$("datasetChoice").value) return;
+        if (state.session.user.role !== "admin") { if (!document.querySelector("dialog[open]") && state.submissions.length <= 100) loadSubmissions().catch(() => {}); return; }
+        if (["tranches", "mine"].includes(state.view)) return; // the Tranches views refresh themselves
+        const typing = document.activeElement?.matches?.("input:not([type=checkbox]),select,textarea");
+        if (document.querySelector("dialog[open]") || state.selected.size || state.images.length > 100 || typing
+                || $("stopImport")?.hidden === false || Date.now() - (state.loadedAt || 0) < 10000) { refreshCounts(); return; }
+        const y = scrollY;
+        loadImages().then(() => scrollTo(0, y)).catch(error => { if (!error.stale) notice(error.message, true); });
+    }
+    document.addEventListener("visibilitychange", refreshIfIdle); window.addEventListener("focus", refreshIfIdle);
     window.TatorHostedDashboard = { api, action, notice, errorText, refresh: workspace, refreshCounts, dropRouteParams,
         selectDataset: id => id === $("datasetChoice").value ? Promise.resolve() : switchDataset(id, "replace"),
         showView: view, navigate, loadImages, clearSelection, get view() { return state.view; }, get users() { return state.users; }, personLabel,

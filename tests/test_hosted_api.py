@@ -117,7 +117,12 @@ def test_full_incoming_review_admission_and_receipt_recovery(application):
     image = acquire(admin, submitted, "administrator-tab")
     returned = admin.post(f"/api/hosted/images/{image['id']}/return", json={**context(image, "administrator-tab"), "feedback": "Please check the upper edge."})
     assert returned.status_code == 200, returned.text
+    # Returned work arrives unchecked (here: no longer marked empty); the annotator confirms it again.
+    assert returned.json()["complete"] is False and returned.json()["negative"] is False
     image = acquire(alice, returned.json())
+    rechecked = alice.post(f"/api/hosted/images/{image['id']}/save", json={**context(image), "annotations": alice.get(f"/api/hosted/images/{image['id']}").json()["annotations"], "negative": True})
+    assert rechecked.status_code == 200, rechecked.text
+    image = {**image, **rechecked.json()}
     resubmitted = alice.post(f"/api/hosted/images/{image['id']}/submit", json=context(image))
     assert resubmitted.status_code == 200, resubmitted.text
     image = acquire(admin, resubmitted.json(), "administrator-tab")

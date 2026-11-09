@@ -85,7 +85,13 @@ def test_individual_submit_return_approve_and_personal_counts(store):
     assert store.image(ALICE, returned['id'], include_review=True)['review_feedback']['feedback'] == 'One car is missing'
     row = next(m for m in store.tranche_members(ALICE, tranche['id'], state='changes_requested')['members'] if m['image_id'] == returned['id'])
     assert row['feedback'] == 'One car is missing'
+    # Returned work arrives unchecked with its objects kept; the annotator confirms it again.
+    assert returned['complete'] is False and returned['negative'] is False
     editing = store.acquire_editor(ALICE, returned['id'], 'editor')
+    error('annotation_not_complete', lambda: store.submit(ALICE, ctx(editing, 'resubmit-unchecked', 'editor')))
+    kept = store.image(ALICE, returned['id'])['annotations']
+    assert len(kept['objects']) == len(objects(ds)['objects'])
+    editing = store.save(ALICE, ctx(editing, 'recheck', 'editor'), kept, complete=True)
     submitted = store.submit(ALICE, ctx(editing, 'resubmit', 'editor'))
     store.approve_from_review_queue(ADMIN, ctx(submitted, 'approval'))
     assert_counts(store, tranche['id'], approved=1, to_finish=2)

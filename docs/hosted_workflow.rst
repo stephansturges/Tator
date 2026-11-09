@@ -130,6 +130,13 @@ only. Failed jobs show a readable reason; the full log stays on the server. A
 named analysis page shows an explicit setup message if its runtime is not
 configured on this server.
 
+When you come back to the workspace tab, the view counts reload, and so do the
+Confirmed, Incoming and Review grids unless you are in the middle of something
+there: a selection, an open dialog, more than one page loaded, an import, typing
+in a field, or a list loaded in the last ten seconds. The Tranches views follow
+the same rule. On a phone, the view tabs and dataset actions wrap onto more
+lines instead of running off the screen.
+
 Large work lists load compact image identifiers and filenames in bounded pages
 within the selected queue. Annotation versions and editing ownership are checked again when an
 image is opened; faster navigation does not reuse an old permission to edit.
@@ -286,7 +293,9 @@ First day: annotator
    the handoff, the message says why and editing continues on your saved work;
    reopening the image does not retry the refused submission.
 6. Follow **Submitted work · all datasets** in the workspace. A returned image
-   reappears in its tranche with feedback. Correct it, check it and submit again.
+   reappears in its tranche with feedback. Its boxes are kept, but **Annotations
+   checked** (or **No objects to label**) is cleared. Correct it, check it again
+   and submit again.
 
 **Classes & requests** in the workspace also shows the administrator's dataset
 guidance and what each class means. Use it, or **Request a class** in the
@@ -431,7 +440,9 @@ Corrections, returns and ownership recovery
 In **Review**, an administrator can correct a submitted image before approving
 it, or return it with feedback. The submission, corrections and feedback remain
 in history. **Return for changes** restores the original annotator's editing
-access. After approval, administrator edits saved on the confirmed image create
+access and clears the image's checked (or no-objects) mark, keeping its objects,
+captions and the review note, so the annotator confirms it again after fixing.
+The submitted version stays in history. After approval, administrator edits saved on the confirmed image create
 new canonical annotation versions; earlier snapshots keep their earlier versions.
 
 **History**, on each image card in the workspace and in the canvas panel, lists

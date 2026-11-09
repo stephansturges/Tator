@@ -118,3 +118,5 @@ button.danger{color:var(--warning);border-color:var(--warning)}button.danger:hov
 input:not([type=checkbox]):not([type=radio]),select,textarea{border-color:var(--control-border,var(--border))}
 :where(button,a,input,select,textarea,summary,[tabindex]):focus-visible{outline:3px solid var(--accent);outline-offset:2px}
 .hosted-card>a:focus-visible{outline-offset:-3px;border-radius:10px}
+/* Phones: tabs and dataset actions wrap onto a second line instead of running off the screen. */
+@media(max-width:700px){#views,.hosted-actions{flex-wrap:wrap;overflow-x:visible}}

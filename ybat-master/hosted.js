@@ -409,6 +409,7 @@
         const filtered = state.filters.q || (state.view === "incoming" && state.filters.incoming !== "incoming") || (state.view === "submitted" && (state.filters.tranche || state.filters.annotator));
         $("empty").textContent = filtered ? "No images match these filters." : state.view === "submitted" ? "No images are waiting for review." : state.view === "confirmed" ? "No confirmed images yet. Add images in Incoming and approve them to build this dataset." : "No images in Incoming. Use Add images to upload new ones.";
         state.cursor = result.next_cursor; state.total = result.total; $("more").hidden = !state.cursor;
+        if (!append) state.loadedAt = Date.now();
         drawMatchCount();
     }
     async function loadAll() {
@@ -832,6 +833,20 @@
     for (const id of ["incomingFilter", "reviewTranche", "reviewAnnotator"]) $(id).addEventListener("change", () => action($(id), applyFilters));
     $("selectVisibleImages").onclick = event => action(event.currentTarget, () => { for (const image of state.images.filter(selectable)) state.selected.set(image.id, image); syncChecks(); });
     $("selectMatchingImages").onclick = event => action(event.currentTarget, selectMatching);
+    // Back in this tab: other people may have submitted, approved or recalled work meanwhile.
+    // Reload the counts, and the grid unless the person is in the middle of something here
+    // (a selection, a dialog, a long list, an import, typing) - the same rule as the Tranches views.
+    function refreshIfIdle() {
+        if (document.hidden || !state.session || $("workspace").hidden || !$("datasetChoice").value) return;
+        if (state.session.user.role !== "admin") { if (!document.querySelector("dialog[open]") && state.submissions.length <= 100) loadSubmissions().catch(() => {}); return; }
+        if (["tranches", "mine"].includes(state.view)) return; // the Tranches views refresh themselves
+        const typing = document.activeElement?.matches?.("input:not([type=checkbox]),select,textarea");
+        if (document.querySelector("dialog[open]") || state.selected.size || state.images.length > 100 || typing
+                || $("stopImport")?.hidden === false || Date.now() - (state.loadedAt || 0) < 10000) { refreshCounts(); return; }
+        const y = scrollY;
+        loadImages().then(() => scrollTo(0, y)).catch(error => { if (!error.stale) notice(error.message, true); });
+    }
+    document.addEventListener("visibilitychange", refreshIfIdle); window.addEventListener("focus", refreshIfIdle);
     window.TatorHostedDashboard = { api, action, notice, errorText, refresh: workspace, refreshCounts, dropRouteParams,
         selectDataset: id => id === $("datasetChoice").value ? Promise.resolve() : switchDataset(id, "replace"),
         showView: view, navigate, loadImages, clearSelection, get view() { return state.view; }, get users() { return state.users; }, personLabel,

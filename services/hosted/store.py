@@ -1380,6 +1380,14 @@ class HostedStore(TrancheMixin):
             self._annotator(con, image["assignee_id"])
             text = _text(feedback, "feedback", 20000)
             review_id = self._review(con, actor, image, "returned", text)
+            # The annotator confirms again after fixing: the returned copy keeps
+            # its objects and metadata but is no longer marked checked or empty.
+            # The submitted version stays in history with the review.
+            current = con.execute("SELECT annotations_json,complete,negative FROM hosted_annotation_versions WHERE id=?", (image["current_version"],)).fetchone()
+            if current["complete"] or current["negative"]:
+                unchecked = self._version(con, actor, ctx.image_id, image["dataset_id"], json.loads(current["annotations_json"]),
+                                          parent=image["current_version"], kind="returned")
+                con.execute("UPDATE hosted_images SET current_version=? WHERE id=?", (unchecked, ctx.image_id))
             self._handoff(con, ctx.image_id, "returned", assignee=image["assignee_id"], assignment=image["assignment_id"], actor_id=actor.user_id)
             self._event(con, actor, image["dataset_id"], ctx.image_id, "returned", {"review_id": review_id, "feedback": text})
             return self._image_result(con, ctx.image_id)

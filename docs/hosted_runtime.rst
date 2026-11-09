@@ -544,6 +544,12 @@ one structured response per image, including the configured QA requirements,
 glossary, label hints, grounding rules and catch-up questions. This is a
 different recipe from sequential window captions, merging and QA generation.
 The preview displays the exact first-image prompt and reservation ceiling.
+Job status adds ``cost``: images, the summed reservation, the charges settled
+from reported usage and how many images are settled (microdollars). The dialog
+shows the reported cost and, while images are unsettled, the reservation; the
+saved-jobs list shows each job's reported cost. The canvas offers **Remote
+dataset captions…** only for datasets with a permitted Batch model, or with
+earlier batches still to review.
 
 Only models with an explicit operator-supplied ``batch`` price and token-limit
 record are offered. No discount or live price is guessed. Images are uploaded

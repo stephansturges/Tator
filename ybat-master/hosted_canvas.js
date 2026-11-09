@@ -152,20 +152,47 @@
         if (pending && error.commit_outcome === "committed" && error.result_restricted === true && error.operation_id === pending.body.operation_id) {
             retainRestrictedCommit(pending, error);
         }
-        const retentionFailure = [401, 403, 409, 423].includes(error.status) && !contentRejections.has(error.code) ? freeze() : null;
+        const gone = accessGone(error);
+        const retentionFailure = ([401, 403, 409, 423].includes(error.status) || gone) && !contentRejections.has(error.code) ? freeze() : null;
+        if (gone && !retentionFailure) {
+            lostImage = true; update();
+            let unsaved = Boolean(pending);
+            try { unsaved ||= ready && JSON.stringify(draft()) !== lastSaved; } catch (_) { unsaved = true; }
+            const kept = unsaved ? "Your unsaved changes stay in this tab only." : "Your saved work stays with the image.";
+            error.message = boot.user.role === "annotator"
+                ? `This image is no longer assigned to you: an administrator gave it to someone else or recalled it. ${kept} Use Back to continue with your other work.`
+                : `This image is no longer available for you to edit here. ${kept} Use Back to return to the workspace.`;
+            refreshStateLine();
+        }
         status(retentionFailure?.message || error.message || String(error), true);
         if (error.status === 401 && !retentionFailure && !storageFailed) offerSignIn();
         if (error.code === "ownership_changed") explainOwnership();
     }
-    // An expired session keeps the draft in this tab; signing in again in the
-    // same tab and reopening the image offers to recover it.
-    let leavingToSignIn = false;
+    // The server says this account can no longer read or edit the image (it
+    // was handed to someone else or recalled), not that a request failed.
+    function accessGone(error) {
+        return (error?.status === 404 && ["image_not_found", "tranche_not_found"].includes(error.code)) || ["image_not_editable", "image_left_queue", "queue_scope_changed"].includes(error?.code)
+            || (error?.code === "ownership_changed" && boot.user.role === "annotator");
+    }
+    async function refreshStateLine() {
+        const origin = imageId;
+        let text;
+        try { const current = await api(base); if (imageId !== origin) return; text = stateText(current); }
+        catch (error) {
+            if (imageId !== origin || ![403, 404].includes(error.status)) return;
+            text = boot.user.role === "annotator" ? "No longer assigned to you" : "No longer available";
+        }
+        if ($("hostedStateLine") && dataset) $("hostedStateLine").textContent = `${dataset.name} · ${text} · ${boot.user.username}`;
+    }
+    // An expired session or a lost image keeps the draft in this tab, so
+    // leaving needs no browser warning; reopening the image offers recovery.
+    let leavingWithDraft = false, lostImage = false;
     function offerSignIn() {
         const parent = $("hostedSaveState")?.parentElement;
         if (!parent || $("hostedSignIn")) return;
         const button = node("button", "Sign in again"); button.type = "button"; button.id = "hostedSignIn";
         button.title = "Your unsent draft stays in this tab. After signing in, reopen this image to recover it.";
-        button.onclick = () => { leavingToSignIn = true; location.assign(backUrl()); };
+        button.onclick = () => { leavingWithDraft = true; location.assign(backUrl()); };
         parent.append(button);
     }
     async function explainOwnership() {
@@ -526,7 +553,7 @@
             if ($(id)) $(id).disabled = !editable || !ready || busy || handoff || recoveryRequired;
         }
         for (const id of ["hostedRefreshQueue", "hostedMoreImages"]) if ($(id)) $(id).disabled = !queue || scopeLeft || recoveryRequired || busy;
-        if ($("hostedReconnect")) $("hostedReconnect").hidden = editable || scopeLeft || recoveryRequired;
+        if ($("hostedReconnect")) $("hostedReconnect").hidden = editable || scopeLeft || recoveryRequired || lostImage;
         // The server only lets you replace your own editing tab; never offer
         // a takeover that would fail because another person holds the image.
         if ($("hostedTakeover")) $("hostedTakeover").hidden = editable || recoveryRequired || !ownLeaseConflict || (boot.user.role === "admin" && ["assigned", "returned"].includes(record.state));
@@ -553,9 +580,41 @@
             error.message = "This image is open in another editing tab or window of yours, possibly one you closed in the last two minutes. Taking over here is safe: unsent changes there will not overwrite this tab.";
         } else {
             const name = await personName(holder);
-            error.message = `${name ? name.charAt(0).toUpperCase() + name.slice(1) : "Someone else"} is editing this image right now. You can view it; editing becomes available when they leave it.`;
+            holderName = name ? name.charAt(0).toUpperCase() + name.slice(1) : "Someone else";
+            error.message = `${holderName} is editing this image right now. You can view it; editing becomes available when they leave it.`;
         }
         return error;
+    }
+    // While someone else holds the image, check now and then whether they
+    // left it: then take editing over, or say what changed and offer a reload.
+    let holderName = "Someone else", holderWatch = null;
+    function watchLeaseHolder() {
+        clearInterval(holderWatch);
+        const origin = imageId;
+        holderWatch = setInterval(async () => {
+            if (imageId !== origin || editable || recoveryRequired || accountChanged || lostImage) { clearInterval(holderWatch); holderWatch = null; return; }
+            if (!ready || busy || handoff || document.hidden) return;
+            let current;
+            try { current = await api(base); } catch (_) { return; }
+            if (imageId !== origin || editable || current.editor_lease) return;
+            clearInterval(holderWatch); holderWatch = null;
+            const who = ownLeaseConflict ? "Your other tab" : holderName;
+            // Releasing bumps the generation; only a new version or state means
+            // this read-only view is out of date.
+            const changed = current.state !== record.state || current.current_version !== record.current_version || current.assignee_id !== record.assignee_id;
+            if ($("hostedStateLine")) $("hostedStateLine").textContent = `${dataset.name} · ${stateText(current)} · ${boot.user.username}`;
+            if (!changed) {
+                busy = true; update();
+                record = { ...record, ...current };
+                try { await acquire(); status(`${who} left this image. You can edit it now.`); return; }
+                catch (error) { report(error); if (error.code === "editor_lease_conflict") return; }
+                finally { busy = false; update(); }
+            } else status(`${who} left this image, which changed meanwhile (now ${stateText(current)}). Reload it to see the latest version.`, true);
+            if (!$("hostedReloadImage")) {
+                const reload = node("button", "Reload image"); reload.type = "button"; reload.id = "hostedReloadImage";
+                reload.onclick = () => location.reload(); $("hostedSaveState").parentElement.append(reload);
+            }
+        }, 5000);
     }
     async function save({ manual = false } = {}) {
         if (saving) { await saving; if (manual) return save({ manual }); return false; }
@@ -679,6 +738,7 @@
                 let holder = fresh;
                 if (preparedRecord) try { holder = await api(base); } catch (_) { /* Keep the earlier record. */ }
                 await explainLeaseConflict(error, holder); update();
+                watchLeaseHolder();
             }
             throw error;
         }
@@ -689,11 +749,23 @@
     }
     async function leave(next = false, destination = backUrl()) {
         pauseMediaPrefetch();
-        if (editable && !handoff) { if (!await save({ manual: true })) throw new Error("Save your work before leaving."); await api(`${base}/release`, context()); editable = false; }
+        if (editable && !handoff) {
+            // Leaving always works once the server has said the image is no
+            // longer this account's: report() then froze editing and kept the
+            // draft in this tab. Any other failure keeps you on the image.
+            let saved = false;
+            try { saved = await save({ manual: true }); }
+            catch (error) { if (!accessGone(error) && error.status !== 401) throw error; }
+            if (saved) {
+                try { await api(`${base}/release`, context()); }
+                catch (error) { if (error.offline) throw error; /* The reservation expires by itself. */ }
+            } else if (editable) throw new Error("Save your work before leaving.");
+            editable = false;
+        }
         if (next && queue) {
             let image = await queue.neighbor(imageId, 1);
             while (image) {
-                try { await queue.authorize(image.id); location.assign(queue.url(image.id)); return; }
+                try { await queue.authorize(image.id); leavingWithDraft = true; location.assign(queue.url(image.id)); return; }
                 catch (error) {
                     if (![403, 404, 409].includes(error.status)) throw error;
                     queue.remove(image.id); window.TatorHostedCanvas.removeQueue([image.id]);
@@ -704,9 +776,9 @@
             status(queue.scope.tranche_id ? "Tranche finished · returning to the workspace…" : "Queue finished · returning to the workspace…");
             const target = queue.back(imageId);
             await new Promise(resolve => setTimeout(resolve, 900));
-            location.assign(target); return;
+            leavingWithDraft = true; location.assign(target); return;
         }
-        location.assign(destination);
+        leavingWithDraft = true; location.assign(destination);
     }
     function updateTranche(value) {
         tranche = value;
@@ -1371,7 +1443,7 @@
         // Undo may reach the saved baseline before the next autosave tick.
         // Reconcile that transition even when there is nothing left to send.
         try { retainDraft(); } catch (error) { status(error.message, true); }
-        if (leavingToSignIn && !storageFailed) return; // The draft is retained for recovery after sign-in.
+        if (leavingWithDraft && !storageFailed) return; // The draft is retained in this tab for recovery.
         if (storageFailed || pending || (ready && JSON.stringify(draft()) !== lastSaved)) {
             event.preventDefault(); event.returnValue = "";
         }

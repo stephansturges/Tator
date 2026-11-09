@@ -445,6 +445,15 @@ canvas offers **Sign in again**: it keeps the unsent draft in this tab, opens th
 sign-in page without a leave-page warning and returns to the same work list,
 where reopening the image offers **Recover my draft** (described below).
 
+When an administrator gives an open image to someone else or recalls it, the
+canvas says so as soon as the server refuses a save or the next half-minute check
+notices, and the panel shows "No longer assigned to you". Back always leaves
+then, without a leave-page warning; unsaved changes stay in this tab's retained
+draft. A canvas that is view-only because someone else is editing checks every few
+seconds whether they left: if the image is unchanged, editing starts there with a
+short note; if it changed (for example it was approved), the panel shows its new
+state and **Reload image**.
+
 Importing labels and managing classes
 -------------------------------------
 

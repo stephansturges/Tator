@@ -133,7 +133,10 @@ class UserToolAdapter:
         self.config, self.device = config, device
         self.capacity = config["capacity"]
         self.slots = OrderedDict()
-        self.slots["current"] = {"backend": _build_sam(config["model"], device), "key": None}
+        # Without an installed SAM model the worker still hosts the class
+        # predictor and Qwen; SAM operations then fail with a clear code.
+        if config["model"] is not None:
+            self.slots["current"] = {"backend": _build_sam(config["model"], device), "key": None}
         self.classifier = None
         self.sam3_prompts = None
         self.qwen = None
@@ -161,6 +164,8 @@ class UserToolAdapter:
         return result
 
     def _slot(self, name):
+        if self.config["model"] is None:
+            raise ValueError("hosted_sam_not_configured")
         allowed = ("current", "next", "previous")[:self.capacity]
         if name not in allowed:
             raise ValueError("hosted_predictor_slot_disabled")
@@ -179,7 +184,8 @@ class UserToolAdapter:
         return self.slots[name]
 
     def execute(self, operation, payload, context):
-        if self.config["model"]["kind"] == "sam3" and self.config["model"].get("backend") != "mlx":
+        model = self.config["model"] or {}
+        if model.get("kind") == "sam3" and model.get("backend") != "mlx":
             from services.sam3_descriptors import native_sam3_context
             with native_sam3_context(self.device):
                 return self._execute(operation, payload, context)
@@ -189,6 +195,8 @@ class UserToolAdapter:
         if context["actor_id"] != self.config["actor_id"]:
             raise ValueError("hosted_runtime_owner_mismatch")
         if operation == "sam_state":
+            if self.config["model"] is None:
+                return {"slots": [], "capacity": 0}
             # Inspect only this user's actual cache; no image embedding is
             # produced or moved by a status request. Restrict to this dataset.
             entries = []
@@ -207,6 +215,8 @@ class UserToolAdapter:
             raise ValueError("hosted_tool_not_implemented")
         if (auto or operation == "classify_bbox") and self.classifier is None:
             raise ValueError("hosted_classifier_not_configured")
+        if self.config["model"] is None and operation not in {"classify_bbox", "sam3_recipe_chain", "qwen_infer", "qwen_caption", "qwen_caption_preview", "qwen_caption_case"}:
+            raise ValueError("hosted_sam_not_configured")
         import numpy as np
         from utils.coco import _encode_binary_mask_impl
         from utils.coords import _mask_to_bounding_box, _xyxy_to_yolo_norm_list

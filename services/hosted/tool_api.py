@@ -292,7 +292,11 @@ class ToolController:
         sources = self.configuration.get("models", {})
         if model_id not in sources:
             raise DomainError("tool_model_not_configured", 404, "An administrator must configure this model on the server.")
-        source = ModelRegistry(allowed_roots=self.configuration.get("allowed_model_roots", []), definitions={model_id: sources[model_id]})
+        try:
+            source = ModelRegistry(allowed_roots=self.configuration.get("allowed_model_roots", []), definitions={model_id: sources[model_id]})
+        except (ValueError, OSError) as exc:
+            from services.hosted.config import model_source_problem
+            raise DomainError("tool_model_source_invalid", 422, model_source_problem(model_id, exc)) from exc
         definition = source.definition(model_id)
         with self._lock, self.artifacts.exclusive():
             previous = self.store.raw_receipt(actor, operation_id)
@@ -359,15 +363,23 @@ class ToolController:
             self.store._actor(con, actor)
             selected = con.execute("SELECT model_id,revision FROM hosted_tool_preferences WHERE user_id=?", (actor.user_id,)).fetchone()
         policy = self.configuration.get("user_sam", {})
+        installed = self._sam_model_ids()
         default = policy.get("default_model_id")
         if default is None:
-            available = self._sam_model_ids()
-            default = available[0] if available else None
+            default = installed[0] if installed else None
+        if not selected and not installed:
+            # A server default that was never installed is not a lost personal
+            # choice: report "nothing installed yet" instead of an alarm.
+            return {"model_id": None, "revision": 0, "available": False, "default_model_id": default,
+                    "unavailable_reason": "No SAM model is installed on this server yet. Manual annotation works without it."}
         model_id = selected[0] if selected else default
-        available = model_id in self._sam_model_ids()
+        available = model_id in installed
+        reason = None
+        if not available:
+            reason = ("The saved SAM model cannot run on this server. Select an available model; your previous selection has been preserved."
+                      if selected else f"The server's default SAM model ({model_id}) is not installed yet.")
         return {"model_id": model_id, "revision": selected[1] if selected else 0,
-                "available": available,
-                "unavailable_reason": None if available else "The saved SAM model cannot run on this server. Select an available model; your previous selection has been preserved."}
+                "available": available, "unavailable_reason": reason}
 
     def _definition(self, model_id):
         try:
@@ -473,13 +485,12 @@ class ToolController:
             if model_id not in available:
                 if operation not in NON_SAM_OPERATIONS:
                     raise DomainError("tool_not_configured", 503, selection["unavailable_reason"])
-                # Qwen and the class predictor do not use SAM, but they share the
-                # user's private worker, which hosts one installed SAM model. Use
-                # one without changing the user's saved (unavailable) choice.
-                if not available:
-                    raise DomainError("tool_not_configured", 503, "Your private annotation worker needs one installed SAM model on this server. Ask an administrator to install one in Tools & models.")
-                model_id = available[0]
-            model = self._definition(model_id)
+                # Qwen and the class predictor do not use SAM. They share the
+                # user's private worker, which hosts an installed SAM model when
+                # there is one (without changing the user's saved choice) and
+                # otherwise starts without SAM.
+                model_id = available[0] if available else None
+            model = self._definition(model_id) if model_id else {}
             if operation.startswith("sam3_") and operation not in SAM_RECIPE_OPERATIONS and model["kind"] != "sam3":
                 raise DomainError("tool_sam3_required", 503, "Select an installed SAM3 model to use this tool.")
             if model.get("backend") == "mlx" and operation in {"sam3_text", "sam3_text_auto", "sam3_visual"}:

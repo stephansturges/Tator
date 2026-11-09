@@ -258,12 +258,25 @@ requires ``bpe_path``. SHA-256 fields may pin expected bytes. Installation copie
 files into immutable artifact storage, registers every required file for full
 recovery, and publishes a portable model definition only after registration.
 Installed models and selections survive loss of the original source directory.
+If a configured file is missing, is a link, lies outside ``allowed_model_roots``
+or does not match its SHA-256, installation is refused with
+``tool_model_source_invalid`` and a message naming the model and the problem;
+nothing is installed.
 
 Every installed SAM1 or SAM3 model is a personal choice for every dataset; there
 is no second SAM allowlist. With no explicit default, the controller picks an
 installed SAM1 first. A saved personal choice and an explicit server default
-remain authoritative. Dataset detector and class-predictor selection still
-belong to the administrator.
+remain authoritative. While no SAM model is installed, the catalog reports no
+selection rather than an unavailable saved choice. An explicit default that is
+not installed yet is reported as such; a saved choice that cannot run keeps its
+own warning. Dataset detector and class-predictor selection still belong to the
+administrator.
+
+The class predictor and local Qwen run in the same private worker as the
+user's SAM model. With no SAM model installed that worker starts without SAM:
+the class predictor and Qwen work, and SAM requests fail with
+``hosted_sam_not_configured``. ``user_sam.device`` remains the device for this
+worker.
 
 On Apple Silicon, a SAM3 definition can use ``backend: mlx`` with ``model_path``
 and a SHA-256 ``files`` manifest instead of a PyTorch checkpoint. The package

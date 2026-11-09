@@ -40,6 +40,14 @@ QWEN_OPERATIONS = {"qwen_infer", "qwen_caption", "qwen_caption_preview", "qwen_c
 # Operations that never call SAM; they must not depend on the user's SAM choice.
 NON_SAM_OPERATIONS = QWEN_OPERATIONS | {"classify_bbox"}
 NATIVE_ANALYSIS_FACTORY = "services.hosted.native_analysis:NativeAnalysisAdapter"
+# Plain text for refusals people meet while annotating; the code stays in "error".
+RUNTIME_MESSAGES = {
+    "runtime_automation_paused": "Assistance is paused while an administrator job uses the server's GPU. Manual annotation and saving still work; the tools come back when the job finishes.",
+    "runtime_queue_full": "Too many tool requests are waiting. Try again in a moment.",
+    "runtime_owner_limit": "The server is running tools for as many people as it can. Try again shortly.",
+    "runtime_payload_budget_exceeded": "The server is busy with large tool requests. Try again in a moment.",
+    "runtime_configuration_changed": "The server's model settings changed while this request waited. Run the tool again.",
+}
 PARAMETERS = {"point_x", "point_y", "positive_points", "negative_points", "bbox_left", "bbox_top", "bbox_width", "bbox_height",
               "local_refine", "uuid", "slot", "conf", "iou", "max_det", "slice_size", "overlap", "merge_iou",
               "text_prompt", "prompt", "threshold", "mask_threshold", "min_size", "max_results", "windowed", "window_size", "window_overlap", "simplify_epsilon", "bboxes", "bbox_labels"}
@@ -1400,7 +1408,7 @@ def install_tool_api(app, store, auth, artifacts, actor_dependency, admin_depend
             return callback(*args)
         except RuntimeRejected as exc:
             status = 404 if exc.code == "runtime_request_not_found" else 429 if exc.code in {"runtime_queue_full", "runtime_payload_budget_exceeded", "runtime_owner_limit"} else 409
-            raise DomainError(exc.code, status) from exc
+            raise DomainError(exc.code, status, RUNTIME_MESSAGES.get(exc.code)) from exc
         except (ValueError, KeyError) as exc:
             raise DomainError("tool_configuration_or_input_invalid", 422, "Check the tool settings and supplied parameters.") from exc
 

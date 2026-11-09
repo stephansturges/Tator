@@ -446,7 +446,7 @@
     async function workspace() {
         window.dispatchEvent(new Event("tator:hosted-session"));
         const sequence = ++state.workspaceSequence;
-        $("loginPanel").hidden = true; $("invitePanel").hidden = true; $("workspace").hidden = false; $("logout").hidden = false;
+        $("invitePanel").hidden = true; $("logout").hidden = false;
         $("accountName").textContent = `${state.session.user.username} · ${state.session.user.role === "admin" ? "Administrator" : "Annotator"}`; $("logout").title = `Signed in as ${$("accountName").textContent}`;
         const isAdmin = state.session.user.role === "admin";
         $("submissionPanel").hidden = isAdmin; $("classes").textContent = isAdmin ? "Classes" : "Classes & requests";
@@ -480,6 +480,8 @@
         const previous = route.get("dataset") || before; $("datasetChoice").replaceChildren();
         for (const dataset of state.datasets) { const option = node("option", dataset.name); option.value = dataset.id; $("datasetChoice").append(option); }
         if (state.datasets.some((row) => row.id === previous)) $("datasetChoice").value = previous;
+        // Show the workspace once its datasets are known, so it never appears without them.
+        $("loginPanel").hidden = true; $("workspace").hidden = false;
         if (before && $("datasetChoice").value !== before) window.dispatchEvent(new Event("tator:hosted-dataset"));
         if (isAdmin) await refreshUsers();
         if (sequence !== state.workspaceSequence) return;

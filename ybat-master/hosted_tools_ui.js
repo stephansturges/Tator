@@ -43,6 +43,9 @@
             const [catalog, dataset] = await Promise.all([api(`/tools/catalog?dataset_id=${encodeURIComponent(id)}`), api(`/datasets/${encodeURIComponent(id)}`)]);
             if (generation !== epoch || datasetId() !== id || !dialog.open) return;
             title.textContent = `Tools & models · ${dataset.name}`;
+            for (const [modelId, reason] of Object.entries(catalog.unavailable_models || {})) {
+                const problem = node("p", `${modelId} is installed but cannot be used. ${reason}`); problem.setAttribute("role", "alert"); content.append(problem);
+            }
             const sam = section("Your segmentation model", "Installed SAM1 and SAM3 models are available in every dataset. Your choice and image cache follow your account, without changing anyone else's tools.");
             const allowed = catalog.sam_allowed_model_ids;
             const candidates = catalog.models.filter(model => ["sam1", "sam3"].includes(model.kind) && (!Array.isArray(allowed) || allowed.includes(model.model_id)));

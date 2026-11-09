@@ -203,8 +203,17 @@ class ToolController:
             "operation": "caption_export", "config": {"native_root": str(Path(root) / "native-caption-export")},
             "allowed_parameters": list(export_defaults), "defaults": export_defaults, "timeout": 1800})
         self.registry = ModelRegistry(allowed_roots=[self.model_root])
+        # One damaged installed model must not stop the service: manual
+        # annotation and the other tools keep working, and administrators see
+        # which model failed verification in Tools & models.
+        self.unavailable_models = {}
         for row in installed:
-            self._load_definition(row[0], json.loads(row[1]))
+            try:
+                self._load_definition(row[0], json.loads(row[1]))
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception("Installed model %s failed verification", row[0])
+                self.unavailable_models[row[0]] = "Its stored files failed verification, so it is not loaded. Restore the server's artifact store from a backup."
         from services.hosted.caption_jobs import CaptionJobs
         self.caption_jobs = CaptionJobs(self)
         from services.hosted.caption_batch import CaptionBatches
@@ -347,6 +356,7 @@ class ToolController:
                 return {"model_id": model_id, "checkpoint_sha256": definition["checkpoint_sha256"]}
             result = self.store._command(actor, operation_id, "install_tool_model", {"model_id": model_id, "definition": definition}, publish, admin=True)
             self._load_definition(model_id, definition)
+            self.unavailable_models.pop(model_id, None)
             return result
 
     def _sam_model_ids(self):
@@ -959,6 +969,7 @@ class ToolController:
             result["caption_batch_defaults"] = {"caption_request": {key: caption_defaults[key] for key in _parameters_for("qwen_caption")},
                 "settings": CaptionSettings().model_dump(), "pilot": PilotSettings().model_dump(), "sample_size": 20, "sample_seed": 0}
             result["available_to_install"] = sorted(self.configuration.get("models", {}))
+            result["unavailable_models"] = dict(self.unavailable_models)
             result["heavy_jobs"] = sorted(self.configuration.get("heavy_jobs", {}))
             result["heavy_job_options"] = {name: {"operation": value["operation"],
                 "label": value.get("label", name), "allowed_parameters": list(value.get("allowed_parameters", [])),

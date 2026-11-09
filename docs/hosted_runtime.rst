@@ -263,6 +263,14 @@ or does not match its SHA-256, installation is refused with
 ``tool_model_source_invalid`` and a message naming the model and the problem;
 nothing is installed.
 
+If an installed model's stored files fail verification when the service
+starts, that model is left unloaded and logged; the service, manual annotation
+and the other models keep working. The administrator catalog lists it under
+``unavailable_models`` and Tools & models shows it at the top. Annotators see
+that the dataset's selected detector or class predictor cannot be used right
+now, rather than "no model yet". Repairing the files needs the artifact store
+restored from a backup; installing over a damaged stored copy is refused.
+
 Every installed SAM1 or SAM3 model is a personal choice for every dataset; there
 is no second SAM allowlist. With no explicit default, the controller picks an
 installed SAM1 first. A saved personal choice and an explicit server default

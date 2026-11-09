@@ -11,7 +11,21 @@ On a server with the `admin workbench <hosted_workbench.rst>`_, these entries
 open the full workbench tabs instead, and **Server jobs** opens this launcher.
 Review the parameters and select **Start task** to run the selected operation.
 If no compute recipes are configured, saved results remain readable; an operator
-must configure the available tasks before a new run can start.
+must configure the available tasks before a new run can start. A dataset without
+confirmed images cannot start a task. **Open results** shows a saved result
+below the list and scrolls to it. Dataset statistics list the splits set on the
+dataset, and a training result says how many images it trained and validated on.
+
+A run that fails says why when the reason is known: the trainer's licence was
+not accepted, the task needs a GPU that is not available, training has no
+validation images, or the class predictor has fewer than two classes. Other
+failures keep their details in the server log of that run. YOLO and RF-DETR
+training run only after their licence is accepted for the run: allow
+``accept_tos`` in the task's ``allowed_parameters`` (with a ``false``
+default), and the launcher shows the licence box, which must be ticked to
+start. Without that setting the launcher warns that the run would be refused.
+A Data Quality Explorer server job reviews all classes of the confirmed dataset
+unless its configuration names a class.
 
 For Incoming diversity analysis, first select unassigned images in **Incoming**
 and attach a whole-image SALAD descriptor in **Analysis presets**. For pruning,

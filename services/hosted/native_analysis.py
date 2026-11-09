@@ -38,6 +38,55 @@ SOURCE_KEYS |= {'candidate_image_ids', 'candidate_uploads', 'reference_uploads',
                 'reference_snapshot_id', 'reference_dataset_id', 'reference_dataset_kind', 'reference_session_id',
                 'reference_storage_mode', 'reference_kind', 'reference_open_path',
                 'use_server_reference_dataset', 'use_backend_reference_dataset'}
+# A failed child records why, when the reason is one an administrator can act
+# on; the run then fails with that code instead of a generic engine failure.
+# Only these fixed codes leave the child; messages and paths stay in its log.
+ENGINE_FAILURES = {
+    "yolo_tos_required": "native_yolo_terms_required",
+    "rfdetr_tos_required": "native_rfdetr_terms_required",
+    "training_validation_split_required": "analysis_validation_split_required",
+    "classifier_classes_missing": "native_classifier_classes_missing",
+    "gpu_unavailable": "native_gpu_unavailable",
+    "class_name_required": "native_dqe_scope_required",
+    "model_unavailable": "native_model_unavailable",
+}
+FAILURE_LIMIT = 4096
+
+
+def _failure_reason(error: BaseException) -> str | None:
+    """A fixed reason code for a child failure an administrator can act on."""
+    detail = getattr(error, "detail", None)
+    if isinstance(detail, dict):
+        detail = detail.get("code")
+    text = str(error)
+    if detail is None and text.startswith("native job "):
+        # _wait: "native job failed: <native error code>"
+        detail = text.partition(": ")[2].strip()
+        if detail.endswith("_load_failed"):
+            return "model_unavailable"
+    if isinstance(detail, str) and detail in ENGINE_FAILURES:
+        return detail
+    if text.startswith("Training needs training and validation images"):
+        return "training_validation_split_required"
+    if text.startswith(("The fixed training split lacks classes", "Classifier samples require nonempty")):
+        return "classifier_classes_missing"
+    if "CUDA" in text and any(marker in text for marker in ("not available", "Invalid CUDA", "not compiled", "no CUDA GPUs", "No CUDA GPUs")):
+        return "gpu_unavailable"
+    return None
+
+
+def _recorded_failure(directory: Path) -> str | None:
+    """The reason a failed child wrote, mapped to a hosted error code (or None)."""
+    try:
+        fd = os.open(directory / "failure.json", os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            reason = json.loads(handle.read(FAILURE_LIMIT) or b"{}").get("reason")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return ENGINE_FAILURES.get(reason) if isinstance(reason, str) else None
 
 
 def _safe_relative(value):
@@ -281,7 +330,8 @@ class NativeAnalysisAdapter:
             process = subprocess.run([sys.executable, "-m", "services.hosted.native_analysis", "--child", str(directory)],
                 cwd=directory, env=environment, stdout=log, stderr=subprocess.STDOUT, check=False)
         if process.returncode:
-            raise DomainError("native_engine_failed", 409, {"exit_code": process.returncode, "diagnostic_directory": str(directory)})
+            raise DomainError(_recorded_failure(directory) or "native_engine_failed", 409,
+                              {"exit_code": process.returncode, "diagnostic_directory": str(directory)})
         # SQLite can checkpoint its last connection during interpreter exit.
         # Attest only after the complete child has exited and these writes end.
         _publication_receipt(directory, operation)
@@ -606,7 +656,11 @@ def _run_native(request, manifest, dataset, source, directory):
         from services.hosted.caption_export import export_native_instructions
         return export_native_instructions(api, manifest, source, directory, parameters)
     if operation == "dqe":
-        payload = {**parameters, "source_mode": "active_workspace", "workspace_dir": str(dataset), "workspace_manifest": source,
+        # A server job reviews the whole confirmed dataset unless the task
+        # configuration names a class: the native default (one selected class)
+        # cannot run without one.
+        scope = {} if any(parameters.get(key) for key in ("analysis_scope", "class_name", "class_names")) else {"analysis_scope": "all_classes"}
+        payload = {**parameters, **scope, "source_mode": "active_workspace", "workspace_dir": str(dataset), "workspace_manifest": source,
                    "workspace_manifest_path": "", "snapshot_id": manifest["snapshot_id"], "yolo_layout": "split", "dataset_id": "", "session_id": ""}
         created = api.create_class_analysis_job(payload)
         status = _wait(api.get_class_analysis_job, created["job_id"], request["timeout"])
@@ -742,6 +796,16 @@ def _child(directory):
     directory = Path(directory).resolve(strict=True)
     if directory != Path.cwd().resolve():
         raise RuntimeError("Native working directory mismatch")
+    try:
+        _run_child(directory)
+    except BaseException as error:
+        reason = _failure_reason(error)
+        if reason is not None:
+            _write_json(directory / "failure.json", {"reason": reason})
+        raise
+
+
+def _run_child(directory):
     request = json.loads((directory / "request.json").read_text())
     manifest = read_canonical_snapshot(request["snapshot_reference"], allowed_root=request["canonical_root"])
     if request["operation"] == "caption_export":
@@ -750,6 +814,9 @@ def _child(directory):
     run_split = None
     if request["operation"].endswith("_training") and request["operation"] != "salad_training":
         manifest, run_split = _run_split(manifest)
+        if run_split is not None:
+            print(f"Run split: {run_split['train_images']} train / {run_split['validation_images']} validation / "
+                  f"{run_split['test_images']} test images; {run_split['images_split_for_run']} unsplit images split for this run", flush=True)
     dataset, source, inputs = _materialize(manifest, directory)
     result = _run_native(request, manifest, dataset, source, directory)
     if run_split is not None:

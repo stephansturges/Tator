@@ -86451,7 +86451,15 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             event.preventDefault();
             return;
         }
-        if (event.deltaY < 0) {
+        if (hostedMode) {
+            // Zoom by how far the wheel turned: one mouse-wheel notch is about
+            // a quarter, so a 12-megapixel image reaches its tiny objects in a
+            // few notches; trackpad and pinch (ctrl) events stay smooth.
+            const unit = event.deltaMode === 1 ? 33 : event.deltaMode === 2 ? 800 : 1;
+            const delta = Math.max(-120, Math.min(120, event.deltaY * unit));
+            const factor = Math.exp(-delta * (event.ctrlKey ? 0.01 : 0.0025));
+            scale = Math.min(maxZoom, Math.max(minZoom, scale * factor));
+        } else if (event.deltaY < 0) {
             scale = Math.min(maxZoom, scale * scrollSpeed);
         } else {
             scale = Math.max(minZoom, scale * (1 / scrollSpeed));
@@ -89488,7 +89496,9 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                 group: "Images",
                 label: "Previous image",
                 description: "Switch to the previous image.",
-                defaultBindings: [makeBinding("Tab", "Tab"), makeBinding("ArrowLeft", "ArrowLeft")],
+                // In the hosted canvas Tab moves keyboard focus, so the panel
+                // and lists stay reachable without a mouse.
+                defaultBindings: hostedMode ? [makeBinding("ArrowLeft", "ArrowLeft")] : [makeBinding("Tab", "Tab"), makeBinding("ArrowLeft", "ArrowLeft")],
                 run: () => navigateImage(-1),
             },
             {
@@ -90652,6 +90662,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         };
 
         initShortcutSettingsUi();
+        if (hostedMode) hostedDeleteSelection = deleteSelectedOrCurrentBboxShortcut;
         keyboardListenersBound = true;
         window.addEventListener("keydown", captureShortcutBindingEvent, true);
         document.addEventListener("keydown", captureShortcutBindingEvent, true);
@@ -91447,6 +91458,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             reason: "Captioning is off: no caption model is set up for this dataset (an administrator configures one in Tools & models)." },
     ];
     var hostedToolGate = {}; // var: mode toggles may consult it before this line runs.
+    var hostedDeleteSelection = null; // Set by the keyboard setup; used by the hosted panel's Delete button.
     function hostedToolBlocked(key) {
         if (!hostedMode || !hostedToolGate?.[key]) return false;
         setSamStatus(hostedToolGate[key], { variant: "warn", duration: 5000 });
@@ -91728,6 +91740,27 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             renderCaptionAlternatesForCurrentImage();
         },
         freeze(value = true) { annotationSourceState.readOnly = value; syncLabelingSourceControls(); },
+        // View and selection helpers for the hosted panel, keys and touch.
+        fitView() { if (currentImage?.object) fitZoom(currentImage); },
+        hasSelection() { return selectedBboxes.size > 0 || currentBbox !== null; },
+        deleteSelection() {
+            if (!this.hasSelection() || !hostedDeleteSelection) return false;
+            hostedDeleteSelection(); return true;
+        },
+        // Two-finger gesture: the image point under the fingers' midpoint
+        // stays under it while the fingers pinch (zoom) and move (pan).
+        beginGesture(clientX, clientY) {
+            const bounds = canvas.element.getBoundingClientRect();
+            const x = clientX - bounds.left, y = clientY - bounds.top;
+            return { scale, realX: (x - screenX) / scale + canvasX, realY: (y - screenY) / scale + canvasY };
+        },
+        moveGesture(start, clientX, clientY, ratio) {
+            const bounds = canvas.element.getBoundingClientRect();
+            scale = Math.min(maxZoom, Math.max(minZoom, start.scale * ratio));
+            canvasX = start.realX; canvasY = start.realY;
+            screenX = clientX - bounds.left; screenY = clientY - bounds.top;
+            mouse.x = screenX; mouse.y = screenY; mouse.realX = zoomXInv(mouse.x); mouse.realY = zoomYInv(mouse.y);
+        },
     };
 
     async function loadSam3ClipClassifiers() {

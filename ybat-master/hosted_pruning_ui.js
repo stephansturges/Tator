@@ -1,6 +1,14 @@
 /* Authenticated hosting adapter; the established pruning controls stay intact. */
 (async () => {
     "use strict";
+    // Follow the theme chosen in the dataset workspace (same stored keys).
+    try {
+        const mode = localStorage.getItem("tator.themeMode"), root = document.documentElement;
+        if (["dark", "pipboy"].includes(mode)) {
+            root.dataset.theme = mode; root.classList.add("theme-dark");
+            if (mode === "pipboy" && localStorage.getItem("tator.pipboyAccent") === "amber") root.dataset.pipboyAccent = "amber";
+        }
+    } catch (_error) { /* storage unavailable: keep the light theme */ }
     const boot = window.TatorPruningBoot, notice = document.getElementById("hostedPruningNotice");
     let context, instance;
     const base = `/api/hosted/analysis/jobs/${encodeURIComponent(boot.job_id)}`;
@@ -25,7 +33,7 @@
     try {
         const [job, meta] = await Promise.all([json(base), json(base + "/view")]);
         const dataset = await json(`/api/hosted/datasets/${encodeURIComponent(job.dataset_id)}`);
-        context = { apiRoot: location.origin + base, backendId: `${boot.instance_id}:${boot.user_id}`,
+        context = { apiRoot: location.origin + base, backendId: `${boot.instance_id}:${boot.user_id}`, backendName: "the saved server analysis",
             annotationSource: { kind: "dataset", id: dataset.id }, revision: job.request.dataset_revision,
             datasetName: dataset.name, imageCount: job.confirmed_count, inventory: { image_count: job.confirmed_count } };
         if (job.stale) notice.textContent = "This analysis describes an earlier confirmed version. You can inspect it; run a new analysis before changing its removal plan.";

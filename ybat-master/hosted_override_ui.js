@@ -17,10 +17,18 @@
     list.style.maxHeight = "40vh"; list.style.overflowY = "auto";
     const reasonLabel = node("label", "Why are you recalling this work?"), reason = node("textarea"); reason.id = "recallReason"; reason.rows = 2; reason.maxLength = 10000; reason.required = true; reasonLabel.append(reason);
     const submit = node("button", "Recall selected images"), close = node("button", "Close"); submit.id = "recallSubmit"; submit.className = "primary";
-    const actions = node("div"); actions.className = "dialog-actions"; actions.append(close, submit);
-    for (const control of [selectAll, clear, refresh, more, submit, close]) control.type = "button";
+    // After a recall, the usual next step is handing the same images to someone else.
+    const handoff = node("button", "Create a tranche from these images"); handoff.id = "recallHandoff"; handoff.className = "primary"; handoff.hidden = true;
+    const actions = node("div"); actions.className = "dialog-actions"; actions.append(close, submit, handoff);
+    for (const control of [selectAll, clear, refresh, more, submit, close, handoff]) control.type = "button";
     dialog.append(heading, explanation, notice, filterLabel, controls, count, list, more, reasonLabel, actions); document.body.append(dialog);
-    let sequence = 0, sessionKey = "", datasetId = "", rows = [], selected = new Set(), pending = null, busy = false, visible = 100, storageKey = "";
+    let sequence = 0, sessionKey = "", datasetId = "", rows = [], selected = new Set(), pending = null, busy = false, visible = 100, storageKey = "", recalled = [];
+    function finished(on) {
+        for (const part of [filterLabel, controls, count, list, reasonLabel, submit]) part.hidden = on;
+        if (on) more.hidden = true;
+        handoff.hidden = !on || !recalled.length || recalled.length > 500;
+        handoff.textContent = `Create a tranche from these ${recalled.length.toLocaleString()} image${recalled.length === 1 ? "" : "s"}`;
+    }
     const identity = () => JSON.stringify([app.session?.instance_id, app.session?.user.user_id, app.session?.csrf]);
     const current = ticket => ticket === sequence && dialog.open && app.session?.user.role === "admin" && identity() === sessionKey && app.datasetId === datasetId;
     const tell = (text, error = false) => { notice.textContent = text; notice.hidden = !text; notice.dataset.error = String(error); };
@@ -66,7 +74,7 @@
             const owners = [...new Set(rows.map(image => image.assignee_id))];
             for (const owner of owners) {
                 const user = users.users.find(user => user.id === owner), amount = rows.filter(image => image.assignee_id === owner).length;
-                const option = node("option", `${user?.username || owner}${user?.disabled ? " (disabled)" : ""} · ${amount} images`); option.value = owner; filter.append(option);
+                const option = node("option", `${user ? app.personLabel?.(user) || user.username : owner}${user?.disabled ? " (access disabled)" : ""} · ${amount.toLocaleString()} image${amount === 1 ? "" : "s"}`); option.value = owner; filter.append(option);
             }
             tell(""); render();
         } finally { if (current(ticket)) { busy = false; update(); } }
@@ -75,7 +83,7 @@
         if (app.session?.user.role !== "admin" || !app.datasetId) return;
         datasetId = app.datasetId; sessionKey = identity(); const ticket = ++sequence;
         storageKey = `tator.hosted.recall:${app.session.instance_id}:${app.session.user.user_id}:${datasetId}`;
-        rows = []; selected.clear(); reason.value = ""; pending = null; busy = false; filter.replaceChildren(); list.replaceChildren();
+        rows = []; selected.clear(); reason.value = ""; pending = null; busy = false; filter.replaceChildren(); list.replaceChildren(); recalled = []; finished(false);
         heading.textContent = `Recall assigned work · ${document.getElementById("datasetChoice").selectedOptions[0]?.textContent || "Dataset"}`;
         dialog.showModal(); tell("");
         try { pending = JSON.parse(sessionStorage.getItem(storageKey) || "null"); }
@@ -88,6 +96,8 @@
     async function commit() {
         const ticket = sequence;
         if (!current(ticket) || busy) return;
+        // A recovered earlier recall may describe images that were reassigned since.
+        const fresh = !pending;
         if (!pending) {
             const chosen = rows.filter(row => selected.has(row.id));
             if (!chosen.length || !reason.value.trim()) return;
@@ -114,7 +124,11 @@
             }
             sessionStorage.removeItem(storageKey); pending = null;
             const message = `${result.images.length.toLocaleString()} image${result.images.length === 1 ? "" : "s"} recalled to Incoming as Not assigned. Saved work and history were preserved.`;
-            dialog.close(); app.notice(message);
+            if (fresh) {
+                // Stay open on the result, so the same images can go straight into a new tranche.
+                recalled = result.images; selected.clear(); finished(true); app.notice(message);
+                tell(`${message}${recalled.length <= 500 ? " To give them to someone else, create a tranche from them now." : " Select them in Incoming to give them to someone else."}`);
+            } else { dialog.close(); app.notice(message); }
             try { await app.refresh(); app.notice(message); }
             catch (error) { if (!error.stale) app.notice(`${message} Refresh the workspace to see the saved result.`, true); }
         } catch (error) {
@@ -133,6 +147,7 @@
     reason.oninput = update;
     refresh.onclick = () => app.action(refresh, () => load(++sequence));
     close.onclick = () => dialog.close();
+    handoff.onclick = () => { const images = recalled; dialog.close(); window.TatorHostedTranches?.create(images); };
     button.onclick = () => app.action(button, open);
     submit.onclick = () => { commit().catch(error => tell(error.message, true)); };
     dialog.addEventListener("close", () => { ++sequence; });

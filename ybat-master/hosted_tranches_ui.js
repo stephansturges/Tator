@@ -9,15 +9,50 @@
     // One label per state, shared with the Incoming and Review grids.
     const labels = {not_assigned: "Not assigned", to_finish: "Assigned", changes_requested: "Returned for changes", awaiting_review: "Waiting for review", approved: "Confirmed", removed: "Removed", transferred: "Transferred", archived: "Archived"};
     const count = (value, one, many = `${one}s`) => `${Number(value || 0).toLocaleString()} ${value === 1 ? one : many}`;
+    const EDITABLE = ["not_assigned", "to_finish", "changes_requested", "awaiting_review"];
     const panel = el("section", undefined, "hosted-tranches"); panel.id = "tranchePanel"; panel.hidden = true; $("imageGrid").before(panel);
     const recovery = el("aside", undefined, "hosted-tranche-recovery"); recovery.id = "trancheRecovery"; recovery.hidden = true; panel.before(recovery);
     const dialog = el("dialog"); dialog.id = "trancheDialog"; document.body.append(dialog);
     let sequence = 0, shown = false, current = null, members = [], selected = new Map(), cursor = null, pending = null, running = false, owner = "";
-    let filter = "all", lifecycle = "open", query = "", assigneeFilter = "", listRows = [], listCursor = null;
+    let filter = "all", lifecycle = "open", query = "", assigneeFilter = "", listRows = [], listCursor = null, otherDatasets = [];
     const identity = () => app.session ? `${app.session.instance_id}:${app.session.user.user_id}` : "";
     const key = () => `tator.hosted.tranche-command:${identity()}`;
     // The canvas keeps these in its Back link, so the workspace reopens this tranche.
-    const scopeLink = (id, tranche, queue) => `/annotate?${new URLSearchParams({image: id, ...(tranche ? {tranche} : {}), queue, dataset: app.datasetId, view: admin() ? "tranches" : "mine"})}`;
+    const scopeLink = (id, tranche, queue, dataset = app.datasetId) => `/annotate?${new URLSearchParams({image: id, ...(tranche ? {tranche} : {}), queue, dataset, view: admin() ? "tranches" : "mine"})}`;
+    const open = tranche => (tranche.counts.to_finish || 0) + (tranche.counts.changes_requested || 0);
+    // Short reasons for images a review command left unchanged, grouped so a
+    // long selection reads as a few lines rather than one line per file.
+    const reviewSkips = {ownership_changed: "changed since you selected them; someone else may already have reviewed them", annotation_version_changed: "changed since you selected them; someone else may already have reviewed them",
+        image_not_approvable: "are no longer waiting for review", editor_lease_conflict: "are open for editing", image_not_found: "are no longer available"};
+    function skipped(rows, names) {
+        const groups = new Map();
+        for (const row of rows) { const reason = reviewSkips[row.error] || (app.errorText?.(row.error, row.detail) || row.detail || row.error || "").replace(/\.$/, ""); if (!groups.has(reason)) groups.set(reason, []); groups.get(reason).push(names[row.image_id] || row.image_id); }
+        return [...groups].map(([reason, files]) => `${count(files.length, "image")} not approved: ${reason} (${files.slice(0, 3).join(", ")}${files.length > 3 ? ` and ${(files.length - 3).toLocaleString()} more` : ""}).`).join(" ");
+    }
+    // Say what changed, not only that a command was saved.
+    function describe(operation, result) {
+        if (operation.bulk_review) {
+            const rejected = result.images.filter(row => row.status === "rejected");
+            return `${count(result.images.length - rejected.length, "image")} approved.${rejected.length ? ` ${skipped(rejected, operation.review_names)} The list below is refreshed.` : ""}`;
+        }
+        if (operation.image_command) return `${operation.label.replace(/^Withdraw /, "")} was withdrawn to Incoming as Not assigned.`;
+        const tranche = result.tranche, images = Array.isArray(result.images) ? result.images.length : 0, name = `“${tranche.name}”`, path = operation.path;
+        if (/\/(activate|assignee)$/.test(path)) return `${name} is assigned to ${tranche.annotator_name || "the annotator"}: ${count(images, "image")}. They see it in My tranches.`;
+        if (/\/datasets\/[^/]+\/tranches$/.test(path)) return `Draft ${name} created with ${count(images, "image")}. Annotators cannot see it until you assign it.`;
+        if (path.endsWith("/members/add")) return `${count(images, "image")} added to ${name}${tranche.lifecycle === "active" ? ` and assigned to ${tranche.annotator_name || "its annotator"}` : ""}.`;
+        if (path.endsWith("/members/remove")) return `${count(images, "image")} removed from ${name} and returned to Incoming as Not assigned.`;
+        if (path.endsWith("/move")) return `${count(images, "image")} moved to “${result.destination?.name || "the other tranche"}”.`;
+        if (path.endsWith("/close")) return `${name} is closed.`;
+        if (path.endsWith("/edit")) return `${name} is updated.`;
+        if (path.endsWith("/reopen")) return `${name} is open again as a Draft.`;
+        return `${operation.label}: saved.`;
+    }
+    // Images open in someone's editing tab: their unsaved changes stay in that tab.
+    const editing = rows => rows.filter(row => row?.editor_lease).length;
+    function confirmEditing(rows, who = "an annotator") {
+        const busy = editing(rows);
+        return !busy || confirm(`${count(busy, "image")} ${busy === 1 ? "is" : "are"} open in ${who}'s editing tab right now. Changes saved so far move with the image; unsaved changes in that tab stay there and the tab can no longer save. Continue?`);
+    }
     const currentQuery = () => new URLSearchParams(location.search);
     const admin = () => app.session?.user.role === "admin";
     function persist(value) {
@@ -68,7 +103,15 @@
                     if ([400, 403, 404, 409, 422, 423].includes(error.status)) {
                         if (operation.import_storage_key) sessionStorage.removeItem(operation.import_storage_key);
                         persist(null);
-                        throw new Error(`${error.message} No changes from this command were applied.${operation.stage === "activate" ? " The created Draft remains available; review it and assign it again." : " Refresh the selection before trying again."}`);
+                        // Usually someone else changed the tranche first: show its current state
+                        // instead of leaving a stale form and page that would be refused again.
+                        let refreshed = false;
+                        if (error.status === 409 && shown && app.datasetId === operation.dataset_id) {
+                            dialog.close();
+                            try { await show(); refreshed = true; } catch (_) { /* The message below still applies. */ }
+                        }
+                        const lead = refreshed && ["tranche_revision_changed", "tranche_membership_changed"].includes(error.code) ? "Someone else changed this tranche first." : error.message;
+                        throw new Error(`${lead} No changes from this command were applied.${operation.stage === "activate" ? " The created Draft remains available; review it and assign it again." : refreshed ? " The tranche below now shows its current state; check it before trying again." : operation.body?.image_ids || operation.body?.images ? " Refresh the selection before trying again." : ""}`);
                     }
                     throw error;
                 }
@@ -80,11 +123,15 @@
                         annotator_id: operation.assign_after_create, ...captured(result.images)}, tranche_id: tranche.id});
                 } else {
                     committed = result; if (operation.import_storage_key) sessionStorage.removeItem(operation.import_storage_key); const trancheId = result.tranche?.id || operation.tranche_id; persist(null); dialog.close();
-                    app.notice(`${operation.bulk_review ? `${count(result.images.filter(row => row.status === "approved").length, "image")} approved. ${result.images.filter(row => row.status === "rejected").map(row => `${operation.review_names[row.image_id]}: ${app.errorText?.(row.error, row.detail) || row.detail || row.error}`).join("; ")}` : `${operation.label}: saved.`}${operation.import_summary?.excluded.length ? ` Not attached: ${operation.import_summary.excluded.join("; ")}.` : ""}`);
+                    const message = `${describe(operation, result)}${operation.import_summary?.excluded.length ? ` Not attached: ${operation.import_summary.excluded.join("; ")}.` : ""}`;
+                    const partial = operation.bulk_review && result.images.some(row => row.status === "rejected");
                     if (app.datasetId === operation.dataset_id) {
-                        history.pushState(null, "", `/?${new URLSearchParams({dataset: operation.dataset_id, view: admin() ? "tranches" : "mine", tranche: trancheId})}`);
-                        try { await app.showView(admin() ? "tranches" : "mine"); } catch (_) { app.notice("The change was saved. Refresh to load the current tranche.", true); }
+                        const target = `/?${new URLSearchParams({dataset: operation.dataset_id, view: admin() ? "tranches" : "mine", tranche: trancheId})}`;
+                        if (target !== location.pathname + location.search) history.pushState(null, "", target);
+                        // Showing the view clears the notice, so the result is written after it.
+                        try { await app.showView(admin() ? "tranches" : "mine"); } catch (_) { app.notice(`${message} Refresh to load the current tranche.`, true); return committed; }
                     }
+                    app.notice(message, partial);
                 }
             }
         } catch (error) { if (owner === capturedOwner && !error.stale) app.notice(`${error.message}${pending ? " Use Check and continue to recover the original command." : ""}`, true); }
@@ -112,26 +159,51 @@
         history.pushState(null, "", `/?${new URLSearchParams({dataset: app.datasetId, view: admin() ? "tranches" : "mine", ...(id ? {tranche: id} : {})})}`);
         return show();
     }
-    async function list(append = false) {
+    async function list(append = false, quiet = false) {
         const ticket = ++sequence, dataset = app.datasetId;
-        if (!append) { listRows = []; listCursor = null; panel.replaceChildren(); }
+        // A quiet refresh keeps the current cards until the new ones arrive.
+        if (!append) { listCursor = null; if (!quiet) { listRows = []; panel.replaceChildren(); } }
         const params = new URLSearchParams({dataset_id: dataset, limit: "50"});
         if (lifecycle) params.set("lifecycle", lifecycle); if (assigneeFilter && admin()) params.set("annotator_id", assigneeFilter); if (query) params.set("q", query);
         if (append && listCursor) params.set("cursor", listCursor);
-        const result = await app.api(`/tranches?${params}`);
+        const [result, elsewhere] = await Promise.all([app.api(`/tranches?${params}`), append || admin() ? null : otherWork(dataset)]);
         if (ticket !== sequence || !shown || dataset !== app.datasetId) return;
+        if (elsewhere) otherDatasets = elsewhere;
+        if (!append) listRows = [];
         listRows.push(...result.tranches); listCursor = result.next_cursor; renderList();
     }
+    // An annotator sees one dataset at a time; say where else work is waiting.
+    async function otherWork(dataset, skip = null) {
+        const rows = []; let next = null;
+        do { const q = new URLSearchParams({lifecycle: "active", limit: "100"}); if (next) q.set("cursor", next); const page = await app.api(`/tranches?${q}`); rows.push(...page.tranches); next = page.next_cursor; } while (next && rows.length < 1000);
+        return rows.filter(t => open(t) && t.id !== skip && (dataset === null || t.dataset_id !== dataset));
+    }
+    function switchTo(tranche) {
+        const choice = $("datasetChoice");
+        if (choice.value === tranche.dataset_id) return route(tranche.id);
+        choice.value = tranche.dataset_id; choice.dispatchEvent(new Event("change"));
+    }
+    function elsewhereNote(rows) {
+        const box = el("div", undefined, "tranche-elsewhere"); box.setAttribute("role", "note");
+        const byDataset = new Map();
+        for (const t of rows) { const entry = byDataset.get(t.dataset_id) || {first: t, name: t.dataset_name, images: 0}; entry.images += open(t); byDataset.set(t.dataset_id, entry); }
+        box.append(el("strong", "You also have work in other datasets:"));
+        for (const entry of byDataset.values()) box.append(button(`${entry.name || "Another dataset"} · ${count(entry.images, "image")} to annotate`, () => switchTo(entry.first)));
+        return box;
+    }
     function personName(user) { return app.personLabel ? app.personLabel(user) : user.username; }
+    // An annotator's own counts: nothing retained but some moved away means the work was handed over.
+    const handedOver = tranche => tranche.personal && !tranche.counts.retained && (tranche.counts.transferred || tranche.counts.removed);
     function statusLine(tranche) {
-        if (tranche.lifecycle === "active") return `Active · Assigned to ${tranche.annotator_name || "an annotator"}`;
+        if (handedOver(tranche)) return `No longer assigned to you · ${tranche.lifecycle === "closed" ? "Closed" : "your earlier outcomes stay listed"}`;
+        if (tranche.lifecycle === "active") return `Active · Assigned to ${tranche.personal ? "you" : tranche.annotator_name || "an annotator"}`;
         if (tranche.lifecycle === "draft") return `Draft · not given to anyone yet${tranche.annotator_name ? ` (planned for ${tranche.annotator_name})` : ""}`;
         return "Closed · kept for history";
     }
     function renderList() {
         panel.replaceChildren();
         const toolbar = el("div", undefined, "tranche-toolbar"), stateLabel = el("label", "Status"), stateSelect = el("select");
-        for (const [value, text] of [["open", "Open (Draft and Active)"], ["draft", "Draft"], ["active", "Active"], ["closed", "Closed"], ["", "All, including closed"]]) stateSelect.append(new Option(text, value));
+        for (const [value, text] of admin() ? [["open", "Open (Draft and Active)"], ["draft", "Draft"], ["active", "Active"], ["closed", "Closed"], ["", "All, including closed"]] : [["open", "Open"], ["closed", "Closed"], ["", "All, including closed"]]) stateSelect.append(new Option(text, value));
         stateSelect.value = lifecycle; stateSelect.onchange = () => { lifecycle = stateSelect.value; app.action(stateSelect, () => list()); }; stateLabel.append(stateSelect);
         const search = el("input"); search.type = "search"; search.placeholder = "Find a tranche"; search.value = query; search.setAttribute("aria-label", "Find a tranche");
         const form = el("form"); form.className = "tranche-search"; form.append(search, button("Search", () => { query = search.value.trim(); return list(); })); form.onsubmit = e => { e.preventDefault(); query = search.value.trim(); app.action(search, () => list()); };
@@ -144,15 +216,17 @@
             const steps = el("ol", undefined, "tranche-steps");
             for (const text of ["Add new images in Incoming.", "Group them into a tranche and assign it to one annotator. Drafts stay private until assigned.", "The annotator submits images one by one. Approve them in Review to add them to the Confirmed dataset."]) steps.append(el("li", text));
             panel.append(steps);
-        }
+        } else if (otherDatasets.length) panel.append(elsewhereNote(otherDatasets));
         const grid = el("div", undefined, "tranche-grid");
-        for (const tranche of listRows) {
+        // Annotators see the tranches that still have work for them first.
+        const ordered = admin() ? listRows : [...listRows].sort((a, b) => (open(b) > 0) - (open(a) > 0));
+        for (const tranche of ordered) {
             const card = el("article", undefined, "tranche-card"); card.dataset.trancheId = tranche.id;
-            const complete = tranche.counts.ever_included > 0 && ["not_assigned", "to_finish", "changes_requested", "awaiting_review"].every(key => !tranche.counts[key]);
+            const complete = tranche.counts.ever_included > 0 && !handedOver(tranche) && EDITABLE.every(key => !tranche.counts[key]);
             card.append(el("h2", tranche.name), el("p", `${complete ? "Complete · " : ""}${statusLine(tranche)}${tranche.annotator_id && !tranche.annotator_available ? " · Annotator unavailable" : ""}`), totals(tranche));
             if (tranche.instructions) card.append(el("p", tranche.instructions, "tranche-instructions"));
             if (tranche.updated_at) card.append(el("small", `Last activity ${new Date(tranche.updated_at * 1000).toLocaleString()}`, "tranche-activity"));
-            if (!admin() && tranche.counts.to_finish + tranche.counts.changes_requested) card.append(button("Continue annotation", () => openQueue("work", tranche), "primary"));
+            if (!admin() && open(tranche)) card.append(button("Continue annotation", () => openQueue("work", tranche), "primary"));
             card.append(button(admin() ? "Manage tranche" : "Open tranche", () => route(tranche.id))); grid.append(card);
         }
         panel.append(grid);
@@ -161,9 +235,16 @@
     }
     async function detail(id, append = false) {
         const ticket = ++sequence, dataset = app.datasetId;
-        if (!append) { members = []; selected.clear(); cursor = null; }
+        if (!append) { members = []; selected.clear(); cursor = null; if (current?.id !== id) filter = "all"; }
         const params = new URLSearchParams({state: filter, limit: "100"}); if (append && cursor) params.set("cursor", cursor);
-        const result = await app.api(`/tranches/${encodeURIComponent(id)}/members?${params}`);
+        let result;
+        try { result = await app.api(`/tranches/${encodeURIComponent(id)}/members?${params}`); }
+        catch (error) {
+            if (error.status !== 404 || ticket !== sequence || !shown || dataset !== app.datasetId) throw error;
+            // An old or shared link to a tranche this account cannot open: show the list instead of an empty page.
+            history.replaceState(null, "", `/?${new URLSearchParams({dataset, view: admin() ? "tranches" : "mine"})}`);
+            current = null; await list(); app.notice(`${error.message} Showing ${admin() ? "this dataset's tranches" : "your tranches"} instead.`, true); return;
+        }
         if (ticket !== sequence || !shown || dataset !== app.datasetId) return;
         if (result.tranche.dataset_id !== dataset) {
             // A link can name a tranche of another dataset: list this dataset's tranches instead.
@@ -190,7 +271,29 @@
     async function openQueue(queue, tranche = current) {
         const result = await app.api(`/queue?${new URLSearchParams({dataset_id: tranche.dataset_id, tranche_id: tranche.id, queue, limit: "1"})}`);
         if (!result.images.length) { app.notice(queue === "work" ? "All your images are submitted. The administrator can review them now." : "There are no images in this queue."); await route(tranche.id); return; }
-        location.assign(scopeLink(result.images[0].id, tranche.id, queue));
+        location.assign(scopeLink(result.images[0].id, tranche.id, queue, tranche.dataset_id));
+    }
+    // After a tranche is finished, offer the annotator's next open tranche.
+    async function suggestNext(tranche, box) {
+        const ticket = sequence, rows = await otherWork(null, tranche.id);
+        if (ticket !== sequence || !rows.length) return;
+        const next = rows.find(t => t.dataset_id === tranche.dataset_id) || rows[0];
+        box.append(el("span", `Next: “${next.name}”${next.dataset_id !== tranche.dataset_id ? ` in ${next.dataset_name}` : ""} has ${count(open(next), "image")} to annotate.`),
+            button("Continue there", () => openQueue("work", next), "primary"));
+    }
+    // Every image in the current filter, across pages, as one selection of at most 500.
+    async function selectAll(tranche) {
+        const authority = identity(), state = filter, rows = []; let next = null;
+        const tooMany = () => new Error(`More than 500 images are ${labels[state].toLowerCase()}. One change accepts at most 500; ${state === "awaiting_review" ? "use the Review view with this tranche selected to approve more at once, or " : ""}select a page at a time.`);
+        if ((tranche.counts[state] || 0) > 500) throw tooMany();
+        do {
+            const params = new URLSearchParams({state, limit: "500"}); if (next) params.set("cursor", next);
+            const page = await app.api(`/tranches/${encodeURIComponent(tranche.id)}/members?${params}`);
+            if (identity() !== authority || app.datasetId !== tranche.dataset_id || current?.id !== tranche.id || filter !== state) return;
+            rows.push(...page.members.filter(m => m.image && m.state === state)); next = page.next_cursor;
+            if (rows.length > 500) throw tooMany();
+        } while (next);
+        selected.clear(); rows.forEach(m => selected.set(m.image_id, m.image)); renderDetail();
     }
     function renderDetail() {
         panel.replaceChildren();
@@ -205,40 +308,57 @@
                 actions.append(button("Edit name & instructions", () => edit(tranche)), button("Add Incoming images", () => pickIncoming(tranche)));
                 actions.append(button("Upload images here", () => window.TatorHostedImport?.start({tranche_id: tranche.id})));
                 if (tranche.lifecycle === "draft") actions.append(button("Assign tranche", () => chooseAssignee(tranche), "primary"));
-                else { const change = button("Change annotator", () => chooseAssignee(tranche)); change.disabled = Boolean(tranche.counts.awaiting_review); if (change.disabled) change.title = "Review pending submissions first, or move selected unfinished images to another tranche."; actions.append(change); }
-                actions.append(button("Close tranche", () => command(`Close “${tranche.name}”`, `/tranches/${tranche.id}/close`, {expected_revision: tranche.revision})));
+                else { const change = button("Change annotator", () => chooseAssignee(tranche)); change.disabled = Boolean(tranche.counts.awaiting_review); if (change.disabled) { change.title = "Review pending submissions first, or move selected unfinished images to another tranche."; change.setAttribute("aria-describedby", "trancheChangeHint"); } actions.append(change); }
+                actions.append(button("Close tranche", () => { const left = EDITABLE.filter(key => tranche.counts[key]).map(key => `${tranche.counts[key].toLocaleString()} ${labels[key].toLowerCase()}`);
+                    if (left.length) throw new Error(`This tranche still has work: ${left.join(", ")}. Close it once those images are confirmed, or remove them from the tranche first.`);
+                    return command(`Close “${tranche.name}”`, `/tranches/${tranche.id}/close`, {expected_revision: tranche.revision}); }));
             } else actions.append(button("Reopen as Draft", () => command(`Reopen “${tranche.name}”`, `/tranches/${tranche.id}/reopen`, {expected_revision: tranche.revision})));
             if (tranche.counts.awaiting_review) actions.append(button(`Review ${count(tranche.counts.awaiting_review, "image")}`, () => openQueue("review"), "primary"));
             if (tranche.lifecycle === "draft" && tranche.counts.not_assigned) actions.append(button("Annotate Draft yourself", () => openQueue("draft")));
             actions.append(button("View history", () => showHistory(tranche)));
-        } else if (tranche.counts.to_finish + tranche.counts.changes_requested) actions.append(button("Continue annotation", () => openQueue("work"), "primary"));
-        else panel.append(el("p", tranche.counts.awaiting_review ? "All your images are submitted. You can track the administrator’s review here." : "No images are currently assigned to you in this tranche. Your earlier outcomes remain below."));
+        } else if (open(tranche)) actions.append(button("Continue annotation", () => openQueue("work"), "primary"));
+        else {
+            const done = el("div", undefined, "tranche-toolbar tranche-next");
+            done.append(el("p", tranche.counts.awaiting_review ? "All your images are submitted. You can track the administrator’s review here." : "No images are currently assigned to you in this tranche. Your earlier outcomes remain below."));
+            panel.append(done); suggestNext(tranche, done).catch(() => {});
+        }
         panel.append(actions);
+        if (admin() && tranche.lifecycle === "active" && tranche.counts.awaiting_review && open(tranche)) {
+            const hint = el("p", `To change the annotator, first review the ${count(tranche.counts.awaiting_review, "waiting image")}. To hand over unfinished work now, select it below and use Move to another tranche, or use Recall assigned work.`, "tranche-hint tranche-subtle");
+            hint.id = "trancheChangeHint"; panel.append(hint);
+        }
         const filters = el("label", "Show images"), select = el("select"); select.id = "trancheMemberFilter";
         select.append(new Option("All outcomes", "all")); for (const [key, text] of Object.entries(labels)) select.append(new Option(text, key)); select.value = filter;
         select.onchange = () => { filter = select.value; app.action(select, () => detail(tranche.id)); }; filters.append(select); panel.append(filters);
-        const selectionBar = el("div", undefined, "tranche-toolbar"); selectionBar.id = "trancheSelection";
-        if (admin() && tranche.lifecycle !== "closed") selectionBar.append(button("Select eligible images on this page", () => { members.forEach(m => { if (m.image && ["not_assigned", "to_finish", "changes_requested", "awaiting_review"].includes(m.state)) selected.set(m.image_id, m.image); }); renderDetail(); }), button("Clear selection", () => { selected.clear(); renderDetail(); }));
-        selectionBar.append(el("span", `${selected.size.toLocaleString()} selected · maximum 500 per change`));
-        if (selected.size) {
-            const rows = [...selected.values()];
-            if (rows.every(image => image.state === "submitted")) selectionBar.append(button("Approve selected submissions", () => approveSelected(tranche), "primary"));
-            else if (rows.every(image => image.state !== "submitted")) selectionBar.append(button("Remove from tranche", () => removal(tranche)), button("Move to another tranche", () => move(tranche)));
-            else selectionBar.append(el("span", "Select submitted images separately to approve them, or unfinished images to move them."));
+        if (admin()) {
+            const selectionBar = el("div", undefined, "tranche-toolbar"); selectionBar.id = "trancheSelection";
+            if (tranche.lifecycle !== "closed") {
+                selectionBar.append(button("Select eligible images on this page", () => { members.forEach(m => { if (m.image && EDITABLE.includes(m.state)) selected.set(m.image_id, m.image); }); renderDetail(); }));
+                if (EDITABLE.includes(filter) && tranche.counts[filter] > members.length) selectionBar.append(button(`Select all ${labels[filter].toLowerCase()} (${tranche.counts[filter].toLocaleString()})`, () => selectAll(tranche)));
+                selectionBar.append(button("Clear selection", () => { selected.clear(); renderDetail(); }));
+            }
+            const status = el("span", `${selected.size.toLocaleString()} selected · maximum 500 per change`); status.setAttribute("role", "status"); selectionBar.append(status);
+            if (selected.size) {
+                const rows = [...selected.values()];
+                if (rows.every(image => image.state === "submitted")) selectionBar.append(button("Approve selected submissions", () => approveSelected(tranche), "primary"));
+                else if (rows.every(image => image.state !== "submitted")) selectionBar.append(button("Remove from tranche", () => removal(tranche)), button("Move to another tranche", () => move(tranche)));
+                else selectionBar.append(el("span", "Select submitted images separately to approve them, or unfinished images to move them."));
+            }
+            panel.append(selectionBar);
         }
-        panel.append(selectionBar);
         const grid = el("div", undefined, "hosted-grid tranche-members");
         for (const member of members) {
             const card = el("article", undefined, "hosted-card"); card.dataset.imageId = member.image_id;
-            const status = el("small", member.state === "to_finish" && current?.annotator_name ? `Assigned to ${current.annotator_name}` : labels[member.state] || member.state);
+            const status = el("small", `${member.state === "to_finish" && current?.annotator_name ? `Assigned to ${current.annotator_name}` : labels[member.state] || member.state}${member.image?.editor_lease && EDITABLE.includes(member.state) ? " · open for editing now" : ""}`);
             if (member.state === "changes_requested") status.dataset.tone = "warning";
             const info = el("div", undefined, "card-info"); info.append(el("strong", member.filename), status);
+            if (member.feedback) { const feedback = el("small", `Feedback: ${member.feedback}`, "tranche-feedback"); feedback.title = member.feedback; info.append(feedback); }
             if (member.can_view && member.image) {
                 const image = member.image, link = el("a"), photo = el("img"); photo.loading = "lazy"; photo.alt = member.filename; photo.decoding = "async"; photo.onerror = () => { photo.onerror = null; photo.src = `/api/hosted/images/${encodeURIComponent(image.id)}/media`; }; photo.src = `/api/hosted/images/${encodeURIComponent(image.id)}/thumbnail`;
                 const queue = {not_assigned: "draft", to_finish: "work", changes_requested: "work", awaiting_review: "review", approved: "confirmed"}[member.state];
                 link.href = queue ? scopeLink(image.id, queue === "confirmed" ? null : tranche.id, queue) : `/annotate?image=${encodeURIComponent(image.id)}`;
                 link.append(photo, info); card.append(link);
-                if (admin() && ["not_assigned", "to_finish", "changes_requested", "awaiting_review"].includes(member.state)) {
+                if (admin() && EDITABLE.includes(member.state)) {
                     const check = el("input"); check.type = "checkbox"; check.checked = selected.has(image.id); check.setAttribute("aria-label", `Select ${member.filename}`);
                     check.onchange = () => { if (check.checked) selected.set(image.id, image); else selected.delete(image.id); renderDetail(); }; card.append(check);
                 }
@@ -252,7 +372,7 @@
     function form(title) { dialog._context = `${identity()}:${app.datasetId}`; dialog.replaceChildren(el("h2", title)); const notice = el("p"); notice.dataset.dialogNotice = ""; notice.className = "dialog-notice"; notice.hidden = true; dialog.append(notice); const f = el("form"); dialog.append(f); dialog.showModal(); return f; }
     function field(f, text, tag = "input", value = "") { const label = el("label", text), input = el(tag); input.value = value; input.setAttribute("aria-label", text); if (tag === "textarea") { input.rows = 3; input.maxLength = 10000; } label.append(input); f.append(label); return input; }
     function submit(f, text, work) { const row = el("div", undefined, "dialog-actions"), save = el("button", text, "primary"); save.type = "submit"; row.append(button("Cancel", () => dialog.close()), save); f.append(row); f.onsubmit = e => { e.preventDefault(); app.action(save, work); }; }
-    function annotators(f, selectedId = "") { const choice = field(f, "Annotator", "select"); choice.append(new Option("Choose an annotator", "")); for (const user of app.users.filter(u => u.role === "annotator" && !u.disabled)) choice.append(new Option(personName(user), user.id)); choice.value = selectedId; return choice; }
+    function annotators(f, selectedId = "", exclude = "") { const choice = field(f, "Annotator", "select"); choice.append(new Option("Choose an annotator", "")); for (const user of app.users.filter(u => u.role === "annotator" && !u.disabled && u.id !== exclude)) choice.append(new Option(personName(user), user.id)); choice.value = selectedId; return choice; }
     function checkSelection(rows) { if (!rows.length || rows.length > 500) throw new Error("Select between 1 and 500 images for one membership change."); }
     function create(rows = []) {
         if (rows.length > 500) { app.notice("Create a tranche with up to 500 selected images, then add more in further selections.", true); return; }
@@ -267,21 +387,24 @@
         submit(f, "Save changes", () => command(`Update “${name.value.trim()}”`, `/tranches/${tranche.id}/edit`, {expected_revision: tranche.revision, name: name.value.trim(), instructions: instructions.value.trim(), ...(assignee ? {annotator_id: assignee.value || null} : {})}));
     }
     function chooseAssignee(tranche) {
-        const f = form(tranche.lifecycle === "draft" ? "Assign this tranche" : "Change its annotator"), choice = annotators(f, tranche.annotator_id); choice.required = true;
+        const draft = tranche.lifecycle === "draft";
+        // Choosing the current annotator again would only revoke their open editing tabs.
+        const f = form(draft ? "Assign this tranche" : `Change its annotator from ${tranche.annotator_name || "the current annotator"}`), choice = annotators(f, draft ? tranche.annotator_id : "", draft ? "" : tranche.annotator_id); choice.required = true;
         f.append(el("p", "This assigns all unfinished images together. Saved annotations remain intact. Review submitted images before changing an active tranche’s annotator."));
-        submit(f, "Assign unfinished images", async () => { const rows = await allMembers(tranche, tranche.lifecycle === "draft" ? ["not_assigned"] : ["to_finish", "changes_requested"]); return command(`Assign “${tranche.name}”`, `/tranches/${tranche.id}/${tranche.lifecycle === "draft" ? "activate" : "assignee"}`, {expected_revision: tranche.revision, annotator_id: choice.value, ...captured(rows)}); });
+        submit(f, "Assign unfinished images", async () => { const rows = await allMembers(tranche, tranche.lifecycle === "draft" ? ["not_assigned"] : ["to_finish", "changes_requested"]); if (!confirmEditing(rows, tranche.annotator_name || "an annotator")) return; return command(`Assign “${tranche.name}”`, `/tranches/${tranche.id}/${tranche.lifecycle === "draft" ? "activate" : "assignee"}`, {expected_revision: tranche.revision, annotator_id: choice.value, ...captured(rows)}); });
     }
     function removal(tranche) {
         const rows = [...selected.values()]; checkSelection(rows); const f = form(`Remove ${count(rows.length, "image")} from this tranche`), reason = field(f, "Reason", "textarea"); reason.required = true;
         f.append(el("p", "The images return to Incoming as Not assigned, with their saved annotations. Their current annotator loses editing access. Nothing is deleted."));
-        submit(f, "Remove from tranche", () => command(`Remove ${count(rows.length, "image")}`, `/tranches/${tranche.id}/members/remove`, {expected_revision: tranche.revision, reason: reason.value.trim(), ...captured(rows)}));
+        submit(f, "Remove from tranche", () => !confirmEditing(rows, current?.annotator_name || "an annotator") ? null : command(`Remove ${count(rows.length, "image")}`, `/tranches/${tranche.id}/members/remove`, {expected_revision: tranche.revision, reason: reason.value.trim(), ...captured(rows)}));
     }
     async function move(tranche) {
         const rows = [...selected.values()]; checkSelection(rows); const f = form(`Move ${count(rows.length, "image")}`), choice = field(f, "Destination tranche", "select"), reason = field(f, "Reason", "textarea"); reason.required = true;
         const destinations = []; let next = null; do { const q = new URLSearchParams({dataset_id: tranche.dataset_id, limit: "100"}); if (next) q.set("cursor", next); const page = await app.api(`/tranches?${q}`); destinations.push(...page.tranches.filter(t => t.id !== tranche.id && t.lifecycle !== "closed")); next = page.next_cursor; } while (next);
-        destinations.forEach(t => choice.append(new Option(`${t.name} · ${t.lifecycle}${t.annotator_name ? ` · ${t.annotator_name}` : ""}`, t.id))); choice.required = true;
-        f.append(el("p", "Moving to an Active tranche hands the images to its annotator. Moving to a Draft reserves them for an administrator. Saved annotations remain intact."));
-        submit(f, "Move images", () => { const target = destinations.find(t => t.id === choice.value); if (!target) throw new Error("Create another Draft first."); return command(`Move ${count(rows.length, "image")}`, `/tranches/${tranche.id}/move`, {expected_revision: tranche.revision, destination_id: target.id, expected_destination_revision: target.revision, reason: reason.value.trim(), ...captured(rows)}); });
+        destinations.forEach(t => choice.append(new Option(`${t.name} · ${t.lifecycle === "active" ? `Active, ${t.annotator_name || "annotator"}` : "Draft"}`, t.id))); choice.required = true;
+        f.append(el("p", destinations.length ? "Moving to an Active tranche hands the images to its annotator. Moving to a Draft reserves them for an administrator. Saved annotations remain intact."
+            : "There is no other open tranche in this dataset. Cancel, choose All tranches → New tranche to make one, then select these images again."));
+        submit(f, "Move images", () => { const target = destinations.find(t => t.id === choice.value); if (!target) throw new Error("Create another Draft first."); if (!confirmEditing(rows, current?.annotator_name || "an annotator")) return; return command(`Move ${count(rows.length, "image")}`, `/tranches/${tranche.id}/move`, {expected_revision: tranche.revision, destination_id: target.id, expected_destination_revision: target.revision, reason: reason.value.trim(), ...captured(rows)}); });
     }
     async function approveSelected(tranche) {
         const rows = [...selected.values()]; checkSelection(rows);
@@ -328,9 +451,34 @@
         submit(f, "Add selected images", () => { valid(); const selectedRows = [...chosen.values()]; checkSelection(selectedRows); return command(`Add ${count(selectedRows.length, "image")}`, `/tranches/${tranche.id}/members/add`, {expected_revision: tranche.revision, ...captured(selectedRows)}); }); await load();
     }
     async function showHistory(tranche) {
-        const f = form(`${tranche.name} · History`), list = el("div"); let next = null; f.append(list);
-        const load = async () => { const q = new URLSearchParams({limit: "100"}); if (next) q.set("cursor", next); const result = await app.api(`/tranches/${tranche.id}/history?${q}`); result.events.forEach(event => list.append(el("p", `${new Date((event.created_at || event.at) * 1000).toLocaleString()} · ${event.kind || event.action || event.event_type}${event.data?.reason ? ` · ${event.data.reason}` : ""}`))); next = result.next_cursor; more.hidden = !next; };
-        const more = button("Load earlier history", load); f.append(more, button("Close", () => dialog.close())); await load();
+        const f = form(`${tranche.name} · History`), list = el("ol", undefined, "tranche-history"); let next = null; f.append(list);
+        const files = new Map(members.map(m => [m.image_id, m.filename])), people = new Map(app.users.map(u => [u.id, personName(u)]));
+        const who = id => people.get(id) || (String(id || "").startsWith("system") ? "Tator" : "A former account");
+        const images = data => count((data.image_ids || []).length, "image"), reason = data => data.reason ? `: ${data.reason}` : "";
+        const one = (n, data, text) => n > 1 ? `${count(n, "image")} ${text}` : `${files.get(data.image_id) || "One image"} ${text}`;
+        const say = (kind, data, n) => ({created: "Created", edited: "Changed the name or instructions", members_added: `Added ${images(data)}`,
+            members_removed: `Removed ${images(data)} to Incoming${reason(data)}`, members_transferred: `Moved ${images(data)} to another tranche${reason(data)}`,
+            members_received: `Received ${images(data)} from another tranche`, activated: `Assigned ${images(data)} to ${who(data.annotator_id)}`,
+            annotator_changed: `Changed the annotator to ${who(data.annotator_id)} (${images(data)})`, closed: "Closed the tranche", reopened: "Reopened it as a Draft",
+            submitted: one(n, data, "submitted for review"), returned: one(n, data, "returned for changes"), approved: one(n, data, "confirmed"),
+            withdrawn: one(n, data, `removed${reason(data)}`), transferred: one(n, data, "handed to another tranche or annotator"), archived: one(n, data, "archived")}[kind]
+            || `${String(kind).replaceAll("_", " ")}`);
+        // Per-image "assigned" rows repeat the Assigned/Added line written with them.
+        const perImage = new Set(["submitted", "returned", "approved", "withdrawn", "transferred", "archived"]);
+        const load = async () => {
+            const q = new URLSearchParams({limit: "100"}); if (next) q.set("cursor", next);
+            const result = await app.api(`/tranches/${tranche.id}/history?${q}`), groups = [];
+            for (const event of result.events) {
+                const kind = event.kind || event.action || event.event_type, at = event.created_at || event.at, last = groups.at(-1);
+                if (kind === "assigned") continue;
+                if (last && perImage.has(kind) && last.kind === kind && last.actor === event.actor_id && at - last.at < 5 && (last.data.reason || "") === (event.data?.reason || "")) { last.n++; continue; }
+                groups.push({kind, at, actor: event.actor_id, data: event.data || {}, n: 1});
+            }
+            for (const g of groups) list.append(el("li", `${new Date(g.at * 1000).toLocaleString()} · ${who(g.actor)} · ${say(g.kind, g.data, g.n)}`));
+            if (!list.children.length) list.append(el("li", "No events yet."));
+            next = result.next_cursor; more.hidden = !next;
+        };
+        const more = button("Show later events", load); f.append(more, button("Close", () => dialog.close())); await load();
     }
     async function withdraw(image) {
         // This image command has its own existing receipt contract, not a group result.
@@ -344,7 +492,16 @@
             persist({label: `Withdraw ${image.filename}`, dataset_id: image.dataset_id, image_command: true, path: `/images/${image.id}/withdraw-submission`, body: {operation_id: crypto.randomUUID(), expected_version: fresh.current_version, generation: fresh.generation, editor_id: crypto.randomUUID(), submission_id: fresh.active_submission, reason: reason.value.trim()}, tranche_id: current.id}); await resume();
         });
     }
-    async function show() { shown = true; panel.hidden = false; readPending(); if (!app.datasetId) { panel.replaceChildren(el("p", "No datasets are available for this account.")); return; } const id = currentQuery().get("tranche"); return id ? detail(id) : list(); }
+    async function show(quiet = false) { shown = true; shownAt = Date.now(); panel.hidden = false; readPending(); if (!app.datasetId) { panel.replaceChildren(el("p", "No datasets are available for this account.")); return; } const id = currentQuery().get("tranche"); return id ? detail(id) : list(false, quiet); }
+    // Other people keep working: coming back to this tab or window reloads the
+    // counts and cards, unless the person is in the middle of something here.
+    let shownAt = 0;
+    function refreshIfIdle() {
+        if (!shown || document.hidden || !app.session || document.querySelector("dialog[open]") || selected.size || pending || running || members.length > 100 || listCursor || Date.now() - shownAt < 10000) return;
+        const y = scrollY; app.refreshCounts?.();
+        show(true).then(() => scrollTo(0, y)).catch(error => { if (!error.stale) app.notice(error.message, true); });
+    }
+    document.addEventListener("visibilitychange", refreshIfIdle); window.addEventListener("focus", refreshIfIdle);
     function hide() { shown = false; ++sequence; panel.hidden = true; }
     window.TatorHostedTranches = {show, hide, create,
         async attachImported(trancheId, entries, importStorageKey) {

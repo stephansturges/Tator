@@ -108,6 +108,8 @@
     const activeTools = new Map();
     const jsonResponse = (value) => new Response(JSON.stringify(value), { status: 200, headers: { "content-type": "application/json" } });
     const node = (tag, text) => { const e = document.createElement(tag); if (text !== undefined) e.textContent = text; return e; };
+    const mac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+    const keyName = (key) => mac ? `⌘${key}` : `Ctrl+${key}`;
     const messages = {
         image_left_queue: "This image left the current tranche or queue. Your draft is retained. Use Back to tranche to continue.",
         queue_scope_changed: "This tranche changed. Your draft is retained. Return to the tranche to see its current work.",
@@ -152,6 +154,29 @@
         }
         const retentionFailure = [401, 403, 409, 423].includes(error.status) && !contentRejections.has(error.code) ? freeze() : null;
         status(retentionFailure?.message || error.message || String(error), true);
+        if (error.status === 401 && !retentionFailure && !storageFailed) offerSignIn();
+        if (error.code === "ownership_changed") explainOwnership();
+    }
+    // An expired session keeps the draft in this tab; signing in again in the
+    // same tab and reopening the image offers to recover it.
+    let leavingToSignIn = false;
+    function offerSignIn() {
+        const parent = $("hostedSaveState")?.parentElement;
+        if (!parent || $("hostedSignIn")) return;
+        const button = node("button", "Sign in again"); button.type = "button"; button.id = "hostedSignIn";
+        button.title = "Your unsent draft stays in this tab. After signing in, reopen this image to recover it.";
+        button.onclick = () => { leavingToSignIn = true; location.assign(backUrl()); };
+        parent.append(button);
+    }
+    async function explainOwnership() {
+        // Taking the image over in another tab of yours ends editing here.
+        const origin = imageId;
+        try {
+            const current = await api(base);
+            if (imageId === origin && !editable && current.editor_lease?.actor_id === boot.user.user_id) {
+                status("You continued this image in another tab or window, so editing stopped here. Changes made here since then stay in this tab only; close it, or reload it to see the saved version.", true);
+            }
+        } catch (_) { /* Keep the original message. */ }
     }
     function headers(options = {}) {
         const h = new Headers(options.headers);
@@ -505,6 +530,7 @@
         // The server only lets you replace your own editing tab; never offer
         // a takeover that would fail because another person holds the image.
         if ($("hostedTakeover")) $("hostedTakeover").hidden = editable || recoveryRequired || !ownLeaseConflict || (boot.user.role === "admin" && ["assigned", "returned"].includes(record.state));
+        syncEditButtons();
     }
     const userNames = new Map();
     async function personName(userId) {
@@ -574,6 +600,55 @@
         finally { saving = null; update(); }
     }
     async function run(button, action) { if (busy) return; busy = true; pauseMediaPrefetch(); update(); try { await action(); } catch (error) { report(error); } finally { busy = false; update(); scheduleMediaPrefetch(); } }
+    // Undo and redo for the open image's objects. Each finished edit (a
+    // release, a key, a class choice or a tool result) is one step; undoing
+    // restores the objects on the canvas, and autosave stores the result.
+    const undo = { image: null, past: [], future: [] };
+    let pointerHeld = false;
+    function objectState() { return JSON.stringify(window.TatorHostedCanvas.snapshot().objects || []); }
+    function resetUndo() {
+        undo.image = imageId; undo.future = [];
+        try { undo.past = [objectState()]; } catch (_) { undo.past = []; }
+        syncEditButtons();
+    }
+    function noteEdit() {
+        if (!ready || recoveryRequired || pointerHeld || undo.image !== imageId || window.TatorHostedCanvas.hasPendingTools()) return;
+        let current;
+        try { current = objectState(); } catch (_) { return; }
+        if (undo.past.at(-1) === current) return;
+        undo.past.push(current); if (undo.past.length > 100) undo.past.shift();
+        undo.future = []; syncEditButtons();
+    }
+    function stepUndo(direction) {
+        if (!window.TatorHosted.editable) { status("Undo needs editing access. Reconnect editing first.", true); return; }
+        if (window.TatorHostedCanvas.hasPendingTools()) { status("Wait for the annotation tool to finish before undoing.", true); return; }
+        noteEdit();
+        if (direction < 0) {
+            if (undo.past.length < 2) { status("Nothing to undo on this image."); return; }
+            undo.future.push(undo.past.pop());
+        } else {
+            if (!undo.future.length) { status("Nothing to redo on this image."); return; }
+            undo.past.push(undo.future.pop());
+        }
+        const annotations = window.TatorHostedCanvas.snapshot();
+        annotations.objects = JSON.parse(undo.past.at(-1));
+        window.TatorHostedCanvas.restoreDraft(annotations);
+        syncEditButtons();
+        status(`${direction < 0 ? "Undone" : "Redone"} · saves automatically`);
+    }
+    function deleteSelection() {
+        if (!window.TatorHosted.editable) { status("Deleting needs editing access. Reconnect editing first.", true); return; }
+        if (!window.TatorHostedCanvas.deleteSelection()) { status("Click or tap a box first, then delete it."); return; }
+        noteEdit(); status(`Box deleted · ${keyName("Z")} undoes it`);
+    }
+    function syncEditButtons() {
+        const blocked = !editable || !ready || busy || handoff || recoveryRequired;
+        if ($("hostedUndo")) $("hostedUndo").disabled = blocked || undo.past.length < 2;
+        if ($("hostedRedo")) $("hostedRedo").disabled = blocked || !undo.future.length;
+        if ($("hostedDeleteBox")) $("hostedDeleteBox").disabled = blocked;
+    }
+    for (const type of ["pointerup", "keyup", "change", "touchend"]) document.addEventListener(type, () => { if (type !== "keyup") pointerHeld = false; setTimeout(noteEdit, 0); }, true);
+    document.addEventListener("pointerdown", event => { pointerHeld = event.target?.id === "canvas"; }, true);
     window.addEventListener("storage", event => {
         if (event.key === "tator.hosted.session-event") {
             accountChanged = true;
@@ -681,7 +756,7 @@
                 if (Date.now() - began > 30000) throw new Error("This image did not finish loading. Reopen it to retry.");
                 await new Promise((resolve) => setTimeout(resolve, 16));
             }
-            ready = true; lastSaved = JSON.stringify(draft());
+            ready = true; lastSaved = JSON.stringify(draft()); resetUndo();
             window.TatorHostedCanvas.freeze(!editable);
             window.dispatchEvent(new Event("tator:hosted-image"));
             history.replaceState(null, "", queue.url(imageId));
@@ -810,6 +885,16 @@
         try { startMinimized = sessionStorage.getItem("tator.hosted.panelMinimized") === "1"; } catch (_) { /* Default to expanded. */ }
         const trancheInstructions = node("p"); trancheInstructions.id = "hostedTrancheInstructions"; trancheInstructions.style.whiteSpace = "pre-wrap"; content.append(trancheInstructions);
         const notes = node("div"); notes.id = "hostedReviewNotes"; content.append(notes);
+        // Editing actions that otherwise need a keyboard (tablets) or are hard
+        // to discover: undo, redo, delete the selected box, and the help sheet.
+        const edits = node("div"); edits.className = "hosted-canvas-edit"; edits.setAttribute("role", "group"); edits.setAttribute("aria-label", "Edit this image");
+        for (const [id, label, title, action] of [
+            ["hostedUndo", "Undo", `Undo the last change on this image (${keyName("Z")})`, () => stepUndo(-1)],
+            ["hostedRedo", "Redo", `Redo (${mac ? "⇧⌘Z" : "Ctrl+Y"})`, () => stepUndo(1)],
+            ["hostedDeleteBox", "Delete box", "Delete the selected box (Delete, Backspace or X)", deleteSelection],
+            ["hostedHelp", "Help & keys", "Mouse, touch and keyboard help (?)", () => toggleHelp(true)],
+        ]) { const button = node("button", label); button.type = "button"; button.id = id; button.title = title; button.onclick = action; edits.append(button); }
+        content.append(edits);
         const bar = node("div"); bar.className = "hosted-canvas-bar"; content.append(bar);
         addButton(bar, "hostedSave", "Save now", () => save({ manual: true }));
         addButton(bar, "hostedRefreshQueue", "Refresh work list", async () => { await queue.refresh(imageId); updateTranche((await queue.authorize(imageId)).tranche); status("Work list updated. Your current annotations are unchanged."); });
@@ -849,13 +934,131 @@
         const narrow = node("div"); narrow.className = "hosted-narrow-notice"; narrow.setAttribute("role", "note");
         narrow.append(node("strong", "Annotation needs a larger screen"), node("p", "Open this image on a computer or a tablet at least 768 pixels wide. Your saved work is kept."));
         addButton(narrow, "hostedNarrowBack", "← Back to the workspace", () => $("hostedBack").click());
-        document.body.append(panel, dialog, narrow);
+        document.body.append(panel, dialog, narrow, buildHelp());
+        $("canvas")?.setAttribute("aria-label", "Image to annotate. Drag to draw a box in the selected class; click a box to select it.");
+        installTouch();
         minimize(startMinimized, false);
         updateTranche(tranche);
         window.dispatchEvent(new Event("tator:hosted-canvas"));
         trackAdminNavHeight();
         update();
     }
+    function buildHelp() {
+        const help = node("dialog"); help.id = "hostedHelpDialog"; help.setAttribute("aria-labelledby", "hostedHelpTitle");
+        const title = node("h2", "Annotating: mouse, touch and keys"); title.id = "hostedHelpTitle";
+        const finish = boot.user.role === "annotator" ? "Submit & next" : "Approve & next";
+        const basics = node("ul"); basics.className = "hosted-help-basics";
+        for (const [what, how] of [
+            ["Draw a box", "Choose a class under Classes, then drag on the image. On a touch screen, drag with one finger."],
+            ["Select, move, resize", "Click or tap a box to select it. Drag it to move it, or drag a corner to resize it."],
+            ["Change a box's class", "Select the box, then choose the class under Classes."],
+            ["Delete", "Select the box, then press Delete, Backspace or X, or use Delete box. Q deletes the newest box."],
+            ["Undo and redo", `${keyName("Z")} undoes the last change on this image; ${mac ? "⇧⌘Z" : "Ctrl+Y or Ctrl+Shift+Z"} redoes it. Undo and Redo are also in the panel.`],
+            ["Polygons", "Press P or use Draw polygons, click each corner, and double-click to close the shape."],
+            ["Zoom and pan", `Mouse wheel or pinch zooms; Shift + wheel, right-drag or two fingers pan. ${keyName("0")} fits the image again.`],
+            ["Save", `Changes save automatically every few seconds; ${keyName("S")} or Save now saves at once.`],
+            ["Other images", "→ or Space opens the next image and ← the previous one without handing anything over, or click a name in the image list. Tab moves between buttons and fields."],
+            ["Finish an image", `Tick Annotations checked (or No objects to label), then ${finish} (${keyName("Enter")}).`],
+        ]) { const item = node("li"); item.append(node("strong", `${what}: `), document.createTextNode(how)); basics.append(item); }
+        help.append(title, basics);
+        // The live list follows the keys set in this browser.
+        const live = $("description");
+        if (live) { const heading = node("h3", "All keyboard shortcuts"); help.append(heading, live); }
+        const actions = node("div"); actions.className = "dialog-actions";
+        const close = node("button", "Close"); close.type = "button"; close.autofocus = true; close.onclick = () => help.close(); actions.append(close); help.append(actions);
+        help.addEventListener("click", event => { if (event.target === help) help.close(); });
+        return help;
+    }
+    // Touch screens: one finger draws, moves and selects like the mouse (a
+    // drag starts after a few pixels, a tap clicks, a double tap closes a
+    // polygon); two fingers pinch to zoom and move to pan the image.
+    function installTouch() {
+        const canvas = $("canvas");
+        if (!canvas || canvas.dataset.hostedTouch) return;
+        canvas.dataset.hostedTouch = "true";
+        let single = null, gesture = null, waitForLift = false, lastTap = null;
+        const at = (touches) => ({ clientX: [...touches].reduce((sum, t) => sum + t.clientX, 0) / touches.length, clientY: [...touches].reduce((sum, t) => sum + t.clientY, 0) / touches.length });
+        const spread = (touches) => Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY) || 1;
+        const fire = (type, point, detail = 1) => canvas.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window,
+            clientX: point.clientX, clientY: point.clientY, button: 0, buttons: type === "mouseup" ? 0 : 1, detail }));
+        canvas.addEventListener("touchstart", event => {
+            event.preventDefault();
+            if (event.touches.length >= 2) {
+                if (single?.down) fire("mouseup", single.last);
+                single = null;
+                const middle = at([...event.touches].slice(0, 2));
+                gesture = { start: window.TatorHostedCanvas.beginGesture(middle.clientX, middle.clientY), spread: spread(event.touches) };
+                return;
+            }
+            if (waitForLift || gesture) return;
+            const touch = event.touches[0];
+            single = { start: { clientX: touch.clientX, clientY: touch.clientY }, last: { clientX: touch.clientX, clientY: touch.clientY }, down: false };
+            fire("mousemove", single.start, 0);
+        }, { passive: false });
+        canvas.addEventListener("touchmove", event => {
+            event.preventDefault();
+            if (gesture && event.touches.length >= 2) {
+                const middle = at([...event.touches].slice(0, 2));
+                window.TatorHostedCanvas.moveGesture(gesture.start, middle.clientX, middle.clientY, spread(event.touches) / gesture.spread);
+                return;
+            }
+            if (!single) return;
+            const touch = event.touches[0];
+            single.last = { clientX: touch.clientX, clientY: touch.clientY };
+            if (!single.down && Math.hypot(touch.clientX - single.start.clientX, touch.clientY - single.start.clientY) < 6) return;
+            if (!single.down) { single.down = true; fire("mousedown", single.start); }
+            fire("mousemove", single.last);
+        }, { passive: false });
+        const end = event => {
+            event.preventDefault();
+            if (gesture) { if (event.touches.length < 2) { gesture = null; waitForLift = event.touches.length > 0; } return; }
+            if (!event.touches.length) waitForLift = false;
+            if (!single) return;
+            if (single.down) fire("mouseup", single.last);
+            else {
+                const now = Date.now(), point = single.start;
+                const double = lastTap && now - lastTap.time < 400 && Math.hypot(point.clientX - lastTap.clientX, point.clientY - lastTap.clientY) < 24;
+                fire("mousedown", point, double ? 2 : 1); fire("mouseup", point, double ? 2 : 1);
+                lastTap = double ? null : { ...point, time: now };
+            }
+            single = null;
+        };
+        canvas.addEventListener("touchend", end, { passive: false });
+        canvas.addEventListener("touchcancel", end, { passive: false });
+    }
+    function toggleHelp(open = !$("hostedHelpDialog")?.open) {
+        const help = $("hostedHelpDialog"); if (!help) return;
+        if (open && !help.open) help.showModal(); else if (!open && help.open) help.close();
+    }
+    // Keys the hosted canvas adds: save, undo/redo, hand over, fit, help.
+    window.addEventListener("keydown", event => {
+        if (!$("hostedSaveState") || event.defaultPrevented) return;
+        const target = event.target instanceof Element ? event.target : null;
+        if (target?.closest(".shortcut-settings-body")) return; // Recording a new binding.
+        // Lists such as Classes keep focus after a click; they have no text undo of their own.
+        const typing = Boolean(target?.closest("textarea, [contenteditable=''], [contenteditable='true'], input:not([type=checkbox]):not([type=radio]):not([type=button]):not([type=range])"));
+        const modifier = (event.ctrlKey || event.metaKey) && !event.altKey;
+        const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+        const openDialog = document.querySelector("dialog[open]");
+        // Escape belongs to an open dialog (the browser closes it); the
+        // canvas's own Escape shortcut would otherwise swallow it.
+        if (event.key === "Escape" && openDialog) { event.stopPropagation(); return; }
+        let handled = true;
+        if (modifier && key === "s") { if (ready) run(null, () => save({ manual: true })); }
+        else if (openDialog && openDialog.id !== "hostedHelpDialog") handled = false;
+        else if (event.key === "?" && !modifier && !typing) toggleHelp();
+        else if (openDialog || typing || !modifier) handled = false;
+        else if (key === "z") stepUndo(event.shiftKey ? 1 : -1);
+        else if (key === "y" && !event.shiftKey) stepUndo(1);
+        else if (key === "0") window.TatorHostedCanvas.fitView();
+        else if (event.key === "Enter") {
+            const finish = [$("hostedSubmit"), $("hostedApprove")].find(button => button && !button.hidden);
+            if (finish && !finish.disabled) finish.click();
+            else status(finish ? "Finish saving or reconnect editing before handing this image over." : "This image cannot be handed over from here.", true);
+        }
+        else handled = false;
+        if (handled) { event.preventDefault(); event.stopPropagation(); }
+    }, true);
     function trackAdminNavHeight() {
         // Lay the canvas out under the administrator navigation strip.
         const nav = $("hostedAdminNav"), root = document.documentElement;
@@ -914,7 +1117,7 @@
             await window.TatorHostedCanvas.open(record, dataset, !editable, neighbors);
             const start = Date.now();
             while (!window.TatorHostedCanvas.ready()) { if (Date.now() - start > 30000) throw new Error("Image loading did not finish. Reopen it to retry."); await new Promise((resolve) => setTimeout(resolve, 16)); }
-            ready = true; lastSaved = JSON.stringify(draft()); window.TatorHostedCanvas.freeze(!editable); update();
+            ready = true; lastSaved = JSON.stringify(draft()); resetUndo(); window.TatorHostedCanvas.freeze(!editable); update();
             if (retained) {
                 recoveryRequired = true;
                 freeze();
@@ -967,7 +1170,7 @@
                     history.replaceState(null, "", queue.url(imageId));
                     $("hostedScopeNotice")?.remove();
                     if (rejectedByLease && record.generation <= anchor.generation) throw new Error("The earlier editing reservation has not been replaced. Your original command and draft remain retained; reconnect before trying again.");
-                    window.TatorHostedCanvas.restoreDraft(restored.annotations);
+                    window.TatorHostedCanvas.restoreDraft(restored.annotations); resetUndo();
                     $("hostedComplete").checked = restored.complete;
                     $("hostedNegative").checked = restored.negative;
                     // Restoration is complete even if this draft still needs
@@ -999,7 +1202,7 @@
             const fresh = await api(origin.base);
             checkOrigin(); record = fresh;
             window.TatorHostedCanvas.acknowledge(record);
-            window.TatorHostedCanvas.restoreDraft(record.annotations);
+            window.TatorHostedCanvas.restoreDraft(record.annotations); resetUndo();
             lastSaved = JSON.stringify(draft()); pending = null; clearJournal(); handoff = false;
             $(retryId)?.remove();
             await acquire(); status(message); update();
@@ -1145,6 +1348,8 @@
     });
     setInterval(() => {
         if (editable && ready && !busy && !handoff) {
+            // Tool results arrive without a click or key: record them as their own undo step.
+            noteEdit();
             if (saving && pending) { try { journal({ pending, latest: draft() }); } catch (error) { report(error); } }
             else save().catch(() => {});
         }
@@ -1166,6 +1371,7 @@
         // Undo may reach the saved baseline before the next autosave tick.
         // Reconcile that transition even when there is nothing left to send.
         try { retainDraft(); } catch (error) { status(error.message, true); }
+        if (leavingToSignIn && !storageFailed) return; // The draft is retained for recovery after sign-in.
         if (storageFailed || pending || (ready && JSON.stringify(draft()) !== lastSaved)) {
             event.preventDefault(); event.returnValue = "";
         }

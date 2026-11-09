@@ -313,9 +313,36 @@ polygon corners are merged; a polygon needs three distinct corners around an
 area. **Draw polygons (P)** switches to polygon drawing, and an image that
 already has polygons opens in polygon mode. To change the class of an existing
 box, click it, then pick the class in the list or press its class key. Without a
-selected box, the class applies to the next box. Space, Tab and the arrow keys
-change images only when focus is not on a button, checkbox, link, menu, the
-annotation panel or a dialog.
+selected box, the class applies to the next box. Space and → open the next image
+and ← the previous one, only when focus is not on a button, checkbox, link,
+menu, the annotation panel or a dialog. In the hosted canvas Tab is not an
+image key: it moves between buttons and fields, so every control can be reached
+from the keyboard (Tab stays a previous-image key in the workbench).
+
+The top row of the annotation panel holds **Undo**, **Redo**, **Delete box** and
+**Help & keys**. Undo and redo cover the open image's boxes and polygons (each
+finished drag, deletion, class change or tool result is one step); the result
+saves automatically like any other edit, and the history starts again on each
+image. **Delete box** removes the selected box, which is how a touch screen
+deletes. **Help & keys**, or the ``?`` key, opens a sheet with the mouse, touch
+and keyboard basics and the full, customisable shortcut list. Keys added by the
+hosted canvas (⌘ on a Mac instead of Ctrl):
+
+* Ctrl+Z undo; Ctrl+Y or Ctrl+Shift+Z redo (text fields keep their own undo).
+* Ctrl+S saves at once instead of opening the browser's save dialog.
+* Ctrl+Enter is **Submit & next** (annotators) or **Approve & next**
+  (administrators). It follows the same checks as the button, so the image must
+  be ticked **Annotations checked** or **No objects to label** first.
+* Ctrl+0 fits the image to the canvas again.
+
+The mouse wheel zooms by how far it turns, about a quarter per notch, so a
+12-megapixel image reaches its smallest objects in a few notches; Shift + wheel
+and right-drag pan. On a touch screen one finger draws, moves and resizes like
+the mouse (a tap selects, a double tap closes a polygon) and two fingers pinch to
+zoom and move to pan; the page itself does not zoom or scroll.
+
+The image list also shows the images before the one you opened in the same
+queue, so earlier work can be reopened from the list.
 
 .. list-table:: Canvas assistance
    :header-rows: 1
@@ -420,8 +447,11 @@ in the dataset workspace, choose the annotator, select individual images or
 **Select all in this list**, enter a reason, then confirm the recall. Images
 return to Incoming as Not assigned for administrator editing or reassignment, and
 leave their former tranche. Submitted and confirmed images are excluded from
-ordinary recall. An administrator can explicitly withdraw a pending submission
-to Incoming with a reason, for example when its author is no longer available.
+ordinary recall. After a recall of up to 500 images, the dialog offers **Create a
+tranche from these images**, which opens the new-tranche form with exactly those
+images, so they can go straight to another annotator. An administrator can
+explicitly withdraw a pending submission to Incoming with a reason, for example
+when its author is no longer available.
 
 Recall invalidates old editing tabs and automated results. If any selected image
 changed after the list loaded, the entire recall is rejected; refresh and review
@@ -432,9 +462,13 @@ Use **Take over my other editing tab** only to replace your own tab's reservatio
 It is offered only when the image is open in another tab or window of yours,
 including one closed in the last two minutes; taking over is then safe. It never
 takes work from another person: when someone else is editing, the canvas names
-them when it can (otherwise "someone else") and stays view-only. If the editing reservation expires
-while you are signed in, use **Reconnect editing**. After sign-out, sign in again;
-when a retained draft is offered, recover it first as described below.
+them when it can (otherwise "someone else") and stays view-only. The tab that
+was taken over says the image continued in another tab of yours; edits made
+there afterwards stay in that tab only. If the editing reservation expires
+while you are signed in, use **Reconnect editing**. When the session ends, the
+canvas offers **Sign in again**: it keeps the unsent draft in this tab, opens the
+sign-in page without a leave-page warning and returns to the same work list,
+where reopening the image offers **Recover my draft** (described below).
 
 Importing labels and managing classes
 -------------------------------------
@@ -498,7 +532,13 @@ Choose **Keep current labels** or **Use imported objects**. This requires curren
 administrator editing authority and an unchanged saved version. Applying imported
 objects preserves captions and other existing metadata, and both annotation
 versions remain in history. Replacing objects with an empty list requires an
-explicit negative confirmation. The reviewed migration workflow supports larger
+explicit negative confirmation. An image that needs a decision (an open import
+conflict, or an import that marked it for review) says so at the top of the
+canvas panel, with the reason and **Compare imported labels**; the button reads
+**Imported labels · N to review** while versions are unresolved. Approving the
+checked image is the decision for an import review. **Approve & next** follows
+the Incoming queue the image belongs to, not the **Needs a decision** filter.
+The reviewed migration workflow supports larger
 existing labelled dataset trees, including caption records, splits and metadata.
 See `Migrating a legacy YOLO dataset <hosted_migration.rst>`_ before importing an
 existing dataset tree.

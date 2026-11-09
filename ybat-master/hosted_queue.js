@@ -42,6 +42,16 @@
                 this.filters = {}; page = await this.fetch({anchor_id: imageId});
             }
             this.rows = page.images; this.next = page.next_cursor; this.previous = page.previous_cursor;
+            // Show the images before this one too, so the list can go back to
+            // them; without that page the list still works from this image on.
+            if (this.previous) {
+                try {
+                    const before = await this.fetch({anchor_id: imageId, direction: "backward"});
+                    const seen = new Set(this.rows.map(row => row.id));
+                    this.rows = [...before.images.filter(row => !seen.has(row.id)), ...this.rows];
+                    this.previous = before.previous_cursor;
+                } catch (_) { /* Earlier rows load on demand with Previous. */ }
+            }
             return this.rows;
         }
         async more(direction = "forward") {

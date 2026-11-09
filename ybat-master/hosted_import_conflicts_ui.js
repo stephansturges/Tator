@@ -85,6 +85,32 @@
         } catch (error) { if (eligible()) notify(`${error.message} Your saved versions remain available.`, true); }
         finally { choice.disabled = false; controls(); }
     }
+    // "Needs a decision" from Incoming is explained on the canvas: why, and
+    // what to do. Approving the image is the decision for an import review.
+    const decisionReasons = {duplicate_labels_differ: "duplicate copies of this image had different labels; the copy with the most objects was kept"};
+    let decisionTicket = 0;
+    async function refreshDecision() {
+        const id = app()?.imageId; if (!id || !button) return;
+        const seq = ++decisionTicket;
+        try {
+            const [record, history] = await Promise.all([app().api(`/api/hosted/images/${encodeURIComponent(id)}`), app().api(`/api/hosted/images/${encodeURIComponent(id)}/history`)]);
+            if (seq !== decisionTicket || app()?.imageId !== id) return;
+            const reviewed = new Set((history.import_conflict_decisions || []).map(item => item.conflict_id));
+            const unresolved = (history.import_conflicts || []).filter(item => !reviewed.has(item.id)).length;
+            const flag = record.annotations?.migration?.review_required;
+            const reason = typeof flag === "string" && flag ? decisionReasons[flag] || flag.replaceAll("_", " ") : flag === true ? "the import marked it for review" : "";
+            button.textContent = unresolved ? `Imported labels · ${unresolved} to review` : "Imported labels";
+            document.getElementById("hostedDecisionNote")?.remove();
+            if (!unresolved && !reason) return;
+            const note = node("div"); note.id = "hostedDecisionNote"; note.className = "hosted-decision-note"; note.setAttribute("role", "note");
+            const why = [reason, unresolved ? `${unresolved === 1 ? "an imported label version differs" : `${unresolved} imported label versions differ`} from the saved labels` : ""].filter(Boolean).join("; ");
+            const finish = record.state === "unassigned" ? " Then tick Annotations checked and approve the image." : "";
+            note.append(node("strong", "Needs a decision: "), document.createTextNode(`${why}.${unresolved ? " Compare them and keep one version." : " Check the boxes."}${finish}`));
+            if (unresolved) { const compare = node("button", "Compare imported labels"); compare.type = "button"; compare.onclick = () => open(); note.append(document.createElement("br"), compare); }
+            const anchor = document.getElementById("hostedReviewNotes");
+            if (anchor) anchor.after(note);
+        } catch (_) { /* The Imported labels button still works. */ }
+    }
     window.addEventListener("load", () => {
         button = node("button", "Imported labels"); button.id = "hostedImportConflicts"; button.type = "button";
         const attach = () => { const target = document.querySelector(".hosted-canvas-feedback"); if (!target) return false; target.append(button); return true; };
@@ -99,6 +125,9 @@
         dialog.addEventListener("close", () => { ++ticket; });
         // The canvas page claims Escape for drawing; while this dialog is open, Escape closes it.
         document.addEventListener("keydown", event => { if (event.key === "Escape" && dialog.open) { event.preventDefault(); event.stopPropagation(); dialog.close(); } }, true);
-        window.addEventListener("tator:hosted-image", () => { if (imageId !== app()?.imageId) { ++ticket; dialog.close(); } });
+        window.addEventListener("tator:hosted-image", () => { if (imageId !== app()?.imageId) { ++ticket; dialog.close(); } refreshDecision(); });
+        window.addEventListener("tator:import-conflict-resolved", refreshDecision);
+        // The first image: wait until the canvas has its record.
+        const first = setInterval(() => { if (app()?.datasetId && document.getElementById("hostedReviewNotes")) { clearInterval(first); refreshDecision(); } }, 300);
     }, {once: true});
 })();

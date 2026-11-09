@@ -4,3 +4,11 @@
 .tranche-hint{color:var(--text);font-weight:550}
 .tranche-counts span[data-tone=warning]{color:var(--warning);font-weight:600}
 .tranche-members .hosted-card small[data-tone=warning]{color:var(--warning);font-weight:600}
+.tranche-members .hosted-card small.tranche-feedback{color:var(--text);white-space:normal;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+.tranche-elsewhere{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem .7rem;margin:0 0 18px;padding:12px 16px;border:1px solid var(--accent);border-radius:8px;background:var(--accent-light);color:var(--text)}
+.tranche-next{margin:.5rem 0}.tranche-next p{margin:0;flex-basis:100%}.tranche-next span{color:var(--text)}
+.tranche-subtle{font-weight:450;color:var(--muted);max-width:85ch}
+.tranche-members .hosted-card:not(:has(img)){align-self:start}
+/* Light theme: muted text on the page background needs a darker shade to reach 4.5:1. */
+:root[data-theme=light] .hosted-tranches,:root[data-theme=light] .hosted-tranche-recovery{--muted:#566a78}
+.tranche-history{margin:0;padding-left:1.2rem;display:grid;gap:.35rem;max-height:55vh;overflow:auto}.tranche-history li{overflow-wrap:anywhere}

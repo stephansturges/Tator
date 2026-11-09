@@ -474,6 +474,14 @@ class TrancheMixin:
                     if actor.role == 'admin' or (row['is_current'] and image['assignment_id'] == row['assignment_id']):
                         item['image'] = self._image_result(con, row['image_id'])
                         item['can_view'] = True
+                        if row['outcome'] == 'returned' and row['assignment_id']:
+                            # The note for this ownership episode only: a later
+                            # owner never sees an earlier author's feedback.
+                            note = con.execute(
+                                "SELECT r.feedback FROM hosted_reviews r JOIN hosted_submissions s ON s.id=r.submission_id "
+                                "WHERE r.image_id=? AND r.action='returned' AND s.assignment_id=? ORDER BY r.rowid DESC LIMIT 1",
+                                (row['image_id'], row['assignment_id'])).fetchone()
+                            item['feedback'] = note['feedback'] if note else None
                 except DomainError as exc:
                     if exc.code != 'image_not_found':
                         raise

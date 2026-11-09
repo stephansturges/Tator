@@ -38,7 +38,10 @@ example duplicate copies with different labels, or an imported label conflict is
 open), **With labels** and **Without labels**. Search, totals and **Select all
 matching** use the same filter. When the dataset came from an import, a line
 under the title summarises the newest import, and its link shows the images that
-need a decision.
+need a decision. To decide, open the image: **Imported labels** compares the two
+label sets when the import kept both. When it kept only one (imports made before
+importer v5), check and correct the boxes on the canvas and approve the image;
+approving ends the decision.
 
 **Select all matching** selects up to 5,000 eligible images, including those not
 yet displayed; only Not assigned images can be selected in Incoming. **Load more
@@ -99,9 +102,18 @@ opens it once and then leaves the address, which keeps the result's dataset.
 
 The theme button, in the workspace header and in the annotation panel, switches
 between light and dark. Double-click it for the Pip-Boy theme; a click then
-switches its green and amber colors, and another double-click leaves it. The
-choice is kept in the browser and applies to the workspace, the annotation
-canvas and the workbench.
+switches its green and amber colors, and another double-click leaves it. In the
+workspace, Shift+click (Shift+Enter from the keyboard) does the same as a
+double-click. The choice is kept in the browser and applies to the workspace,
+the annotation canvas, the workbench and the short pages that explain a refused
+or unknown link. Keyboard focus is outlined in the theme's accent colour, and
+text fields keep a visible border in every theme.
+
+A link to the canvas, a pruning result or the workbench that is opened while
+signed out leads to the sign-in form and, after signing in, to the page that
+was asked for. Only those pages of the same server are followed this way. An
+address that does not exist shows a short **Page not found** page with a link
+to the workspace; programs calling the API still receive JSON.
 
 **Admin workspace** returns to the selected dataset. **New dataset** sits beside
 the dataset picker and **People** beside the account. The toolbar holds the
@@ -235,6 +247,13 @@ invitation link that is not used yet, or has no password yet. **Save changes** a
 **New invitation link** or **Password reset link** creates a one-time link, and
 an open link can be cancelled. Password, role and access changes sign out
 existing sessions while preserving assignments and saved work.
+
+After ten wrong passwords for one username, signing in is paused for 15
+minutes. Setting a new password, by a link or by an administrator, ends that
+pause for the account, so a reset works at once. A disabled account that enters
+its correct password is told that it can no longer sign in and should ask an
+administrator. Its open images stay assigned; People shows how many, and
+**Recall assigned work** in Incoming hands them to someone else.
 
 **Remove** hides an account permanently and stops it signing in; its past work
 and review history stay attributed to it, and its username cannot be reused.
@@ -388,6 +407,12 @@ in history. **Return for changes** restores the original annotator's editing
 access. After approval, administrator edits saved on the confirmed image create
 new canonical annotation versions; earlier snapshots keep their earlier versions.
 
+**History**, on each image card in the workspace and in the canvas panel, lists
+who changed an image and how, newest first: added, assigned, saved (with its
+box count), submitted, returned with its feedback, approved, recalled, archived
+and restored. It is read-only; every saved version stays in the server's
+history.
+
 An administrator cannot edit an annotator's active assignment without an
 explicit handoff. **Recover from annotator** on the image removes that assignment
 and preserves the saved draft. For several images, open **Recall assigned work**
@@ -430,9 +455,25 @@ files together in the Incoming uploader. Include one ``labelmap.txt``,
 ``classes.txt`` or ``labels.txt`` to map numeric class indices by name; otherwise,
 the uploader asks you to confirm the dataset's current class order. Class names
 must already exist. Ambiguous filenames and changed class maps are rejected
-rather than guessed. Boxes and polygons that cross the image edge are clipped to
-it (never shifted), and a row with no area inside the image is dropped. Empty sidecar
-files are retained as empty imported annotations, not approved negatives.
+rather than guessed. A labelmap that names a class the dataset does not have is
+refused before anything is uploaded. Boxes and polygons that cross the image
+edge are clipped to it (never shifted), and a row with no area inside the image
+is dropped. Empty sidecar files are retained as empty imported annotations, not
+approved negatives.
+
+**Add images** shows its progress at the top of the page. **Stop import**
+finishes the image being sent and stops; **Resume image import** continues
+after you select the same files again, skipping the images already added. A file
+the server refuses, for example a damaged image or a label line whose class
+number is not in the labelmap, is reported and the rest of the selection
+continues. Files that are neither images nor ``.txt`` labels are left out and
+listed. A ZIP archive is not unpacked in the browser: unzip it and select its
+images with their labels, or use the `migration tool <hosted_migration.rst>`_
+for a whole dataset tree. When the import ends, a report under the Incoming
+actions lists the new images, images that were already in the dataset, new
+images that share a file name with a different image, clipped, repeated and
+dropped label rows, imported label conflicts and the files not added with their
+reasons. It stays in that browser tab until **Dismiss**.
 
 For labeled images with EXIF rotation or reflection, use **Imported label
 coordinates** to declare **Original stored pixels** or **Rotated photo viewer

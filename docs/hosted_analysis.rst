@@ -263,7 +263,12 @@ use it too. A workbench dataset without validation images, such as a hosted
 copy, which is one pool under ``train/``, gets validation images chosen for
 each YOLO, YOLO head-graft, RF-DETR, SAM3 or Qwen run. The rule reads capture
 groups from the copy's per-image annotation files; with none, each image is its
-own group. The run's lists live in its own directory (``run_split_train.txt``
+own group. Those files also record the split set on the hosted dataset
+(``hosted_split``): images placed in training or validation there keep that
+place, test images are left out of the run, and only the unsplit rest is split,
+as on the server. This applies to YOLO, YOLO head-graft, RF-DETR and SAM3 runs;
+Qwen's converted dataset does not carry the annotation files, so a Qwen run
+still splits the whole pool. The run's lists live in its own directory (``run_split_train.txt``
 and ``run_split_val.txt`` for YOLO, ``dataset/`` for RF-DETR, the job's split
 directory for SAM3 and Qwen). The training log says how many images went to
 training and to validation, and the run's configuration or split metadata keeps

@@ -88,10 +88,14 @@ Working on a hosted dataset
 1. A workbench copy holds every confirmed image and its labels at the moment
    it is made, as one pool: the workbench does not make or keep split
    decisions, and the legacy layout calls that pool train. Training in the
-   workbench does not validate on that pool: a YOLO, RF-DETR, SAM3 or Qwen
-   run on a copy without validation images holds out about a tenth of the
-   images for that run only, keeping capture groups together, and records the
-   split in its log; the copy's files are not changed. Images are hard
+   workbench does not validate on that pool: a YOLO, RF-DETR or SAM3 run on
+   a copy keeps the splits set on the hosted dataset (images placed in
+   training or validation stay there, test images are left out of the run)
+   and holds out about a tenth of the unsplit rest for that run only, keeping
+   capture groups together. A Qwen run does not read the hosted splits yet
+   and holds out about a tenth of the whole pool. The run log records the
+   split; the copy's files are not changed. Copies made before this release
+   do not carry the hosted splits; make a fresh copy to use them. Images are hard
    links to the hosted image store, so a copy uses almost no extra disk space.
    Its name is the dataset name followed by "hosted copy" and the time.
    Image and label files are named after the original file name followed by

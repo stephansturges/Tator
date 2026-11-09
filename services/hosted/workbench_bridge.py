@@ -130,7 +130,8 @@ def plan_objects(base_objects: list[dict], items: list[dict], class_ids: list[st
 ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,128}")
 DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}")
 # A workbench copy is one pool of every confirmed image: the tools do not make
-# or keep split decisions (the legacy layout calls that pool "train").
+# split decisions (the legacy layout calls that pool "train"). Splits set on the
+# hosted dataset travel in the annotation sidecars for training runs.
 EXPORT_SPLITS = {"train": "train", "unsplit": "train", "val": "train", "test": "train"}
 OVERLAY_LIMIT = 8 * 1024 * 1024
 CHANGE_KEYS = ("relabeled", "moved", "added", "deleted")
@@ -174,15 +175,24 @@ def image_id_for_stem(stem: str, known) -> str | None:
     return None
 
 
-def _renamed(entries, stems: dict[str, str]):
-    """Name per-image export files after the original file name plus the hosted ID."""
+def _renamed(entries, stems: dict[str, str], declared: dict[str, str] | None = None):
+    """Name per-image export files after the original file name plus the hosted ID.
+
+    The copy pools every image, so each annotation sidecar records the split set
+    on the hosted dataset ("hosted_split"); workbench training keeps it
+    (utils/run_split.py) and splits only the rest.
+    """
     from .backup import ExportEntry
+    declared = declared or {}
     for entry in entries:
         parts = entry.path.split("/")
         if len(parts) == 3 and parts[1] in PER_IMAGE_FOLDERS:
             stem, dot, suffix = parts[2].partition(".")
             if stem in stems:
-                yield ExportEntry(f"{parts[0]}/{parts[1]}/{stems[stem]}{dot}{suffix}", artifact=entry.artifact, data=entry.data)
+                data = entry.data
+                if parts[1] == "annotations" and stem in declared and data is not None:
+                    data = _json({**json.loads(data), "hosted_split": declared[stem]}).encode()
+                yield ExportEntry(f"{parts[0]}/{parts[1]}/{stems[stem]}{dot}{suffix}", artifact=entry.artifact, data=data)
                 continue
         if entry.path == "hosted-media.json":
             media = json.loads(entry.data)
@@ -399,7 +409,8 @@ class WorkbenchBridge:
         stage.mkdir(mode=0o700)
         try:
             stems = {image["id"]: export_stem(image) for image in exported}
-            for entry in _renamed(self.operations._snapshot_entries({**manifest, "images": exported}, unsplit_as_train=True), stems):
+            declared = {image["id"]: image["split"] for image in manifest["images"] if image["split"] in ("train", "val", "test")}
+            for entry in _renamed(self.operations._snapshot_entries({**manifest, "images": exported}, unsplit_as_train=True), stems, declared):
                 target = stage / entry.path
                 if not self._inside(target, stage) or target.resolve() == stage.resolve():
                     raise DomainError("workbench_export_path_invalid", 409)

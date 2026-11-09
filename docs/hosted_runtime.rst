@@ -258,12 +258,33 @@ requires ``bpe_path``. SHA-256 fields may pin expected bytes. Installation copie
 files into immutable artifact storage, registers every required file for full
 recovery, and publishes a portable model definition only after registration.
 Installed models and selections survive loss of the original source directory.
+If a configured file is missing, is a link, lies outside ``allowed_model_roots``
+or does not match its SHA-256, installation is refused with
+``tool_model_source_invalid`` and a message naming the model and the problem;
+nothing is installed.
+
+If an installed model's stored files fail verification when the service
+starts, that model is left unloaded and logged; the service, manual annotation
+and the other models keep working. The administrator catalog lists it under
+``unavailable_models`` and Tools & models shows it at the top. Annotators see
+that the dataset's selected detector or class predictor cannot be used right
+now, rather than "no model yet". Repairing the files needs the artifact store
+restored from a backup; installing over a damaged stored copy is refused.
 
 Every installed SAM1 or SAM3 model is a personal choice for every dataset; there
 is no second SAM allowlist. With no explicit default, the controller picks an
 installed SAM1 first. A saved personal choice and an explicit server default
-remain authoritative. Dataset detector and class-predictor selection still
-belong to the administrator.
+remain authoritative. While no SAM model is installed, the catalog reports no
+selection rather than an unavailable saved choice. An explicit default that is
+not installed yet is reported as such; a saved choice that cannot run keeps its
+own warning. Dataset detector and class-predictor selection still belong to the
+administrator.
+
+The class predictor and local Qwen run in the same private worker as the
+user's SAM model. With no SAM model installed that worker starts without SAM:
+the class predictor and Qwen work, and SAM requests fail with
+``hosted_sam_not_configured``. ``user_sam.device`` remains the device for this
+worker.
 
 On Apple Silicon, a SAM3 definition can use ``backend: mlx`` with ``model_path``
 and a SHA-256 ``files`` manifest instead of a PyTorch checkpoint. The package
@@ -404,6 +425,14 @@ Only the exact generation transition checked by that acquisition is accepted;
 assignment or annotation changes cannot be skipped. Recovery never acquires a
 lease itself, and failure to resume does not undo a successful editor acquire.
 
+A job that ran all of its attempts has a verdict (``caption_attempts_failed`` or
+``caption_health_gate_failed``). It is not resumed by request: resume returns
+``caption_job_attempts_exhausted`` and the person starts a new caption. Worker
+crashes are still resumed automatically, within ``max_auto_resumes``. A failed
+job's status carries a plain ``message`` naming the last attempt's problem; the
+code stays in ``error`` and the attempts keep their model output. The canvas no
+longer re-submits such a job on its own.
+
 Jobs wait while admin compute suspends new automation. Loss of image authority,
 session validity, model selection or class-map identity stops a job. Result
 publication repeats the guarded image check while recording artifact references.
@@ -523,6 +552,12 @@ one structured response per image, including the configured QA requirements,
 glossary, label hints, grounding rules and catch-up questions. This is a
 different recipe from sequential window captions, merging and QA generation.
 The preview displays the exact first-image prompt and reservation ceiling.
+Job status adds ``cost``: images, the summed reservation, the charges settled
+from reported usage and how many images are settled (microdollars). The dialog
+shows the reported cost and, while images are unsettled, the reservation; the
+saved-jobs list shows each job's reported cost. The canvas offers **Remote
+dataset captions…** only for datasets with a permitted Batch model, or with
+earlier batches still to review.
 
 Only models with an explicit operator-supplied ``batch`` price and token-limit
 record are offered. No discount or live price is guessed. Images are uploaded

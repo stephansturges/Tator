@@ -19,6 +19,30 @@ from services.hosted.types import Actor, MutationContext
 from services.hosted.paid_caption import PaidCaptionOptions
 
 
+# A job that ran all of its attempts reached a verdict; resuming it would only
+# repeat the same request. Worker crashes are resumed by the server itself.
+EXHAUSTED_ERRORS = {"caption_attempts_failed", "caption_health_gate_failed"}
+ATTEMPT_ERROR_TEXT = {
+    "worker_operation_failed": "the caption model reported an error",
+    "worker_failed": "the caption model could not load",
+    "worker_disconnected": "the caption worker stopped unexpectedly",
+    "worker_timeout": "the caption ran past its time limit",
+}
+
+
+def failure_message(error, attempts):
+    """Plain text for a stopped caption job; the code stays in ``error``."""
+    last = attempts[-1] if attempts else {}
+    if error == "caption_attempts_failed":
+        reason = ATTEMPT_ERROR_TEXT.get(last.get("error")) or (
+            "the caption did not pass the quality checks" if last.get("quality_failures") else (last.get("error") or "no usable caption").replace("_", " "))
+        return (f"No caption after {len(attempts)} attempt{'s' if len(attempts) != 1 else ''}: {reason}. "
+                "Start a new caption to try again; the attempts and their model output are kept with this job.")
+    if error == "caption_health_gate_failed":
+        return "A caption was produced but failed this job's quality limits. It is kept with the job; start a new caption to try again."
+    return None
+
+
 class CaptionJobRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     dataset_id: str
@@ -389,6 +413,7 @@ class CaptionJobs:
             if not matches(actor) or not matches(Actor(**json.loads(row["actor_json"]))):
                 raise DomainError("caption_result_context_changed", 409)
         return {"job_id": job_id, "status": row["state"], "error": row["error"], "result": result,
+            "message": failure_message(row["error"], json.loads(row["attempts_json"])) if row["state"] == "failed" else None,
             "auto_resume_count": row["auto_resumes"], "max_auto_resumes": body.settings.max_auto_resumes,
             "request": body.model_dump(exclude={"operation_id"}),
             "created_at": row["created_at"], "updated_at": row["updated_at"],
@@ -437,6 +462,8 @@ class CaptionJobs:
                 raise DomainError("caption_resume_input_changed", 409)
             if row["state"] not in {"failed", "interrupted", "cancelled", "waiting_for_editor"}:
                 raise DomainError("caption_job_not_resumable", 409)
+            if not automatic and row["state"] == "failed" and row["error"] in EXHAUSTED_ERRORS:
+                raise DomainError("caption_job_attempts_exhausted", 409, failure_message(row["error"], json.loads(row["attempts_json"])))
             if self._validate(actor, body) != row["runtime_identity"]:
                 if self._validate(actor, body, include_media=False) == row['runtime_identity']:
                     raise DomainError('media_policy_upgrade_required', 409)

@@ -637,7 +637,14 @@ class PaidBatches:
         row = self._row(actor, job_id)
         self._visible(actor, row)
         remote = json.loads(row["remote_json"] or "{}")
+        with self.store.read_connection() as con:
+            # Spending in microdollars: the reservation ceiling and the charges
+            # settled from reported usage so far. Unsettled rows stay counted.
+            images, reserved, charged, settled = con.execute(
+                "SELECT COUNT(*),COALESCE(SUM(c.reserved),0),COALESCE(SUM(c.charged),0),COALESCE(SUM(c.state IN ('settled','reconciled')),0) "
+                "FROM hosted_paid_batch_rows r JOIN hosted_provider_calls c ON c.id=r.call_id WHERE r.job_id=?", (job_id,)).fetchone()
         return {"job_id": job_id, "status": row["state"], "error": row["error"], "openai_batch_id": row["remote_id"],
+            "cost": {"images": images, "reserved_microdollars": reserved, "charged_microdollars": charged, "settled_images": settled},
             "request_counts": remote.get("request_counts", {}), "request": json.loads(row["request_json"]),
             "result": json.loads(row["result_json"] or "{}"), "archived": bool(row["archived"]),
             "created_at": row["created_at"], "updated_at": row["updated_at"], "kind": "openai_caption_batch"}

@@ -37941,6 +37941,9 @@ async function cancelRfDetrTrainingJobRequest() {
             "caption_runner_pilot_required",
             "caption_runner_pilot_certification_failed",
             "caption_runner_backend_supervision_required",
+            // Hosted jobs that already used all their attempts are not resumed.
+            "caption_attempts_failed",
+            "caption_health_gate_failed",
         ].includes(errorCode);
     }
 
@@ -91490,7 +91493,11 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         };
         for (const group of HOSTED_TOOL_GROUPS) {
             const available = configured[group.key];
-            hostedToolGate[group.key] = available ? null : group.reason;
+            // A selected model that cannot run is not "no model yet": say so.
+            const chosen = { classifier: catalog.classifier?.model_id, detector: catalog.detector?.model_id }[group.key];
+            const reason = chosen && !available ? `${group.reason.split(":")[0]}: the dataset's ${group.key === "detector" ? "detector" : "class predictor"} (${chosen}) cannot be used on this server right now. An administrator can see why in Tools & models.`
+                : group.key === "sam" && !catalog.sam?.model_id ? "SAM is off: no segmentation model is installed on this server yet." : group.reason;
+            hostedToolGate[group.key] = available ? null : reason;
             // Hide the control's own one-control row, never a wider section.
             const rowOf = (control) => control?.parentElement?.matches(".training-field, .training-actions") ? control.parentElement : control;
             for (const id of group.controls) {
@@ -91502,7 +91509,7 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
                 note = document.createElement("div"); note.className = "training-help hosted-tool-reason"; note.dataset.hostedTool = group.key;
                 anchorRow.insertAdjacentElement("beforebegin", note);
             }
-            if (note) { note.textContent = group.reason; note.hidden = available; }
+            if (note) { note.textContent = reason; note.hidden = available; }
         }
         if (hostedToolGate.classifier && autoMode) updateAutoModeState(false);
         if (hostedToolGate.sam && samMode) updateSamModeState(false);

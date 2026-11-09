@@ -30,9 +30,30 @@ def file_digest(path: Path) -> str:
     return digest.hexdigest()
 
 
+MODEL_SOURCE_PROBLEMS = {
+    "hosted_model_path_invalid": "a configured file is missing, is a link, or is outside the allowed model folders",
+    "hosted_model_artifact_changed": "a configured file does not match its recorded SHA-256",
+    "hosted_model_roots_required": "the allowed model folders are missing",
+    "hosted_detector_labels_required": "its label list is missing or repeats a label",
+    "hosted_sam3_mlx_package_incomplete": "the MLX SAM3 package is missing required files",
+    "hosted_qwen_configuration_required": "the Qwen package has no config.json",
+}
+
+
+def model_source_problem(model_id, error):
+    """Administrator text for a configured model that cannot be installed."""
+    code = str(error.args[0]) if isinstance(error, ValueError) and error.args else ""
+    reason = MODEL_SOURCE_PROBLEMS.get(code) or ("a configured file is missing" if isinstance(error, OSError)
+                                                 else "its server configuration is invalid" + (f" ({code})" if code else ""))
+    return f"{model_id} cannot be installed: {reason}. Fix the server's model configuration, then install it again."
+
+
 def regular_file(path, roots) -> Path:
     candidate = Path(path).expanduser().absolute()
-    resolved = candidate.resolve(strict=True)
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("hosted_model_path_invalid") from exc
     roots = [Path(root).resolve(strict=True) for root in roots]
     root = next((root for root in roots if resolved.is_relative_to(root)), None)
     if root is None or not resolved.is_file():
@@ -236,13 +257,17 @@ class ModelRegistry:
                     for value in self._definitions.values()]))
 
     def user_spec(self, user_id, model_id, *, media_root, device, capacity=3, classifier_id=None):
+        """One private worker per user. ``model_id=None`` starts it without SAM,
+        for the class predictor and Qwen on a server with no SAM installed."""
         if not isinstance(user_id, str) or not user_id:
             raise ValueError("hosted_runtime_owner_required")
-        model = self.definition(model_id)
-        if model["kind"] not in {"sam1", "sam3"}:
-            raise ValueError("hosted_user_model_kind_invalid")
-        if not model_runtime_capability(model, device)["available"]:
-            raise ValueError("hosted_model_runtime_unavailable")
+        model = None
+        if model_id is not None:
+            model = self.definition(model_id)
+            if model["kind"] not in {"sam1", "sam3"}:
+                raise ValueError("hosted_user_model_kind_invalid")
+            if not model_runtime_capability(model, device)["available"]:
+                raise ValueError("hosted_model_runtime_unavailable")
         if type(capacity) is not int or not 1 <= capacity <= 3:
             raise ValueError("hosted_predictor_capacity_invalid")
         config = {

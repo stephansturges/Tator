@@ -40,6 +40,14 @@ QWEN_OPERATIONS = {"qwen_infer", "qwen_caption", "qwen_caption_preview", "qwen_c
 # Operations that never call SAM; they must not depend on the user's SAM choice.
 NON_SAM_OPERATIONS = QWEN_OPERATIONS | {"classify_bbox"}
 NATIVE_ANALYSIS_FACTORY = "services.hosted.native_analysis:NativeAnalysisAdapter"
+# Plain text for refusals people meet while annotating; the code stays in "error".
+RUNTIME_MESSAGES = {
+    "runtime_automation_paused": "Assistance is paused while an administrator job uses the server's GPU. Manual annotation and saving still work; the tools come back when the job finishes.",
+    "runtime_queue_full": "Too many tool requests are waiting. Try again in a moment.",
+    "runtime_owner_limit": "The server is running tools for as many people as it can. Try again shortly.",
+    "runtime_payload_budget_exceeded": "The server is busy with large tool requests. Try again in a moment.",
+    "runtime_configuration_changed": "The server's model settings changed while this request waited. Run the tool again.",
+}
 PARAMETERS = {"point_x", "point_y", "positive_points", "negative_points", "bbox_left", "bbox_top", "bbox_width", "bbox_height",
               "local_refine", "uuid", "slot", "conf", "iou", "max_det", "slice_size", "overlap", "merge_iou",
               "text_prompt", "prompt", "threshold", "mask_threshold", "min_size", "max_results", "windowed", "window_size", "window_overlap", "simplify_epsilon", "bboxes", "bbox_labels"}
@@ -203,8 +211,17 @@ class ToolController:
             "operation": "caption_export", "config": {"native_root": str(Path(root) / "native-caption-export")},
             "allowed_parameters": list(export_defaults), "defaults": export_defaults, "timeout": 1800})
         self.registry = ModelRegistry(allowed_roots=[self.model_root])
+        # One damaged installed model must not stop the service: manual
+        # annotation and the other tools keep working, and administrators see
+        # which model failed verification in Tools & models.
+        self.unavailable_models = {}
         for row in installed:
-            self._load_definition(row[0], json.loads(row[1]))
+            try:
+                self._load_definition(row[0], json.loads(row[1]))
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception("Installed model %s failed verification", row[0])
+                self.unavailable_models[row[0]] = "Its stored files failed verification, so it is not loaded. Restore the server's artifact store from a backup."
         from services.hosted.caption_jobs import CaptionJobs
         self.caption_jobs = CaptionJobs(self)
         from services.hosted.caption_batch import CaptionBatches
@@ -292,7 +309,11 @@ class ToolController:
         sources = self.configuration.get("models", {})
         if model_id not in sources:
             raise DomainError("tool_model_not_configured", 404, "An administrator must configure this model on the server.")
-        source = ModelRegistry(allowed_roots=self.configuration.get("allowed_model_roots", []), definitions={model_id: sources[model_id]})
+        try:
+            source = ModelRegistry(allowed_roots=self.configuration.get("allowed_model_roots", []), definitions={model_id: sources[model_id]})
+        except (ValueError, OSError) as exc:
+            from services.hosted.config import model_source_problem
+            raise DomainError("tool_model_source_invalid", 422, model_source_problem(model_id, exc)) from exc
         definition = source.definition(model_id)
         with self._lock, self.artifacts.exclusive():
             previous = self.store.raw_receipt(actor, operation_id)
@@ -343,6 +364,7 @@ class ToolController:
                 return {"model_id": model_id, "checkpoint_sha256": definition["checkpoint_sha256"]}
             result = self.store._command(actor, operation_id, "install_tool_model", {"model_id": model_id, "definition": definition}, publish, admin=True)
             self._load_definition(model_id, definition)
+            self.unavailable_models.pop(model_id, None)
             return result
 
     def _sam_model_ids(self):
@@ -359,15 +381,23 @@ class ToolController:
             self.store._actor(con, actor)
             selected = con.execute("SELECT model_id,revision FROM hosted_tool_preferences WHERE user_id=?", (actor.user_id,)).fetchone()
         policy = self.configuration.get("user_sam", {})
+        installed = self._sam_model_ids()
         default = policy.get("default_model_id")
         if default is None:
-            available = self._sam_model_ids()
-            default = available[0] if available else None
+            default = installed[0] if installed else None
+        if not selected and not installed:
+            # A server default that was never installed is not a lost personal
+            # choice: report "nothing installed yet" instead of an alarm.
+            return {"model_id": None, "revision": 0, "available": False, "default_model_id": default,
+                    "unavailable_reason": "No SAM model is installed on this server yet. Manual annotation works without it."}
         model_id = selected[0] if selected else default
-        available = model_id in self._sam_model_ids()
+        available = model_id in installed
+        reason = None
+        if not available:
+            reason = ("The saved SAM model cannot run on this server. Select an available model; your previous selection has been preserved."
+                      if selected else f"The server's default SAM model ({model_id}) is not installed yet.")
         return {"model_id": model_id, "revision": selected[1] if selected else 0,
-                "available": available,
-                "unavailable_reason": None if available else "The saved SAM model cannot run on this server. Select an available model; your previous selection has been preserved."}
+                "available": available, "unavailable_reason": reason}
 
     def _definition(self, model_id):
         try:
@@ -473,13 +503,12 @@ class ToolController:
             if model_id not in available:
                 if operation not in NON_SAM_OPERATIONS:
                     raise DomainError("tool_not_configured", 503, selection["unavailable_reason"])
-                # Qwen and the class predictor do not use SAM, but they share the
-                # user's private worker, which hosts one installed SAM model. Use
-                # one without changing the user's saved (unavailable) choice.
-                if not available:
-                    raise DomainError("tool_not_configured", 503, "Your private annotation worker needs one installed SAM model on this server. Ask an administrator to install one in Tools & models.")
-                model_id = available[0]
-            model = self._definition(model_id)
+                # Qwen and the class predictor do not use SAM. They share the
+                # user's private worker, which hosts an installed SAM model when
+                # there is one (without changing the user's saved choice) and
+                # otherwise starts without SAM.
+                model_id = available[0] if available else None
+            model = self._definition(model_id) if model_id else {}
             if operation.startswith("sam3_") and operation not in SAM_RECIPE_OPERATIONS and model["kind"] != "sam3":
                 raise DomainError("tool_sam3_required", 503, "Select an installed SAM3 model to use this tool.")
             if model.get("backend") == "mlx" and operation in {"sam3_text", "sam3_text_auto", "sam3_visual"}:
@@ -948,6 +977,7 @@ class ToolController:
             result["caption_batch_defaults"] = {"caption_request": {key: caption_defaults[key] for key in _parameters_for("qwen_caption")},
                 "settings": CaptionSettings().model_dump(), "pilot": PilotSettings().model_dump(), "sample_size": 20, "sample_seed": 0}
             result["available_to_install"] = sorted(self.configuration.get("models", {}))
+            result["unavailable_models"] = dict(self.unavailable_models)
             result["heavy_jobs"] = sorted(self.configuration.get("heavy_jobs", {}))
             result["heavy_job_options"] = {name: {"operation": value["operation"],
                 "label": value.get("label", name), "allowed_parameters": list(value.get("allowed_parameters", [])),
@@ -1378,7 +1408,7 @@ def install_tool_api(app, store, auth, artifacts, actor_dependency, admin_depend
             return callback(*args)
         except RuntimeRejected as exc:
             status = 404 if exc.code == "runtime_request_not_found" else 429 if exc.code in {"runtime_queue_full", "runtime_payload_budget_exceeded", "runtime_owner_limit"} else 409
-            raise DomainError(exc.code, status) from exc
+            raise DomainError(exc.code, status, RUNTIME_MESSAGES.get(exc.code)) from exc
         except (ValueError, KeyError) as exc:
             raise DomainError("tool_configuration_or_input_invalid", 422, "Check the tool settings and supplied parameters.") from exc
 

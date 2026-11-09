@@ -9,6 +9,7 @@
         : window.TatorHosted.api("/api/hosted" + path, body);
     const response = value => new Response(JSON.stringify(value), {status: 200, headers: {"content-type": "application/json"}});
     const pick = (value, keys) => Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]]));
+    const dollars = micro => `$${(Number(micro || 0) / 1000000).toFixed(4)}`;
     let dialog, notice, form, list, details, epoch = 0, selected = null, timer = null, datasetId = null;
     const activeDataset = () => dashboard?.datasetId || window.TatorHosted?.datasetId;
     const current = ticket => ticket === epoch && dialog?.open && activeDataset() === datasetId;
@@ -35,7 +36,7 @@
         if (!value.jobs.length) list.append(node("p", "No remote batches for this dataset."));
         for (const job of value.jobs) {
             const row = node("div"); row.className = "hosted-analysis-job";
-            row.append(node("span", `${job.status.replaceAll("_", " ")} · ${new Date(job.created_at * 1000).toLocaleString()}`));
+            row.append(node("span", `${job.status.replaceAll("_", " ")} · ${new Date(job.created_at * 1000).toLocaleString()}${job.cost?.images ? ` · ${dollars(job.cost.charged_microdollars)} reported` : ""}`));
             action(row, "Inspect", () => inspect(job.job_id, ticket)); list.append(row);
         }
     }
@@ -45,6 +46,10 @@
         if (!current(ticket) || selected !== id) return;
         details.replaceChildren(node("h3", `Batch · ${job.status.replaceAll("_", " ")}`));
         details.append(node("p", `${job.result.accepted_cases || 0} complete caption rows; ${job.result.incomplete_cases || 0} incomplete. No annotation changes are automatic.${job.error ? " " + job.error : ""}`));
+        if (job.cost?.images) {
+            const cost = job.cost, open = cost.images - cost.settled_images;
+            details.append(node("p", `Cost: ${dollars(cost.charged_microdollars)} reported for ${cost.settled_images} of ${cost.images} images${open ? `; ${open} not settled yet, reserved up to ${dollars(cost.reserved_microdollars)} in total` : ""}.`));
+        }
         action(details, "Refresh provider status", async () => { await api(`${base}/${id}/poll`, {}); await inspect(id, ticket); });
         if (!["collected", "cancelled", "failed", "expired", "submission_unknown"].includes(job.status)) {
             action(details, "Cancel remote work", async () => { await api(`${base}/${id}/cancel`, {operation_id: operation()}); await inspect(id, ticket); });
@@ -198,6 +203,18 @@
         document.getElementById("hostedCaptionJobs")?.insertAdjacentElement("afterend", button);
         button.onclick = () => open().catch(error => { notice.textContent = error.message; });
         window.addEventListener("storage", event => { if (event.key === "tator.hosted.session-event") { button.hidden = true; dialog?.close(); } });
+        // Offer remote batches only where a paid provider is set up for this
+        // dataset, or where earlier batches still hold proposals to review.
+        button.hidden = true;
+        window.addEventListener("load", async () => {
+            const began = Date.now();
+            while (!activeDataset()) { if (Date.now() - began > 30000) return; await new Promise(resolve => setTimeout(resolve, 200)); }
+            try {
+                const id = encodeURIComponent(activeDataset());
+                const [catalog, saved] = await Promise.all([api(`/tools/catalog?dataset_id=${id}`), api(`${base}?dataset_id=${id}`)]);
+                button.hidden = !catalog.paid_batch?.models?.length && !saved.jobs?.length;
+            } catch (_) { button.hidden = false; }
+        }, {once: true});
     }
     if (!dashboard) window.addEventListener("load", async () => {
         const id = new URLSearchParams(location.search).get("paid_batch"); if (!id) return;

@@ -121,9 +121,13 @@ records a terminal review, preserves the original submission and makes the
 image available for a new assignment.
 
 **Close tranche** is allowed only when no reserved, editable or submitted images
-remain. Finish or explicitly remove that work first. **Reopen as Draft** lets an
-administrator add new work while retaining previous outcomes; it never revives
-old editing access.
+remain. Finish or explicitly remove that work first; the button says which work
+is left. **Reopen as Draft** lets an administrator add new work while retaining
+previous outcomes; it never revives old editing access.
+
+**View history** lists, oldest first, who changed the tranche and how: created,
+assigned, images added, removed or moved with their reason, submitted, returned
+and confirmed. Several images handled together appear as one line.
 
 Read the progress counts
 -------------------------

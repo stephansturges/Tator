@@ -11,3 +11,4 @@
 .tranche-members .hosted-card:not(:has(img)){align-self:start}
 /* Light theme: muted text on the page background needs a darker shade to reach 4.5:1. */
 :root[data-theme=light] .hosted-tranches,:root[data-theme=light] .hosted-tranche-recovery{--muted:#566a78}
+.tranche-history{margin:0;padding-left:1.2rem;display:grid;gap:.35rem;max-height:55vh;overflow:auto}.tranche-history li{overflow-wrap:anywhere}

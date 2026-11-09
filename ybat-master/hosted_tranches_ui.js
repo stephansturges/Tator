@@ -102,7 +102,7 @@
                     if ([400, 403, 404, 409, 422, 423].includes(error.status)) {
                         if (operation.import_storage_key) sessionStorage.removeItem(operation.import_storage_key);
                         persist(null);
-                        throw new Error(`${error.message} No changes from this command were applied.${operation.stage === "activate" ? " The created Draft remains available; review it and assign it again." : " Refresh the selection before trying again."}`);
+                        throw new Error(`${error.message} No changes from this command were applied.${operation.stage === "activate" ? " The created Draft remains available; review it and assign it again." : operation.body?.image_ids || operation.body?.images ? " Refresh the selection before trying again." : ""}`);
                     }
                     throw error;
                 }
@@ -194,7 +194,7 @@
     function renderList() {
         panel.replaceChildren();
         const toolbar = el("div", undefined, "tranche-toolbar"), stateLabel = el("label", "Status"), stateSelect = el("select");
-        for (const [value, text] of [["open", "Open (Draft and Active)"], ["draft", "Draft"], ["active", "Active"], ["closed", "Closed"], ["", "All, including closed"]]) stateSelect.append(new Option(text, value));
+        for (const [value, text] of admin() ? [["open", "Open (Draft and Active)"], ["draft", "Draft"], ["active", "Active"], ["closed", "Closed"], ["", "All, including closed"]] : [["open", "Open"], ["closed", "Closed"], ["", "All, including closed"]]) stateSelect.append(new Option(text, value));
         stateSelect.value = lifecycle; stateSelect.onchange = () => { lifecycle = stateSelect.value; app.action(stateSelect, () => list()); }; stateLabel.append(stateSelect);
         const search = el("input"); search.type = "search"; search.placeholder = "Find a tranche"; search.value = query; search.setAttribute("aria-label", "Find a tranche");
         const form = el("form"); form.className = "tranche-search"; form.append(search, button("Search", () => { query = search.value.trim(); return list(); })); form.onsubmit = e => { e.preventDefault(); query = search.value.trim(); app.action(search, () => list()); };
@@ -209,7 +209,9 @@
             panel.append(steps);
         } else if (otherDatasets.length) panel.append(elsewhereNote(otherDatasets));
         const grid = el("div", undefined, "tranche-grid");
-        for (const tranche of listRows) {
+        // Annotators see the tranches that still have work for them first.
+        const ordered = admin() ? listRows : [...listRows].sort((a, b) => (open(b) > 0) - (open(a) > 0));
+        for (const tranche of ordered) {
             const card = el("article", undefined, "tranche-card"); card.dataset.trancheId = tranche.id;
             const complete = tranche.counts.ever_included > 0 && !handedOver(tranche) && EDITABLE.every(key => !tranche.counts[key]);
             card.append(el("h2", tranche.name), el("p", `${complete ? "Complete · " : ""}${statusLine(tranche)}${tranche.annotator_id && !tranche.annotator_available ? " · Annotator unavailable" : ""}`), totals(tranche));
@@ -291,7 +293,9 @@
                 actions.append(button("Upload images here", () => window.TatorHostedImport?.start({tranche_id: tranche.id})));
                 if (tranche.lifecycle === "draft") actions.append(button("Assign tranche", () => chooseAssignee(tranche), "primary"));
                 else { const change = button("Change annotator", () => chooseAssignee(tranche)); change.disabled = Boolean(tranche.counts.awaiting_review); if (change.disabled) { change.title = "Review pending submissions first, or move selected unfinished images to another tranche."; change.setAttribute("aria-describedby", "trancheChangeHint"); } actions.append(change); }
-                actions.append(button("Close tranche", () => command(`Close “${tranche.name}”`, `/tranches/${tranche.id}/close`, {expected_revision: tranche.revision})));
+                actions.append(button("Close tranche", () => { const left = EDITABLE.filter(key => tranche.counts[key]).map(key => `${tranche.counts[key].toLocaleString()} ${labels[key].toLowerCase()}`);
+                    if (left.length) throw new Error(`This tranche still has work: ${left.join(", ")}. Close it once those images are confirmed, or remove them from the tranche first.`);
+                    return command(`Close “${tranche.name}”`, `/tranches/${tranche.id}/close`, {expected_revision: tranche.revision}); }));
             } else actions.append(button("Reopen as Draft", () => command(`Reopen “${tranche.name}”`, `/tranches/${tranche.id}/reopen`, {expected_revision: tranche.revision})));
             if (tranche.counts.awaiting_review) actions.append(button(`Review ${count(tranche.counts.awaiting_review, "image")}`, () => openQueue("review"), "primary"));
             if (tranche.lifecycle === "draft" && tranche.counts.not_assigned) actions.append(button("Annotate Draft yourself", () => openQueue("draft")));
@@ -431,9 +435,34 @@
         submit(f, "Add selected images", () => { valid(); const selectedRows = [...chosen.values()]; checkSelection(selectedRows); return command(`Add ${count(selectedRows.length, "image")}`, `/tranches/${tranche.id}/members/add`, {expected_revision: tranche.revision, ...captured(selectedRows)}); }); await load();
     }
     async function showHistory(tranche) {
-        const f = form(`${tranche.name} · History`), list = el("div"); let next = null; f.append(list);
-        const load = async () => { const q = new URLSearchParams({limit: "100"}); if (next) q.set("cursor", next); const result = await app.api(`/tranches/${tranche.id}/history?${q}`); result.events.forEach(event => list.append(el("p", `${new Date((event.created_at || event.at) * 1000).toLocaleString()} · ${event.kind || event.action || event.event_type}${event.data?.reason ? ` · ${event.data.reason}` : ""}`))); next = result.next_cursor; more.hidden = !next; };
-        const more = button("Load earlier history", load); f.append(more, button("Close", () => dialog.close())); await load();
+        const f = form(`${tranche.name} · History`), list = el("ol", undefined, "tranche-history"); let next = null; f.append(list);
+        const files = new Map(members.map(m => [m.image_id, m.filename])), people = new Map(app.users.map(u => [u.id, personName(u)]));
+        const who = id => people.get(id) || (String(id || "").startsWith("system") ? "Tator" : "A former account");
+        const images = data => count((data.image_ids || []).length, "image"), reason = data => data.reason ? `: ${data.reason}` : "";
+        const one = (n, data, text) => n > 1 ? `${count(n, "image")} ${text}` : `${files.get(data.image_id) || "One image"} ${text}`;
+        const say = (kind, data, n) => ({created: "Created", edited: "Changed the name or instructions", members_added: `Added ${images(data)}`,
+            members_removed: `Removed ${images(data)} to Incoming${reason(data)}`, members_transferred: `Moved ${images(data)} to another tranche${reason(data)}`,
+            members_received: `Received ${images(data)} from another tranche`, activated: `Assigned ${images(data)} to ${who(data.annotator_id)}`,
+            annotator_changed: `Changed the annotator to ${who(data.annotator_id)} (${images(data)})`, closed: "Closed the tranche", reopened: "Reopened it as a Draft",
+            submitted: one(n, data, "submitted for review"), returned: one(n, data, "returned for changes"), approved: one(n, data, "confirmed"),
+            withdrawn: one(n, data, `removed${reason(data)}`), transferred: one(n, data, "handed to another tranche or annotator"), archived: one(n, data, "archived")}[kind]
+            || `${String(kind).replaceAll("_", " ")}`);
+        // Per-image "assigned" rows repeat the Assigned/Added line written with them.
+        const perImage = new Set(["submitted", "returned", "approved", "withdrawn", "transferred", "archived"]);
+        const load = async () => {
+            const q = new URLSearchParams({limit: "100"}); if (next) q.set("cursor", next);
+            const result = await app.api(`/tranches/${tranche.id}/history?${q}`), groups = [];
+            for (const event of result.events) {
+                const kind = event.kind || event.action || event.event_type, at = event.created_at || event.at, last = groups.at(-1);
+                if (kind === "assigned") continue;
+                if (last && perImage.has(kind) && last.kind === kind && last.actor === event.actor_id && at - last.at < 5 && (last.data.reason || "") === (event.data?.reason || "")) { last.n++; continue; }
+                groups.push({kind, at, actor: event.actor_id, data: event.data || {}, n: 1});
+            }
+            for (const g of groups) list.append(el("li", `${new Date(g.at * 1000).toLocaleString()} · ${who(g.actor)} · ${say(g.kind, g.data, g.n)}`));
+            if (!list.children.length) list.append(el("li", "No events yet."));
+            next = result.next_cursor; more.hidden = !next;
+        };
+        const more = button("Show later events", load); f.append(more, button("Close", () => dialog.close())); await load();
     }
     async function withdraw(image) {
         // This image command has its own existing receipt contract, not a group result.

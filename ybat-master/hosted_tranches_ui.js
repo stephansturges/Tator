@@ -43,6 +43,7 @@
         if (path.endsWith("/members/remove")) return `${count(images, "image")} removed from ${name} and returned to Incoming as Not assigned.`;
         if (path.endsWith("/move")) return `${count(images, "image")} moved to “${result.destination?.name || "the other tranche"}”.`;
         if (path.endsWith("/close")) return `${name} is closed.`;
+        if (path.endsWith("/edit")) return `${name} is updated.`;
         if (path.endsWith("/reopen")) return `${name} is open again as a Draft.`;
         return `${operation.label}: saved.`;
     }
@@ -102,7 +103,15 @@
                     if ([400, 403, 404, 409, 422, 423].includes(error.status)) {
                         if (operation.import_storage_key) sessionStorage.removeItem(operation.import_storage_key);
                         persist(null);
-                        throw new Error(`${error.message} No changes from this command were applied.${operation.stage === "activate" ? " The created Draft remains available; review it and assign it again." : operation.body?.image_ids || operation.body?.images ? " Refresh the selection before trying again." : ""}`);
+                        // Usually someone else changed the tranche first: show its current state
+                        // instead of leaving a stale form and page that would be refused again.
+                        let refreshed = false;
+                        if (error.status === 409 && shown && app.datasetId === operation.dataset_id) {
+                            dialog.close();
+                            try { await show(); refreshed = true; } catch (_) { /* The message below still applies. */ }
+                        }
+                        const lead = refreshed && ["tranche_revision_changed", "tranche_membership_changed"].includes(error.code) ? "Someone else changed this tranche first." : error.message;
+                        throw new Error(`${lead} No changes from this command were applied.${operation.stage === "activate" ? " The created Draft remains available; review it and assign it again." : refreshed ? " The tranche below now shows its current state; check it before trying again." : operation.body?.image_ids || operation.body?.images ? " Refresh the selection before trying again." : ""}`);
                     }
                     throw error;
                 }

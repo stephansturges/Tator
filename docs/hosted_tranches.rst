@@ -99,7 +99,10 @@ Incoming and preserves their saved annotations. **Move to another tranche**
 reserves them in a Draft or assigns them to an Active destination's annotator.
 Both changes revoke the previous editing session, so a delayed save or inference
 result cannot overwrite the handoff. If a selected image changed after the
-selection was captured, refresh and review the selection before retrying.
+selection was captured, refresh and review the selection before retrying. When
+another administrator changed the tranche first, the change is refused, the open
+form closes and the tranche page reloads with its current state, so the next
+attempt starts from what is really there.
 
 **Change annotator** transfers only unfinished work into a new ownership
 assignment. It offers the other annotators, not the current one. It is blocked

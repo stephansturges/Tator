@@ -226,9 +226,16 @@
     }
     async function detail(id, append = false) {
         const ticket = ++sequence, dataset = app.datasetId;
-        if (!append) { members = []; selected.clear(); cursor = null; }
+        if (!append) { members = []; selected.clear(); cursor = null; if (current?.id !== id) filter = "all"; }
         const params = new URLSearchParams({state: filter, limit: "100"}); if (append && cursor) params.set("cursor", cursor);
-        const result = await app.api(`/tranches/${encodeURIComponent(id)}/members?${params}`);
+        let result;
+        try { result = await app.api(`/tranches/${encodeURIComponent(id)}/members?${params}`); }
+        catch (error) {
+            if (error.status !== 404 || ticket !== sequence || !shown || dataset !== app.datasetId) throw error;
+            // An old or shared link to a tranche this account cannot open: show the list instead of an empty page.
+            history.replaceState(null, "", `/?${new URLSearchParams({dataset, view: admin() ? "tranches" : "mine"})}`);
+            current = null; await list(); app.notice(`${error.message} Showing ${admin() ? "this dataset's tranches" : "your tranches"} instead.`, true); return;
+        }
         if (ticket !== sequence || !shown || dataset !== app.datasetId) return;
         if (result.tranche.dataset_id !== dataset) {
             // A link can name a tranche of another dataset: list this dataset's tranches instead.

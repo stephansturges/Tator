@@ -173,13 +173,16 @@
         await refreshHistory(ticket);
     }
     async function showResult(jobId, ticket) {
+        await renderResult(jobId, ticket);
+        // The result opens below the saved list; bring it into view once drawn.
+        if (valid(ticket) && currentJob === jobId) content.scrollIntoView({block: "start"});
+    }
+    async function renderResult(jobId, ticket) {
         disposeGraph?.(); disposeGraph = null; currentJob = jobId;
         const job = await api(`/analysis/jobs/${jobId}`);
         if (!valid(ticket) || currentJob !== jobId) return;
         content.replaceChildren(node("h3", job.consumer === "dqe" ? "Data Quality Explorer" : "Analysis result"));
         content.append(node("p", job.stale ? "Confirmed data has changed since this run. These results remain available as history; create a new run before applying changes." : "This result describes the current confirmed dataset."));
-        // The result opens below the saved list; bring it into view.
-        content.scrollIntoView({block: "start"});
         if (job.consumer === "pruning") {
             const a = node("a", "Open Dataset pruning →"); a.href = `/pruning?job=${encodeURIComponent(jobId)}`; a.className = "hosted-download"; content.append(a); return;
         }
@@ -264,8 +267,10 @@
             content.append(node("p", "The completed model, logs and recipe are retained with this snapshot."));
             // Training runs record the train/validation split they used.
             const split = result.run_split;
+            const placed = split ? split.train_images + split.validation_images + split.test_images - split.images_split_for_run : 0;
             if (split) content.append(node("p", `This run trained on ${count(split.train_images, "image")} and validated on ${count(split.validation_images, "image")}${split.test_images ? `, leaving ${count(split.test_images, "test image")} out` : ""}. `
-                + `Splits set on the dataset were kept; ${count(split.images_split_for_run, "unsplit image")} ${split.images_split_for_run === 1 ? "was" : "were"} split for this run only.`));
+                + (placed > 0 ? `${count(placed, "image")} kept the split set on the dataset; the other ${count(split.images_split_for_run, "image")} ${split.images_split_for_run === 1 ? "was" : "were"} split for this run only.`
+                    : "The dataset has no splits, so this run chose them; the dataset is not changed.")));
             else if (trainingTasks.has(job.consumer)) content.append(node("p", "This run used the splits set on the dataset."));
             // Trainers fall back to the CPU when the configured GPU is not available; say where it ran.
             const device = (result.status?.logs || []).map(entry => String(entry?.message || "")).find(message => message.startsWith("Training device:"));

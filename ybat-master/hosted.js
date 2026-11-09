@@ -77,13 +77,15 @@
             const root = document.documentElement, button = $("theme"), pip = mode === "pipboy";
             root.dataset.theme = mode; if (pip) root.dataset.pipboyAccent = accent; else delete root.dataset.pipboyAccent;
             button.textContent = pip ? `Pip ${accent === "amber" ? "Amber" : "Green"}` : mode === "dark" ? "Light mode" : "Dark mode";
-            button.title = pip ? `Switch Pip-Boy color to ${accent === "amber" ? "green" : "amber"}; double-click to leave Pip-Boy` : "";
+            button.title = pip ? `Switch Pip-Boy color to ${accent === "amber" ? "green" : "amber"}; double-click or Shift+click to leave Pip-Boy` : "Double-click or Shift+click for the Pip-Boy theme";
             if (!persist) return;
             write("tator.themeMode", mode); write("tator.darkMode", mode === "dark" ? "1" : "0"); write("tator.pipboyAccent", accent);
             if (!pip) write("tator.classicThemeMode", mode);
         }
-        $("theme").onclick = () => {
+        $("theme").onclick = event => {
             clearTimeout(clickTimer);
+            // Shift+click (Shift+Enter from the keyboard) is the keyboard's way to the Pip-Boy theme.
+            if (event.shiftKey) { clickTimer = null; apply(mode === "pipboy" ? classic : "pipboy", true); return; }
             clickTimer = setTimeout(() => { clickTimer = null; if (mode === "pipboy") accent = accent === "amber" ? "green" : "amber"; apply(mode === "pipboy" ? mode : mode === "dark" ? "light" : "dark", true); }, 320);
         };
         $("theme").ondblclick = () => { clearTimeout(clickTimer); clickTimer = null; apply(mode === "pipboy" ? classic : "pipboy", true); };
@@ -501,7 +503,7 @@
         else { parts.push("Can sign in"); if (user.link && !user.link.expired) parts.push(`reset link open until ${when(user.link.expires_at)}`); }
         if (user.self) parts.push("You");
         if (user.last_administrator) parts.push("Only active administrator");
-        if (user.open_work) parts.push(`${count(user.open_work, "open image")}`);
+        if (user.open_work) parts.push(user.disabled ? `${count(user.open_work, "open image")} still with them: use Recall assigned work in Incoming to hand them on` : `${count(user.open_work, "open image")}`);
         return parts.join(" · ");
     }
     function drawUsers() {
@@ -742,6 +744,8 @@
     $("loginForm").onsubmit = (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); action(event.submitter, async () => { state.session = await api("/login", { method: "POST", body: { username: form.get("username"), password: form.get("password") } }); event.target.reset(); announceSession(); notice(""); const next = nextPage(); if (next) { location.replace(next); return; } await workspace(); }); };
     $("logout").onclick = () => action($("logout"), async () => { await api("/logout", { method: "POST" }); announceSession(); state.selected.clear(); state.images = []; $("imageGrid").replaceChildren(); loginView(); });
     $("refresh").onclick = () => action($("refresh"), workspace);
+    // Refresh stays last after the modules add their dataset actions, in tab order as well as on screen.
+    document.addEventListener("DOMContentLoaded", () => $("refresh").parentElement.append($("refresh")));
     $("datasetChoice").onchange = () => { notice(""); switchDataset($("datasetChoice").value).catch((error) => { if (!error.stale) notice(error.message, true); }); };
     $("more").onclick = () => action($("more"), () => loadImages(true));
     $("moreAll").onclick = () => action($("moreAll"), loadAll);

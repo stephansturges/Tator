@@ -422,8 +422,11 @@ in the dataset workspace, choose the annotator, select individual images or
 **Select all in this list**, enter a reason, then confirm the recall. Images
 return to Incoming as Not assigned for administrator editing or reassignment, and
 leave their former tranche. Submitted and confirmed images are excluded from
-ordinary recall. An administrator can explicitly withdraw a pending submission
-to Incoming with a reason, for example when its author is no longer available.
+ordinary recall. After a recall of up to 500 images, the dialog offers **Create a
+tranche from these images**, which opens the new-tranche form with exactly those
+images, so they can go straight to another annotator. An administrator can
+explicitly withdraw a pending submission to Incoming with a reason, for example
+when its author is no longer available.
 
 Recall invalidates old editing tabs and automated results. If any selected image
 changed after the list loaded, the entire recall is rejected; refresh and review

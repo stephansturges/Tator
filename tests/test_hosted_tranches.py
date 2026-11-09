@@ -83,6 +83,8 @@ def test_individual_submit_return_approve_and_personal_counts(store):
     returned = store.return_image(ADMIN, ctx(review, 'return-one', 'admin-tab'), 'One car is missing')
     assert_counts(store, tranche['id'], changes_requested=1)
     assert store.image(ALICE, returned['id'], include_review=True)['review_feedback']['feedback'] == 'One car is missing'
+    row = next(m for m in store.tranche_members(ALICE, tranche['id'], state='changes_requested')['members'] if m['image_id'] == returned['id'])
+    assert row['feedback'] == 'One car is missing'
     editing = store.acquire_editor(ALICE, returned['id'], 'editor')
     submitted = store.submit(ALICE, ctx(editing, 'resubmit', 'editor'))
     store.approve_from_review_queue(ADMIN, ctx(submitted, 'approval'))

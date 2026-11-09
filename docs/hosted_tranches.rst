@@ -54,7 +54,11 @@ Annotate and review
 
 Annotators open **My tranches** and choose **Continue annotation** on a card to
 resume immediately in the existing annotation canvas. **Open tranche** shows
-its instructions and progress first. All first-pane annotation tools and
+its instructions and progress first. My tranches shows one dataset at a time;
+when another dataset also has work for you, a note above the cards names it and
+switches to it. A tranche whose images were all handed to someone else reads
+**No longer assigned to you**. When a tranche has nothing left for you, its page
+names your next open tranche, if any, with **Continue there**. All first-pane annotation tools and
 shortcuts remain available, subject to installed runtime capabilities. The administrator still
 selects the dataset's detector and class predictor. Tranche instructions add
 human guidance; they do not change tool permissions or model prompts.
@@ -70,13 +74,18 @@ updates membership and instructions without resetting your current annotations.
 After submission, the annotator can see its progress but cannot open that
 image's pixels or annotations. The administrator may approve it or return it
 with feedback. Returned work goes back to the original author in the same
-tranche. Only approval adds it to the canonical dataset. A reviewed background
+tranche, and the feedback is shown on the image's card in the tranche as well as
+on the canvas. A later owner of the same image does not see it. Only approval adds it to the canonical dataset. A reviewed background
 image with no objects is valid: use **No objects to label** before submission.
 
 Administrators may annotate and approve a Draft's reserved image directly.
 That image counts as approved without inventing an annotator submission.
 Inside a tranche, filter to **Waiting for review**, select the reviewed images and
-choose **Approve selected submissions**. Each image is checked against its
+choose **Approve selected submissions**. When the filter has more images than the
+page shows, **Select all waiting for review** (or the filter's other state)
+selects every one of them, up to 500 per change; for more, use **Review** with the
+tranche selected. Images another administrator reviewed in the meantime are
+reported together as not approved, with their names, and the list refreshes. Each image is checked against its
 captured version and ownership generation. The result identifies any rejected
 images separately. A lost reply retains the exact per-image commands for retry;
 it does not create new approvals against changed work. The global **Review**
@@ -93,11 +102,17 @@ result cannot overwrite the handoff. If a selected image changed after the
 selection was captured, refresh and review the selection before retrying.
 
 **Change annotator** transfers only unfinished work into a new ownership
-assignment. It is blocked while submissions await review. Review those images
+assignment. It offers the other annotators, not the current one. It is blocked
+while submissions await review, and the tranche page says so beside the button. Review those images
 first, or move a selected unfinished subset to another tranche. Earlier authors,
 submissions and approvals remain in history. The new annotator receives the
 current saved annotation as a working baseline, but not another person's private
 feedback or earlier annotation history.
+
+Image cards show **open for editing now** while someone has the image open on
+the canvas. Changing the annotator, removing or moving such images asks for
+confirmation first: annotations saved so far move with the image, but unsaved
+changes in that tab stay there and the tab can no longer save.
 
 Disabling an account or promoting it to administrator does not discard its
 work. The tranche shows **Annotator unavailable**. Recall its unfinished work;
@@ -130,6 +145,12 @@ change its Draft / Active / Closed lifecycle. Re-adding an image does not
 inflate its total, and approval after a transfer does not change the source tranche's transferred
 outcome. Annotators see only their own work and outcomes; administrators see the
 whole tranche and its history.
+
+The tranche pages reload their cards and counts when you come back to the tab
+or window, after at least ten seconds, unless a selection, a dialog or a
+longer loaded list is open. **Refresh** always reloads them. After each change a
+message says what changed, for example who the tranche is now assigned to and
+how many images it holds.
 
 Recover an interrupted change
 ------------------------------

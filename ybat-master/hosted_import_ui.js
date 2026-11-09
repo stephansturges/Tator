@@ -90,8 +90,10 @@
     }
     function publish(dataset, result) {
         try { sessionStorage.setItem(reportKey(dataset), JSON.stringify(result)); } catch (_) {}
-        app.notice(""); refresh();
-        if (app.view !== "incoming" || app.datasetId !== dataset) app.notice(`${result.title} ${result.lines.join(" ")}`, result.error);
+        refresh();
+        // The headline replaces the progress line at the top; the details stay in the report.
+        const shown = !report.hidden && app.datasetId === dataset;
+        app.notice(shown ? `${result.title}${result.lines.length ? " Details are in the import report below." : ""}` : `${result.title} ${result.lines.join(" ")}`, result.error);
     }
     input.onchange = async (event) => {
         const files = [...event.target.files || []], dataset = app.datasetId, authority = app.session;

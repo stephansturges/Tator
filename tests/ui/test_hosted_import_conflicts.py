@@ -38,7 +38,7 @@ async def _exercise(origin, output):
         labelmap = output / 'labelmap.txt'; labelmap.write_text('Person\nCar\n')
         await page.get_by_role('button', name='Incoming', exact=True).click()
         await page.locator('#uploadInput').set_input_files([str(photo), str(labels), str(labelmap)])
-        await expect(page.locator('#notice')).to_contain_text('1 imported label conflict retained')
+        await expect(page.locator('#uploadReport')).to_contain_text('1 imported label conflict retained')
         before = await api(f"/images/{image['id']}")
         assert before['annotations']['objects'] == []
         await page.goto(f"{origin}/annotate?image={image['id']}")

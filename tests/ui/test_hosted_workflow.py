@@ -864,7 +864,7 @@ async def _encoded_media(origin, source):
         await sign_in(page, origin, 'admin')
         await page.get_by_role('button', name='Incoming', exact=True).click()
         await page.locator('#uploadInput').set_input_files(str(source))
-        await expect(page.locator('#notice')).to_contain_text('1 new image uploaded')
+        await expect(page.locator('#notice')).to_contain_text('1 new image added')
         rows = await page.evaluate("window.TatorHostedDashboard.api('/images?dataset_id='+document.getElementById('datasetChoice').value)")
         record = next(row for row in rows['images'] if row['filename'] == source.name)
         assert record['media_hash'] == original_hash
@@ -920,7 +920,7 @@ async def _special_pixel_modes(origin, source, mode):
         await sign_in(page, origin, 'admin')
         await page.get_by_role('button', name='Incoming', exact=True).click()
         await page.locator('#uploadInput').set_input_files(str(source))
-        await expect(page.locator('#notice')).to_contain_text('1 new image uploaded')
+        await expect(page.locator('#notice')).to_contain_text('1 new image added')
         rows = await page.evaluate("window.TatorHostedDashboard.api('/images?dataset_id='+document.getElementById('datasetChoice').value)")
         image = next(row for row in rows['images'] if row['filename'] == source.name)
         await page.goto(origin + '/annotate?image=' + image['id'])
@@ -1100,7 +1100,7 @@ async def _imports_and_recovery(origin, paths):
         async with page.expect_file_chooser() as chooser:
             await page.locator("#resumeImport").click()
         await (await chooser.value).set_files(paths)
-        await expect(page.locator("#notice")).to_contain_text("2 new images uploaded")
+        await expect(page.locator("#notice")).to_contain_text("2 new images added")
         images = await (await context.request.get(f"{origin}/api/hosted/images?dataset_id={dataset_id}")).json()
         assert len(images["images"]) == 2 and commits[0]["id"] in {row["id"] for row in images["images"]}
         await page.get_by_role("navigation", name="Administrator tools").get_by_role("button", name="Tools & models", exact=True).click()

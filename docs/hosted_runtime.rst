@@ -417,6 +417,14 @@ Only the exact generation transition checked by that acquisition is accepted;
 assignment or annotation changes cannot be skipped. Recovery never acquires a
 lease itself, and failure to resume does not undo a successful editor acquire.
 
+A job that ran all of its attempts has a verdict (``caption_attempts_failed`` or
+``caption_health_gate_failed``). It is not resumed by request: resume returns
+``caption_job_attempts_exhausted`` and the person starts a new caption. Worker
+crashes are still resumed automatically, within ``max_auto_resumes``. A failed
+job's status carries a plain ``message`` naming the last attempt's problem; the
+code stays in ``error`` and the attempts keep their model output. The canvas no
+longer re-submits such a job on its own.
+
 Jobs wait while admin compute suspends new automation. Loss of image authority,
 session validity, model selection or class-map identity stops a job. Result
 publication repeats the guarded image check while recording artifact references.

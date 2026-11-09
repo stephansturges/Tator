@@ -37927,6 +37927,9 @@ async function cancelRfDetrTrainingJobRequest() {
             "caption_runner_pilot_required",
             "caption_runner_pilot_certification_failed",
             "caption_runner_backend_supervision_required",
+            // Hosted jobs that already used all their attempts are not resumed.
+            "caption_attempts_failed",
+            "caption_health_gate_failed",
         ].includes(errorCode);
     }
 

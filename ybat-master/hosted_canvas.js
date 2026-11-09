@@ -1035,7 +1035,8 @@
         if (!$("hostedSaveState") || event.defaultPrevented) return;
         const target = event.target instanceof Element ? event.target : null;
         if (target?.closest(".shortcut-settings-body")) return; // Recording a new binding.
-        const typing =Boolean(target?.closest("textarea, select, [contenteditable=''], [contenteditable='true'], input:not([type=checkbox]):not([type=radio]):not([type=button]):not([type=range])"));
+        // Lists such as Classes keep focus after a click; they have no text undo of their own.
+        const typing = Boolean(target?.closest("textarea, [contenteditable=''], [contenteditable='true'], input:not([type=checkbox]):not([type=radio]):not([type=button]):not([type=range])"));
         const modifier = (event.ctrlKey || event.metaKey) && !event.altKey;
         const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
         const openDialog = document.querySelector("dialog[open]");

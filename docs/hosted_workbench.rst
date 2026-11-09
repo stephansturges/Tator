@@ -37,8 +37,9 @@ Data Quality Explorer review that is on screen is kept, and the bar then offers
 what is open. On the first visit for a dataset, the workbench makes the copy
 itself, showing progress in the bar, and then opens it. A dataset without
 confirmed images has nothing to copy; the bar says so instead of opening an
-empty copy. Arriving never reopens the previously open copy first, and the
-saved-session restore offers only that dataset's own copies.
+empty copy, and offers no **Make fresh copy** until images are confirmed.
+Arriving never reopens the previously open copy first, and the saved-session
+restore offers only that dataset's own copies.
 
 If the newest copy was deleted in the workbench's Dataset Management, the
 newest remaining copy opens and the bar says that a newer copy was deleted.
@@ -56,7 +57,9 @@ Management and the bar, **Make fresh copy**, **Review edits** and the
 **Admin workspace** link follow it to that copy's hosted dataset. When the open
 dataset is not a copy of a hosted dataset, the bar says so, disables the hosted
 actions and offers **Open** for the dataset you came from. Choosing a dataset
-in the **Hosted data** dialog only changes what the dialog lists.
+in the **Hosted data** dialog only changes what the dialog lists; **Open here**
+next to a listed copy opens that copy in the workbench, saving the open one
+first.
 
 **Review edits** counts the edited images of the open copy that can be applied,
 and is updated after every label save, not only on arrival. **Make fresh copy**
@@ -72,12 +75,14 @@ without releasing it (the lock then lapses after about a minute and a half).
 Opening it then asks whether to take over editing here. Cancel opens it
 read-only, and the bar says read-only and offers **Take over editing**. A copy
 that another administrator is editing opens only read-only, or not at all if
-you cancel; the bar says which and why.
+you cancel; the bar says which and why, and **Try editing again** reloads the
+page to edit once they have closed it.
 
 A copy does not follow later hosted work. When images were edited on the
 annotation canvas, newly confirmed or taken out of the confirmed set after the
 copy was made, the bar says how many and offers **Update copy**. Updating
-makes a fresh copy and opens it. Edits that the workbench applied itself do not
+makes a fresh copy and opens it. The bar checks for such changes every half
+minute and after each apply. Edits that the workbench applied itself do not
 count as hosted changes. Apply pending workbench edits before updating;
 otherwise they stay in the older copy, which remains reviewable under **Hosted
 data**.
@@ -199,6 +204,8 @@ Pin the workbench to one GPU with ``CUDA_VISIBLE_DEVICES``.
 
 Restart the workbench service after each release update, together with the
 hosted service. If it is stopped, workbench pages report that the service is
-unavailable and the hosted workspace keeps working.
+unavailable and the hosted workspace keeps working. Making a copy is then
+refused at once, before anything is frozen or linked, and the bar offers
+**Reload** to use once the service runs again.
 
 Related guides are listed in the `documentation index <index.rst>`_.

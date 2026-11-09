@@ -255,7 +255,8 @@ class WorkbenchBridge:
     # ---- jobs -----------------------------------------------------------
     def _start(self, actor, kind, target, args, *, bridge_id=None, dataset_id=None) -> dict:
         job = {"id": uuid.uuid4().hex, "kind": kind, "actor_id": actor.user_id, "state": "running", "done": 0, "total": None,
-               "result": None, "error": None, "started_at": time.time(), "bridge_id": bridge_id, "dataset_id": dataset_id}
+               "phase": None, "result": None, "error": None, "error_code": None, "started_at": time.time(),
+               "bridge_id": bridge_id, "dataset_id": dataset_id}
         with self._lock:
             # One copy of a dataset at a time: a second tab follows the running export.
             running = next((other for other in self._jobs.values() if dataset_id is not None and other["kind"] == kind
@@ -276,6 +277,7 @@ class WorkbenchBridge:
                 job["result"] = target(job, *args); job["state"] = "completed"
             except Exception as exc:
                 job["state"] = "failed"
+                job["error_code"] = exc.code if isinstance(exc, DomainError) else "workbench_job_failed"
                 job["error"] = exc.detail if isinstance(exc, DomainError) and isinstance(exc.detail, str) else getattr(exc, "code", "workbench_job_failed")
                 if not isinstance(exc, DomainError):
                     traceback.print_exc()
@@ -287,7 +289,7 @@ class WorkbenchBridge:
         job = self._jobs.get(job_id)
         if job is None or job["actor_id"] != actor.user_id:
             raise DomainError("workbench_job_not_found", 404)
-        return {key: job[key] for key in ("id", "kind", "state", "done", "total", "result", "error")}
+        return {key: job[key] for key in ("id", "kind", "state", "done", "total", "phase", "result", "error", "error_code")}
 
     # ---- bridges --------------------------------------------------------
     @staticmethod
@@ -374,7 +376,19 @@ class WorkbenchBridge:
             # A copy holds confirmed images only; an empty one would open as an empty workspace.
             raise DomainError("workbench_no_confirmed_images", 409, f"{dataset['name']} has no confirmed images yet. "
                               "Confirm images in the admin workspace before opening it in the workbench.")
+        self._require_service()
         return self._start(actor, "export", self._export, (actor, dataset_id), dataset_id=dataset_id)
+
+    def _require_service(self):
+        """Refuse at once when the workbench service is down, before freezing and linking a copy.
+
+        Any HTTP answer, even a 404, means the service runs.
+        """
+        try:
+            with self._client(5) as client:
+                client.get("/health")
+        except httpx.HTTPError:
+            raise DomainError("workbench_unavailable", 503, "The workbench service is not running. Ask the operator to start it.") from None
 
     def _real_directory(self, path: Path) -> Path:
         if path.is_symlink():
@@ -438,7 +452,8 @@ class WorkbenchBridge:
         dataset_name = row["name"] if row else dataset_id
         label = f"{dataset_name} · hosted copy {time.strftime('%Y-%m-%d %H:%M')}"
         legacy_id = "hosted_" + bridge_id
-        entry, problem = None, "The workbench service is not running."
+        entry, problem = None, "The workbench service is not running. Ask the operator to start it."
+        job["phase"] = "registering"
         try:
             with self._client(1800) as client:
                 try:
@@ -449,11 +464,14 @@ class WorkbenchBridge:
                         entry = response.json()
                     else:
                         problem = f"The workbench refused the dataset: {response.text[:300]}"
+                    sent = True
+                except httpx.ConnectError:
+                    sent = False  # the request never reached the workbench: nothing to wait for
                 except (httpx.HTTPError, ValueError):
-                    pass
+                    sent = True
                 # A timeout can still finish registering it later; give the
                 # workbench time before treating the copy as unregistered.
-                for _ in range(24):
+                for _ in range(24 if sent else 0):
                     if isinstance(entry, dict) and entry.get("id") == legacy_id:
                         break
                     entry = self._registered(client, legacy_id)

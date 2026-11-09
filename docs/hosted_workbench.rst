@@ -102,7 +102,7 @@ Working on a hosted dataset
    split; the copy's files are not changed. Copies made before this release
    do not carry the hosted splits; make a fresh copy to use them. Images are hard
    links to the hosted image store, so a copy uses almost no extra disk space.
-   Its name is the dataset name followed by "hosted copy" and the time.
+   Its name is the dataset name followed by "hosted copy" and the time to the second.
    Image and label files are named after the original file name followed by
    ``__`` and the hosted image ID, for example ``beach_0412__image_3f2a….jpg``,
    so names stay unique and readable. Confirmed images without objects have an

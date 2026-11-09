@@ -450,7 +450,7 @@ class WorkbenchBridge:
         with self.store.read_connection() as con:
             row = con.execute("SELECT name FROM hosted_datasets WHERE id=?", (dataset_id,)).fetchone()
         dataset_name = row["name"] if row else dataset_id
-        label = f"{dataset_name} · hosted copy {time.strftime('%Y-%m-%d %H:%M')}"
+        label = f"{dataset_name} · hosted copy {time.strftime('%Y-%m-%d %H:%M:%S')}"
         legacy_id = "hosted_" + bridge_id
         entry, problem = None, "The workbench service is not running. Ask the operator to start it."
         job["phase"] = "registering"

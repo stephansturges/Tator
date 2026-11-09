@@ -54,3 +54,6 @@ html.theme-pipboy .hosted-wb-copies li,html.theme-pipboy .hosted-wb-table,html.t
 html.theme-pipboy .hosted-wb-dialog :is(.hosted-wb-table tr.conflict td,.hosted-wb-table tr.held td,.hosted-wb-held,small.hosted-wb-pending[data-tone=pending],.hosted-wb-status[data-tone=error]){color:var(--pip-amber)}
 html.theme-pipboy .hosted-wb-status[data-tone=ok]{color:var(--pip-green-strong)}
 .hosted-wb-copies li > .hosted-wb-row{flex:none}
+/* Datasets tab: the details under each dataset wrap below its buttons instead of running off the card. */
+body.hosted-workbench #tabDatasets .training-history-item{flex-wrap:wrap}
+body.hosted-workbench #tabDatasets .training-history-item > .training-help{flex:1 1 100%;min-width:0;overflow-wrap:anywhere}

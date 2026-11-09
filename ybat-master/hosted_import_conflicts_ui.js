@@ -65,7 +65,14 @@
             for (const item of conflicts) { const option = node("option", `${item.filename} · ${new Date(item.created_at * 1000).toLocaleString()}${decisions.some(decision => decision.conflict_id === item.id) ? " · Reviewed" : " · Needs review"}`); option.value = item.id; choice.append(option); }
             const unresolved = conflicts.find(item => !decisions.some(decision => decision.conflict_id === item.id));
             if (unresolved) choice.value = unresolved.id;
-            if (!conflicts.length) { notify("No conflicting imported labels for this image."); negativeLabel.hidden = true; return; }
+            if (!conflicts.length) {
+                // An import can mark an image for review without keeping a second label set
+                // (imports before importer v5). The decision is then made on the canvas itself.
+                const marked = record.annotations?.migration?.review_required;
+                const reason = {duplicate_labels_differ: "its duplicate copies had different labels"}[marked] || (typeof marked === "string" ? marked.replaceAll("_", " ") : "");
+                notify(marked ? `The import marked this image for a decision${reason ? `: ${reason}` : ""}. No other label set was kept to compare, so check the boxes on the canvas, correct them if needed, then mark Annotations checked and approve it. Approving ends the decision.` : "No conflicting imported labels for this image.");
+                negativeLabel.hidden = true; return;
+            }
             await draw();
         } catch (error) { if (eligible()) notify(error.message, true); }
     }

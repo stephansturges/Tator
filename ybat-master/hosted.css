@@ -106,3 +106,7 @@ button.danger{color:var(--warning);border-color:var(--warning)}button.danger:hov
 .hosted-analysis-parameters>p{grid-column:1/-1;margin:0}
 .hosted-title-text{flex:1 1 auto}.hosted-dataset-picker{flex:0 0 auto}
 .hosted-selection-note{color:var(--muted);font-size:.9rem}.hosted-selection-note:empty{display:none}
+.hosted-upload-report{margin:0 0 16px;padding:.6rem .8rem;border-left:3px solid var(--accent);background:var(--accent-light);border-radius:0 6px 6px 0;font-size:.9rem}
+.hosted-upload-report[data-error=true]{border-left-color:var(--warning)}
+.hosted-upload-report p{margin:.25rem 0;max-width:none;color:var(--text);overflow-wrap:anywhere}
+.hosted-upload-report button{margin-top:.3rem;padding:.3rem .7rem;font-size:.85rem}

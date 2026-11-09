@@ -37,3 +37,23 @@ html.theme-pipboy #hostedWorkbenchBar button.hosted-wb-attention{background:var(
 .hosted-wb-table tr.held td{color:#7a5a00}
 .hosted-wb-held{color:#7a5a00}
 html.theme-pipboy #hostedWorkbenchBar #hostedWorkbenchCopy[data-tone=readonly]{color:var(--pip-amber)}
+/* The Hosted data dialog follows the dark and Pip-Boy themes of the page. */
+html.theme-dark .hosted-wb-dialog{background:#17201d;color:#e4eee9;border-color:#3b4a44}
+html.theme-dark .hosted-wb-dialog :is(.hosted-wb-help,small){color:#a9bab3}
+html.theme-dark .hosted-wb-dialog :is(button,select){background:#22302b;color:#e4eee9;border:1px solid #5d7a6f}
+html.theme-dark .hosted-wb-dialog button.primary{background:#9fe3c9;border-color:#9fe3c9;color:#0f2a22}
+html.theme-dark .hosted-wb-copies li,html.theme-dark .hosted-wb-table,html.theme-dark .hosted-wb-table :is(th,td){border-color:#2f3d38}
+html.theme-dark .hosted-wb-dialog :is(.hosted-wb-table tr.conflict td,small.hosted-wb-pending[data-tone=pending]){color:#ffc27a}
+html.theme-dark .hosted-wb-dialog :is(.hosted-wb-table tr.held td,.hosted-wb-held){color:#f3d27a}
+html.theme-dark .hosted-wb-status[data-tone=error]{color:#ff9d8f}html.theme-dark .hosted-wb-status[data-tone=ok]{color:#7fe0b4}
+html.theme-pipboy .hosted-wb-dialog{background:var(--pip-panel);color:var(--pip-green);border-color:var(--pip-border);font-family:var(--pip-font)}
+html.theme-pipboy .hosted-wb-dialog :is(.hosted-wb-help,small){color:var(--pip-green-muted)}
+html.theme-pipboy .hosted-wb-dialog :is(button,select){background:var(--pip-control-bg);color:var(--pip-green);border-color:var(--pip-border);font-family:var(--pip-font)}
+html.theme-pipboy .hosted-wb-dialog button.primary{background:var(--pip-green);border-color:var(--pip-green);color:var(--pip-bg)}
+html.theme-pipboy .hosted-wb-copies li,html.theme-pipboy .hosted-wb-table,html.theme-pipboy .hosted-wb-table :is(th,td){border-color:var(--pip-green-dim)}
+html.theme-pipboy .hosted-wb-dialog :is(.hosted-wb-table tr.conflict td,.hosted-wb-table tr.held td,.hosted-wb-held,small.hosted-wb-pending[data-tone=pending],.hosted-wb-status[data-tone=error]){color:var(--pip-amber)}
+html.theme-pipboy .hosted-wb-status[data-tone=ok]{color:var(--pip-green-strong)}
+.hosted-wb-copies li > .hosted-wb-row{flex:none}
+/* Datasets tab: the details under each dataset wrap below its buttons instead of running off the card. */
+body.hosted-workbench #tabDatasets .training-history-item{flex-wrap:wrap}
+body.hosted-workbench #tabDatasets .training-history-item > .training-help{flex:1 1 100%;min-width:0;overflow-wrap:anywhere}

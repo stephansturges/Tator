@@ -8,6 +8,9 @@ groups join validation in that order while they fit about a tenth of those
 images (the smallest group when none fits), only when there is more than one
 group. A group whose classes would appear only in validation
 goes back to training. The caller records the summary in its run log/metadata.
+A workbench copy of a hosted dataset holds one pool of images, but its
+annotation sidecars record the splits an administrator set on the hosted
+dataset ("hosted_split"); those are kept, and only the rest is split.
 
 Shared by the hosted native trainers (services/hosted/native_analysis.py) and
 the legacy workbench trainers (YOLO, RF-DETR, SAM3, Qwen), so a dataset opened
@@ -25,6 +28,7 @@ from utils.capture_metadata import CAPTURE_GROUP_FIELDS, portable_capture_metada
 RUN_VALIDATION_SHARE = 0.1
 RUN_SPLIT_RULE = "unsplit images split for this run only; capture groups kept together; dataset splits kept"
 SIDECAR_MAX_BYTES = 8 * 1024 * 1024
+DECLARED_SPLITS = ("train", "val", "test")
 
 
 def capture_identities(metadata: Mapping[str, Any]) -> Tuple[Tuple[str, str], ...]:
@@ -125,8 +129,8 @@ def choose_run_split(items: Sequence[Mapping[str, Any]], dataset_key: str, *,
                     "test_images": splits.count("test")}
 
 
-def sidecar_capture_groups(annotation_dirs: Iterable[Path], image_stem: str) -> Tuple[Tuple[str, str], ...]:
-    """Capture identities from a per-image annotation sidecar, if one exists.
+def _sidecar_document(annotation_dirs: Iterable[Path], image_stem: str) -> Optional[Dict[str, Any]]:
+    """The per-image annotation sidecar of an image, if one exists.
 
     Hosted workbench copies keep `<split>/annotations/<image>.json` holding the
     hosted annotation body ({"annotations": {...}}). Image files there may be
@@ -143,11 +147,29 @@ def sidecar_capture_groups(annotation_dirs: Iterable[Path], image_stem: str) -> 
                 document = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue
-            if not isinstance(document, dict):
-                continue
-            body = document.get("annotations") if isinstance(document.get("annotations"), dict) else document
-            return annotation_capture_groups(body) or capture_identities(document)
-    return ()
+            if isinstance(document, dict):
+                return document
+    return None
+
+
+def sidecar_capture_groups(annotation_dirs: Iterable[Path], image_stem: str) -> Tuple[Tuple[str, str], ...]:
+    """Capture identities from a per-image annotation sidecar, if one exists."""
+    document = _sidecar_document(annotation_dirs, image_stem)
+    if document is None:
+        return ()
+    body = document.get("annotations") if isinstance(document.get("annotations"), dict) else document
+    return annotation_capture_groups(body) or capture_identities(document)
+
+
+def sidecar_declared_split(annotation_dirs: Iterable[Path], image_stem: str) -> Optional[str]:
+    """The split an administrator set on the hosted dataset for this image, if any.
+
+    Workbench copies hold every confirmed image in one pool; their sidecars
+    record a split set on the hosted dataset as "hosted_split".
+    """
+    document = _sidecar_document(annotation_dirs, image_stem)
+    split = document.get("hosted_split") if document is not None else None
+    return split if split in DECLARED_SPLITS else None
 
 
 def yolo_label_classes(label_path: Path) -> set:
@@ -167,18 +189,24 @@ def yolo_label_classes(label_path: Path) -> set:
     return found
 
 
-def split_unsplit_pool(items: Sequence[Mapping[str, Any]], dataset_key: str) -> Optional[Tuple[List[bool], Dict[str, Any]]]:
+def split_unsplit_pool(items: Sequence[Mapping[str, Any]], dataset_key: str) -> Optional[Tuple[List[Optional[bool]], Dict[str, Any]]]:
     """Legacy trainers: hold out validation from a dataset that has none.
 
-    Every item is treated as unsplit. Returns (is_validation per item, summary),
-    or None when fewer than two items exist. The summary's validation_images is
-    0 when the pool is a single capture group, so no honest holdout exists.
+    Items are unsplit unless they carry a "split" an administrator declared on
+    the hosted dataset (sidecar_declared_split): those keep it, and only the
+    rest is split by the shared rule. Returns (per item: True for validation,
+    False for training, None for a declared test image that the run leaves
+    out; summary), or None when fewer than two items exist. The summary's
+    validation_images is 0 when the pool is a single capture group, so no
+    honest holdout exists.
     """
     if len(items) < 2:
         return None
-    splits, summary = choose_run_split([{**item, "split": "unsplit"} for item in items], dataset_key)
-    held = [split == "val" for split in splits]
-    summary = {**summary, "applies_when": "the dataset has no validation images"}
+    declared = [item.get("split") if item.get("split") in DECLARED_SPLITS else "unsplit" for item in items]
+    splits, summary = choose_run_split([{**item, "split": split} for item, split in zip(items, declared)], dataset_key)
+    held = [None if split == "test" else split == "val" for split in splits]
+    summary = {**summary, "applies_when": "the dataset has no validation images",
+               "declared_images": sum(split != "unsplit" for split in declared)}
     if all(held):
         # The first group can be small and the next one the rest of the pool;
         # both then land in validation. Keep the run trainable and say so.
@@ -193,6 +221,12 @@ def describe_run_split(summary: Mapping[str, Any]) -> str:
     if not summary.get("validation_images"):
         reason = summary.get("note") or f"its {summary.get('train_images', 0)} images form one capture group, so none could be held out"
         return f"Run split: the dataset has no validation images and {reason} for this run"
+    if summary.get("declared_images"):
+        left_out = f"; {summary.get('test_images')} test images left out" if summary.get("test_images") else ""
+        return (f"Run split: {summary.get('train_images', 0)} train / {summary.get('validation_images', 0)} validation images "
+                f"({summary.get('declared_images')} placed by the hosted dataset's splits, {summary.get('images_split_for_run', 0)} unsplit "
+                f"images split for this run{left_out}; capture groups kept together; validation share {summary.get('validation_share')}; "
+                "dataset files unchanged)")
     return (f"Run split: {summary.get('train_images', 0)} train / {summary.get('validation_images', 0)} validation images "
             "chosen for this run (the dataset has no validation images; capture groups kept together; "
             f"validation share {summary.get('validation_share')}; dataset files unchanged)")

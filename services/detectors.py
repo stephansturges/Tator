@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from utils.io import _path_is_within_root_impl
-from utils.run_split import capture_identities, sidecar_capture_groups, split_unsplit_pool, yolo_label_classes
+from utils.run_split import capture_identities, sidecar_capture_groups, sidecar_declared_split, split_unsplit_pool, yolo_label_classes
 
 
 def _path_identity(path: Path) -> Path:
@@ -1557,6 +1557,7 @@ def _rfdetr_prepare_run_split_impl(
     annotation_dirs = _run_split_annotation_dirs([dataset_root, *metadata_roots])
     items = [{"id": Path(str(img["file_name"])).stem,
               "groups": capture_identities(img) or sidecar_capture_groups(annotation_dirs, Path(str(img["file_name"])).stem),
+              "split": sidecar_declared_split(annotation_dirs, Path(str(img["file_name"])).stem),
               "classes": classes.get(img.get("id"), set())} for img in images]
     chosen = split_unsplit_pool(items, dataset_key)
     if chosen is None:
@@ -1697,13 +1698,15 @@ def _yolo_write_data_yaml_impl(
         annotation_dirs = _run_split_annotation_dirs([dataset_root, *metadata_roots])
         items = [{"id": path.stem,
                   "groups": sidecar_capture_groups(annotation_dirs, path.stem),
+                  "split": sidecar_declared_split(annotation_dirs, path.stem),
                   "classes": yolo_label_classes((labels_dir / path.relative_to(train_dir)).with_suffix(".txt"))}
                  for path in images]
         chosen = split_unsplit_pool(items, run_split_key)
         if chosen is not None:
             held, summary = chosen
             if any(held):
-                train_list = _write_text_file(run_dir / "run_split_train.txt", "".join(f"{p}\n" for p, v in zip(images, held) if not v))
+                # held: True validation, False training, None a declared test image left out.
+                train_list = _write_text_file(run_dir / "run_split_train.txt", "".join(f"{p}\n" for p, v in zip(images, held) if v is False))
                 val_list = _write_text_file(run_dir / "run_split_val.txt", "".join(f"{p}\n" for p, v in zip(images, held) if v))
                 data["train"], data["val"] = str(train_list), str(val_list)
             else:

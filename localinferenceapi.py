@@ -16737,6 +16737,7 @@ from utils.run_split import (
     capture_identities as _run_split_capture_identities,
     describe_run_split,
     sidecar_capture_groups as _run_split_sidecar_capture_groups,
+    sidecar_declared_split as _run_split_sidecar_declared_split,
     split_unsplit_pool as _run_split_unsplit_pool,
 )
 
@@ -104980,6 +104981,7 @@ def _prepare_qwen_training_split(
                     "groups": _run_split_capture_identities(payload)
                     or _run_split_capture_identities(payload.get("capture_metadata") or {})
                     or _run_split_sidecar_capture_groups(annotation_dirs, Path(str(payload.get("image"))).stem),
+                    "split": _run_split_sidecar_declared_split(annotation_dirs, Path(str(payload.get("image"))).stem),
                     "classes": {
                         str(det.get("label"))
                         for det in (payload.get("detections") or [])
@@ -104996,7 +104998,7 @@ def _prepare_qwen_training_split(
             return dataset_root
         held, run_split = chosen
         val_entries = [entry for entry, is_val in zip(entries, held) if is_val]
-        train_entries = [entry for entry, is_val in zip(entries, held) if not is_val]
+        train_entries = [entry for entry, is_val in zip(entries, held) if is_val is False]  # None: a declared test image, left out
     else:
         entries = _annotation_entries("train") + _annotation_entries("val")
         if len(entries) < 2:
@@ -108827,6 +108829,9 @@ def _prepare_sam3_training_split(
                     or _run_split_sidecar_capture_groups(
                         annotation_dirs, Path(images[img_id]["file_name"]).stem
                     ),
+                    "split": _run_split_sidecar_declared_split(
+                        annotation_dirs, Path(images[img_id]["file_name"]).stem
+                    ),
                     "classes": {ann.get("category_id") for ann in ann_by_image.get(img_id, [])},
                 }
                 for img_id in image_ids
@@ -108839,7 +108844,7 @@ def _prepare_sam3_training_split(
             return meta
         held, run_split = chosen
         val_ids = [img_id for img_id, is_val in zip(image_ids, held) if is_val]
-        train_ids = [img_id for img_id, is_val in zip(image_ids, held) if not is_val]
+        train_ids = [img_id for img_id, is_val in zip(image_ids, held) if is_val is False]  # None: a declared test image, left out
     else:
         rnd = random.Random(split_seed)
         rnd.shuffle(image_ids)

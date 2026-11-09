@@ -51,9 +51,16 @@
         const data = await response.json().catch(() => ({}));
         if (!response.ok) {
             const detail = typeof data.detail === "string" ? data.detail : (data.error || `HTTP ${response.status}`);
-            throw new Error(detail);
+            throw Object.assign(new Error(detail), {code: data.error || "", status: response.status});
         }
         return data;
+    }
+    // The workbench service answers any request when it runs (even with 404);
+    // the hosted proxy answers 503 when it does not.
+    let serviceDown = false;
+    async function serviceRunning() {
+        try { return (await nativeFetch("/workbench/api/health", {credentials: "same-origin"})).status !== 503; }
+        catch (_error) { return false; }
     }
     async function follow(job, onProgress) {
         while (job.state === "running") {
@@ -61,7 +68,7 @@
             await new Promise((resolve) => setTimeout(resolve, 1000));
             job = await hosted(`/api/hosted/workbench/jobs/${encodeURIComponent(job.id)}`);
         }
-        if (job.state === "failed") throw new Error(job.error || "The job failed.");
+        if (job.state === "failed") throw Object.assign(new Error(job.error || "The job failed."), {code: job.error_code || ""});
         return job.result;
     }
     const when = (seconds) => new Date(seconds * 1000).toLocaleString();
@@ -132,7 +139,12 @@
                 hosted(`/api/hosted/workbench/bridges/${encodeURIComponent(bridge.id)}/changes`)
                     .then((changes) => { const text = pendingText(pendingOf(changes)); pending.textContent = text || "No edits waiting"; pending.dataset.tone = text ? "pending" : ""; })
                     .catch((error) => { pending.textContent = error.message || String(error); });
-                row.append(action("Review changes", () => openReview(bridge).catch(showError(copyStatus))));
+                const buttons = el("div", {className: "hosted-wb-row"});
+                // Any listed copy can be opened here; the open workspace is saved first.
+                if (legacy()?.openedDataset() === bridge.legacy_dataset_id) details.append(" · open here now");
+                else if (legacy()) buttons.append(action("Open here", () => openCopy(bridge)));
+                buttons.append(action("Review changes", () => openReview(bridge).catch(showError(copyStatus))));
+                row.append(buttons);
             } else {
                 row.firstChild.append(el("small", {className: "hosted-wb-pending", textContent: "Deleted in the workbench, with any edits that were not applied."}));
             }
@@ -158,6 +170,7 @@
         review.hidden = false;
         review.replaceChildren(el("h3", {textContent: `Changes in “${bridge.label}”`}), el("p", {textContent: "Comparing workbench labels with the hosted dataset…"}));
         const changes = await hosted(`/api/hosted/workbench/bridges/${encodeURIComponent(bridge.id)}/changes`);
+        if (bridge.id === current?.id) checkCopy();
         const totals = changes.totals, status = el("p", {className: "hosted-wb-status", role: "status"});
         review.replaceChildren(el("h3", {textContent: `Changes in “${bridge.label}”`}));
         if (!totals.images) {
@@ -198,6 +211,7 @@
                 await loadCopies();
                 await openReview({...bridge, applied_images: (bridge.applied_images || 0) + result.applied});
                 refreshPending();
+                checkCopy();  // the apply may have shown hosted edits the bar did not know yet
                 const after = review.querySelector(".hosted-wb-status") || review.appendChild(el("p", {className: "hosted-wb-status", role: "status"}));
                 const failed = result.failed.length ? ` ${plural(result.failed.length, "image")} not applied: ${result.failed.slice(0, 5).map((row) => `${row.filename} (${row.detail || row.error})`).join(", ")}.` : "";
                 const moved = result.changed_since_review ? ` ${plural(result.changed_since_review, "image")} changed after this review, in the workbench or the hosted dataset, and ${result.changed_since_review === 1 ? "was" : "were"} not applied. Review again.` : "";
@@ -210,7 +224,8 @@
     // ---- copies ---------------------------------------------------------------
     async function makeCopyOf(datasetId, target) {
         const job = await hosted(`/api/hosted/datasets/${encodeURIComponent(datasetId)}/workbench/export`, {method: "POST", body: {}});
-        return follow(job, (state) => say(target, state.total ? `Linking images: ${state.done} of ${state.total}…` : "Freezing the confirmed snapshot…"));
+        return follow(job, (state) => say(target, state.phase === "registering" ? "Adding the copy to the workbench library…"
+            : state.total ? `Linking images: ${state.done} of ${state.total}…` : "Freezing the confirmed snapshot…"));
     }
     function reopenWith(datasetId) {
         // A fresh load lists a new copy in every tab; arrive() then opens it.
@@ -241,7 +256,7 @@
     // ---- the bar follows the open workspace -----------------------------------
     // State: what was arrived for, what the legacy page has open, and the
     // pending edits of that copy.
-    const arrival = {dataset: null, bridge: null, skippedNewer: false, gone: false};
+    const arrival = {dataset: null, bridge: null, skippedNewer: false, gone: false, empty: false};
     let shown = {key: null}, current = null, pending = null, notice = "", opening = false, renderTicket = 0;
     const pageLoaded = new Promise((resolve) => { if (document.readyState === "complete") resolve(); else window.addEventListener("load", resolve, {once: true}); });
     const legacy = () => window.TatorLegacyWorkbench;
@@ -251,13 +266,20 @@
         return action(`Open ${arrival.dataset.name}`, () => openArrival("any"));
     }
     async function openArrival(replace) {
-        const target = arrival.bridge;
+        if (arrival.bridge) await openWorkspace(arrival.bridge, arrival.dataset.name, replace);
+    }
+    async function openCopy(bridge) {
+        dialog.close();
+        await openWorkspace(bridge, bridge.label, "any");
+    }
+    async function openWorkspace(target, name, replace) {
         if (!target || !legacy()) return;
-        opening = true; notice = ""; say(copyInfo, `Opening ${arrival.dataset.name}…`); copyActions.replaceChildren();
+        opening = true; notice = ""; serviceDown = false; say(copyInfo, `Opening ${name}…`); copyActions.replaceChildren();
         try {
             if (!await legacy().openDataset(target.legacy_dataset_id, target.label, {replace})) notice = "";
         } catch (error) {
             notice = error?.message || String(error);
+            serviceDown = !await serviceRunning();
         } finally {
             opening = false; render(true);
         }
@@ -286,11 +308,14 @@
             : opened ? `“${label || opened}” is open here. It is not a copy of a hosted dataset, so its edits stay in the workbench.`
             : arrival.gone ? `The workbench copies of ${arrivalName} were deleted in the workbench, with any edits that were not applied.`
             : arrivalName && !notice ? `${arrivalName} is not open here.` : "";
-        say(copyInfo, [notice, text].filter(Boolean).join(" "), notice ? "error" : "");
+        // The legacy page loaded its lists while the service was down; a reload refreshes them all.
+        const down = serviceDown ? "Reload this page once the workbench service is running again." : "";
+        say(copyInfo, [notice, text, down].filter(Boolean).join(" "), notice ? "error" : "");
         const buttons = [];
+        if (serviceDown) buttons.push(action("Reload", () => location.reload()));
         const open = opened === arrival.bridge?.legacy_dataset_id ? null : openArrivalButton();
         if (open) buttons.push(open);
-        if (arrival.dataset) buttons.push(freshButton(arrival.dataset.id, arrival.dataset.name));
+        if (arrival.dataset && !arrival.empty) buttons.push(freshButton(arrival.dataset.id, arrival.dataset.name));
         if (opened && arrival.dataset) buttons.forEach((button) => { if (button !== open) { button.disabled = true; button.title = "Open a hosted copy to use the hosted actions."; } });
         copyActions.replaceChildren(...buttons);
         barDataset = arrivalDataset; syncBack();
@@ -317,6 +342,11 @@
                 await legacy().takeOver?.();
                 render(true);
             }));
+        } else if (readOnly) {
+            // Another administrator's lock is never taken over; reopen once they are done.
+            const again = action("Try editing again", () => location.reload());
+            again.title = `Reload to edit if ${holder} has closed it`;
+            buttons.push(again);
         }
         buttons.push(freshButton(info.dataset_id, info.dataset_name, {changed: Boolean(changed), waitingEdits: () => (current === info ? pending : null)}));
         const reviewEdits = action(reviewLabel(), () => {
@@ -393,7 +423,13 @@
         if (!bridges.length) {
             say(copyInfo, `Copying ${dataset.name} into the workbench…`);
             try { await makeCopyOf(dataset.id, copyInfo); }
-            catch (error) { notice = error?.message || String(error); await pageLoaded; render(true); return; }
+            catch (error) {
+                notice = error?.message || String(error);
+                // Nothing to copy yet: making a copy again would fail the same way.
+                arrival.empty = error?.code === "workbench_no_confirmed_images";
+                serviceDown = error?.code === "workbench_unavailable" || error?.code === "workbench_register_failed" && !await serviceRunning();
+                await pageLoaded; render(true); return;
+            }
             say(copyInfo, `Opening ${dataset.name}…`);
             reopenWith(dataset.id); return;
         }
@@ -450,7 +486,21 @@
     arrive().catch(showError(copyInfo)).finally(() => {
         // Opening another copy inside the workbench (Dataset Management, Datasets &
         // sessions), taking over or losing a lock: the bar follows within a second.
-        setInterval(() => { if (document.visibilityState === "visible") render(); }, 1000);
+        // Hosted work goes on meanwhile: re-read the copy's hosted changes every half minute.
+        let lastCheck = Date.now();
+        setInterval(() => {
+            if (document.visibilityState !== "visible") return;
+            render();
+            if (Date.now() - lastCheck > 30000) { lastCheck = Date.now(); checkCopy(); }
+        }, 1000);
     });
+    async function checkCopy() {
+        const info = current;
+        if (!info || opening) return;
+        let fresh;
+        try { fresh = await copyInfoFor(info.id, {fresh: true}); } catch (_error) { return; }
+        const key = (value) => JSON.stringify([value.hosted_changes, value.newer_copies, value.present]);
+        if (current === info && key(fresh) !== key(info)) render(true);
+    }
     window.TatorWorkbench = {get hostedDataset() { return barDataset; }, bar, dialog, datasetDeleteWarning};
 })();

@@ -11,7 +11,21 @@ On a server with the `admin workbench <hosted_workbench.rst>`_, these entries
 open the full workbench tabs instead, and **Server jobs** opens this launcher.
 Review the parameters and select **Start task** to run the selected operation.
 If no compute recipes are configured, saved results remain readable; an operator
-must configure the available tasks before a new run can start.
+must configure the available tasks before a new run can start. A dataset without
+confirmed images cannot start a task. **Open results** shows a saved result
+below the list and scrolls to it. Dataset statistics list the splits set on the
+dataset, and a training result says how many images it trained and validated on.
+
+A run that fails says why when the reason is known: the trainer's licence was
+not accepted, the task needs a GPU that is not available, training has no
+validation images, or the class predictor has fewer than two classes. Other
+failures keep their details in the server log of that run. YOLO and RF-DETR
+training run only after their licence is accepted for the run: allow
+``accept_tos`` in the task's ``allowed_parameters`` (with a ``false``
+default), and the launcher shows the licence box, which must be ticked to
+start. Without that setting the launcher warns that the run would be refused.
+A Data Quality Explorer server job reviews all classes of the confirmed dataset
+unless its configuration names a class.
 
 For Incoming diversity analysis, first select unassigned images in **Incoming**
 and attach a whole-image SALAD descriptor in **Analysis presets**. For pruning,
@@ -249,7 +263,12 @@ use it too. A workbench dataset without validation images, such as a hosted
 copy, which is one pool under ``train/``, gets validation images chosen for
 each YOLO, YOLO head-graft, RF-DETR, SAM3 or Qwen run. The rule reads capture
 groups from the copy's per-image annotation files; with none, each image is its
-own group. The run's lists live in its own directory (``run_split_train.txt``
+own group. Those files also record the split set on the hosted dataset
+(``hosted_split``): images placed in training or validation there keep that
+place, test images are left out of the run, and only the unsplit rest is split,
+as on the server. This applies to YOLO, YOLO head-graft, RF-DETR and SAM3 runs;
+Qwen's converted dataset does not carry the annotation files, so a Qwen run
+still splits the whole pool. The run's lists live in its own directory (``run_split_train.txt``
 and ``run_split_val.txt`` for YOLO, ``dataset/`` for RF-DETR, the job's split
 directory for SAM3 and Qwen). The training log says how many images went to
 training and to validation, and the run's configuration or split metadata keeps

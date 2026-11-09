@@ -49,3 +49,29 @@ def test_yolo_training_validates_on_held_out_images_when_the_dataset_has_none(tm
     assert frames <= train or frames <= val
     assert recorded[0]["validation_images"] == len(val) and json.loads((run / "run_split.json").read_text()) == recorded[0]
     assert sorted((path, path.read_bytes() if path.is_file() else b"") for path in dataset.rglob("*")) == before
+
+
+def test_workbench_training_keeps_splits_set_on_the_hosted_dataset(tmp_path):
+    # A workbench copy pools every image; sidecars carry the hosted split.
+    dataset = tmp_path / "hosted_copy"
+    for sub in ("images", "labels", "annotations"):
+        (dataset / "train" / sub).mkdir(parents=True)
+    declared = {"single000": "val", "single001": "val", "single002": "test", "single003": "train"}
+    for item in _pool():
+        stem = f"{item['id']}__img_{item['id']}"
+        (dataset / "train" / "images" / f"{stem}.jpg").write_bytes(b"jpg")
+        (dataset / "train" / "labels" / f"{stem}.txt").write_text(f"{int('rare' in item['classes'])} 0.5 0.5 0.1 0.1\n")
+        sidecar = {"annotations": {}, **({"hosted_split": declared[item["id"]]} if item["id"] in declared else {})}
+        (dataset / "train" / "annotations" / f"img_{item['id']}.json").write_text(json.dumps(sidecar))
+    run = tmp_path / "run"
+    run.mkdir()
+    recorded = []
+    data = json.loads(_yolo_write_data_yaml_impl(
+        run, dataset, "split", None, resolve_split_paths_fn=_yolo_resolve_split_paths_impl,
+        yolo_load_labelmap_fn=lambda _path: [], yaml_dump_fn=json.dumps, copy_file_fn=lambda _a, _b: None,
+        run_split_key="ds", metadata_roots=[dataset], on_run_split=recorded.append).read_text())
+    train = {Path(line).stem.split("__")[0] for line in Path(data["train"]).read_text().split()}
+    val = {Path(line).stem.split("__")[0] for line in Path(data["val"]).read_text().split()}
+    assert {"single000", "single001"} <= val and "single003" in train and "single002" not in train | val
+    assert not train & val and len(train | val) == 80 and len(val) > 2  # the unsplit rest is split too
+    assert recorded[0]["declared_images"] == 4 and recorded[0]["test_images"] == 1

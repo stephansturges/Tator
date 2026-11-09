@@ -3494,6 +3494,9 @@
     }
 
     let activeTab = TAB_LABELING;
+    // The first activation initializes its tab even when a restored session
+    // already named it active (otherwise e.g. a restored YOLO tab has no datasets).
+    let tabActivatedOnce = false;
     let trainingUiInitialized = false;
     let sam3TrainUiInitialized = false;
     let segBuilderUiInitialized = false;
@@ -10533,7 +10536,17 @@ const sam3TrainState = {
             const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(entry.id)}`, { method: "DELETE" });
             if (!resp.ok) {
                 const detail = await resp.text();
-                throw new Error(detail || `HTTP ${resp.status}`);
+                // Show the server's words, not its JSON (e.g. a copy still open here).
+                let readable = detail;
+                try {
+                    const body = JSON.parse(detail)?.detail;
+                    if (typeof body === "string") readable = body;
+                    else if (body?.message) {
+                        readable = [body.message, ...(Array.isArray(body.blockers) ? body.blockers.map((item) => item?.message) : [])].filter(Boolean).join(" ");
+                        if (body.code === "library_cleanup_blocked") readable += " If it is open in Label Images, close it there first.";
+                    }
+                } catch (_error) { /* plain-text detail */ }
+                throw new Error(readable || `HTTP ${resp.status}`);
             }
             const payload = await resp.json().catch(() => ({}));
             clearAnnotationSourceResumeDescriptor({
@@ -22569,7 +22582,8 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function setActiveTab(tabName) {
         if (hostedMode && tabName !== TAB_LABELING) return;
-        const previous = activeTab;
+        const previous = tabActivatedOnce ? activeTab : null;
+        tabActivatedOnce = true;
         activeTab = tabName;
         if (annotationFocusMode && tabName !== TAB_LABELING) {
             exitAnnotationFocusMode();

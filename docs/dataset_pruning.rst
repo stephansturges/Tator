@@ -197,7 +197,9 @@ Hosted review mounts these routes beneath
 ``/api/hosted/analysis/jobs/{hosted_job_id}``. Creating a new hosted analysis
 uses the configured ``/api/hosted/tools/heavy`` task; the mounted pruning
 creation route cannot start a new producer run. Hosted session and snapshot
-checks apply in addition to the shared review ledger.
+checks apply in addition to the shared review ledger. The hosted review page
+follows the dark and Pip-Boy themes chosen in the dataset workspace, and its
+source line reads "Connected to the saved server analysis".
 
 A hosted review describes one frozen confirmed revision. When the dataset
 changes afterwards, read routes (job status, result, review snapshot,

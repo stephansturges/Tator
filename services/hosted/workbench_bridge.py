@@ -130,7 +130,8 @@ def plan_objects(base_objects: list[dict], items: list[dict], class_ids: list[st
 ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,128}")
 DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}")
 # A workbench copy is one pool of every confirmed image: the tools do not make
-# or keep split decisions (the legacy layout calls that pool "train").
+# split decisions (the legacy layout calls that pool "train"). Splits set on the
+# hosted dataset travel in the annotation sidecars for training runs.
 EXPORT_SPLITS = {"train": "train", "unsplit": "train", "val": "train", "test": "train"}
 OVERLAY_LIMIT = 8 * 1024 * 1024
 CHANGE_KEYS = ("relabeled", "moved", "added", "deleted")
@@ -174,15 +175,24 @@ def image_id_for_stem(stem: str, known) -> str | None:
     return None
 
 
-def _renamed(entries, stems: dict[str, str]):
-    """Name per-image export files after the original file name plus the hosted ID."""
+def _renamed(entries, stems: dict[str, str], declared: dict[str, str] | None = None):
+    """Name per-image export files after the original file name plus the hosted ID.
+
+    The copy pools every image, so each annotation sidecar records the split set
+    on the hosted dataset ("hosted_split"); workbench training keeps it
+    (utils/run_split.py) and splits only the rest.
+    """
     from .backup import ExportEntry
+    declared = declared or {}
     for entry in entries:
         parts = entry.path.split("/")
         if len(parts) == 3 and parts[1] in PER_IMAGE_FOLDERS:
             stem, dot, suffix = parts[2].partition(".")
             if stem in stems:
-                yield ExportEntry(f"{parts[0]}/{parts[1]}/{stems[stem]}{dot}{suffix}", artifact=entry.artifact, data=entry.data)
+                data = entry.data
+                if parts[1] == "annotations" and stem in declared and data is not None:
+                    data = _json({**json.loads(data), "hosted_split": declared[stem]}).encode()
+                yield ExportEntry(f"{parts[0]}/{parts[1]}/{stems[stem]}{dot}{suffix}", artifact=entry.artifact, data=data)
                 continue
         if entry.path == "hosted-media.json":
             media = json.loads(entry.data)
@@ -245,7 +255,8 @@ class WorkbenchBridge:
     # ---- jobs -----------------------------------------------------------
     def _start(self, actor, kind, target, args, *, bridge_id=None, dataset_id=None) -> dict:
         job = {"id": uuid.uuid4().hex, "kind": kind, "actor_id": actor.user_id, "state": "running", "done": 0, "total": None,
-               "result": None, "error": None, "started_at": time.time(), "bridge_id": bridge_id, "dataset_id": dataset_id}
+               "phase": None, "result": None, "error": None, "error_code": None, "started_at": time.time(),
+               "bridge_id": bridge_id, "dataset_id": dataset_id}
         with self._lock:
             # One copy of a dataset at a time: a second tab follows the running export.
             running = next((other for other in self._jobs.values() if dataset_id is not None and other["kind"] == kind
@@ -266,6 +277,7 @@ class WorkbenchBridge:
                 job["result"] = target(job, *args); job["state"] = "completed"
             except Exception as exc:
                 job["state"] = "failed"
+                job["error_code"] = exc.code if isinstance(exc, DomainError) else "workbench_job_failed"
                 job["error"] = exc.detail if isinstance(exc, DomainError) and isinstance(exc.detail, str) else getattr(exc, "code", "workbench_job_failed")
                 if not isinstance(exc, DomainError):
                     traceback.print_exc()
@@ -277,7 +289,7 @@ class WorkbenchBridge:
         job = self._jobs.get(job_id)
         if job is None or job["actor_id"] != actor.user_id:
             raise DomainError("workbench_job_not_found", 404)
-        return {key: job[key] for key in ("id", "kind", "state", "done", "total", "result", "error")}
+        return {key: job[key] for key in ("id", "kind", "state", "done", "total", "phase", "result", "error", "error_code")}
 
     # ---- bridges --------------------------------------------------------
     @staticmethod
@@ -364,7 +376,19 @@ class WorkbenchBridge:
             # A copy holds confirmed images only; an empty one would open as an empty workspace.
             raise DomainError("workbench_no_confirmed_images", 409, f"{dataset['name']} has no confirmed images yet. "
                               "Confirm images in the admin workspace before opening it in the workbench.")
+        self._require_service()
         return self._start(actor, "export", self._export, (actor, dataset_id), dataset_id=dataset_id)
+
+    def _require_service(self):
+        """Refuse at once when the workbench service is down, before freezing and linking a copy.
+
+        Any HTTP answer, even a 404, means the service runs.
+        """
+        try:
+            with self._client(5) as client:
+                client.get("/health")
+        except httpx.HTTPError:
+            raise DomainError("workbench_unavailable", 503, "The workbench service is not running. Ask the operator to start it.") from None
 
     def _real_directory(self, path: Path) -> Path:
         if path.is_symlink():
@@ -399,7 +423,8 @@ class WorkbenchBridge:
         stage.mkdir(mode=0o700)
         try:
             stems = {image["id"]: export_stem(image) for image in exported}
-            for entry in _renamed(self.operations._snapshot_entries({**manifest, "images": exported}, unsplit_as_train=True), stems):
+            declared = {image["id"]: image["split"] for image in manifest["images"] if image["split"] in ("train", "val", "test")}
+            for entry in _renamed(self.operations._snapshot_entries({**manifest, "images": exported}, unsplit_as_train=True), stems, declared):
                 target = stage / entry.path
                 if not self._inside(target, stage) or target.resolve() == stage.resolve():
                     raise DomainError("workbench_export_path_invalid", 409)
@@ -425,9 +450,10 @@ class WorkbenchBridge:
         with self.store.read_connection() as con:
             row = con.execute("SELECT name FROM hosted_datasets WHERE id=?", (dataset_id,)).fetchone()
         dataset_name = row["name"] if row else dataset_id
-        label = f"{dataset_name} · hosted copy {time.strftime('%Y-%m-%d %H:%M')}"
+        label = f"{dataset_name} · hosted copy {time.strftime('%Y-%m-%d %H:%M:%S')}"
         legacy_id = "hosted_" + bridge_id
-        entry, problem = None, "The workbench service is not running."
+        entry, problem = None, "The workbench service is not running. Ask the operator to start it."
+        job["phase"] = "registering"
         try:
             with self._client(1800) as client:
                 try:
@@ -438,11 +464,14 @@ class WorkbenchBridge:
                         entry = response.json()
                     else:
                         problem = f"The workbench refused the dataset: {response.text[:300]}"
+                    sent = True
+                except httpx.ConnectError:
+                    sent = False  # the request never reached the workbench: nothing to wait for
                 except (httpx.HTTPError, ValueError):
-                    pass
+                    sent = True
                 # A timeout can still finish registering it later; give the
                 # workbench time before treating the copy as unregistered.
-                for _ in range(24):
+                for _ in range(24 if sent else 0):
                     if isinstance(entry, dict) and entry.get("id") == legacy_id:
                         break
                     entry = self._registered(client, legacy_id)

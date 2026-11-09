@@ -1347,6 +1347,8 @@
     });
     setInterval(() => {
         if (editable && ready && !busy && !handoff) {
+            // Tool results arrive without a click or key: record them as their own undo step.
+            noteEdit();
             if (saving && pending) { try { journal({ pending, latest: draft() }); } catch (error) { report(error); } }
             else save().catch(() => {});
         }

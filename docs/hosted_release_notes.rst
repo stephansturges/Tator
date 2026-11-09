@@ -1,6 +1,138 @@
 Release notes
 =============
 
+2026-11-09: fifty-scenario walk
+-------------------------------
+
+.. warning::
+
+   **This release is untested on a server.** Fifty user scenarios were walked
+   in a browser against disposable instances with test data on a development
+   Mac. SAM1, the WALDO class predictor and the WALDO40 YOLO model ran for
+   real there; native SAM3, Qwen text generation and paid providers were
+   stand-ins. Nothing was run on the CUDA server or with the production
+   datasets. Keep the previous release available for rollback and check the
+   main workflows yourself after updating.
+
+It follows ``5f66d2b``.
+
+Signing in and accounts
+~~~~~~~~~~~~~~~~~~~~~~~
+
+* Signing in from a link to the workbench, pruning or the canvas returns to
+  that page. Browsers get a "Page not found" page instead of raw data.
+* A new password set by an administrator ends the pause after failed
+  attempts. A disabled account is told it can no longer sign in.
+* An annotator with nothing assigned is told so, and one who opens an
+  administrator link is told why their own work is shown.
+
+Adding images and the admin workspace
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* **Stop import** and **Resume image import**, also after a reload. A bad
+  file no longer blocks the selection: the good files are added and the
+  others are listed with their reason. A labelmap naming classes the dataset
+  lacks is refused before anything uploads.
+* An import report under Incoming lists clipped, repeated and dropped label
+  rows, images already in the dataset, and new images that share a file name
+  with a different image.
+* **History** on every image card and in the canvas panel.
+* The Review and Incoming grids and the counts refresh when the window
+  regains focus, unless a selection, dialog or typing is in progress.
+* Returning an image clears "Annotations checked", so the annotator confirms
+  again after fixing it.
+* Readable muted text, field borders and a visible focus outline in every
+  theme. Pip-Boy can be switched with Shift+Enter on the theme button. On a
+  phone the tabs and actions wrap.
+
+Tranches and review
+~~~~~~~~~~~~~~~~~~~
+
+* Cards show review notes and which images are open for editing. Changing
+  the annotator asks first when images are open.
+* An annotator whose tranche was handed on sees "No longer assigned to you",
+  is told about work in other datasets, and a finished tranche offers the
+  next one.
+* Recall offers to make a tranche from the recalled images. **Select all
+  waiting for review** selects up to 500 images.
+* Tranche history reads in words. When another administrator changed the
+  tranche first, the page reloads it and says so.
+
+Annotation canvas
+~~~~~~~~~~~~~~~~~
+
+* **Undo**, **Redo**, **Delete box** and **Help & keys** (also ``?``).
+  Ctrl/⌘+S saves, Ctrl/⌘+Enter submits or approves and goes to the next
+  image, Ctrl/⌘+Z and Ctrl+Y undo and redo, Ctrl/⌘+0 fits the image.
+* Tab now moves between controls; the left arrow still goes to the previous
+  image. Wheel zoom follows how far the wheel turns.
+* Touch: one finger draws and edits, two fingers zoom and pan the image.
+* When the session ends, **Sign in again** keeps the draft. Leaving always
+  works after an image was handed to someone else or recalled. A view-only
+  canvas notices when the other person leaves.
+* An image that needs a decision says why and offers **Compare imported
+  labels**. SAM messages name the file.
+
+Workbench and server jobs
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* The Data Quality Explorer server job no longer fails when no class is
+  named. Job failures are explained in words, and results show the run split
+  and the training device.
+* YOLO and RF-DETR server jobs show a licence box that must be ticked.
+* Workbench training keeps the splits set on the hosted dataset for YOLO,
+  RF-DETR and SAM3 and splits only the rest; test images stay out.
+* **Hosted data** can open any copy. When the workbench service is stopped,
+  the bar says so and offers **Reload**, and copies are refused at once.
+
+Models and assistance
+~~~~~~~~~~~~~~~~~~~~~
+
+* The class predictor and Qwen tools no longer need a SAM model installed.
+  A damaged installed model is flagged in **Tools & models** instead of
+  stopping the service.
+* Refusals while the server is busy read as sentences. Caption jobs stop
+  after their attempts and say why; remote caption batches show the reported
+  cost.
+
+Updating
+~~~~~~~~
+
+* Restart the hosted and workbench services together.
+* A YOLO or RF-DETR server job runs only when its task allows
+  ``accept_tos`` in ``allowed_parameters``.
+* Workbench copies made before this release do not carry the hosted splits;
+  make a fresh copy before training in the workbench.
+
+Automated checks run
+~~~~~~~~~~~~~~~~~~~~
+
+* Hosted test suite: 429 passed, 1 skipped.
+* Hosted browser tests: 50 passed.
+* The scenario walks for each area, against disposable instances with test
+  data, and on the combined code the workbench flows (12 of 12), arriving in
+  the workbench from the admin workspace (7 of 7) and the theme check
+  (12 of 12).
+
+The legacy suites ``test_labeling_panel_layout_contract`` and
+``test_dataset_linked_annotation_flows`` still fail as before.
+
+Known limits
+~~~~~~~~~~~~
+
+* Classes cannot be retired.
+* A model trained by a server job cannot yet be installed as a detector from
+  its result.
+* Boxes from a detector batch are saved as drafts without a mark saying they
+  came from the detector; they still need the annotator to check and submit.
+* Qwen runs in the workbench ignore the hosted splits. Training without a GPU
+  falls back to the processor and only reports it.
+* Views refresh when the window regains focus; there are no live updates.
+* An image left open in a closed browser stays reserved until its
+  reservation lapses.
+* Exports run in one request; the time for a dataset of 18,000 images is not
+  measured.
+
 2026-11-08: workspace, canvas and workbench review
 --------------------------------------------------
 

@@ -360,6 +360,10 @@
         }
         if (image.tranche_name) info.append(node("small", `Tranche: ${image.tranche_name}`));
         link.append(photo, info); card.append(link);
+        if (state.session.user.role === "admin") {
+            const history = node("button", "History", "card-history"); history.type = "button"; history.setAttribute("aria-label", `History of ${image.filename}`);
+            history.onclick = () => window.TatorHostedHistory?.open(image.id, image.filename); card.append(history);
+        }
         if (state.session.user.role === "admin" && selectable(image)) {
             const check = node("input"); check.type = "checkbox"; check.setAttribute("aria-label", `Select ${image.filename}`);
             check.dataset.image = image.id; check.checked = state.selected.has(image.id);

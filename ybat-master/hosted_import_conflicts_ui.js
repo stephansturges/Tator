@@ -97,6 +97,8 @@
         button.onclick = open; choice.onchange = () => draw().catch(error => notify(error.message, true)); negative.onchange = controls;
         close.onclick = () => dialog.close(); keep.onclick = () => apply("keep_current"); use.onclick = () => apply("use_imported_objects");
         dialog.addEventListener("close", () => { ++ticket; });
+        // The canvas page claims Escape for drawing; while this dialog is open, Escape closes it.
+        document.addEventListener("keydown", event => { if (event.key === "Escape" && dialog.open) { event.preventDefault(); event.stopPropagation(); dialog.close(); } }, true);
         window.addEventListener("tator:hosted-image", () => { if (imageId !== app()?.imageId) { ++ticket; dialog.close(); } });
     }, {once: true});
 })();

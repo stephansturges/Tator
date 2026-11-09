@@ -793,7 +793,7 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
         # Hide the unmanaged legacy tabs before first paint, then render the
         # role-aware navigation to hosted, snapshot-bound destinations.
         html = html.replace("<body>", '<body class="hosted-canvas">', 1)
-        return html.replace("</head>", '<link rel="stylesheet" href="/hosted_canvas.css"><link rel="stylesheet" href="/hosted_admin_nav.css"><script src="/hosted_admin_nav.js" defer></script><script src="/hosted_caption_ui.js" defer></script><script src="/hosted_caption_review.js" defer></script><script src="/hosted_paid_batches_ui.js" defer></script><script src="/hosted_import_conflicts_ui.js" defer></script><script src="/hosted_instruction_review.js" defer></script></head>', 1)
+        return html.replace("</head>", '<link rel="stylesheet" href="/hosted_canvas.css"><link rel="stylesheet" href="/hosted_admin_nav.css"><script src="/hosted_admin_nav.js" defer></script><script src="/hosted_caption_ui.js" defer></script><script src="/hosted_caption_review.js" defer></script><script src="/hosted_paid_batches_ui.js" defer></script><script src="/hosted_import_conflicts_ui.js" defer></script><script src="/hosted_history_ui.js" defer></script><script src="/hosted_instruction_review.js" defer></script></head>', 1)
 
     @app.api_route("/{asset_name}", methods=["GET", "HEAD"])
     def asset(asset_name: str, request: Request):

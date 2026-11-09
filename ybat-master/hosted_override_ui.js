@@ -96,6 +96,8 @@
     async function commit() {
         const ticket = sequence;
         if (!current(ticket) || busy) return;
+        // A recovered earlier recall may describe images that were reassigned since.
+        const fresh = !pending;
         if (!pending) {
             const chosen = rows.filter(row => selected.has(row.id));
             if (!chosen.length || !reason.value.trim()) return;
@@ -122,9 +124,11 @@
             }
             sessionStorage.removeItem(storageKey); pending = null;
             const message = `${result.images.length.toLocaleString()} image${result.images.length === 1 ? "" : "s"} recalled to Incoming as Not assigned. Saved work and history were preserved.`;
-            // Stay open on the result, so the same images can go straight into a new tranche.
-            recalled = result.images; selected.clear(); finished(true); app.notice(message);
-            tell(`${message}${recalled.length <= 500 ? " To give them to someone else, create a tranche from them now." : " Select them in Incoming to give them to someone else."}`);
+            if (fresh) {
+                // Stay open on the result, so the same images can go straight into a new tranche.
+                recalled = result.images; selected.clear(); finished(true); app.notice(message);
+                tell(`${message}${recalled.length <= 500 ? " To give them to someone else, create a tranche from them now." : " Select them in Incoming to give them to someone else."}`);
+            } else { dialog.close(); app.notice(message); }
             try { await app.refresh(); app.notice(message); }
             catch (error) { if (!error.stale) app.notice(`${message} Refresh the workspace to see the saved result.`, true); }
         } catch (error) {

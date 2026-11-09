@@ -1385,6 +1385,9 @@
             const target = new URL(url instanceof Request ? url.url : url, location.href);
             if (target.origin !== location.origin) throw new Error("Hosted tools use this server only.");
             if (target.pathname.startsWith("/qwen/caption/openai_batches") && window.TatorHostedPaidBatches) return window.TatorHostedPaidBatches.legacyFetch(target, options);
+            // The hosted server preloads SAM per request and has no image slots to activate;
+            // answer locally so the editor falls back to preloading without a failed request.
+            if (target.pathname === "/sam_activate_slot") return new Response(JSON.stringify({ detail: "Image slots are not used on this server.", error: "sam_slot_not_used" }), { status: 409, headers: { "content-type": "application/json" } });
             if (target.pathname === "/qwen/caption/openai_metadata") {
                 const catalog = await api(`/api/hosted/tools/catalog?dataset_id=${encodeURIComponent(dataset.id)}`);
                 return jsonResponse({models: (catalog.paid_caption?.models || []).map(model => ({...model, supports_original_image_detail: model.image_details.includes("original")}))});

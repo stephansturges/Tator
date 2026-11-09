@@ -23931,6 +23931,11 @@ async function cancelRfDetrTrainingJobRequest() {
         setButtonDisabled(bboxFolderButton, !enabled);
     }
 
+    // Hosted image keys are internal ids; status lines name the file people know.
+    function imageLabelForStatus(name) {
+        try { return (name && images?.[name]?.displayName) || name; } catch (error) { return name; }
+    }
+
     function setSamStatus(text, { variant = null, duration = 4000 } = {}) {
         if (!samStatusEl) {
             samStatusMessageToken++;
@@ -24336,7 +24341,7 @@ async function cancelRfDetrTrainingJobRequest() {
                     return;
                 }
                 clearImageSlotLoading(targetName);
-                setSamStatus(`SAM ready for ${targetName}`, { variant: "success", duration: 2000 });
+                setSamStatus(`SAM ready for ${imageLabelForStatus(targetName)}`, { variant: "success", duration: 2000 });
                 resolveSamPreloadWaiters(targetName, variantSnapshot);
                 hideSamPreloadProgress();
                 triggerNeighborSlotPreloads(targetName);
@@ -47555,10 +47560,10 @@ async function cancelRfDetrTrainingJobRequest() {
             prefixPieces.push(options.messagePrefix);
         }
         if (canceledLabel) {
-            prefixPieces.push(`Canceled SAM preload for ${canceledLabel}`);
+            prefixPieces.push(`Canceled SAM preload for ${imageLabelForStatus(canceledLabel)}`);
         }
         const prefixText = prefixPieces.length ? `${prefixPieces.join(" — ")} — ` : "";
-        setSamStatus(`${prefixText}Preloading SAM: ${preloadLabel}`, { variant: "info", duration: 0 });
+        setSamStatus(`${prefixText}Preloading SAM: ${imageLabelForStatus(preloadLabel)}`, { variant: "info", duration: 0 });
         showSamPreloadProgress();
 
         let releaseSlotLoading = null;
@@ -87315,12 +87320,12 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
         }
         const token = await waitForSamPreloadIfActive(requestImageName, variantForRequest);
         if (token) {
-            setSamStatus(`SAM ready for ${requestImageName}`, { variant: "success", duration: 1200 });
+            setSamStatus(`SAM ready for ${imageLabelForStatus(requestImageName)}`, { variant: "success", duration: 1200 });
             return token;
         }
         const loadedToken = await preloadSamForMagicTweak(requestImageName, variantForRequest);
         if (loadedToken) {
-            setSamStatus(`SAM ready for ${requestImageName}`, { variant: "success", duration: 1200 });
+            setSamStatus(`SAM ready for ${imageLabelForStatus(requestImageName)}`, { variant: "success", duration: 1200 });
         }
         return loadedToken || null;
     }

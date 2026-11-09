@@ -29,6 +29,18 @@
         parent.append(b); return b;
     }
     function field(parent, title, input) { const label = node("label", title); label.append(input); parent.append(label); return input; }
+    // Pilot checks in plain words; the code name stays in the saved result.
+    function checkText(check) {
+        const hours = value => Number.isFinite(value) ? `${value < 1 ? value.toFixed(2) : value.toFixed(1)} h` : "unknown";
+        return {
+            health: "every sampled image was captioned within the failure and recovery limits",
+            generated_sample: `${check.actual ?? 0} of the ${check.required ?? "required"} sample captions needed`,
+            runtime_projection: `projected full run ${hours(check.projected_hours)} (limit ${hours(check.maximum_hours)})`,
+            runtime_tail: "the slowest captions keep the full run within its time limit",
+            prompt_budget: "prompt sizes were recorded for every caption",
+            deterministic_recovery_confidence: "enough clean captions to be confident that fallback recoveries stay rare",
+        }[check.name] || check.name.replaceAll("_", " ");
+    }
     function textInput(value, type = "text") { const e = node("input"); e.type = type; e.value = value; return e; }
     async function refresh(ticket) {
         const rows = await api("/tools/caption-batches");
@@ -38,7 +50,7 @@
         if (!jobs.length) history.append(node("p", "No caption runs for this dataset yet."));
         for (const job of jobs) {
             const row = node("div"); row.className = "hosted-analysis-job";
-            row.append(node("span", `${job.request.pilot ? "Pilot" : "Caption run"} · ${job.status} · ${new Date(job.created_at * 1000).toLocaleString()}`));
+            row.append(node("span", `${job.request.pilot ? "Pilot" : "Caption run"} · ${job.status.replaceAll("_", " ")} · ${new Date(job.created_at * 1000).toLocaleString()}`));
             action(row, "Inspect", () => show(job.job_id, ticket)); history.append(row);
         }
     }
@@ -52,14 +64,18 @@
         if (certification) {
             detail.append(node("strong", certification.status === "certified" ? "Pilot passed its checks" : "Pilot has not passed all checks"));
             const list = node("ul");
-            for (const check of certification.checks) list.append(node("li", `${check.passed ? "Passed" : "Needs attention"}: ${check.name.replaceAll("_", " ")}`));
+            for (const check of certification.checks) list.append(node("li", `${check.passed ? "Passed" : "Needs attention"}: ${checkText(check)}`));
             detail.append(list);
+            const sample = certification.checks.find(check => check.name === "generated_sample");
+            if (sample && !sample.passed) detail.append(node("p", `A pilot needs at least ${sample.required} captioned images; this run captioned ${sample.actual}. Use a larger pilot sample, or, when the dataset has fewer confirmed images, “Run full dataset without a pilot…” under Prompt stages, retry settings and pilot limits. Results stay proposals either way.`));
             if (certification.status === "certified") action(detail, "Run this recipe on the full saved snapshot", async () => {
                 const next = await api("/tools/caption-batches", {...job.request, operation_id: crypto.randomUUID(), sample_size: 0, pilot: null, certified_pilot_id: id});
                 await refresh(ticket); await show(next.job_id, ticket);
             });
         }
         const stopped = ["completed", "failed", "cancelled", "interrupted", "waiting_for_admin"].includes(job.status);
+        // The saved-runs list was drawn when the run started; show its final state.
+        if (stopped && history.dataset.shownState !== `${id}:${job.status}`) { history.dataset.shownState = `${id}:${job.status}`; refresh(ticket).catch(() => {}); }
         if (!stopped) {
             action(detail, "Cancel run", async () => { await api(`/tools/caption-batches/${id}/cancel`, {operation_id: crypto.randomUUID()}); await show(id, ticket); });
             timer = setTimeout(() => show(id, ticket).catch(e => { if (valid(ticket)) notice.textContent = e.message; }), 1500);

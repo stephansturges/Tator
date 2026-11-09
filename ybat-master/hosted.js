@@ -45,7 +45,7 @@
                 const error = new Error(data.commit_outcome === "committed" && data.result_restricted === true
                     ? "The change was saved, but your account can no longer view its result. Refresh the workspace to see what you can access."
                     : errorText(data.error, data.detail) || `Request failed (${response.status})`);
-                error.status = response.status; error.code = data.error;
+                error.status = response.status; error.code = data.error; error.detail = data.detail;
                 for (const name of ["commit_outcome", "operation_id", "result_restricted"]) error[name] = data[name];
                 if ((response.status === 401 || ["installation_changed", "csrf_rejected"].includes(data.error)) && authority) loginView();
                 throw error;
@@ -89,6 +89,14 @@
         $("theme").ondblclick = () => { clearTimeout(clickTimer); clickTimer = null; apply(mode === "pipboy" ? classic : "pipboy", true); };
         apply(mode, false);
     })();
+    // A page opened while signed out (?next=) opens again after signing in.
+    // Only this server's own pages qualify, so the link cannot send anyone elsewhere.
+    function nextPage() {
+        const raw = new URLSearchParams(location.search).get("next");
+        if (!raw || !raw.startsWith("/") || raw.startsWith("//") || raw.includes("\\")) return null;
+        try { const url = new URL(raw, location.origin); return url.origin === location.origin && ["/annotate", "/pruning", "/workbench"].includes(url.pathname) ? url.pathname + url.search : null; }
+        catch (_) { return null; }
+    }
     function announceSession() { try { localStorage.setItem("tator.hosted.session-event", crypto.randomUUID()); } catch (_) {} }
     window.addEventListener("storage", event => { if (event.key === "tator.hosted.session-event" && state.session) { loginView(); notice("The signed-in account changed in another tab. Sign in or reload to continue."); } });
     function loginView() {
@@ -149,7 +157,11 @@
             tranche: next === "submitted" ? route.get("tranche") || "" : "", annotator: next === "submitted" ? route.get("annotator") || "" : ""};
         syncFilterControls();
         if ($("datasetChoice").value !== previous) window.dispatchEvent(new Event("tator:hosted-dataset"));
+        // An annotator who opens an administrator's link sees their own work, and is told why.
+        const adminLink = !isAdmin && ((route.get("view") && route.get("view") !== "mine") || ["tool", "analysis", "panel"].some(key => route.has(key)));
+        if (adminLink) dropRouteParams("tool", "analysis", "panel");
         await view(next, {route: "replace", tranche: ["tranches", "mine"].includes(next) ? route.get("tranche") : null});
+        if (adminLink) notice("That link opens an administrator view, so your own work is shown instead.");
         await revealImage(route.get("at"));
     }
     async function navigate(next) {
@@ -229,7 +241,7 @@
     }
     function syncDatasetActions() {
         const isAdmin = state.session?.user.role === "admin", none = !state.datasets.length;
-        const hint = "Create a dataset first.";
+        const hint = isAdmin ? "Create a dataset first." : "Available once work is assigned to you.";
         for (const id of ["classes", "hostedGuidance", "import", "recallAssigned"]) {
             const control = $(id); if (!control) continue;
             const metadata = id === "classes" && Boolean(state.datasets.find(d => d.id === $("datasetChoice").value)?.metadata_only);
@@ -370,6 +382,11 @@
         syncDatasetActions();
         const grouped = ["tranches", "mine"].includes(state.view);
         $("imageGrid").hidden = grouped; $("moreRow").hidden = grouped; $("empty").hidden = grouped;
+        if (grouped && !id) {
+            clearSelection(); state.images = []; window.TatorHostedTranches?.hide(); $("empty").hidden = false;
+            $("empty").textContent = state.session.user.role === "admin" ? "Start with New dataset: name it and list its classes. Then add images to Incoming." : "Nothing is assigned to you yet. When an administrator assigns you a tranche, it appears here; use Refresh to check.";
+            return;
+        }
         if (grouped) { clearSelection(); state.images = []; await window.TatorHostedTranches?.show(); return; }
         window.TatorHostedTranches?.hide();
         if (!append) { state.cursor = null; state.total = null; clearSelection(); state.images = []; $("imageGrid").replaceChildren(); }
@@ -718,19 +735,24 @@
         await bulkApprove("review", selected);
     });
 
-    $("loginForm").onsubmit = (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); action(event.submitter, async () => { state.session = await api("/login", { method: "POST", body: { username: form.get("username"), password: form.get("password") } }); event.target.reset(); announceSession(); notice(""); await workspace(); }); };
+    $("loginForm").onsubmit = (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); action(event.submitter, async () => { state.session = await api("/login", { method: "POST", body: { username: form.get("username"), password: form.get("password") } }); event.target.reset(); announceSession(); notice(""); const next = nextPage(); if (next) { location.replace(next); return; } await workspace(); }); };
     $("logout").onclick = () => action($("logout"), async () => { await api("/logout", { method: "POST" }); announceSession(); state.selected.clear(); state.images = []; $("imageGrid").replaceChildren(); loginView(); });
     $("refresh").onclick = () => action($("refresh"), workspace);
     $("datasetChoice").onchange = () => { notice(""); switchDataset($("datasetChoice").value).catch((error) => { if (!error.stale) notice(error.message, true); }); };
     $("more").onclick = () => action($("more"), () => loadImages(true));
     $("moreAll").onclick = () => action($("moreAll"), loadAll);
     $("clearSelection").onclick = clearSelection; $("assignee").onchange = selection;
-    $("createDataset").onclick = () => $("datasetDialog").showModal();
+    $("createDataset").onclick = () => { notice(""); $("datasetDialog").showModal(); };
     document.querySelectorAll("[data-close]").forEach((button) => { button.onclick = () => button.closest("dialog").close(); });
     $("datasetForm").onsubmit = (event) => {
         event.preventDefault(); const form = new FormData(event.currentTarget);
+        const name = String(form.get("name")).trim(), classes = String(form.get("classes")).split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+        // Say which line repeats before asking the server, which compares names without capitals.
+        const seen = new Set(), repeated = classes.find(item => { const key = item.toLocaleLowerCase(); if (seen.has(key)) return true; seen.add(key); return false; });
+        if (repeated) { notice(`“${repeated}” is listed twice; class names are compared without capitals. List each class once.`, true); return; }
+        if (state.datasets.some(row => row.name.trim().toLocaleLowerCase() === name.toLocaleLowerCase()) && !window.confirm(`A dataset named “${name}” already exists. Create another one with the same name?`)) return;
         action(event.submitter, async () => {
-            const created = await api("/datasets", { method: "POST", body: { name: form.get("name"), classes: String(form.get("classes")).split(/\r?\n/).map((name) => name.trim()).filter(Boolean), operation_id: op() } });
+            const created = await api("/datasets", { method: "POST", body: { name, classes, operation_id: op() } });
             $("datasetDialog").close(); event.target.reset();
             // The new dataset opens in Incoming, where its images are added.
             history.pushState(null, "", `/?${new URLSearchParams({dataset: created.id, view: "incoming"})}`);
@@ -786,7 +808,11 @@
         });
     };
     window.addEventListener("hashchange", () => { if (!invitationView() && !$("invitePanel").hidden) { $("invitePanel").hidden = true; loginView(); } });
-    (async () => { if (invitationView()) return; try { state.session = await api("/session"); await workspace(); } catch (error) { if (!error.stale) { loginView(); if (error.status !== 401) notice(error.message, true); } } })();
+    (async () => {
+        if (invitationView()) return;
+        try { state.session = await api("/session"); const next = nextPage(); if (next) { location.replace(next); return; } await workspace(); }
+        catch (error) { if (!error.stale) { loginView(); if (error.status !== 401) notice(error.message, true); else if (nextPage()) notice("Sign in to open the page you asked for."); } }
+    })();
     const applyFilters = () => {
         state.filters = {q: $("imageSearch").value.trim(), incoming: $("incomingFilter").value, tranche: $("reviewTranche").value, annotator: $("reviewAnnotator").value};
         writeRoute("replace");

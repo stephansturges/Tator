@@ -17,7 +17,7 @@ import re
 import stat
 from http.cookiejar import CookieJar, DefaultCookiePolicy
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 from fastapi import Request
@@ -118,7 +118,8 @@ def install_workbench(app, *, auth, origin: str, cookie: str, web_root: Path, ur
             identity = await run_in_threadpool(administrator, request, mutation=False)
         except DomainError as error:
             if error.status == 401:
-                return RedirectResponse("/", status_code=303)
+                # After signing in, the workspace opens the workbench again.
+                return RedirectResponse("/?" + urlencode({"next": "/workbench" + (f"?{request.url.query}" if request.url.query else "")}), status_code=303)
             if error.code == "administrator_required" and "text/html" in request.headers.get("accept", ""):
                 return HTMLResponse('<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Tator · For administrators</title>'
                                     '<link rel="stylesheet" href="/hosted.css"></head><body><main class="hosted-login">'

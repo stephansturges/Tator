@@ -36,6 +36,11 @@
     }
     async function open(destination) {
         if (user()?.role !== "admin") return;
+        if (!canvas && !datasetId() && !["datasets", "profiles"].includes(destination)) {
+            // First run: these tools work on a dataset, and there is none yet.
+            workspace.notice("Create a dataset first with New dataset. This tool works on a dataset's images.");
+            document.getElementById("createDataset")?.focus(); return;
+        }
         if (destination === "models") { document.getElementById("hostedTools")?.click(); return; }
         if (workbench() && workbenchTabs[destination]) {
             const query = new URLSearchParams({tab: workbenchTabs[destination]});

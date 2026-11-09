@@ -91469,7 +91469,8 @@ function classSplitDualBBoxResolutionOperationIsCurrent(operation) {
             const available = configured[group.key];
             // A selected model that cannot run is not "no model yet": say so.
             const chosen = { classifier: catalog.classifier?.model_id, detector: catalog.detector?.model_id }[group.key];
-            const reason = chosen && !available ? `${group.reason.split(":")[0]}: the dataset's ${group.key === "detector" ? "detector" : "class predictor"} (${chosen}) cannot be used on this server right now. An administrator can see why in Tools & models.` : group.reason;
+            const reason = chosen && !available ? `${group.reason.split(":")[0]}: the dataset's ${group.key === "detector" ? "detector" : "class predictor"} (${chosen}) cannot be used on this server right now. An administrator can see why in Tools & models.`
+                : group.key === "sam" && !catalog.sam?.model_id ? "SAM is off: no segmentation model is installed on this server yet." : group.reason;
             hostedToolGate[group.key] = available ? null : reason;
             // Hide the control's own one-control row, never a wider section.
             const rowOf = (control) => control?.parentElement?.matches(".training-field, .training-actions") ? control.parentElement : control;

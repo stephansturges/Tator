@@ -110,7 +110,7 @@ Updating
 Automated checks run
 ~~~~~~~~~~~~~~~~~~~~
 
-* Hosted test suite: 429 passed, 1 skipped.
+* Hosted test suite: 431 passed, 1 skipped.
 * Hosted browser tests: 50 passed.
 * The scenario walks for each area, against disposable instances with test
   data, and on the combined code the workbench flows (12 of 12), arriving in
@@ -124,8 +124,6 @@ Known limits
 ~~~~~~~~~~~~
 
 * Classes cannot be retired.
-* Boxes from a detector batch are saved as drafts without a mark saying they
-  came from the detector; they still need the annotator to check and submit.
 * Qwen runs in the workbench ignore the hosted splits. Training without a GPU
   falls back to the processor and only reports it.
 * Views refresh when the window regains focus; there are no live updates.

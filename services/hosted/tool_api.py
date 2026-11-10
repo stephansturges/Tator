@@ -17,8 +17,9 @@ from typing import Literal
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field
 
-from services.hosted.config import ModelRegistry, file_digest, model_uses_manifest, validate_model_id, validate_model_member
+from services.hosted.config import RFDETR_CLASSES, ModelRegistry, file_digest, model_uses_manifest, validate_model_id, validate_model_member
 from services.hosted.analysis import CanonicalAnalysis
+from services.hosted.artifacts import ArtifactError, ArtifactRef
 from services.hosted.job_authority import HeavyJobAuthority
 from services.hosted.media import HostedMedia
 from services.hosted.caption_jobs import CaptionJobRequest, CaptionJobCommand
@@ -40,6 +41,11 @@ QWEN_OPERATIONS = {"qwen_infer", "qwen_caption", "qwen_caption_preview", "qwen_c
 # Operations that never call SAM; they must not depend on the user's SAM choice.
 NON_SAM_OPERATIONS = QWEN_OPERATIONS | {"classify_bbox"}
 NATIVE_ANALYSIS_FACTORY = "services.hosted.native_analysis:NativeAnalysisAdapter"
+# Server-job trainers whose published weights can be installed as a dataset
+# detector, and the files the legacy trainers leave in their run directory.
+TRAINED_DETECTORS = {"yolo_training": ("yolo", "yolo_runs", ("best.pt",)),
+                     # services.detectors._rfdetr_best_checkpoint_impl order.
+                     "rfdetr_training": ("rfdetr", "rfdetr_runs", ("checkpoint_best_total.pth", "checkpoint_best_ema.pth", "checkpoint_best_regular.pth"))}
 # Plain text for refusals people meet while annotating; the code stays in "error".
 RUNTIME_MESSAGES = {
     "runtime_automation_paused": "Assistance is paused while an administrator job uses the server's GPU. Manual annotation and saving still work; the tools come back when the job finishes.",
@@ -157,6 +163,13 @@ class CascadeDelete(BaseModel):
 
 class InstallModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    operation_id: str = Field(min_length=8, max_length=128)
+
+
+class InstallTrainedModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    analysis_job_id: str = Field(min_length=1, max_length=128)
+    model_id: str = Field(min_length=1, max_length=1000)
     operation_id: str = Field(min_length=8, max_length=128)
 
 
@@ -322,6 +335,8 @@ class ToolController:
                     raise DomainError("operation_id_reused", 409)
                 self._reload_model(model_id)
                 return self.store.disclose_receipt_result(actor, operation_id, previous["operation"], previous["result"])
+            if "source" in self._installed_definition(model_id):
+                raise DomainError("tool_model_exists", 409, f"{model_id} is already installed from a server job's result. Give the configured model another name.")
             if definition["kind"] in {"edr", "sam3_recipe"}:
                 identities = {}
                 for kind, component in definition["components"].items():
@@ -363,6 +378,129 @@ class ToolController:
                 con.execute("INSERT INTO hosted_tool_configuration VALUES (1,?) ON CONFLICT(id) DO UPDATE SET policy_json=excluded.policy_json", (json.dumps(policy),))
                 return {"model_id": model_id, "checkpoint_sha256": definition["checkpoint_sha256"]}
             result = self.store._command(actor, operation_id, "install_tool_model", {"model_id": model_id, "definition": definition}, publish, admin=True)
+            self._load_definition(model_id, definition)
+            self.unavailable_models.pop(model_id, None)
+            return result
+
+    def _installed_definition(self, model_id):
+        with self.store.read_connection() as con:
+            row = con.execute("SELECT definition_json FROM hosted_tool_models WHERE model_id=?", (model_id,)).fetchone()
+        return json.loads(row[0]) if row else {}
+
+    def _trained_detector(self, actor, job_id):
+        """Definition of the exact weights a completed YOLO/RF-DETR server job published.
+
+        Weights, labelmap and run metadata are read from the job's registered,
+        content-addressed artifacts; nothing comes from the browser or from the
+        native work directory, which may already be gone.
+        """
+        with self.store.read_connection() as con:
+            self.store._actor(con, actor, admin=True)
+            job, manifest, _ = self.analysis._job(con, job_id)
+            view = con.execute("SELECT payload_json FROM hosted_analysis_views WHERE job_id=?", (job_id,)).fetchone()
+            rows = con.execute("SELECT relative_path,sha256,size_bytes FROM hosted_analysis_artifacts WHERE job_id=?", (job_id,)).fetchall()
+        if job["consumer"] not in TRAINED_DETECTORS:
+            raise DomainError("trained_model_job_not_supported", 422, "Only a completed Train YOLO or Train RF-DETR result can be installed as a detector.")
+        if job["state"] != "complete" or view is None:
+            raise DomainError("trained_model_job_incomplete", 409, "This training run has not finished, so there is no model to install yet.")
+        kind, folder, weight_names = TRAINED_DETECTORS[job["consumer"]]
+        files = {row[0]: ArtifactRef(row[1], row[2]) for row in rows}
+        runs = {path.split("/")[1] for path in files
+                if path.startswith(folder + "/") and path.count("/") == 2 and path.rsplit("/", 1)[1] in weight_names}
+        native_id = json.loads(view[0]).get("native_job_id")
+        if not runs:
+            raise DomainError("trained_model_weights_missing", 409, "This result has no trained weights to install.")
+        if len(runs) > 1 or native_id and runs != {native_id}:
+            raise DomainError("trained_model_weights_ambiguous", 409, "This result holds more than one set of trained weights, so it is not clear which one to install.")
+        run = f"{folder}/{runs.pop()}/"
+        def small(name, limit):
+            reference = files.get(run + name)
+            if reference is None or reference.size_bytes > limit:
+                raise DomainError("trained_model_files_missing", 409, f"This result has no {name} for its trained weights, so their classes are not known.")
+            try:
+                with self.artifacts.open(reference) as stream:
+                    return stream.read()
+            except (ArtifactError, OSError) as exc:
+                raise DomainError("trained_model_artifact_invalid", 409, "This result's stored files failed verification. Restore the server's artifact store from a backup.") from exc
+        try:
+            meta = json.loads(small("run.json", 64 * 1024 * 1024))
+            labels = [line.strip() for line in small("labelmap.txt", 1024 * 1024).decode("utf-8").splitlines() if line.strip()]
+        except ValueError as exc:  # Includes JSON and UTF-8 decoding errors.
+            raise DomainError("trained_model_files_missing", 409, "This result's run record or class list cannot be read.") from exc
+        classes = sorted(manifest["classes"], key=lambda row: row["position"])
+        if not labels or labels != [row["name"] for row in classes]:
+            raise DomainError("trained_model_labels_changed", 409, "The run's class list does not match the classes it was trained on, so its labels cannot be trusted.")
+        meta = meta if isinstance(meta, dict) else {}
+        config = meta.get("config") if isinstance(meta.get("config"), dict) else {}
+        if meta.get("status") != "succeeded":
+            raise DomainError("trained_model_job_incomplete", 409, "The trainer did not record this run as finished, so there is no model to install.")
+        dataset_config = config.get("dataset") if isinstance(config.get("dataset"), dict) else {}
+        if str(dataset_config.get("task") or config.get("task") or "detect").lower() != "detect":
+            raise DomainError("trained_model_not_a_detector", 422, "This run trained a segmentation model. Only box detectors can be installed as a dataset detector.")
+        weights = next(name for name in weight_names if run + name in files)
+        definition = {"kind": kind, "labels": labels}
+        if kind == "rfdetr":
+            recorded = Path(str((meta.get("result") if isinstance(meta.get("result"), dict) else {}).get("best_path") or "")).name
+            if recorded and recorded != weights:
+                raise DomainError("trained_model_weights_ambiguous", 409, "This run's recorded best checkpoint is not the one kept with its result, so it is not clear which one to install.")
+            # Same default as services.detectors._rfdetr_variant_info_impl.
+            variant = str(config.get("variant") or "").strip().lower() or "rfdetr-medium"
+            if variant not in RFDETR_CLASSES:
+                raise DomainError("trained_model_not_a_detector", 422, f"This run trained {variant}, which cannot run as a dataset detector.")
+            # The trainer remaps COCO categories to 0..n-1 in labelmap order
+            # (_rfdetr_remap_coco_ids_impl); a fine-tuned RF-DETR reports that index.
+            definition.update(variant=variant, class_ids=list(range(len(labels))))
+        reference = files[run + weights]
+        definition.update(checkpoint_sha256=reference.sha256, checkpoint_suffix=Path(weights).suffix, source={
+            "analysis_job_id": job_id, "operation": job["consumer"], "snapshot_id": job["snapshot_id"],
+            "dataset_id": manifest["dataset_id"], "dataset_name": manifest.get("dataset_name", ""),
+            "completed_at": job["updated_at"], "dataset_class_ids": [row["id"] for row in classes]})
+        return definition, reference
+
+    def install_trained_model(self, actor, job_id, model_id, operation_id):
+        """Install the weights a completed server training job published as a tool model.
+
+        The model then loads exactly like one installed from the server's model
+        configuration. Choosing it as a dataset's detector stays a separate,
+        human administrator action.
+        """
+        self.auth.require_admin(actor)
+        def replay(previous):
+            result = previous["result"]
+            if previous["operation"] != "install_trained_tool_model" or result.get("model_id") != model_id or result.get("source", {}).get("analysis_job_id") != job_id:
+                raise DomainError("operation_id_reused", 409)
+            self._reload_model(model_id)
+            return self.store.disclose_receipt_result(actor, operation_id, previous["operation"], result)
+        previous = self.store.raw_receipt(actor, operation_id)
+        if previous:
+            with self._lock, self.artifacts.exclusive():
+                return replay(previous)
+        try:
+            validate_model_id(model_id)
+        except ValueError as exc:
+            raise DomainError("tool_model_id_invalid", 422, "Name the model with up to 128 letters, digits, dots, dashes or underscores, starting with a letter or digit.") from exc
+        definition, reference = self._trained_detector(actor, job_id)
+        with self._lock, self.artifacts.exclusive():
+            previous = self.store.raw_receipt(actor, operation_id)
+            if previous:
+                return replay(previous)
+            exists = DomainError("tool_model_exists", 409, f"A model named {model_id} is already installed or configured. Choose another name.")
+            if model_id in self.configuration.get("models", {}) or self._installed_definition(model_id):
+                raise exists
+            try:
+                self.artifacts.verify(reference)
+            except (ArtifactError, OSError) as exc:
+                raise DomainError("trained_model_artifact_invalid", 409, "This result's stored weights failed verification. Restore the server's artifact store from a backup.") from exc
+            self.operations.register_artifact(actor, reference, "tool_model", model_id,
+                "modelref-" + hashlib.sha256(f"{operation_id}:checkpoint".encode()).hexdigest())
+            def publish(con):
+                if con.execute("SELECT 1 FROM hosted_tool_models WHERE model_id=?", (model_id,)).fetchone():
+                    raise exists
+                con.execute("INSERT INTO hosted_tool_models VALUES (?,?,?)", (model_id, json.dumps(definition, sort_keys=True), self.store.clock()))
+                return {"model_id": model_id, "kind": definition["kind"], "checkpoint_sha256": definition["checkpoint_sha256"],
+                        "labels": definition["labels"], "source": definition["source"]}
+            result = self.store._command(actor, operation_id, "install_trained_tool_model",
+                {"analysis_job_id": job_id, "model_id": model_id}, publish, admin=True)
             self._load_definition(model_id, definition)
             self.unavailable_models.pop(model_id, None)
             return result
@@ -946,7 +1084,9 @@ class ToolController:
             for recipe_id in dataset["settings"].get("sam3_recipes", {}).get("model_ids", []):
                 allowed.update(self._definition(recipe_id).get("components", {}).values())
         from services.hosted.config import model_runtime_capability
-        installed = [{**row, **model_runtime_capability(row, self.configuration.get("user_sam", {}).get("device"))}
+        # Where a trained model came from (dataset, snapshot) is administrator information.
+        installed = [{**{key: value for key, value in row.items() if key != "source" or actor.role == "admin"},
+                      **model_runtime_capability(row, self.configuration.get("user_sam", {}).get("device"))}
                      for row in self.registry.catalog() if actor.role == "admin" or row["model_id"] in allowed
                      or row["model_id"] == selection["model_id"]]
         result = {"models": installed, "sam": selection, "implemented": sorted(SAM_OPERATIONS | DETECTOR_OPERATIONS | QWEN_OPERATIONS | EDR_OPERATIONS | SAM_RECIPE_OPERATIONS),
@@ -1479,6 +1619,10 @@ def install_tool_api(app, store, auth, artifacts, actor_dependency, admin_depend
     @router.post("/models/{model_id}/install")
     def install(model_id: str, body: InstallModel, actor=Depends(admin_dependency)):
         return translate(controller.install_model, actor, model_id, body.operation_id)
+
+    @router.post("/models/from-analysis")
+    def install_trained(body: InstallTrainedModel, actor=Depends(admin_dependency)):
+        return translate(controller.install_trained_model, actor, body.analysis_job_id, body.model_id, body.operation_id)
 
     @router.post("/sam")
     def select_sam(body: ModelSelection, actor=Depends(actor_dependency)):

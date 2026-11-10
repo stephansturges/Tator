@@ -271,6 +271,33 @@ that the dataset's selected detector or class predictor cannot be used right
 now, rather than "no model yet". Repairing the files needs the artifact store
 restored from a backup; installing over a damaged stored copy is refused.
 
+A detector trained by a server job is installed from its result instead of
+from the configuration (``install_trained_model``). The weights, labelmap and
+run record are the job's own published artifacts, already content-addressed
+and SHA-256 verified; the browser supplies only the analysis job ID and a new
+model name, and the native work directory is never read again. For
+``yolo_training`` these are ``yolo_runs/<run>/best.pt``, ``labelmap.txt`` and
+``run.json``. For ``rfdetr_training`` the checkpoint is the first of
+``checkpoint_best_total.pth``, ``checkpoint_best_ema.pth`` and
+``checkpoint_best_regular.pth`` in ``rfdetr_runs/<run>/``, the trainer's own
+order, and it must be the one ``run.json`` recorded. The variant comes from the
+run's configuration (``rfdetr-medium`` when none was set). Native ``class_ids``
+are ``0..n-1`` in labelmap order: the trainer remaps COCO categories to that
+order and a fine-tuned RF-DETR reports that index. The labelmap must equal the
+snapshot's classes. The definition records its ``source`` (analysis job,
+snapshot, dataset, finish time and the snapshot's class IDs in label order);
+administrators see it in the catalog, and Tools & models uses those class IDs
+to propose the class links. The checkpoint is registered as a ``tool_model``
+artifact and the definition saved in ``hosted_tool_models``, so it loads
+through the same registry path as configured models, also after a restart. The
+command is idempotent on its ``operation_id``. It refuses other job types,
+unfinished runs, segmentation runs and unsupported variants, missing or
+ambiguous weights, a labelmap that differs from the trained classes, and a
+name that is already installed or configured; each refusal carries a sentence
+for the administrator. Installing a configured model under the name of a
+trained one is refused as well. Selecting the new model as a dataset's
+detector is the separate ``POST /datasets/{id}/detector`` call.
+
 Every installed SAM1 or SAM3 model is a personal choice for every dataset; there
 is no second SAM allowlist. With no explicit default, the controller picks an
 installed SAM1 first. A saved personal choice and an explicit server default
@@ -321,6 +348,9 @@ The API exposes:
 
 * ``GET /api/hosted/tools/catalog?dataset_id=...`` for permitted models and current
   selections; ``POST /models/{id}/install`` is administrator-only.
+* ``POST /models/from-analysis`` with ``analysis_job_id``, ``model_id`` and
+  ``operation_id`` (administrator-only) installs the weights a completed YOLO
+  or RF-DETR server training job published.
 * ``POST /sam`` for the user's installed SAM choice with a preference revision.
 * ``POST /datasets/{id}/detector`` and ``/classifier`` for administrator model
   attachment with the expected dataset revision and an operation ID.

@@ -80,6 +80,9 @@ Workbench and server jobs
   named. Job failures are explained in words, and results show the run split
   and the training device.
 * YOLO and RF-DETR server jobs show a licence box that must be ticked.
+* A completed YOLO or RF-DETR training result offers **Install as detector**;
+  the dataset switches to it only when an administrator sets it in **Tools &
+  models**.
 * Workbench training keeps the splits set on the hosted dataset for YOLO,
   RF-DETR and SAM3 and splits only the rest; test images stay out.
 * **Hosted data** can open any copy. When the workbench service is stopped,
@@ -121,8 +124,6 @@ Known limits
 ~~~~~~~~~~~~
 
 * Classes cannot be retired.
-* A model trained by a server job cannot yet be installed as a detector from
-  its result.
 * Boxes from a detector batch are saved as drafts without a mark saying they
   came from the detector; they still need the annotator to check and submit.
 * Qwen runs in the workbench ignore the hosted splits. Training without a GPU

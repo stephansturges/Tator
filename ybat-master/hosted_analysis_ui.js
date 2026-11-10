@@ -21,6 +21,8 @@
     // Launcher order: the quick, read-only tasks first; exports last.
     const taskOrder = ["statistics", "dqe", "pruning", "ingestion", "clip_training", "yolo_training", "rfdetr_training", "sam3_training", "qwen_training", "salad_training", "caption_export"];
     const trainingTasks = new Set(["clip_training", "yolo_training", "sam3_training", "rfdetr_training", "qwen_training"]);
+    // Trainers whose completed weights can be installed as a dataset detector.
+    const detectorTrainers = {yolo_training: "yolo", rfdetr_training: "rfdetr"};
     const stateNames = {admitting: "Preparing inputs", queued: "Waiting for its turn", running: "Running", completed: "Complete", complete: "Complete", captured: "Started", failed: "Failed", cancelled: "Cancelled", interrupted: "Interrupted", stale: "Out of date", unavailable: "Unavailable"};
     const computeErrors = {native_engine_failed: "The analysis engine stopped with an error; its log is kept on the server.", worker_timeout: "The task ran past its time limit and was stopped.",
         worker_operation_failed: "The task failed on the server; its log is kept on the server.", worker_failed: "The task failed on the server; its log is kept on the server.", worker_disconnected: "The compute worker stopped unexpectedly; its log is kept on the server.", worker_protocol_invalid: "The compute worker sent an unreadable reply; its log is kept on the server.", worker_termination_failed: "The compute worker could not be stopped cleanly; an administrator should check the server.",
@@ -275,8 +277,51 @@
             // Trainers fall back to the CPU when the configured GPU is not available; say where it ran.
             const device = (result.status?.logs || []).map(entry => String(entry?.message || "")).find(message => message.startsWith("Training device:"));
             if (device) content.append(node("p", `${device}.`));
+            if (detectorTrainers[job.consumer]) await installDetector(job, jobId, ticket);
+            if (!valid(ticket) || currentJob !== jobId) return;
         }
         const download = node("a", "Download result and provenance"); download.href = `/api/hosted/analysis/jobs/${jobId}/result`; download.download = `${job.consumer}-${jobId}.json`; content.append(download);
+    }
+    // The server installs the exact weights this run published; making it the
+    // dataset's detector is a separate choice in Tools & models.
+    async function installDetector(job, jobId, ticket) {
+        const box = node("section"), status = node("p"); status.className = "dialog-notice"; status.setAttribute("role", "status");
+        box.append(node("h4", "Use as a detector")); content.append(box);
+        const catalog = await api("/tools/catalog");
+        if (!valid(ticket) || currentJob !== jobId) return;
+        const offer = (modelId) => act(box, "Set as this dataset's detector…", () => { dialog.close(); window.TatorHostedTools?.open({detector: modelId}); });
+        const installed = (catalog.models || []).find(model => model.source?.analysis_job_id === jobId);
+        if (installed) { box.append(node("p", `Installed as detector ${installed.model_id}. The dataset uses it only after you choose it in Tools & models.`)); offer(installed.model_id); return; }
+        box.append(node("p", "Install the weights this run produced as a detector model. The dataset keeps its current detector until you choose the new one and check how its labels link to the dataset's classes."));
+        // Default name: dataset name, model type and the day the run finished.
+        const taken = new Set([...(catalog.models || []).map(model => model.model_id), ...(catalog.available_to_install || [])]);
+        const finished = new Date((job.updated_at || job.created_at) * 1000), pad = value => String(value).padStart(2, "0");
+        const base = `${(app.datasetName || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "dataset"}-${detectorTrainers[job.consumer]}-${finished.getFullYear()}-${pad(finished.getMonth() + 1)}-${pad(finished.getDate())}`;
+        let suggestion = base;
+        for (let index = 2; taken.has(suggestion); index++) suggestion = `${base}-${index}`;
+        const fields = node("div"); fields.className = "hosted-analysis-parameters"; box.append(fields);
+        const name = field(fields, "Model name", node("input")); name.value = suggestion; name.maxLength = 128; name.spellcheck = false;
+        box.append(status);
+        const install = node("button", "Install as detector"); install.type = "button"; box.append(install);
+        install.onclick = async () => {
+            if (!valid(ticket) || currentJob !== jobId) return;
+            const modelId = name.value.trim();
+            status.textContent = ""; status.dataset.error = "false";
+            if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(modelId)) { status.textContent = "Name the model with up to 128 letters, digits, dots, dashes or underscores, starting with a letter or digit."; status.dataset.error = "true"; return; }
+            if (!window.confirm(`Install the weights of this ${operationNames[job.consumer]} run as detector "${modelId}"?\n\nThe dataset keeps its current detector until you choose this one.`)) return;
+            install.disabled = name.disabled = true;
+            try {
+                const done = await api("/tools/models/from-analysis", {analysis_job_id: jobId, model_id: modelId, operation_id: crypto.randomUUID()});
+                if (!valid(ticket) || currentJob !== jobId) return;
+                fields.remove(); install.remove();
+                status.textContent = `Installed as detector ${done.model_id}, with ${count(done.labels.length, "label")}: ${done.labels.join(", ")}.`;
+                offer(done.model_id);
+            } catch (problem) {
+                if (problem.stale || !valid(ticket) || currentJob !== jobId) return;
+                status.textContent = problem.message; status.dataset.error = "true";
+                install.disabled = name.disabled = false;
+            }
+        };
     }
     let disposeGraph = null;
     async function showGraph(jobId, ticket) {

@@ -124,9 +124,13 @@ class ModelRegistry:
         kind = value.get("kind")
         if kind not in {"sam1", "sam3", "yolo", "rfdetr", "classifier", "qwen", "edr", "sam3_recipe"}:
             raise ValueError("hosted_model_kind_unsupported")
-        allowed = {"model_id", "kind", "backend", "checkpoint", "checkpoint_sha256", "model_type", "variant", "labels", "bpe_path", "bpe_sha256", "enable_segmentation", "class_ids", "metadata_path", "metadata_sha256", "model_path", "files", "adapter_path", "adapter_files", "recipe_file", "ensemble_model_file", "ensemble_meta_file", "feature_contract_file", "components", "component_identities"}
+        allowed = {"model_id", "kind", "backend", "checkpoint", "checkpoint_sha256", "model_type", "variant", "labels", "bpe_path", "bpe_sha256", "enable_segmentation", "class_ids", "metadata_path", "metadata_sha256", "model_path", "files", "adapter_path", "adapter_files", "recipe_file", "ensemble_model_file", "ensemble_meta_file", "feature_contract_file", "components", "component_identities", "source"}
         if set(value) - allowed:
             raise ValueError("hosted_model_settings_unknown")
+        # Provenance of a detector installed from a server training job's result.
+        if "source" in value and (kind not in {"yolo", "rfdetr"} or not isinstance(value["source"], dict)
+                                  or len(json.dumps(value["source"])) > 1024 * 1024):
+            raise ValueError("hosted_model_source_invalid")
         if value.get("model_id", model_id) != model_id:
             raise ValueError("hosted_model_id_invalid")
         if "backend" in value and (kind != "sam3" or value["backend"] != "mlx"):
@@ -253,7 +257,7 @@ class ModelRegistry:
 
     def catalog(self):
         with self._lock:
-            return json.loads(json.dumps([{key: value[key] for key in ("model_id", "kind", "backend", "checkpoint_sha256", "variant", "labels") if key in value}
+            return json.loads(json.dumps([{key: value[key] for key in ("model_id", "kind", "backend", "checkpoint_sha256", "variant", "labels", "source") if key in value}
                     for value in self._definitions.values()]))
 
     def user_spec(self, user_id, model_id, *, media_root, device, capacity=3, classifier_id=None):

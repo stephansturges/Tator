@@ -3,6 +3,8 @@
     "use strict";
     const node = (tag, text) => { const element = document.createElement(tag); if (text !== undefined) element.textContent = text; return element; };
     let dialog, title, content, notice, button, stateLabel, epoch = 0, pendingPoll = false;
+    // A model to propose when the dialog is opened for it, e.g. a just-installed trained detector.
+    let proposed = {};
     const canvas = () => window.TatorHosted;
     const dashboard = () => window.TatorHostedDashboard;
     const datasetId = () => canvas()?.datasetId || dashboard()?.datasetId;
@@ -75,22 +77,36 @@
                 panel.append(node("p", `Current model: ${catalog[kind]?.model_id || "Not selected"}`));
                 if (user()?.role !== "admin") continue;
                 const models = catalog.models.filter((model) => kind === "detector" ? ["yolo", "rfdetr"].includes(model.kind) : model.kind === kind);
-                const choice = choices(panel, `${title} model`, models, catalog[kind]?.model_id), mapping = node("div"); mapping.className = "hosted-model-mapping"; panel.append(mapping);
+                const setLabel = {detector: "Set dataset detector", classifier: "Set dataset classifier", edr: "Set detection recipe"}[kind];
+                const offered = models.some((model) => model.model_id === proposed[kind]) && proposed[kind] !== catalog[kind]?.model_id ? proposed[kind] : null;
+                const choice = choices(panel, `${title} model`, models, offered || catalog[kind]?.model_id), mapping = node("div"); mapping.className = "hosted-model-mapping";
+                const origin = node("p"); panel.append(origin, mapping);
+                if (offered) {
+                    panel.append(node("p", `${offered} is proposed, not yet in use. Check that each of its labels links to the right dataset class, then select ${setLabel}.`));
+                    requestAnimationFrame(() => panel.scrollIntoView({block: "start"}));
+                }
                 function drawMapping() {
-                    mapping.replaceChildren();
+                    mapping.replaceChildren(); origin.hidden = true;
                     const model = models.find((item) => item.model_id === choice.value);
                     if (!model) return;
-                    for (const label of model.labels || []) {
+                    // A model trained by a server job says where it came from, and links
+                    // its labels to the classes it was trained on while they still exist.
+                    const source = model.source, trained = source?.dataset_id === id ? source.dataset_class_ids || [] : [];
+                    origin.hidden = !source;
+                    if (source) origin.textContent = `Trained by a server job on ${source.dataset_name || "a dataset"}, finished ${new Date(source.completed_at * 1000).toLocaleString()}.`;
+                    for (const [index, label] of (model.labels || []).entries()) {
                         const row = node("label", `${label} → `), select = node("select"); select.dataset.modelLabel = label;
                         select.setAttribute("aria-label", `Dataset class for ${label}`);
                         const empty = node("option", "Choose dataset class"); empty.value = ""; select.append(empty);
                         for (const cls of dataset.classes.filter((cls) => !cls.retired)) { const option = node("option", cls.name); option.value = cls.id; select.append(option); }
-                        select.value = (catalog[kind]?.model_id === choice.value && catalog[kind]?.class_mapping?.[label]) || dataset.classes.find((cls) => !cls.retired && cls.name === label)?.id || "";
+                        select.value = (catalog[kind]?.model_id === choice.value && catalog[kind]?.class_mapping?.[label])
+                            || dataset.classes.find((cls) => !cls.retired && cls.id === trained[index])?.id
+                            || dataset.classes.find((cls) => !cls.retired && cls.name === label)?.id || "";
                         row.append(select); mapping.append(row);
                     }
                 }
                 choice.onchange = drawMapping; drawMapping();
-                action(panel, {detector: "Set dataset detector", classifier: "Set dataset classifier", edr: "Set detection recipe"}[kind], async (valid) => {
+                action(panel, setLabel, async (valid) => {
                     if (!choice.value) throw new Error("Choose an installed model.");
                     const pairs = [...mapping.querySelectorAll("select")].map((item) => [item.dataset.modelLabel, item.value]);
                     if (pairs.some(([, value]) => !value)) throw new Error("Link every model label to a dataset class.");
@@ -167,10 +183,12 @@
         content = node("div"); dialog.append(notice, content);
         const close = node("button", "Close"); close.type = "button"; close.onclick = () => dialog.close();
         const closeRow = node("div"); closeRow.className = "dialog-actions"; closeRow.append(close); dialog.append(closeRow); document.body.append(dialog);
-        dialog.addEventListener("close", () => { epoch++; });
+        dialog.addEventListener("close", () => { epoch++; proposed = {}; });
         button.onclick = () => { title.textContent = "Tools & models"; dialog.showModal(); render(); };
         button.hidden = stateLabel.hidden = hide(); poll();
     }
+    // Open the dialog proposing a model, e.g. {detector: model_id}; nothing is selected until the administrator confirms.
+    window.TatorHostedTools = { open(options = {}) { mount(); if (!button) return; proposed = {...options}; button.click(); } };
     window.addEventListener("tator:hosted-canvas", mount);
     window.addEventListener("tator:hosted-session", () => { epoch++; dialog?.close(); content?.replaceChildren(); if (stateLabel) stateLabel.textContent = ""; mount(); });
     window.addEventListener("DOMContentLoaded", mount);

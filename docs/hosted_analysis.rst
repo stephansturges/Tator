@@ -27,6 +27,18 @@ start. Without that setting the launcher warns that the run would be refused.
 A Data Quality Explorer server job reviews all classes of the confirmed dataset
 unless its configuration names a class.
 
+A completed **Train YOLO** or **Train RF-DETR** result offers **Install as
+detector**. Name the model (the default is the dataset name, the model type
+and the day the run finished) and confirm. The server installs the exact
+weights that run published, taken from its verified artifact store, as an
+installed tool model. **Set as this dataset's detector…** then opens **Tools &
+models** with the new model proposed and each of its labels linked to the
+class it was trained on, or else to a class of the same name. The dataset
+keeps its current detector until an administrator checks those links and
+selects **Set dataset detector**. Segmentation runs cannot be installed as a
+detector. See `Hosted inference runtime <hosted_runtime.rst>`_ for the files
+used and the refusals.
+
 For Incoming diversity analysis, first select unassigned images in **Incoming**
 and attach a whole-image SALAD descriptor in **Analysis presets**. For pruning,
 start a configured pruning task here, then open its completed review page.

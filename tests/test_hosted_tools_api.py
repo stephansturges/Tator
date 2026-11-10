@@ -390,6 +390,72 @@ def test_detector_selection_cas_preserves_settings_and_recovers_receipt(system):
         assert "checkpoint" not in definition and definition["checkpoint_sha256"] == refs[0][0]
 
 
+@pytest.mark.parametrize("operation", ["yolo_training", "rfdetr_training"])
+def test_trained_detector_installs_published_weights_and_survives_restart(system, operation):
+    """A server training job's published weights become an installed detector."""
+    import shutil
+    from services.hosted.tool_api import ToolController
+    store, admin, controller = system["store"], system["admin"], system["controller"]
+    dataset_id = system["dataset"]["id"]
+    job = controller.analysis.capture(admin, dataset_id, operation, {}, op())
+    native_id = "fixture" + uuid.uuid4().hex[:8]
+    directory = system["root"] / "native-training" / "job"
+    run = directory / ("yolo_runs" if operation == "yolo_training" else "rfdetr_runs") / native_id
+    run.mkdir(parents=True)
+    weights = ["best.pt"] if operation == "yolo_training" else ["checkpoint_best_total.pth", "checkpoint_best_ema.pth"]
+    for name in weights:
+        (run / name).write_bytes(b"trained fixture weights - never loaded " + name.encode())
+    (run / "labelmap.txt").write_text("vehicle\n")
+    (run / "run.json").write_text(json.dumps({"status": "succeeded", "config": {"task": "detect", "variant": "rfdetr-nano"},
+                                              "result": {"best_path": str(run / weights[0])}}))
+    (directory / "result.json").write_text(json.dumps({"snapshot_id": job["snapshot_id"], "dataset_id": dataset_id, "revision": job["dataset_revision"],
+                                                       "engine_result": {"native_job_id": native_id, "status": {"status": "succeeded"}}}))
+    entries = [{"relative_path": path.relative_to(directory).as_posix(), "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "size_bytes": path.stat().st_size}
+               for path in sorted(directory.rglob("*")) if path.is_file()]
+    receipt = directory / "receipt.json"
+    receipt.write_text(json.dumps({"operation": operation, "state": "complete", "result_path": "result.json", "artifacts": entries}))
+    output = {"operation": operation, "snapshot_id": job["snapshot_id"], "dataset_id": dataset_id, "revision": job["dataset_revision"],
+              "native_directory": str(directory), "receipt_sha256": hashlib.sha256(receipt.read_bytes()).hexdigest(), "receipt_size_bytes": receipt.stat().st_size}
+    controller.analysis.publish_native_result(admin, job["job_id"], output, op(), native_root=directory.parent)
+    shutil.rmtree(directory)  # Installation must use only the published artifacts.
+    with store.read_connection() as con:
+        published = con.execute("SELECT sha256 FROM hosted_analysis_artifacts WHERE job_id=? AND relative_path=?",
+                                (job["job_id"], run.relative_to(directory).as_posix() + "/" + weights[0])).fetchone()[0]
+
+    url, body = "/api/hosted/tools/models/from-analysis", {"analysis_job_id": job["job_id"], "model_id": "trained-detector", "operation_id": op()}
+    assert system["client"].post(url, json=body).status_code == 403
+    other = controller.analysis.capture(admin, dataset_id, "statistics", {}, op())
+    refused = system["admin_client"].post(url, json={**body, "analysis_job_id": other["job_id"], "operation_id": op()})
+    assert refused.status_code == 422 and refused.json()["error"] == "trained_model_job_not_supported", refused.text
+    response = system["admin_client"].post(url, json=body)
+    assert response.status_code == 200, response.text
+    assert response.json()["checkpoint_sha256"] == published and response.json()["source"]["analysis_job_id"] == job["job_id"]
+    assert system["admin_client"].post(url, json=body).json() == response.json()
+    again = system["admin_client"].post(url, json={**body, "operation_id": op()})
+    assert again.status_code == 409 and again.json()["error"] == "tool_model_exists"
+    with store.read_connection() as con:
+        stored = json.loads(con.execute("SELECT definition_json FROM hosted_tool_models WHERE model_id='trained-detector'").fetchone()[0])
+        assert con.execute("SELECT 1 FROM hosted_artifact_references WHERE kind='tool_model' AND owner_id='trained-detector' AND sha256=?", (published,)).fetchone()
+    assert stored["checkpoint_sha256"] == published and "checkpoint" not in stored
+    if operation == "rfdetr_training":
+        assert stored["variant"] == "rfdetr-nano" and stored["class_ids"] == [0]
+    # The existing dataset-detector selection accepts it, mapped by the trained classes.
+    current = store.get_dataset(admin, dataset_id)
+    mapping = dict(zip(stored["labels"], stored["source"]["dataset_class_ids"]))
+    selected = system["admin_client"].post(f"/api/hosted/tools/datasets/{dataset_id}/detector",
+        json={"model_id": "trained-detector", "expected_revision": current["revision"], "class_mapping": mapping, "operation_id": op()})
+    assert selected.status_code == 200, selected.text
+    controller.close()
+    restarted = ToolController(store, system["auth"], system["artifacts"], system["root"], configuration=controller.configuration)
+    try:
+        definition = restarted.registry.definition("trained-detector")
+        assert definition["checkpoint_sha256"] == published and "trained-detector" not in restarted.unavailable_models
+        assert Path(definition["checkpoint"]).is_relative_to(restarted.model_root)
+        assert hashlib.sha256(Path(definition["checkpoint"]).read_bytes()).hexdigest() == published
+    finally:
+        restarted.close()
+
+
 def test_classifier_artifacts_class_binding_and_private_runtime_state(system):
     install(system)
     install(system, "classifier")

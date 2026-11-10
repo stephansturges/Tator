@@ -16,7 +16,7 @@ ADMIN_OPERATIONS = frozenset({
     "override", "recall_images", "reassign", "override_assignment", "add_class", "rename_class",
     "resolve_class_request", "create_snapshot", "register_artifact", "archive_image", "archive_dataset",
     "restore_archive", "purge_archive", "purge_orphans", "export_canonical", "recovery_backup", "start_migration",
-    "migration_image_done", "finish_migration", "install_tool_model", "request_heavy_tool",
+    "migration_image_done", "finish_migration", "install_tool_model", "install_trained_tool_model", "request_heavy_tool",
     "capture_ingestion_candidates", "capture_analysis", "analysis_terminal", "publish_analysis_result",
     "publish_native_analysis", "apply_analysis_annotations", "dqe_apply_objects", "dqe_disposition",
     "dqe_create_batch", "dqe_resume_batch", "dqe_cancel_batch", "salad_profiles", "register_salad_head",

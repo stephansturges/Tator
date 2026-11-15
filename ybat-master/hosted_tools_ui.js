@@ -5,6 +5,7 @@
     let dialog, title, content, notice, button, stateLabel, epoch = 0, pendingPoll = false;
     // A model to propose when the dialog is opened for it, e.g. a just-installed trained detector.
     let proposed = {};
+    const IGNORE_LABEL = "__ignore__";
     const canvas = () => window.TatorHosted;
     const dashboard = () => window.TatorHostedDashboard;
     const datasetId = () => canvas()?.datasetId || dashboard()?.datasetId;
@@ -99,7 +100,10 @@
                         select.setAttribute("aria-label", `Dataset class for ${label}`);
                         const empty = node("option", "Choose dataset class"); empty.value = ""; select.append(empty);
                         for (const cls of dataset.classes.filter((cls) => !cls.retired)) { const option = node("option", cls.name); option.value = cls.id; select.append(option); }
-                        select.value = (catalog[kind]?.model_id === choice.value && catalog[kind]?.class_mapping?.[label])
+                        // An ignored label: the model's results for it are dropped (for example after its class was retired).
+                        const ignore = node("option", "Ignore this label"); ignore.value = IGNORE_LABEL; select.append(ignore);
+                        const saved = catalog[kind]?.model_id === choice.value ? catalog[kind]?.class_mapping : null;
+                        select.value = (saved && Object.hasOwn(saved, label) && saved[label] === null ? IGNORE_LABEL : saved?.[label])
                             || dataset.classes.find((cls) => !cls.retired && cls.id === trained[index])?.id
                             || dataset.classes.find((cls) => !cls.retired && cls.name === label)?.id || "";
                         row.append(select); mapping.append(row);
@@ -109,8 +113,9 @@
                 action(panel, setLabel, async (valid) => {
                     if (!choice.value) throw new Error("Choose an installed model.");
                     const pairs = [...mapping.querySelectorAll("select")].map((item) => [item.dataset.modelLabel, item.value]);
-                    if (pairs.some(([, value]) => !value)) throw new Error("Link every model label to a dataset class.");
-                    await api(`/tools/datasets/${encodeURIComponent(id)}/${kind}`, { model_id: choice.value, expected_revision: catalog.dataset_revision, class_mapping: Object.fromEntries(pairs), operation_id: crypto.randomUUID() });
+                    if (pairs.some(([, value]) => !value)) throw new Error("Link every model label to a dataset class, or choose “Ignore this label”.");
+                    if (pairs.every(([, value]) => value === IGNORE_LABEL)) throw new Error("Link at least one model label to a dataset class.");
+                    await api(`/tools/datasets/${encodeURIComponent(id)}/${kind}`, { model_id: choice.value, expected_revision: catalog.dataset_revision, class_mapping: Object.fromEntries(pairs.map(([label, value]) => [label, value === IGNORE_LABEL ? null : value])), operation_id: crypto.randomUUID() });
                     if (!valid()) return; await render(); await poll();
                 });
             }

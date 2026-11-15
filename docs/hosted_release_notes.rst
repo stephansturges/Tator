@@ -1,6 +1,68 @@
 Release notes
 =============
 
+2026-11-15: class retirement
+----------------------------
+
+.. warning::
+
+   **This release is untested on a server.** Class retirement was exercised by
+   the automated tests and by one browser walk against a disposable instance
+   with test data on a development Mac. Nothing was run on the CUDA server or
+   with the production datasets, and its timing was measured only on a
+   synthetic dataset of 18,000 images. Retiring a class changes many images at
+   once: make a backup first, keep the previous release available for
+   rollback, and try it on a copy or a small dataset before a production one.
+
+It follows ``b19464d``.
+
+* **Retire…** on a class in **Classes & requests** first shows what would
+  change: the boxes and images that use the class, split into confirmed, in
+  progress and waiting for review, how many are open on a canvas, and the
+  model settings that link a label to it. Nothing changes until you choose
+  and confirm.
+* Choose **Merge into another class** (every box takes the other class and
+  keeps its position, identity and history) or **Delete the boxes**.
+  Confirmed images that deleting would leave with no boxes are listed; they
+  are saved as background images only if you tick the box, and otherwise the
+  class is not retired.
+* Confirmed images get a new confirmed version; images in Incoming, assigned,
+  returned for changes or waiting for review change the same way and keep
+  their state and annotator. Each image's **History** says what was changed,
+  and every earlier version stays.
+* A canvas that had an image open is told in a sentence what changed and
+  reloads the saved result with the current class list. Boxes it saves with
+  the retired class follow the same choice.
+* A detector, classifier or detection-recipe label linked to the class
+  follows a merge. After a delete the label is ignored; **Ignore this label**
+  is also a choice when selecting a model.
+* New snapshots, downloads, workbench copies and server jobs leave retired
+  classes out and number the remaining classes from zero. Anything made
+  earlier is not changed.
+* **Restore class** in the **Retired classes** list puts a class back, at the
+  end of the class list. It does not undo the merge or delete. Adding or approving a class whose name
+  belongs to a retired class says to restore it instead.
+
+Automated checks run: the hosted test suite and the hosted browser tests.
+
+Known limits
+~~~~~~~~~~~~
+
+* Saved SAM3 recipes and cascade presets name their output class. One that
+  names a retired class stops with a message until it is detached or the
+  class is restored; it does not follow a merge. The remaining classes are
+  renumbered without gaps, so a cascade preset that sets an output class
+  listed after the retired one is refused until it is saved again.
+* Dataset guidance and the class glossary are free text and are not edited.
+* A workbench copy made before the retirement still lists the class. Edits
+  there that use it are refused when reviewed; make a new copy.
+* An image archived before the retirement changes when it is restored. If
+  that would leave a confirmed image with no boxes, the restore is refused
+  until the class is restored.
+* The counts in the preview are read when it opens. Work saved between the
+  preview and the confirmation is included in the change without a new
+  preview.
+
 2026-11-09: fifty-scenario walk
 -------------------------------
 
@@ -123,7 +185,6 @@ The legacy suites ``test_labeling_panel_layout_contract`` and
 Known limits
 ~~~~~~~~~~~~
 
-* Classes cannot be retired.
 * Qwen runs in the workbench ignore the hosted splits. Training without a GPU
   falls back to the processor and only reports it.
 * Views refresh when the window regains focus; there are no live updates.

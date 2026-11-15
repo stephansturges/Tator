@@ -133,6 +133,7 @@
         image_not_found: "This image is no longer available to your account. Your draft is retained in this tab.",
         instruction_review_requires_admin: "Only an administrator can change review decisions. Your draft is retained.",
         machine_validation_requires_server_evidence: "These QA validation labels do not match a saved server result. Your draft is retained; ask an administrator to review the affected answers.",
+        retired_class_boxes_deleted: "An administrator retired a class and deleted its boxes, which leaves this image with no boxes. Reload the image to see its current state.",
         machine_validation_source_changed: "The caption result belongs to an earlier image version or editing session. Your draft is retained; generate it again from the current saved image.",
     };
     function status(text, error = false) { if ($("hostedSaveState")) { $("hostedSaveState").textContent = text; $("hostedSaveState").dataset.error = String(error); } }
@@ -511,6 +512,31 @@
         }
         throw new Error("An administrator manages installed model packages in Tools & models. Your cascade presets can be saved and downloaded from the cascade controls.");
     }
+    // A class was retired while this image was open: the server changed its
+    // boxes of that class (merged or deleted). Say so and show the saved
+    // result with the current class list, never a canvas that silently differs.
+    const retirementKey = "tator.hosted.classRetired";
+    let retirementNotice = null;
+    function retirementText(notice) { return `An administrator retired a class while this image was open. ${notice.message} The image now shows the saved result.`; }
+    function takeRetirementNote() {
+        try {
+            const note = JSON.parse(sessionStorage.getItem(retirementKey) || "null"); sessionStorage.removeItem(retirementKey);
+            return note?.image_id === imageId ? note.text : null;
+        } catch (_) { return null; }
+    }
+    async function adoptRetirement(notice) {
+        retirementNotice = notice;
+        let clean = false;
+        try { clean = ready && !pending && JSON.stringify(draft()) === lastSaved; } catch (_) { clean = false; }
+        // Unsaved edits go first; the save after them comes back here.
+        if (!clean) { status(`${notice.message} Your remaining changes save next.`); return; }
+        try { clearJournal(); sessionStorage.setItem(retirementKey, JSON.stringify({ image_id: imageId, text: retirementText(notice) })); }
+        catch (_) { status(retirementText(notice)); return; }
+        // Reload with the current class list. Leave the image first so this tab can open it again.
+        editable = false; update();
+        try { await api(`${base}/release`, context()); } catch (_) { /* The reload explains any remaining conflict. */ }
+        leavingWithDraft = true; location.reload();
+    }
     function context() { return { expected_version: record.current_version, generation: record.generation, editor_id: editorId, operation_id: uuid() }; }
     function draft() { return { annotations: window.TatorHostedCanvas.snapshot(), complete: record.state === "confirmed" || Boolean($("hostedComplete")?.checked), negative: Boolean($("hostedNegative")?.checked) }; }
     function journal(value) {
@@ -643,6 +669,7 @@
             const latest = draft();
             if (JSON.stringify(latest) === lastSaved) { clearJournal(); status("All changes saved"); }
             else { retentionCommand = { path: `${base}/save`, body: { ...context(), ...latest } }; journal({ unsent: retentionCommand, latest }); status("Earlier edits saved · saving remaining changes next"); }
+            if (result.class_retirement || retirementNotice) adoptRetirement(result.class_retirement || retirementNotice);
             return true;
         })();
         try { return await saving; } catch (error) {
@@ -1172,6 +1199,8 @@
                 clearJournal(); location.assign(scopeBackUrl(recovery.scope || originScope)); return;
             }
             record = await api(`${base}?include_review=true`); dataset = await api(`/api/hosted/datasets/${record.dataset_id}`);
+            // Retired classes are never offered. Active classes are numbered 0..n-1, so positions still index this list.
+            dataset.classes = dataset.classes.filter((entry) => !entry.retired);
             const scoped = boot.scope ? {scope: boot.scope, tranche: boot.tranche} : await api(`${base}/scope`);
             scopeLeft = scopeLeft || Boolean(recovery?.scope && !sameScope(recovery.scope, scoped.scope));
             tranche = scoped.tranche;
@@ -1254,6 +1283,8 @@
                 });
             } else if (editable) status("Connected · edits save automatically");
             else if (scopeLeft) status("This image left the previous queue. Open its current work queue to continue.", true);
+            const retiredNote = takeRetirementNote();
+            if (retiredNote && !retained) status(retiredNote);
             await refreshFeedback();
             scheduleMediaPrefetch();
         } catch (error) { if (!$("hostedSaveState")) { document.body.replaceChildren(node("p", error.message)); const back = node("a", "Return to sign in"); back.href = "/"; document.body.append(back); } else report(error); }
@@ -1439,7 +1470,12 @@
             if (scoped.tranche && scoped.tranche.revision !== tranche?.revision) await queue.refresh(origin.imageId, current);
             if (!current()) return;
             updateTranche(scoped.tranche);
-            await api(`${base}/editor`, { editor_id: editorId, expected_version: record.current_version, generation: record.generation });
+            const renewed = await api(`${base}/editor`, { editor_id: editorId, expected_version: record.current_version, generation: record.generation });
+            if (current() && renewed.class_retirement && !saving && !pending) {
+                // Nothing else changed: continue from the version the retirement saved.
+                record = { ...record, current_version: renewed.current_version, version_id: renewed.version_id, generation: renewed.generation };
+                await adoptRetirement(renewed.class_retirement);
+            }
         } catch (error) { if (current()) report(error); }
     }, 30000);
     window.addEventListener("beforeunload", (event) => {

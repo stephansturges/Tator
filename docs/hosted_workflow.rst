@@ -503,6 +503,72 @@ invalid frozen map report the class that needs correction. Existing completed
 export receipts still return their original files. After renaming, capture a new
 snapshot for export; the old snapshot retains its original class map.
 
+Retiring a class
+~~~~~~~~~~~~~~~~
+
+An administrator retires a class in **Classes & requests** with **Retire…**.
+The dialog first shows what would change and changes nothing:
+
+* how many boxes and images use the class, split into **Confirmed**, in
+  progress (Incoming, Assigned, Returned for changes) and **Waiting for
+  review**, and how many of those images are open on a canvas right now;
+* archived images that use it;
+* the dataset's model settings (detector, classifier, detection recipe) that
+  link one of their labels to it.
+
+Then choose what happens to the existing boxes:
+
+**Merge into another class**
+   Every box takes the class you pick. Its position, its identity and its
+   history are kept.
+
+**Delete the boxes**
+   The boxes are removed from the current annotations. Confirmed images that
+   would be left with no boxes are counted and listed. They are saved as
+   background images (no objects to label) only if you tick **Save them as
+   background images**. Without the tick the class is not retired and nothing
+   changes: give those images other boxes first, or tick the box. Images in
+   progress or waiting for review that end up with no boxes stay where they
+   are for the annotator or reviewer to decide.
+
+Confirming is one change for the whole dataset:
+
+* Confirmed images get a new confirmed version made by the administrator.
+  Images in Incoming, assigned, returned for changes or waiting for review get
+  a new draft and keep their state and annotator.
+* **History** on each image says what happened, for example "Class “Car”
+  retired: 3 boxes merged into “Vehicle”." Earlier versions are kept.
+* An image open on a canvas is changed too. Its canvas is told in a sentence
+  and reloads the saved result with the current class list, after saving any
+  unsent edits. Boxes a canvas still saves with the retired class are merged
+  or deleted the same way. New boxes cannot use a retired class.
+* A model label linked to the class links to the merge target. After a delete
+  the label is ignored and the model's results for it are dropped. In **Tools
+  & models** such a label shows **Ignore this label**; you can link it to
+  another class there.
+* Saved SAM3 recipes and cascade presets that name the class are not changed.
+  They stop with a message until they are detached or the class is restored.
+  The remaining classes are renumbered without gaps, so a cascade preset that
+  sets an output class listed after the retired one is refused until it is
+  saved again. Dataset guidance text is not edited.
+
+Each export stands alone. Snapshots, downloads, workbench copies and server
+job inputs made after the retirement leave the class out and number the
+remaining classes from zero. Anything made earlier keeps its own class list
+and is never rewritten.
+
+The **Retired classes** list in the same dialog offers **Restore class**. It
+puts the class back at the end of the class list and in new exports. It does
+not undo the merge or the delete; the earlier versions are in each image's
+history, and model settings are not changed back. A
+retired class keeps its name: adding a class with that name, or approving a
+request for it, says to restore it instead. The last class of a dataset cannot
+be retired, and a class cannot be merged into itself or into a retired class.
+
+An image archived before the retirement changes the same way when it is
+restored. If that would leave a confirmed image with no boxes, the restore is
+refused until you restore the class.
+
 Importing the same bytes into the same dataset finds the existing image. It does
 not replace saved annotations. Select images and their same-stem YOLO ``.txt``
 files together in the Incoming uploader. Include one ``labelmap.txt``,

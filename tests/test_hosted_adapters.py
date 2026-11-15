@@ -335,6 +335,11 @@ def test_detector_uses_existing_extraction_offsets_clamps_and_tile_merge(assets,
     assert len(windowed["detections"]) == 1 and len(model.calls) == 3
     with pytest.raises(ValueError, match="hosted_runtime_owner_mismatch"):
         adapter.execute("detect_full", payload, replace(context, dataset_id="other-dataset").as_dict())
+    # A label linked to no class (its class was retired, boxes deleted) is ignored.
+    ignoring = adapters.DatasetDetectorAdapter(config={**dict(spec.config), "class_bindings": {"car": None, "bus": None},
+        "dataset_labelmap": ["bus", "vehicle"]}, device="cpu")
+    assert ignoring.execute("detect_region", {**payload, "bbox_left": 10, "bbox_top": 5,
+        "bbox_width": 30, "bbox_height": 25}, context.as_dict())["detections"] == []
 
 
 def test_rfdetr_requires_exact_native_class_identity(assets, monkeypatch):

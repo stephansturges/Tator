@@ -558,3 +558,40 @@ def test_real_encrypted_restore_checks_blob_closure_and_preserves_continued_work
     missing_model = create_encrypted_backup(store.path, artifacts, tmp_path / "missing-model.age", recipient=recipient, references=ops.artifact_references)
     assert_error("recovery_model_artifact_missing", lambda: restore_encrypted_backup(missing_model.path, tmp_path / "missing-model-root", identity=identity, restore_hook=ops.restore_hook))
     assert not (tmp_path / "missing-model-root").exists()
+
+
+def test_class_retirement_new_exports_leave_the_class_out_and_restored_archives_follow(workspace, tmp_path):
+    store, _, _, ops, admin, _, ds, _ = workspace
+    vehicle = ds["classes"][0]["id"]
+    store.add_class(admin, ds["id"], "Bus", "add-bus", 0)
+    truck = store.add_class(admin, ds["id"], "Truck", "add-truck", 1)["class"]["id"]
+    kept, _ = import_image(workspace)
+    away, _ = import_image(workspace, "blue")
+    before = store.create_snapshot(admin, ds["id"], "before")
+    archive = ops.archive_image(admin, context(store.acquire_editor(admin, away["id"], "tab"), "archive"), "Later")
+    assert store.class_retirement_preview(admin, ds["id"], vehicle)["archived"] == {"images": 1, "boxes": 1}
+    retired = store.retire_class(admin, ds["id"], vehicle, "merge", "retire-vehicle", 2, target_class_id=truck)
+    assert retired["images"] == 1
+    after = store.create_snapshot(admin, ds["id"], "after")
+    ops.materialize_snapshot(admin, after["snapshot_id"], tmp_path / "after")
+    ops.materialize_snapshot(admin, before["snapshot_id"], tmp_path / "before")
+    # The new export numbers the remaining classes from zero; the earlier one is as it was.
+    assert (tmp_path / "after/classes.txt").read_text().splitlines() == ["Bus", "Truck"]
+    assert (tmp_path / "after/train/labels" / (kept["id"] + ".txt")).read_text().startswith("1 ")
+    assert (tmp_path / "before/classes.txt").read_text().splitlines() == ["Vehicle", "Bus", "Truck"]
+    assert (tmp_path / "before/train/labels" / (kept["id"] + ".txt")).read_text().startswith("0 ")
+    # An image archived before the retirement follows it when restored.
+    ops.restore_archive(admin, archive["archive_id"], "restore")
+    restored = store.image(admin, away["id"])
+    assert restored["state"] == "confirmed" and [obj["class_id"] for obj in restored["annotations"]["objects"]] == [truck]
+    assert store.history(admin, away["id"])["versions"][-1]["kind"] == "class_retired"
+    assert {obj["class_id"] for image in store.snapshot(admin, ds["id"])["images"] for obj in image["annotations"]["objects"]} == {truck}
+    # Deleted boxes never turn a restored confirmed image into background without a decision.
+    archive = ops.archive_image(admin, context(store.acquire_editor(admin, away["id"], "tab"), "archive-again"), "Later")
+    store.retire_class(admin, ds["id"], truck, "delete", "retire-truck", 3, background_empty=True)
+    with pytest.raises(DomainError) as refused:
+        ops.restore_archive(admin, archive["archive_id"], "restore-again")
+    assert refused.value.code == "archive_uses_retired_class" and "Restore the class under Classes first" in refused.value.detail
+    store.restore_class(admin, ds["id"], truck, "restore-truck", 4)
+    ops.restore_archive(admin, archive["archive_id"], "restore-after-class")
+    assert [obj["class_id"] for obj in store.image(admin, away["id"])["annotations"]["objects"]] == [truck]

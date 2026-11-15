@@ -707,3 +707,151 @@ def test_oriented_import_replays_legacy_receipt_before_new_coordinate_rules(stor
     outcome = store.import_yolo_image(**yolo)
     assert store.import_yolo_image(**yolo, media_info=info) == outcome
     error("label_coordinate_space_required", lambda: store.import_yolo_image(**{**yolo, "operation_id": "new-yolo-unframed"}, media_info=info))
+
+
+# ---- Class retirement ----
+
+def retirement_dataset(store):
+    """car + truck; two confirmed images, an Incoming draft, one waiting for review and one assigned, each with car boxes."""
+    ds = store.create_dataset(ADMIN, "retire", ["car", "truck"], "create-retire")
+    car, truck = (row["id"] for row in ds["classes"])
+    def boxes(*class_ids):
+        return {"objects": [{"id": f"object-{index}", "class_id": class_id, "bbox": [1, 2, 10, 15]}
+                            for index, class_id in enumerate(class_ids)]}
+    confirmed = imported(store, ds, "confirmed", boxes(car, truck))
+    lease = store.acquire_editor(ADMIN, confirmed["id"], "tab")
+    saved = store.save(ADMIN, ctx(lease, "check-confirmed"), boxes(car, truck), complete=True)
+    store.approve(ADMIN, ctx(saved, "approve-confirmed"))
+    only = imported(store, ds, "only", boxes(car))
+    lease = store.acquire_editor(ADMIN, only["id"], "tab")
+    saved = store.save(ADMIN, ctx(lease, "check-only"), boxes(car), complete=True)
+    store.approve(ADMIN, ctx(saved, "approve-only"))
+    draft = imported(store, ds, "draft", boxes(car))
+    waiting = assigned(store, ds, imported(store, ds, "waiting", boxes(car, car)))
+    lease = store.acquire_editor(ALICE, waiting["id"], "alice-tab")
+    saved = store.save(ALICE, ctx(lease, "check-waiting", "alice-tab"), boxes(car, car), complete=True)
+    store.submit(ALICE, ctx(saved, "submit-waiting", "alice-tab"))
+    working = assigned(store, ds, imported(store, ds, "working", boxes(car)), BOB)
+    store.test_clock[0] += 100  # every editing tab above has gone
+    ids = {"confirmed": confirmed["id"], "only": only["id"], "draft": draft["id"], "waiting": waiting["id"], "working": working["id"]}
+    return ds, car, truck, ids, boxes
+
+
+def test_class_retirement_merge_keeps_states_object_ids_and_history(store):
+    ds, car, truck, ids, _ = retirement_dataset(store)
+    before = {name: store.image(ADMIN, image_id) for name, image_id in ids.items()}
+    preview = store.class_retirement_preview(ADMIN, ds["id"], car)
+    assert (preview["images"], preview["boxes"], preview["open_now"]) == (5, 6, 0)
+    assert preview["confirmed"] == {"images": 2, "boxes": 2} and preview["waiting_for_review"] == {"images": 1, "boxes": 2}
+    assert preview["in_progress"] == {"images": 2, "boxes": 2} and preview["targets"] == [{"id": truck, "name": "truck"}]
+    assert [row["filename"] for row in preview["empty_after_delete"]["confirmed_images"]] == ["only.png"]
+    error("admin_required", lambda: store.class_retirement_preview(ALICE, ds["id"], car))
+    error("retire_target_same", lambda: store.retire_class(ADMIN, ds["id"], car, "merge", "self", 0, target_class_id=car))
+    error("retire_target_required", lambda: store.retire_class(ADMIN, ds["id"], car, "merge", "none", 0))
+    error("class_version_changed", lambda: store.retire_class(ADMIN, ds["id"], car, "merge", "stale", 7, target_class_id=truck))
+    result = store.retire_class(ADMIN, ds["id"], car, "merge", "retire-car", 0, target_class_id=truck)
+    assert store.retire_class(ADMIN, ds["id"], car, "merge", "retire-car", 0, target_class_id=truck) == result
+    assert (result["images"], result["boxes"], result["class_version"], result["target"]["name"]) == (5, 6, 1, "truck")
+    kept = ("state", "assignee_id", "assignment_id", "generation", "complete", "negative")
+    for name, image_id in ids.items():
+        after = store.image(ADMIN, image_id)
+        # Same state, assignee and editing generation; only the annotation version is new.
+        assert [after[key] for key in kept] == [before[name][key] for key in kept]
+        assert after["current_version"] != before[name]["current_version"]
+        assert [(obj["id"], obj["bbox"]) for obj in after["annotations"]["objects"]] == \
+               [(obj["id"], obj["bbox"]) for obj in before[name]["annotations"]["objects"]]
+        assert {obj["class_id"] for obj in after["annotations"]["objects"]} == {truck}
+        history = store.history(ADMIN, image_id)
+        newest = history["versions"][-1]
+        assert (newest["kind"], newest["parent_version"], newest["actor_id"]) == ("class_retired", before[name]["current_version"], "admin")
+        # The earlier version is still there, unchanged.
+        assert any(version["id"] == before[name]["current_version"] and car in {obj["class_id"] for obj in version["annotations"]["objects"]}
+                   for version in history["versions"])
+        event = [row for row in history["events"] if row["kind"] == "class_retired"][-1]["data"]
+        assert event["summary"].startswith("Class “car” retired: ") and event["summary"].endswith("merged into “truck”.")
+    confirmed = store.image(ADMIN, ids["confirmed"])
+    assert confirmed["confirmed_version"] == confirmed["current_version"]
+    # The waiting image can still be approved exactly as before.
+    waiting = store.image(ADMIN, ids["waiting"])
+    assert store.approve_from_review_queue(ADMIN, ctx(waiting, "approve-waiting"))["state"] == "confirmed"
+    # New boxes cannot use the retired class; the last active class cannot be retired, nor a retired one merged into.
+    error("invalid_class", lambda: imported(store, ds, "new", {"objects": [{"id": "x", "class_id": car, "bbox": [1, 2, 3, 4]}]}))
+    error("class_last_active", lambda: store.retire_class(ADMIN, ds["id"], truck, "delete", "last", 1))
+    error("class_already_retired", lambda: store.retire_class(ADMIN, ds["id"], car, "delete", "again", 1))
+    bus = store.add_class(ADMIN, ds["id"], "bus", "add-bus", 1)["class"]
+    # Active classes stay numbered 0..n-1 ahead of the retired one.
+    assert bus["position"] == 1
+    assert [(row["name"], row["position"]) for row in store.get_dataset(ADMIN, ds["id"])["classes"]] == [("truck", 0), ("bus", 1), ("car", 2)]
+    bus = bus["id"]
+    error("retire_target_retired", lambda: store.retire_class(ADMIN, ds["id"], bus, "merge", "into-retired", 2, target_class_id=car))
+    error("class_name_retired", lambda: store.add_class(ADMIN, ds["id"], "Car", "add-car-again", 2))
+
+
+def test_class_retirement_delete_needs_the_background_tick_for_emptied_confirmed_images(store):
+    ds, car, truck, ids, _ = retirement_dataset(store)
+    versions = {name: store.image(ADMIN, image_id)["current_version"] for name, image_id in ids.items()}
+    with pytest.raises(DomainError) as refused:
+        store.retire_class(ADMIN, ds["id"], car, "delete", "delete-car", 0)
+    assert refused.value.code == "retire_leaves_empty_images" and refused.value.detail.startswith("1 confirmed image would be left with no boxes.")
+    # Refused means nothing changed.
+    assert {name: store.image(ADMIN, image_id)["current_version"] for name, image_id in ids.items()} == versions
+    assert not store.get_dataset(ADMIN, ds["id"])["classes"][0]["retired"]
+    result = store.retire_class(ADMIN, ds["id"], car, "delete", "delete-car-background", 0, background_empty=True)
+    assert (result["images"], result["boxes"], result["background_images"], result["target"]) == (5, 6, 1, None)
+    confirmed, only = store.image(ADMIN, ids["confirmed"]), store.image(ADMIN, ids["only"])
+    assert [obj["class_id"] for obj in confirmed["annotations"]["objects"]] == [truck] and not confirmed["negative"]
+    assert (only["state"], only["annotations"]["objects"], only["negative"], only["complete"]) == ("confirmed", [], True, True)
+    summary = [row for row in store.history(ADMIN, ids["only"])["events"] if row["kind"] == "class_retired"][0]["data"]["summary"]
+    assert summary == "Class “car” retired: 1 box deleted. The image has no boxes left and was saved as a background image."
+    # In-progress images keep their state; an emptied one waits for its reviewer's decision.
+    waiting = store.image(ADMIN, ids["waiting"])
+    assert (waiting["state"], waiting["assignee_id"], waiting["annotations"]["objects"], waiting["negative"]) == ("submitted", "alice", [], False)
+    error("empty_annotation_requires_negative_review", lambda: store.approve_from_review_queue(ADMIN, ctx(waiting, "approve-empty")))
+    # A new snapshot leaves the retired class out and numbers the rest from zero.
+    manifest = store.create_snapshot(ADMIN, ds["id"], "snapshot-after")["manifest"]
+    assert manifest["classes"] == [{"id": truck, "name": "truck", "position": 0, "retired": 0}]
+    assert {obj["class_id"] for image in manifest["images"] for obj in image["annotations"]["objects"]} == {truck}
+
+
+def test_class_retirement_reaches_an_open_editor_and_restore_does_not_undo(store):
+    ds, car, truck, ids, boxes = retirement_dataset(store)
+    snapshot = store.create_snapshot(ADMIN, ds["id"], "snapshot-before")
+    store.patch_dataset_settings(ADMIN, ds["id"], {"detector": {"model_id": "d", "class_mapping": {"car": car, "lorry": truck}}},
+                                 store.get_dataset(ADMIN, ds["id"])["revision"], "detector")
+    # Bob has his image open.
+    working = store.image(ADMIN, ids["working"])
+    lease = store.acquire_editor(BOB, working["id"], "bob-tab", working["current_version"], working["generation"])
+    preview = store.class_retirement_preview(ADMIN, ds["id"], car)
+    assert preview["open_now"] == 1 and preview["model_settings"] == [{"kind": "detector", "model_id": "d", "labels": ["car"]}]
+    result = store.retire_class(ADMIN, ds["id"], car, "merge", "retire-car", 0, target_class_id=truck)
+    assert result["open_now"] == 1 and result["model_settings"][0]["labels"] == ["car"]
+    assert store.get_dataset(ADMIN, ds["id"])["settings"]["detector"]["class_mapping"] == {"car": truck, "lorry": truck}
+    converted = store.image(ADMIN, working["id"])
+    assert converted["current_version"] != lease["current_version"] and converted["generation"] == lease["generation"]
+    # His tab keeps its lease, and its renewal says in words what changed.
+    message = "Class “car” retired: 1 box merged into “truck”."
+    renewed = store.acquire_editor(BOB, working["id"], "bob-tab", lease["current_version"], lease["generation"])
+    assert renewed["class_retirement"]["message"] == message
+    # His save still carries the old class: it lands on the converted version, converted.
+    saved = store.save(BOB, ctx(lease, "bob-save", "bob-tab"), boxes(car, car))
+    assert saved["class_retirement"]["message"] == message
+    after = store.image(ADMIN, working["id"])
+    assert [obj["class_id"] for obj in after["annotations"]["objects"]] == [truck, truck]
+    assert store.history(ADMIN, working["id"])["versions"][-1]["parent_version"] == converted["current_version"]
+    # A stale tab drawing a new box of the retired class is converted and told, too.
+    again = store.save(BOB, ctx(saved, "bob-save-2", "bob-tab"), boxes(truck, car))
+    assert again["class_retirement"]["message"] == message
+    # A save from before an ordinary edit is still a conflict.
+    error("annotation_version_changed", lambda: store.save(BOB, ctx(lease, "bob-old", "bob-tab"), boxes(truck)))
+    # The earlier snapshot is untouched; a new one has only the active class.
+    assert [row["name"] for row in store.get_snapshot(ADMIN, snapshot["snapshot_id"])["manifest"]["classes"]] == ["car", "truck"]
+    assert [row["name"] for row in store.snapshot(ADMIN, ds["id"])["classes"]] == ["truck"]
+    # Restore puts the class back in the list and leaves the merged boxes as they are.
+    assert store.restore_class(ADMIN, ds["id"], car, "restore-car", 1)["class_version"] == 2
+    error("class_not_retired", lambda: store.restore_class(ADMIN, ds["id"], car, "restore-again", 2))
+    classes = store.get_dataset(ADMIN, ds["id"])["classes"]
+    # Active classes are always numbered without gaps; a restored class comes last.
+    assert [(row["name"], row["position"], row["retired"], "merged_into" in row) for row in classes] == [("truck", 0, 0, False), ("car", 1, 0, False)]
+    assert [row["position"] for row in store.snapshot(ADMIN, ds["id"])["classes"]] == [0, 1]
+    assert {obj["class_id"] for obj in store.image(ADMIN, ids["confirmed"])["annotations"]["objects"]} == {truck}
+    assert store.save(BOB, ctx(again, "bob-save-3", "bob-tab"), boxes(car)).get("class_retirement") is None

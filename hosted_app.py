@@ -194,6 +194,19 @@ class ClassChange(BaseModel):
     expected_class_version: int = Field(ge=0)
 
 
+class ClassRetirement(BaseModel):
+    mode: Literal["merge", "delete"]
+    target_class_id: str | None = Field(default=None, min_length=1, max_length=200)
+    background_empty: bool = False
+    operation_id: str = Field(min_length=8, max_length=128)
+    expected_class_version: int = Field(ge=0)
+
+
+class ClassRestore(BaseModel):
+    operation_id: str = Field(min_length=8, max_length=128)
+    expected_class_version: int = Field(ge=0)
+
+
 class ClassRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     reason: str = Field(min_length=1, max_length=5000)
@@ -431,6 +444,19 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
     @app.patch("/api/hosted/datasets/{dataset_id}/classes/{class_id}")
     def rename_class(dataset_id: str, class_id: str, body: ClassChange, identity: Actor = Depends(admin)):
         return store.rename_class(identity, dataset_id, class_id, **body.model_dump())
+
+    @app.get("/api/hosted/datasets/{dataset_id}/classes/{class_id}/retirement")
+    def class_retirement_preview(dataset_id: str, class_id: str, identity: Actor = Depends(admin)):
+        return store.class_retirement_preview(identity, dataset_id, class_id)
+
+    @app.post("/api/hosted/datasets/{dataset_id}/classes/{class_id}/retire")
+    def retire_class(dataset_id: str, class_id: str, body: ClassRetirement, identity: Actor = Depends(admin)):
+        return store.retire_class(identity, dataset_id, class_id, body.mode, body.operation_id, body.expected_class_version,
+                                  target_class_id=body.target_class_id, background_empty=body.background_empty)
+
+    @app.post("/api/hosted/datasets/{dataset_id}/classes/{class_id}/restore")
+    def restore_class(dataset_id: str, class_id: str, body: ClassRestore, identity: Actor = Depends(admin)):
+        return store.restore_class(identity, dataset_id, class_id, body.operation_id, body.expected_class_version)
 
     @app.get("/api/hosted/class-requests")
     def class_requests(dataset_id: str | None = None, identity: Actor = Depends(actor)):

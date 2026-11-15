@@ -348,3 +348,39 @@ def test_dataset_guidance_is_admin_only_versioned_and_cannot_replace_models(appl
     assert admin.post(route, json=body).json() == saved.json()
     assert admin.post(route, json={**body, 'operation_id': op()}).status_code == 409
     assert admin.post(route, json={**body, 'operation_id': op(), 'detector': 'arbitrary'}).status_code == 422
+
+
+def test_class_retirement_routes_preview_retire_and_restore(application):
+    admin = login(application)
+    provision(admin, "annotator")
+    ds = dataset(admin)
+    vehicle = ds["classes"][0]["id"]
+    base = f"/api/hosted/datasets/{ds['id']}/classes"
+    image = acquire(admin, upload(admin, ds["id"]))
+    box = {"objects": [{"id": "one", "class_id": vehicle, "bbox": [1, 2, 10, 12]}]}
+    assert admin.post(f"/api/hosted/images/{image['id']}/save", json={**context(image), "annotations": box}).status_code == 200
+    # The only class cannot be retired, and the refusal is a sentence.
+    only = admin.post(f"{base}/{vehicle}/retire", json={"mode": "delete", "operation_id": op(), "expected_class_version": 0})
+    assert only.status_code == 409 and only.json() == {"error": "class_last_active", "detail": "A dataset needs at least one class. Add another class before retiring this one."}
+    bus = admin.post(base, json={"name": "Bus", "operation_id": op(), "expected_class_version": 0}).json()["class"]["id"]
+    assert login(application, "annotator").get(f"{base}/{vehicle}/retirement").status_code == 403
+    preview = admin.get(f"{base}/{vehicle}/retirement").json()
+    assert (preview["images"], preview["boxes"], preview["open_now"], preview["class_version"]) == (1, 1, 1, 1)
+    assert preview["in_progress"] == {"images": 1, "boxes": 1} and preview["targets"] == [{"id": bus, "name": "Bus"}]
+    body = {"mode": "merge", "target_class_id": bus, "operation_id": op(), "expected_class_version": 1}
+    retired = admin.post(f"{base}/{vehicle}/retire", json=body)
+    assert retired.status_code == 200, retired.text
+    assert admin.post(f"{base}/{vehicle}/retire", json=body).json() == retired.json()
+    assert (retired.json()["boxes"], retired.json()["target"], retired.json()["class_version"]) == (1, {"id": bus, "name": "Bus"}, 2)
+    classes = admin.get(f"/api/hosted/datasets/{ds['id']}").json()["classes"]
+    assert [(row["name"], row["position"], row["retired"], row.get("merged_into")) for row in classes] == [("Bus", 0, 0, None), ("Vehicle", 1, 1, bus)]
+    assert admin.get(f"/api/hosted/images/{image['id']}").json()["annotations"]["objects"][0]["class_id"] == bus
+    # A request for a class of that name says to restore it.
+    request = admin.post(f"/api/hosted/datasets/{ds['id']}/class-requests", json={"name": "vehicle", "reason": "Needed again", "operation_id": op()}).json()
+    approve = {"approved": True, "operation_id": op(), "expected_class_version": 2}
+    refused = admin.post(f"/api/hosted/class-requests/{request['id']}/resolve", json=approve)
+    assert refused.status_code == 409 and refused.json()["error"] == "class_name_retired" and "Restore it under Retired classes" in refused.json()["detail"]
+    restored = admin.post(f"{base}/{vehicle}/restore", json={"operation_id": op(), "expected_class_version": 2})
+    assert restored.status_code == 200 and restored.json()["class_version"] == 3
+    approved = admin.post(f"/api/hosted/class-requests/{request['id']}/resolve", json={**approve, "operation_id": op(), "expected_class_version": 3})
+    assert approved.status_code == 200 and approved.json()["class_id"] == vehicle

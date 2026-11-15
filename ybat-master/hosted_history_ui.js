@@ -41,6 +41,7 @@
             case "image_restored": return "Restored from the archive";
             case "editor_taken_over": return "Editing moved to another tab";
             case "import_conflict_resolved": return `Imported labels decided: ${data.choice === "keep_current" ? "current labels kept" : "imported objects used"}`;
+            case "class_retired": return data.summary || "A class was retired and its boxes here were changed";
             case "split_changed": return `Split set to ${data.split || data.target_split || "a new value"}`;
             default: { const text = String(event.kind || "change").replaceAll("_", " "); return `${text.charAt(0).toUpperCase()}${text.slice(1)}`; }
         }

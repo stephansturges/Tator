@@ -317,7 +317,7 @@ class DatasetEdrAdapter:
             self.image.save(image_path)
             label_lines = []
             bindings = self.config.get("class_bindings") or {}
-            ids = {entry["id"]: label for label, entry in bindings.items()}
+            ids = {entry["id"]: label for label, entry in bindings.items() if entry}
             for item in self.payload.get("annotation_objects", []):
                 label = ids.get(item.get("class_id"))
                 box = item.get("bbox")
@@ -470,11 +470,12 @@ class DatasetEdrAdapter:
                         max_det=None, cross_iou=request.cross_class_dedupe_iou if request.cross_class_dedupe_enabled else None)
                     self._record({"type": "finalize", "rejected": rejected, "count": len(detections)})
                 bindings = self.config.get("class_bindings", {})
+                if any(det.get("label") not in bindings for det in detections):
+                    raise ValueError("hosted_edr_label_unmapped")
+                # A label linked to no class is ignored: its dataset class was retired.
+                detections = [det for det in detections if bindings[det.get("label")] is not None]
                 for det in detections:
-                    label = det.get("label")
-                    if label not in bindings:
-                        raise ValueError("hosted_edr_label_unmapped")
-                    binding = bindings[label]
+                    binding = bindings[det["label"]]
                     det.update(label=binding["name"], class_id=binding["position"], stable_class_id=binding["id"])
                 return {"detections": detections, "warnings": result["warnings"] or None, "caption": None,
                         "trace": [{"step_id": 1, "phase": "merge", "summary": "deep_prepass_complete",

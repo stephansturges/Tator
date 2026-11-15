@@ -13,7 +13,7 @@ ADMIN_OPERATIONS = frozenset({
     "move_tranche_members", "change_tranche_assignee", "close_tranche", "reopen_tranche", "withdraw_submission",
     "create_dataset", "set_dataset_settings", "patch_dataset_settings", "import_image", "import_yolo_image",
     "resolve_import_conflict", "assign", "set_splits", "approve", "approve_from_review_queue", "confirm_incoming", "return",
-    "override", "recall_images", "reassign", "override_assignment", "add_class", "rename_class",
+    "override", "recall_images", "reassign", "override_assignment", "add_class", "rename_class", "retire_class", "restore_class",
     "resolve_class_request", "create_snapshot", "register_artifact", "archive_image", "archive_dataset",
     "restore_archive", "purge_archive", "purge_orphans", "export_canonical", "recovery_backup", "start_migration",
     "migration_image_done", "finish_migration", "install_tool_model", "install_trained_tool_model", "request_heavy_tool",

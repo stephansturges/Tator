@@ -120,3 +120,14 @@ input:not([type=checkbox]):not([type=radio]),select,textarea{border-color:var(--
 .hosted-card>a:focus-visible{outline-offset:-3px;border-radius:10px}
 /* Phones: tabs and dataset actions wrap onto a second line instead of running off the screen. */
 @media(max-width:700px){#views,.hosted-actions{flex-wrap:wrap;overflow-x:visible}}
+/* Image grid: off-screen cards are not rendered, boxes sit exactly over the thumbnail, the selection bar stays in view. */
+#imageGrid>.hosted-card{content-visibility:auto;contain-intrinsic-block-size:auto 262px}
+.hosted-card .card-boxes{position:absolute;top:0;left:0;width:100%;height:170px;pointer-events:none}
+.hosted-card .card-boxes path{fill-opacity:.1;stroke-width:1.5;vector-effect:non-scaling-stroke}
+.hosted-grid.boxes-off .card-boxes{display:none}
+#imageGrid>.hosted-card:has(>input:checked){outline:3px solid var(--accent);outline-offset:-3px}
+.hosted-selection{position:sticky;top:0;z-index:5;box-shadow:var(--shadow)}
+.hosted-band{position:fixed;z-index:20;pointer-events:none;border:1px solid var(--accent);background:color-mix(in srgb,var(--accent) 14%,transparent)}
+.hosted-band span{position:absolute;right:4px;bottom:4px;padding:.1rem .5rem;border-radius:5px;background:var(--surface);color:var(--text);font-size:.8rem;white-space:nowrap;box-shadow:var(--shadow)}
+.hosted-banding,.hosted-banding *{user-select:none;-webkit-user-select:none}
+@media(max-width:700px){.hosted-card .card-boxes{height:130px}}

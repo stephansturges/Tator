@@ -36,6 +36,10 @@ INCOMING_FILTERS = {
     'with_labels': 'EXISTS(SELECT 1 FROM hosted_annotation_versions qv WHERE qv.id=i.current_version AND ' + _OBJECT_COUNT.format(v='qv') + '>0)',
     'without_labels': 'EXISTS(SELECT 1 FROM hosted_annotation_versions qv WHERE qv.id=i.current_version AND ' + _OBJECT_COUNT.format(v='qv') + '=0)',
 }
+# Boxes for the image grid: at most this many per image, as integers out of
+# GRID_BOX_SCALE of the image's width and height.
+GRID_BOX_LIMIT = 300
+GRID_BOX_SCALE = 1000
 NOT_ASSIGNED = ["i.state='unassigned'", 'NOT EXISTS(SELECT 1 FROM hosted_tranche_members m WHERE m.image_id=i.id AND m.is_current=1)']
 
 
@@ -51,6 +55,30 @@ def _string(value, field, maximum, *, empty=False):
     if not isinstance(value, str) or len(value) > maximum or '\x00' in value or (not empty and not value.strip()):
         raise DomainError('invalid_field', 422, {'field': field})
     return value.strip()
+
+
+def _grid_boxes(objects_json, width, height, class_index):
+    """Flat ``[class, x, y, w, h, ...]`` for the grid overlay, and whether it was cut short.
+
+    ``class`` is the class's place in the dataset's class list (-1 when unknown).
+    A polygon is represented by its box.
+    """
+    try:
+        objects = json.loads(objects_json) if objects_json else []
+    except ValueError:
+        objects = []
+    if not isinstance(objects, list) or not width or not height:
+        return [], False
+    flat = []
+    for item in objects[:GRID_BOX_LIMIT]:
+        bbox = item.get('bbox') if isinstance(item, dict) else None
+        if not isinstance(bbox, list) or len(bbox) != 4 or any(type(v) not in (int, float) for v in bbox):
+            continue
+        x, y, w, h = bbox
+        flat.extend((class_index.get(item.get('class_id'), -1),
+                     round(x * GRID_BOX_SCALE / width), round(y * GRID_BOX_SCALE / height),
+                     max(1, round(w * GRID_BOX_SCALE / width)), max(1, round(h * GRID_BOX_SCALE / height))))
+    return flat, len(objects) > GRID_BOX_LIMIT
 
 
 def _cursor(scope, key, direction='forward'):
@@ -571,7 +599,7 @@ class TrancheMixin:
             return {'scope': {'dataset_id': image['dataset_id'], 'tranche_id': tranche_id, 'queue': queue},
                     'tranche': self._tranche_result(con, actor, tranche_id) if tranche_id else None}
 
-    def image_queue(self, actor, dataset_id, *, tranche_id=None, queue='confirmed', cursor=None, limit=100, anchor_id=None, direction='forward', q='', annotator_id=None, include_total=False, not_assigned=False):
+    def image_queue(self, actor, dataset_id, *, tranche_id=None, queue='confirmed', cursor=None, limit=100, anchor_id=None, direction='forward', q='', annotator_id=None, include_total=False, not_assigned=False, boxes=False):
         self._pagination(limit, 0)
         if type(limit) is not int or limit > 500:
             raise DomainError('invalid_pagination', 422)
@@ -619,7 +647,10 @@ class TrancheMixin:
                 (SELECT COALESCE(u.display_name,u.username) FROM hosted_users u WHERE u.id=i.assignee_id) AS assignee_name,
                 ''' + _OBJECT_COUNT.format(v='v') + ''' AS object_count,
                 json_extract(v.annotations_json,'$.migration.review_required') AS review_required,
-                ''' + NEEDS_DECISION + ''' AS needs_decision
+                ''' + NEEDS_DECISION + ''' AS needs_decision''' + (''',
+                json_extract(v.annotations_json,'$.objects') AS objects_json,
+                (SELECT md.width FROM hosted_media md WHERE md.sha256=i.media_hash) AS media_width,
+                (SELECT md.height FROM hosted_media md WHERE md.sha256=i.media_hash) AS media_height''' if boxes else '') + '''
                 FROM hosted_images i JOIN hosted_annotation_versions v ON v.id=i.current_version JOIN hosted_datasets d ON d.id=i.dataset_id
                 WHERE ''' + where + boundary + ' ORDER BY i.created_at ' + ordering + ',i.id ' + ordering + ' LIMIT ?', [*page_args, limit]).fetchall()
             if direction == 'backward':
@@ -628,6 +659,14 @@ class TrancheMixin:
                        'needs_decision': bool(row['needs_decision']),
                        'review_required': row['review_required'] if isinstance(row['review_required'], str) and row['review_required'] else
                        ('review_required' if row['review_required'] == 1 else None)} for row in rows]
+            if boxes:
+                # The grid draws the version it shows a status for: a confirmed image's
+                # current version is its confirmed one; elsewhere it is the draft.
+                class_index = {row['id']: index for index, row in enumerate(self._classes(con, dataset_id))}
+                for image in images:
+                    image['boxes'], truncated = _grid_boxes(image.pop('objects_json'), image['media_width'], image['media_height'], class_index)
+                    if truncated:
+                        image['boxes_truncated'] = True
             previous = following = None
             if rows:
                 first, last = [rows[0]['created_at'], rows[0]['id']], [rows[-1]['created_at'], rows[-1]['id']]

@@ -565,7 +565,7 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
             raise DomainError("thumbnail_size_invalid", 422, f"Use one of {', '.join(map(str, THUMBNAIL_SIZES))} pixels.")
         record = store.image(identity, image_id)
         tag = thumbnails.etag(record["media_hash"], size)
-        headers = {"ETag": tag, "Cache-Control": "private, max-age=604800", "Vary": "Cookie"}
+        headers = {"ETag": tag, "Cache-Control": "private, max-age=604800, immutable", "Vary": "Cookie"}
         request.state.private_cacheable_response = True
         if tag in request.headers.get("if-none-match", ""):
             return Response(status_code=304, headers=headers)

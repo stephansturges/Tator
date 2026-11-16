@@ -10,6 +10,9 @@
     // Select all matching and the bulk actions work on at most this many images;
     // requests go to the server in chunks, one receipt per image.
     const SELECTION_LIMIT = 5000, BULK_CHUNK = 250;
+    // The image grid's own state: box overlays, the next page loading as the end nears, and the drag selection.
+    const grid = {loading: 0, autoPaused: false, scrollQueued: false, refreshing: false, band: null, suppressClick: false, rows: new WeakMap(), overlays: null};
+    const showBoxes = () => { try { return localStorage.getItem("tator.hosted.gridBoxes") !== "0"; } catch (_) { return true; } };
     function notice(message, error = false) {
         for (const element of [$("notice"), ...document.querySelectorAll("dialog[open] [data-dialog-notice]")]) { element.textContent = message; element.dataset.error = String(error); element.hidden = !message; }
     }
@@ -264,6 +267,7 @@
         $("selectionBar").hidden = size === 0;
         $("selectionCount").textContent = `${count(size, "image")} selected`;
         $("selectionBreakdown").textContent = incoming && size ? `${bulk.labelled.toLocaleString()} with labels · ${bulk.empty.toLocaleString()} without${size - bulk.labelled - bulk.empty ? ` · ${(size - bulk.labelled - bulk.empty).toLocaleString()} need a decision` : ""}` : "";
+        if (incoming && size > 500) $("selectionBreakdown").textContent += " · A tranche takes up to 500 images per selection";
         $("assign").hidden = !incoming; $("assigneeLabel").hidden = true; $("assign").textContent = "Create tranche from selection";
         $("approveIncoming").hidden = !incoming || !bulk.labelled; $("approveIncoming").textContent = `Approve selected (${bulk.labelled.toLocaleString()})`;
         $("confirmBackground").hidden = !incoming || !bulk.empty; $("confirmBackground").textContent = `Confirm as background (${bulk.empty.toLocaleString()})`;
@@ -362,6 +366,8 @@
         }
         if (image.tranche_name) info.append(node("small", `Tranche: ${image.tranche_name}`));
         link.append(photo, info); card.append(link);
+        if (image.boxes?.length) { grid.rows.set(card, image); grid.overlays.observe(card); }
+        if (image.boxes_truncated) info.append(node("small", `The first ${(image.boxes.length / 5).toLocaleString()} boxes are drawn`));
         if (state.session.user.role === "admin") {
             const history = node("button", "History", "card-history"); history.type = "button"; history.setAttribute("aria-label", `History of ${image.filename}`);
             history.onclick = () => window.TatorHostedHistory?.open(image.id, image.filename); card.append(history);
@@ -373,15 +379,39 @@
         }
         return card;
     }
+    // ---- Boxes over the thumbnails. One SVG per card, made when the card nears the viewport.
+    // Colours follow the annotation canvas (ybat.js: curatedClassColors and generatedClassColor),
+    // by the class's place in the dataset's class list.
+    const CLASS_COLORS = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c", "#0891b2", "#ca8a04", "#db2777", "#4f46e5", "#65a30d", "#be123c", "#0d9488", "#7c3aed", "#d97706", "#0284c7", "#c026d3",
+        "#1d4ed8", "#b91c1c", "#15803d", "#6d28d9", "#f97316", "#0f766e", "#a16207", "#be185d", "#4338ca", "#4d7c0f", "#e11d48", "#0369a1", "#a21caf", "#92400e", "#059669", "#7e22ce",
+        "#3b82f6", "#ef4444", "#22c55e", "#a855f7", "#f59e0b", "#06b6d4", "#84cc16", "#ec4899", "#6366f1", "#14b8a6", "#f43f5e", "#8b5cf6", "#fb7185", "#10b981", "#eab308", "#38bdf8"];
+    function classColor(index) {
+        if (!(index >= 0)) return "#94a3b8";
+        if (index < CLASS_COLORS.length) return CLASS_COLORS[index];
+        const extra = index - CLASS_COLORS.length, band = extra % 4;
+        return `hsl(${((23 + extra * 137.508) % 360).toFixed(1)} ${[82, 68, 90, 74][band]}% ${[46, 58, 38, 66][band]}%)`;
+    }
+    function drawBoxes(card, image) {
+        const NS = "http://www.w3.org/2000/svg", svg = document.createElementNS(NS, "svg"), group = document.createElementNS(NS, "g"), flat = image.boxes, paths = new Map();
+        // The same fit as the thumbnail (object-fit: contain); boxes are thousandths of the image's width and height.
+        svg.setAttribute("viewBox", `0 0 ${image.media_width} ${image.media_height}`); svg.setAttribute("class", "card-boxes"); svg.setAttribute("aria-hidden", "true");
+        group.setAttribute("transform", `scale(${image.media_width / 1000} ${image.media_height / 1000})`);
+        for (let at = 0; at + 4 < flat.length; at += 5) paths.set(flat[at], `${paths.get(flat[at]) || ""}M${flat[at + 1]} ${flat[at + 2]}h${flat[at + 3]}v${flat[at + 4]}h-${flat[at + 3]}z`);
+        for (const [index, d] of paths) { const path = document.createElementNS(NS, "path"), colour = classColor(index); path.setAttribute("d", d); path.setAttribute("stroke", colour); path.setAttribute("fill", colour); group.append(path); }
+        svg.append(group); card.firstElementChild.append(svg);
+    }
+    grid.overlays = new IntersectionObserver(entries => {
+        for (const entry of entries) if (entry.isIntersecting) { grid.overlays.unobserve(entry.target); const image = grid.rows.get(entry.target); if (image) drawBoxes(entry.target, image); }
+    }, {rootMargin: "600px 0px"});
     function drawMatchCount() {
         if (state.total === null) { $("imageMatchCount").textContent = ""; return; }
         const shown = state.images.length < state.total ? ` · ${state.images.length.toLocaleString()} shown` : "";
-        $("imageMatchCount").textContent = `${count(state.total, "matching image")}${shown} · Shift-click to select a range${state.view === "incoming" ? " · Only Not assigned images can be selected" : ""}`;
+        $("imageMatchCount").textContent = `${count(state.total, "matching image")}${shown} · Drag across images to select them, Alt-drag (Option on a Mac) to deselect · Shift-click selects a range${state.view === "incoming" ? " · Only Not assigned images can be selected" : ""}`;
         const remaining = state.total - state.images.length;
         $("moreAll").hidden = !state.cursor || remaining <= 100;
         $("moreAll").textContent = `Load all ${remaining.toLocaleString()} remaining`;
     }
-    async function loadImages(append = false, limit = 100) {
+    async function loadImages(append = false, limit = 100, fetched = null) {
         const sequence = ++state.sequence;
         const id = $("datasetChoice").value, captured = {sequence, dataset: id, view: state.view}, filters = JSON.stringify(state.filters);
         if (!append) refreshCounts();
@@ -398,8 +428,10 @@
         if (!append) { state.cursor = null; state.total = null; clearSelection(); state.images = []; $("imageGrid").replaceChildren(); }
         if (!id) { $("empty").hidden = false; $("empty").textContent = state.session.user.role === "admin" ? "Start with New dataset: name it and list its classes. Then add images to Incoming." : "No editable work is currently assigned to you."; $("more").hidden = $("moreAll").hidden = true; return; }
         const query = queueQuery(limit);
+        if (showBoxes()) query.set("boxes", "true");
         if (append && state.cursor) query.set("cursor", state.cursor);
-        const result = await api(`/queue?${query}`);
+        let result; grid.loading++;
+        try { result = fetched || await api(`/queue?${query}`); } finally { grid.loading--; }
         if (!currentImages(captured) || filters !== JSON.stringify(state.filters)) return;
         state.images.push(...result.images);
         const fragment = document.createDocumentFragment();
@@ -411,7 +443,15 @@
         state.cursor = result.next_cursor; state.total = result.total; $("more").hidden = !state.cursor;
         if (!append) state.loadedAt = Date.now();
         drawMatchCount();
+        grid.autoPaused = false; requestAnimationFrame(nearEnd);
     }
+    // The next page loads by itself as the end of the grid nears; the buttons stay for keyboards and slow links.
+    function nearEnd() {
+        if (grid.loading || grid.autoPaused || !state.cursor || !state.session || $("workspace").hidden || $("imageGrid").hidden || document.querySelector("dialog[open]")) return;
+        if ($("moreRow").getBoundingClientRect().top > innerHeight + 1500) return;
+        loadImages(true, 200).catch(error => { grid.autoPaused = true; if (!error.stale) notice(error.message, true); });
+    }
+    window.addEventListener("scroll", () => { if (grid.scrollQueued) return; grid.scrollQueued = true; requestAnimationFrame(() => { grid.scrollQueued = false; nearEnd(); }); }, {passive: true});
     async function loadAll() {
         const remaining = state.total - state.images.length;
         if (remaining > 2000 && !window.confirm(`Load all ${remaining.toLocaleString()} remaining images? Very long lists can make this page slow; a search or filter keeps it quick.`)) return;
@@ -833,6 +873,104 @@
     for (const id of ["incomingFilter", "reviewTranche", "reviewAnnotator"]) $(id).addEventListener("change", () => action($(id), applyFilters));
     $("selectVisibleImages").onclick = event => action(event.currentTarget, () => { for (const image of state.images.filter(selectable)) state.selected.set(image.id, image); syncChecks(); });
     $("selectMatchingImages").onclick = event => action(event.currentTarget, selectMatching);
+    $("showBoxes").checked = showBoxes(); $("imageGrid").classList.toggle("boxes-off", !showBoxes());
+    $("showBoxes").onchange = () => {
+        const on = $("showBoxes").checked;
+        try { localStorage.setItem("tator.hosted.gridBoxes", on ? "1" : "0"); } catch (_) {}
+        $("imageGrid").classList.toggle("boxes-off", !on);
+        // Pages loaded while boxes were off came without them.
+        if (on && state.images.some(image => !image.boxes) && !state.selected.size) action($("showBoxes"), () => loadImages());
+    };
+
+    // ---- Drag selection: press in the grid and drag a rectangle over the images. Alt-drag deselects.
+    // The rows a rectangle covers are found by bisection, so a frame reads a few dozen card
+    // positions however long the grid is; only cards entering or leaving the rectangle are touched.
+    function bandRange(band) {
+        const cards = $("imageGrid").children, n = cards.length;
+        if (!n) return null;
+        const startY = band.pageY - scrollY, left = Math.min(band.x0, band.x), right = Math.max(band.x0, band.x), top = Math.min(startY, band.y), bottom = Math.max(startY, band.y);
+        const columns = [cards[0].getBoundingClientRect()];
+        for (let at = 1; at < n; at++) { const rect = cards[at].getBoundingClientRect(); if (rect.top > columns[0].top + 1) break; columns.push(rect); }
+        const cols = columns.length, rows = Math.ceil(n / cols), row = index => cards[index * cols].getBoundingClientRect();
+        let low = 0, high = rows;
+        while (low < high) { const middle = (low + high) >> 1; if (row(middle).bottom < top) low = middle + 1; else high = middle; }
+        const r0 = low; high = rows;
+        while (low < high) { const middle = (low + high) >> 1; if (row(middle).top <= bottom) low = middle + 1; else high = middle; }
+        let c0 = cols, c1 = -1;
+        columns.forEach((rect, column) => { if (rect.right >= left && rect.left <= right) { c0 = Math.min(c0, column); c1 = column; } });
+        return {r0, r1: low - 1, c0, c1, cols, n};
+    }
+    function bandApply(band) {
+        const next = bandRange(band), previous = band.range, cards = $("imageGrid").children;
+        if (!next) return;
+        if (previous && ["r0", "r1", "c0", "c1", "cols", "n"].every(key => previous[key] === next[key])) return;
+        const inside = (range, index) => { if (!range || index >= range.n) return false; const r = Math.floor(index / range.cols), c = index % range.cols; return r >= range.r0 && r <= range.r1 && c >= range.c0 && c <= range.c1; };
+        const same = previous && previous.cols === next.cols;
+        const from = same ? Math.max(0, Math.min(previous.r0, next.r0) * next.cols) : 0, to = same ? Math.min(next.n, (Math.max(previous.r1, next.r1) + 1) * next.cols) : next.n;
+        for (let index = from; index < to; index++) {
+            const now = inside(next, index);
+            if (now === inside(previous, index)) continue;
+            const image = state.images[index], card = cards[index];
+            if (!image || card.dataset.imageId !== image.id || !selectable(image)) continue;
+            // Inside the rectangle: selected, or deselected with Alt. Outside it: as it was before the drag.
+            const keep = now ? !band.remove : band.base.has(image.id);
+            if (!keep) state.selected.delete(image.id);
+            else if (!state.selected.has(image.id)) { if (state.selected.size >= SELECTION_LIMIT) { band.full = true; continue; } state.selected.set(image.id, band.base.get(image.id) || image); }
+            const check = card.querySelector("input[data-image]"); if (check) check.checked = keep;
+        }
+        band.range = next;
+    }
+    function bandTick() {
+        const band = grid.band;
+        if (!band?.active) return;
+        if ($("imageGrid").hidden || state.view !== band.view || $("imageGrid").children.length < (band.range?.n || 0)) { bandEnd(false); return; }
+        // Near the top or bottom edge the page scrolls, faster the closer the pointer is.
+        const edge = 70, speed = band.y > innerHeight - edge ? Math.min(70, 6 + (band.y - innerHeight + edge) * 0.7) : band.y < edge ? -Math.min(70, 6 + (edge - band.y) * 0.7) : 0;
+        if (speed) scrollBy(0, speed);
+        bandApply(band);
+        const startY = band.pageY - scrollY, style = band.box.style;
+        style.left = `${Math.min(band.x0, band.x)}px`; style.top = `${Math.min(startY, band.y)}px`; style.width = `${Math.abs(band.x - band.x0)}px`; style.height = `${Math.abs(band.y - startY)}px`;
+        const text = `${count(state.selected.size, "image")} selected${band.full ? ` · at most ${SELECTION_LIMIT.toLocaleString()}` : ""}`;
+        if (band.label.textContent !== text) band.label.textContent = text;
+        band.frame = requestAnimationFrame(bandTick);
+    }
+    function bandStart(band) {
+        band.active = true; band.base = new Map(state.selected); band.range = null;
+        getSelection()?.removeAllRanges(); document.documentElement.classList.add("hosted-banding");
+        band.box = node("div", undefined, "hosted-band"); band.label = node("span"); band.box.append(band.label); document.body.append(band.box);
+        try { $("imageGrid").setPointerCapture(band.id); } catch (_) {}
+        bandTick();
+    }
+    function bandEnd(commit) {
+        const band = grid.band; grid.band = null;
+        if (!band?.active) return;
+        cancelAnimationFrame(band.frame); band.active = false;
+        if (commit) bandApply(band); else state.selected = new Map(band.base);
+        band.box.remove(); document.documentElement.classList.remove("hosted-banding");
+        try { $("imageGrid").releasePointerCapture(band.id); } catch (_) {}
+        // The release that ends a drag must not open the image under the pointer.
+        grid.suppressClick = true;
+        if (commit) selection(); else syncChecks();
+        if (band.full) notice(`One selection holds at most ${SELECTION_LIMIT.toLocaleString()} images. The rest of the rectangle was left out.`, true);
+    }
+    $("imageGrid").addEventListener("pointerdown", event => {
+        grid.suppressClick = false; grid.band = null;
+        // Mouse only; touch keeps scrolling. Checkboxes, History and modified clicks keep their own meaning.
+        if (event.pointerType !== "mouse" || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || state.session?.user.role !== "admin" || event.target.closest("input,button,select,textarea")) return;
+        grid.band = {active: false, id: event.pointerId, x0: event.clientX, pageY: event.clientY + scrollY, x: event.clientX, y: event.clientY, remove: event.altKey, view: state.view};
+    });
+    $("imageGrid").addEventListener("dragstart", event => { if (grid.band) event.preventDefault(); });
+    window.addEventListener("pointermove", event => {
+        const band = grid.band;
+        if (!band || event.pointerId !== band.id) return;
+        if (!(event.buttons & 1)) { bandEnd(true); return; }
+        band.x = event.clientX; band.y = event.clientY;
+        if (!band.active && Math.hypot(band.x - band.x0, band.y - (band.pageY - scrollY)) > 6) bandStart(band);
+    });
+    window.addEventListener("pointerup", event => { if (grid.band && event.pointerId === grid.band.id) bandEnd(true); setTimeout(() => { grid.suppressClick = false; }, 0); });
+    window.addEventListener("pointercancel", event => { if (grid.band && event.pointerId === grid.band.id) bandEnd(false); });
+    window.addEventListener("keydown", event => { if (event.key === "Escape" && grid.band?.active) { event.preventDefault(); event.stopPropagation(); bandEnd(false); } }, true);
+    window.addEventListener("click", event => { if (!grid.suppressClick) return; grid.suppressClick = false; event.preventDefault(); event.stopPropagation(); }, true);
     // Back in this tab: other people may have submitted, approved or recalled work meanwhile.
     // Reload the counts, and the grid unless the person is in the middle of something here
     // (a selection, a dialog, a long list, an import, typing) - the same rule as the Tranches views.
@@ -841,10 +979,18 @@
         if (state.session.user.role !== "admin") { if (!document.querySelector("dialog[open]") && state.submissions.length <= 100) loadSubmissions().catch(() => {}); return; }
         if (["tranches", "mine"].includes(state.view)) return; // the Tranches views refresh themselves
         const typing = document.activeElement?.matches?.("input:not([type=checkbox]),select,textarea");
-        if (document.querySelector("dialog[open]") || state.selected.size || state.images.length > 100 || typing
+        if (document.querySelector("dialog[open]") || state.selected.size || state.images.length > 100 || typing || grid.band || grid.refreshing
                 || $("stopImport")?.hidden === false || Date.now() - (state.loadedAt || 0) < 10000) { refreshCounts(); return; }
-        const y = scrollY;
-        loadImages().then(() => scrollTo(0, y)).catch(error => { if (!error.stale) notice(error.message, true); });
+        // Ask first; the grid is redrawn only when the first page actually changed.
+        const captured = {sequence: state.sequence, dataset: $("datasetChoice").value, view: state.view}, filters = JSON.stringify(state.filters), query = queueQuery(100);
+        if (showBoxes()) query.set("boxes", "true");
+        grid.refreshing = true;
+        api(`/queue?${query}`).then(result => {
+            if (!currentImages(captured) || filters !== JSON.stringify(state.filters) || state.selected.size || state.images.length > 100 || grid.band) return;
+            if (result.total === state.total && JSON.stringify(result.images) === JSON.stringify(state.images)) { state.loadedAt = Date.now(); refreshCounts(); return; }
+            const y = scrollY;
+            return loadImages(false, 100, result).then(() => scrollTo(0, y));
+        }).catch(error => { if (!error.stale) notice(error.message, true); }).finally(() => { grid.refreshing = false; });
     }
     document.addEventListener("visibilitychange", refreshIfIdle); window.addEventListener("focus", refreshIfIdle);
     window.TatorHostedDashboard = { api, action, notice, errorText, refresh: workspace, refreshCounts, dropRouteParams,

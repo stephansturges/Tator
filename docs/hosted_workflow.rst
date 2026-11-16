@@ -181,13 +181,14 @@ Image switching loads the latest review feedback with the image instead of
 downloading every past annotation version. Account checks can run alongside the
 image lookup; saving and the transfer of editing ownership still happen in order.
 
-Once the current image is ready, the browser downloads the next two images in
-the displayed list in the background, one at a time. These full-resolution bytes
-stay in a temporary, per-tab cache; annotations and editing permissions are
-checked afresh when you open an image. Prefetching pauses when you change images
-or hide the tab and clears when the account changes or the page closes. It keeps
-at most 64 MiB of encoded image data, skipping images larger than 32 MiB until
-you open them. No extra model inference runs for prefetching.
+Once the current image is ready, the browser downloads the next eight images in
+the displayed list in the background, nearest first and three at a time. These
+full-resolution bytes stay in a temporary, per-tab cache; annotations and
+editing permissions are checked afresh when you open an image. Saving, approving
+or changing images lets downloads already under way finish and holds back ones
+not yet started; the cache clears when the account changes or the page closes.
+It keeps at most 256 MiB of encoded image data, skipping images larger than
+32 MiB until you open them. No extra model inference runs for prefetching.
 
 The hosted server compresses public JavaScript and CSS for browsers that support
 gzip and lets browsers revalidate those files when reopening a page. Updated

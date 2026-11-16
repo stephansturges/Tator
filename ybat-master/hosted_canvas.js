@@ -44,6 +44,7 @@
             return response;
         },
     }) : null;
+    const mediaAhead = window.HostedMediaPrefetch?.AHEAD || 2;
     function pauseMediaPrefetch(keepId = null) {
         clearTimeout(mediaWarmTimer); mediaWarmTimer = null;
         mediaPrefetch?.pause(keepId);
@@ -58,8 +59,8 @@
         // editing reservations or durable browser storage are involved.
         mediaWarmTimer = setTimeout(async () => {
             if (!ready || busy || handoff || recoveryRequired || accountChanged || !mediaCacheAllowed || document.hidden) return;
-            try { await queue?.ahead(imageId, 2); } catch (_) { /* Foreground navigation will expose a queue error. */ }
-            if (ready && !busy && !handoff && !accountChanged && mediaCacheAllowed && !document.hidden) mediaPrefetch?.schedule(window.TatorHostedCanvas?.nextImageIds(2) || []);
+            try { await queue?.ahead(imageId, mediaAhead); } catch (_) { /* Foreground navigation will expose a queue error. */ }
+            if (ready && !busy && !handoff && !accountChanged && mediaCacheAllowed && !document.hidden) mediaPrefetch?.schedule(window.TatorHostedCanvas?.nextImageIds(mediaAhead) || []);
         }, 150);
     }
     async function mediaBlobFor(id) {

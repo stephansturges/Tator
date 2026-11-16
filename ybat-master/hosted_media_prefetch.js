@@ -1,8 +1,10 @@
-/* Disposable, authorized image bytes for the next two hosted canvas entries. */
+/* Disposable, authorized image bytes for the next few hosted canvas entries. */
 (() => {
     "use strict";
     const IMAGE_LIMIT = 32 * 1024 * 1024;
-    const TOTAL_LIMIT = 64 * 1024 * 1024;
+    const TOTAL_LIMIT = 256 * 1024 * 1024;
+    const AHEAD = 8;
+    const PARALLEL = 3;
     const HASH = /^[a-f0-9]{64}$/i;
 
     class HostedMediaPrefetch {
@@ -12,17 +14,16 @@
             this._entries = new Map();
             this._queue = [];
             this._paused = true;
-            this._pumping = false;
-            this._active = null;
+            this._loading = 0;
             this._epoch = 0;
         }
 
         get stats() {
-            return Object.freeze({entries: this._entries.size, bytes: this._bytes(), inFlight: this._active ? 1 : 0});
+            return Object.freeze({entries: this._entries.size, bytes: this._bytes(), inFlight: this._loading});
         }
 
         schedule(ids) {
-            const next = [...new Set((Array.isArray(ids) ? ids : []).filter(id => typeof id === "string" && id))].slice(0, 2);
+            const next = [...new Set((Array.isArray(ids) ? ids : []).filter(id => typeof id === "string" && id))].slice(0, AHEAD);
             for (const id of this._entries.keys()) if (!next.includes(id)) this._drop(id);
             this._queue = next;
             for (const id of next) {
@@ -38,10 +39,12 @@
 
         pause(keepId = null) {
             this._paused = true;
-            // Advancing from A to B should retain the already-warmed C. Stop
-            // irrelevant transfers now; the next schedule prunes finished bytes.
-            for (const [id, entry] of this._entries) if (id !== keepId && entry.state !== "ready") this._drop(id);
-            this._queue = this._queue.filter(id => id === keepId);
+            // Saving, approving or advancing from A to B must not throw away
+            // the images after B: transfers already under way finish, and only
+            // ones not yet started wait. The next schedule prunes what is no
+            // longer ahead.
+            for (const [id, entry] of this._entries) if (id !== keepId && entry.state === "queued") this._drop(id);
+            this._queue = this._queue.filter(id => this._entries.has(id));
         }
 
         clear() {
@@ -99,25 +102,17 @@
         }
 
         _pump() {
-            if (this._pumping || this._paused) return;
-            this._pumping = true;
-            this._run().catch(() => {}).finally(() => {
-                this._pumping = false;
-                // An aborted request must settle before another starts. A new
-                // schedule can arrive meanwhile; only its current entries run.
-                if (!this._paused && this._queue.some(id => this._entries.get(id)?.state === "queued")) this._pump();
-            });
-        }
-
-        async _run() {
-            while (!this._paused) {
+            // Nearest images first, a few at a time so one large image does
+            // not hold up the ones behind it.
+            while (!this._paused && this._loading < PARALLEL) {
                 const entry = this._queue.map(id => this._entries.get(id)).find(value => value?.state === "queued");
                 if (!entry) return;
-                this._active = entry;
                 entry.state = "loading";
-                entry.promise = Promise.resolve().then(() => this._load(entry));
-                try { await entry.promise; }
-                finally { if (this._active === entry) this._active = null; }
+                this._loading += 1;
+                entry.promise = Promise.resolve().then(() => this._load(entry)).finally(() => {
+                    this._loading -= 1;
+                    this._pump();
+                });
             }
         }
 
@@ -178,5 +173,6 @@
         }
     }
 
+    HostedMediaPrefetch.AHEAD = AHEAD;
     window.HostedMediaPrefetch = HostedMediaPrefetch;
 })();

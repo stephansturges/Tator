@@ -783,7 +783,7 @@ def test_data_ingestion_distribution_projects_candidates_without_paths(tmp_path,
     distribution = api.get_data_ingestion_distribution("di_distribution")
 
     assert distribution["summary"]["projection"] == "pca"
-    assert distribution["summary"]["projection_fit_basis"] == "reference"
+    assert distribution["summary"]["projection_fit_basis"] == "reference_and_candidates"
     assert distribution["summary"]["candidate_count"] == 2
     assert distribution["summary"]["reference_count"] == 3
     assert distribution["summary"]["candidate_point_count"] == 2

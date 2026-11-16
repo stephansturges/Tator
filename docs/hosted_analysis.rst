@@ -315,6 +315,24 @@ head scope and native numerical validation remain intact. Result rows and the
 distribution graph carry stable image identities. No image is automatically
 assigned, annotated, approved, archived or removed by the analysis.
 
+Each Incoming image gets two distances, from 0 (same whole-image features)
+upward: to its nearest confirmed image, and to the nearest of the confirmed
+images plus the suggestions made before it. Images are suggested farthest
+first. A hosted run stops suggesting when the best remaining image is closer
+than the cutoff, so it may suggest every image or none. The default cutoff
+(``novelty_cutoff: "auto"``) is the median distance from a confirmed image to
+its nearest confirmed neighbour, measured from at most 2,000 evenly spaced
+confirmed images; it needs two confirmed images. A number sets a fixed cutoff
+and ``"off"`` returns to suggesting a fixed share (``keep_fraction``). An image
+whose descriptor is empty or not finite is reported as not measured and is
+never suggested. The result names the rule and cutoff it used.
+
+**Select the suggested images in Incoming** opens Incoming with the
+suggestions that are still not assigned selected, ready for **Create tranche
+from selection**. The graph draws suggested and other Incoming images in
+different colours; its two axes are fitted on confirmed and Incoming images
+together, each set weighted equally.
+
 Result views and pruning review
 -------------------------------
 

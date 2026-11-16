@@ -308,6 +308,26 @@
         if (stale()) return;
         state.selected = new Map(rows.map(image => [image.id, image])); syncChecks(); drawMatchCount();
     }
+    // Selects the given images in Incoming (those still not assigned), for
+    // example the suggestions of a diversity analysis.
+    async function selectImages(ids) {
+        const wanted = new Set(ids);
+        if (!wanted.size) throw new Error("There are no images to select.");
+        if (wanted.size > SELECTION_LIMIT) throw new Error(`At most ${SELECTION_LIMIT.toLocaleString()} images can be selected at once.`);
+        resetFilters(); await view("incoming", {route: "push"});
+        const authority = state.session, dataset = $("datasetChoice").value;
+        const rows = []; let cursor = null;
+        do {
+            const query = queueQuery(500); query.set("not_assigned", "true");
+            if (cursor) query.set("cursor", cursor);
+            const page = await api(`/queue?${query}`);
+            if (authority !== state.session || dataset !== $("datasetChoice").value || state.view !== "incoming") return;
+            rows.push(...page.images.filter(image => wanted.has(image.id) && selectable(image))); cursor = page.next_cursor;
+        } while (cursor && rows.length < wanted.size);
+        state.selected = new Map(rows.map(image => [image.id, image])); state.selectionAnchor = null; syncChecks();
+        const gone = wanted.size - rows.length;
+        notice(`${count(rows.length, "image")} selected in Incoming${gone ? ` · ${count(gone, "image")} no longer waiting unassigned` : ""}. Use Create tranche from selection to assign them.`, !rows.length);
+    }
     async function prepareFilters() {
         const isAdmin = state.session?.user.role === "admin", flat = !["tranches", "mine"].includes(state.view);
         $("imageFilters").hidden = !isAdmin || !flat || !$("datasetChoice").value;
@@ -1097,7 +1117,7 @@
     document.addEventListener("visibilitychange", refreshIfIdle); window.addEventListener("focus", refreshIfIdle);
     window.TatorHostedDashboard = { api, action, notice, errorText, refresh: workspace, refreshCounts, dropRouteParams,
         selectDataset: id => id === $("datasetChoice").value ? Promise.resolve() : switchDataset(id, "replace"),
-        showView: view, navigate, loadImages, clearSelection, get view() { return state.view; }, get users() { return state.users; }, personLabel,
+        showView: view, navigate, loadImages, clearSelection, selectImages, get view() { return state.view; }, get users() { return state.users; }, personLabel,
         get session() { return state.session; }, get selectedImages() { return [...state.selected.values()]; }, get datasetId() { return $("datasetChoice").value; },
         get datasetName() { return datasetName(); } };
 })();

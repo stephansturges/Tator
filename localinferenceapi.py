@@ -352,6 +352,8 @@ from services.data_ingestion import (
     local_vendi_metrics_from_patch_tokens as _data_ingestion_local_vendi_metrics_from_patch_tokens,
     normalize_keep_fraction as _data_ingestion_keep_fraction,
     normalize_rows as _data_ingestion_normalize_rows,
+    reference_spacing as _data_ingestion_reference_spacing,
+    usable_embedding_rows as _data_ingestion_usable_rows,
     safe_media_name as _data_ingestion_safe_media_name,
     score_percentiles as _data_ingestion_score_percentiles,
 )
@@ -99138,13 +99140,51 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
         keep_fraction = _data_ingestion_keep_fraction(request.get("keep_fraction"), 0.2)
         local_vendi_metadata = _data_ingestion_local_vendi_metadata(local_vendi_raw_metrics)
         local_vendi_scores = [float(item.get("local_vendi_score") or 0.0) for item in local_vendi_metadata]
-        if local_vendi_weight > 0.0 and len(local_vendi_scores) == len(candidates):
+        # A blank or non-finite descriptor is at the maximum distance from
+        # everything and would head the list; such images are never suggested.
+        usable = _data_ingestion_usable_rows(np.asarray(candidate_embeddings, dtype=np.float32))
+        usable_indices = np.flatnonzero(usable)
+        failed_indices = {int(i) for i in np.flatnonzero(~usable)}
+        # Optional cutoff: suggest images while they are at least this far from
+        # the confirmed and already suggested images. "auto" is the typical
+        # distance between neighbouring reference images. Without it the keep
+        # fraction sets the count, as before.
+        cutoff_request = request.get("novelty_cutoff")
+        novelty_cutoff: Optional[float] = None
+        novelty_cutoff_mode = "keep_fraction"
+        if isinstance(cutoff_request, str) and cutoff_request.strip().lower() == "auto":
+            novelty_cutoff = _data_ingestion_reference_spacing(reference_embeddings)
+            novelty_cutoff_mode = "reference_spacing" if novelty_cutoff is not None else "keep_fraction"
+        elif cutoff_request is not None and cutoff_request is not False and cutoff_request != "" and not (isinstance(cutoff_request, str) and cutoff_request.strip().lower() in {"off", "none"}):
+            try:
+                parsed_cutoff = float(cutoff_request)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_novelty_cutoff_invalid")
+            if not math.isfinite(parsed_cutoff) or not 0.0 <= parsed_cutoff <= 2.0:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_novelty_cutoff_invalid")
+            novelty_cutoff, novelty_cutoff_mode = parsed_cutoff, "fixed"
+        all_candidate_embeddings = candidate_embeddings
+
+        def _all_rows(values: Any) -> np.ndarray:
+            full = np.zeros(len(candidates), dtype=np.float32)
+            full[usable_indices] = np.asarray(values, dtype=np.float32)
+            return full
+
+        candidate_embeddings = np.asarray(all_candidate_embeddings, dtype=np.float32)[usable_indices]
+        if not len(usable_indices):
+            selected, novelty_scores, coverage_scores = [], np.zeros(len(candidates), dtype=np.float32), np.zeros(len(candidates), dtype=np.float32)
+            selection_scores = coverage_scores.copy()
+            selection_method, selection_score_kind = "farthest_first_coverage", "coverage_distance"
+            selection_score_description = "coverage distance to the reference/kept set"
+            local_vendi_weight = 0.0
+        elif local_vendi_weight > 0.0 and len(local_vendi_scores) == len(candidates):
             selected, novelty_scores, coverage_scores, selection_scores = _data_ingestion_greedy_indices_with_local_scores(
                 candidate_embeddings,
                 keep_fraction=keep_fraction,
                 reference_embeddings=reference_embeddings,
-                local_scores=local_vendi_scores,
+                local_scores=[local_vendi_scores[int(i)] for i in usable_indices],
                 local_weight=local_vendi_weight,
+                min_coverage=novelty_cutoff,
             )
             selection_method = "farthest_first_coverage_plus_local_vendi"
             selection_score_kind = "coverage_percentile_plus_local_vendi"
@@ -99154,12 +99194,17 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
                 candidate_embeddings,
                 keep_fraction=keep_fraction,
                 reference_embeddings=reference_embeddings,
+                min_coverage=novelty_cutoff,
             )
             selection_scores = coverage_scores.astype(np.float32, copy=True)
             selection_method = "farthest_first_coverage"
             selection_score_kind = "coverage_distance"
             selection_score_description = "coverage distance to the reference/kept set"
             local_vendi_weight = 0.0
+        if len(usable_indices):
+            selected = [int(usable_indices[int(i)]) for i in selected]
+            novelty_scores, coverage_scores, selection_scores = _all_rows(novelty_scores), _all_rows(coverage_scores), _all_rows(selection_scores)
+        candidate_embeddings = all_candidate_embeddings
         selected_set = set(selected)
         ranked_items: List[Dict[str, Any]] = []
         rank_by_idx = {idx: rank + 1 for rank, idx in enumerate(selected)}
@@ -99176,6 +99221,7 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
                     "index": idx,
                     "rank": rank_by_idx.get(idx),
                     "keep": idx in selected_set,
+                    "descriptor_failed": idx in failed_indices,
                     "diversity_score": novelty_score,
                     "coverage_score": coverage_score,
                     "selection_score": selection_score,
@@ -99209,6 +99255,9 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
                 reference_embeddings=reference_embeddings,
             ),
             "keep_fraction": keep_fraction,
+            "novelty_cutoff": novelty_cutoff,
+            "novelty_cutoff_mode": novelty_cutoff_mode,
+            "descriptor_failed_count": len(failed_indices),
             "encoder": encoder,
             "encoder_type": salad_base_encoder,
             "base_encoder": salad_base_encoder,
@@ -100201,8 +100250,16 @@ def _data_ingestion_fit_reference_projection(
     candidate_norm = _data_ingestion_normalize_rows(candidate_embeddings)
     reference_norm = _data_ingestion_normalize_rows(reference_embeddings) if reference_count else np.empty((0, dim), dtype=np.float32)
     if reference_count >= 2:
-        fit_rows = reference_norm
-        fit_basis = "reference"
+        # Axes fitted on the reference alone cannot show what makes a candidate
+        # different from it. Fit on both, each population carrying about half
+        # the weight, from at most a few thousand evenly spaced rows.
+        def _spread(rows: np.ndarray, limit: int) -> np.ndarray:
+            return rows if rows.shape[0] <= limit else rows[np.unique(np.linspace(0, rows.shape[0] - 1, limit).astype(np.int64))]
+        reference_fit = _spread(reference_norm, 4000)
+        candidate_fit = _spread(candidate_norm, 4000)
+        repeats = max(1, int(round(reference_fit.shape[0] / max(1, candidate_fit.shape[0]))))
+        fit_rows = np.concatenate([reference_fit, np.repeat(candidate_fit, repeats, axis=0)], axis=0)
+        fit_basis = "reference_and_candidates"
     else:
         fit_rows = np.concatenate([reference_norm, candidate_norm], axis=0) if reference_count else candidate_norm
         fit_basis = "reference_plus_candidates" if reference_count else "candidates"

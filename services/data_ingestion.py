@@ -66,17 +66,14 @@ def _score_percentiles(values: np.ndarray, *, mask: Optional[np.ndarray] = None)
         out[int(valid_indices[0])] = 1.0
         return out
     ordered = valid_indices[np.argsort(arr[valid_indices], kind="mergesort")]
-    denom = max(1, ordered.size - 1)
-    rank = 0
-    while rank < ordered.size:
-        end = rank + 1
-        value = float(arr[int(ordered[rank])])
-        while end < ordered.size and float(arr[int(ordered[end])]) == value:
-            end += 1
-        percentile = float(((rank + end - 1) / 2.0) / denom)
-        for idx in ordered[rank:end]:
-            out[int(idx)] = percentile
-        rank = end
+    values = arr[ordered]
+    # Tied values share the mean of their ranks.
+    changed = values[1:] != values[:-1]
+    starts = np.flatnonzero(np.concatenate(([True], changed)))
+    counts = np.diff(np.concatenate((starts, [values.size])))
+    group = np.concatenate(([0], np.cumsum(changed)))
+    mean_rank = starts + (counts - 1) / 2.0
+    out[ordered] = (mean_rank[group] / max(1, ordered.size - 1)).astype(np.float32)
     return out
 
 
@@ -148,6 +145,46 @@ def local_vendi_metrics_from_patch_tokens(
     return [local_vendi_metric(sample, max_patches=max_patches) for sample in tokens]
 
 
+def usable_embedding_rows(values: np.ndarray) -> np.ndarray:
+    """Rows a descriptor can be compared on: finite and not all zero.
+
+    A blank row is at distance 1 from everything, so it would otherwise look
+    like the most novel image.
+    """
+
+    arr = np.asarray(values, dtype=np.float32)
+    if arr.ndim != 2:
+        raise ValueError("embeddings must be a 2D array")
+    finite = np.isfinite(arr).all(axis=1)
+    norms = np.linalg.norm(np.where(np.isfinite(arr), arr, 0.0), axis=1)
+    return finite & (norms > 1e-12)
+
+
+def reference_spacing(reference_embeddings: np.ndarray, *, max_queries: int = 2000, chunk: int = 256) -> Optional[float]:
+    """Median distance from a reference image to its nearest other reference.
+
+    This is the cutoff for "new": an image closer than this to what is already
+    covered adds less than a typical reference image did. Large reference sets
+    are measured from evenly spaced rows against every row.
+    """
+
+    ref = np.asarray(reference_embeddings, dtype=np.float32)
+    if ref.ndim != 2 or not ref.size:
+        return None
+    ref = normalize_rows(ref[usable_embedding_rows(ref)])
+    total = int(ref.shape[0])
+    if total < 2:
+        return None
+    queries = np.arange(total) if total <= max_queries else np.unique(np.linspace(0, total - 1, max_queries).astype(np.int64))
+    nearest = np.empty(queries.shape[0], dtype=np.float32)
+    for start in range(0, queries.shape[0], chunk):
+        rows = queries[start : start + chunk]
+        distances = np.maximum(0.0, 1.0 - np.clip(ref[rows] @ ref.T, -1.0, 1.0))
+        distances[np.arange(rows.shape[0]), rows] = np.inf
+        nearest[start : start + rows.shape[0]] = distances.min(axis=1)
+    return float(np.median(nearest))
+
+
 def greedy_diverse_indices(
     embeddings: np.ndarray,
     *,
@@ -173,6 +210,7 @@ def greedy_diverse_indices_with_scores(
     target_count: Optional[int] = None,
     distance_update_fn=None,
     on_select=None,
+    min_coverage: Optional[float] = None,
 ) -> Tuple[List[int], np.ndarray, np.ndarray]:
     """Return selected indices, reference novelty, and coverage scores.
 
@@ -180,6 +218,10 @@ def greedy_diverse_indices_with_scores(
     score is the distance to the closest already-covered item at the moment an
     item is selected; for skipped items it is their final distance to the
     reference/selected coverage set.
+
+    With ``min_coverage`` the keep fraction no longer sets the count: selection
+    continues while the best remaining item is at least that far from what is
+    covered, so it may keep every item or none.
     """
 
     emb = normalize_rows(embeddings)
@@ -192,6 +234,8 @@ def greedy_diverse_indices_with_scores(
         if type(target_count) is not int or not 1 <= target_count <= total:
             raise ValueError('target_count_out_of_range')
         keep_count = target_count
+    elif min_coverage is not None:
+        keep_count = total
     if reference_embeddings is not None and np.asarray(reference_embeddings).size:
         ref = normalize_rows(np.asarray(reference_embeddings, dtype=np.float32))
         min_distance = cosine_distance_matrix(emb, ref).min(axis=1)
@@ -215,6 +259,8 @@ def greedy_diverse_indices_with_scores(
         masked = np.where(remaining, candidate_scores, -1.0)
         idx = initial[step] if step < len(initial) else int(np.argmax(masked))
         if not remaining[idx]:
+            break
+        if min_coverage is not None and step >= len(initial) and float(candidate_scores[idx]) < min_coverage:
             break
         selected.append(idx)
         coverage_scores[idx] = float(candidate_scores[idx])
@@ -242,6 +288,7 @@ def greedy_diverse_indices_with_local_scores(
     reference_embeddings: Optional[np.ndarray] = None,
     local_scores: Optional[Sequence[float]] = None,
     local_weight: float = 0.0,
+    min_coverage: Optional[float] = None,
 ) -> Tuple[List[int], np.ndarray, np.ndarray, np.ndarray]:
     """Return diverse indices plus raw coverage and final selection scores."""
 
@@ -263,9 +310,12 @@ def greedy_diverse_indices_with_local_scores(
             emb,
             keep_fraction=keep_fraction,
             reference_embeddings=reference_embeddings,
+            min_coverage=min_coverage,
         )
         return selected, novelty_scores, coverage_scores, coverage_scores.astype(np.float32, copy=True)
     keep_count = max(1, min(total, int(math.ceil(total * normalize_keep_fraction(keep_fraction)))))
+    if min_coverage is not None:
+        keep_count = total
     if reference_embeddings is not None and np.asarray(reference_embeddings).size:
         ref = normalize_rows(np.asarray(reference_embeddings, dtype=np.float32))
         min_distance = cosine_distance_matrix(emb, ref).min(axis=1)
@@ -279,11 +329,16 @@ def greedy_diverse_indices_with_local_scores(
     selection_scores = np.zeros(total, dtype=np.float32)
     remaining = np.ones(total, dtype=bool)
     for _ in range(keep_count):
-        coverage_percentiles = _score_percentiles(candidate_scores, mask=remaining)
+        # Below the cutoff an item is not new enough, however varied its own
+        # patches are; local variety only orders the items that are.
+        eligible = remaining if min_coverage is None else remaining & (candidate_scores >= min_coverage)
+        if not eligible.any():
+            break
+        coverage_percentiles = _score_percentiles(candidate_scores, mask=eligible)
         combined = (1.0 - weight) * coverage_percentiles + weight * local_percentiles
-        masked = np.where(remaining, combined, -1.0)
+        masked = np.where(eligible, combined, -1.0)
         idx = int(np.argmax(masked))
-        if not remaining[idx]:
+        if not eligible[idx]:
             break
         selected.append(idx)
         coverage_scores[idx] = float(candidate_scores[idx])

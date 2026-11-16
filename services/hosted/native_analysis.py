@@ -516,6 +516,9 @@ def _run_ingestion(api, request, manifest, source, directory):
                   'use_server_reference_dataset': False, 'use_backend_reference_dataset': False}
     candidates, uploads = None, []
     if request['operation'] == 'ingestion':
+        # Hosted suggestions stop where images stop being new, not at a fixed
+        # share; a configured or requested value still wins.
+        parameters.setdefault('novelty_cutoff', 'auto')
         candidates = read_candidate_set(request['candidate_reference'], allowed_root=request['canonical_root'])
         if candidates['dataset_id'] != manifest['dataset_id']:
             raise DomainError('ingestion_candidate_dataset_changed', 409)

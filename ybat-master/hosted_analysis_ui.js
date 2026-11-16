@@ -214,18 +214,26 @@
             }
         } else if (job.consumer === "ingestion") {
             const measured = result.result || result, items = measured.items || [];
-            content.append(node("p", `${items.filter(item => item.keep).length} of ${items.length} incoming images selected by the saved diversity recipe. Reference novelty measures difference from confirmed images; diversity measures variety within the incoming set. These images remain in Incoming.`));
+            const summary = measured.summary || {}, suggested = items.filter(item => item.keep && item.hosted_identity), cutoff = Number(summary.novelty_cutoff);
+            const rule = summary.novelty_cutoff_mode === "reference_spacing" ? `An image is suggested while it is at least ${cutoff.toFixed(3)} away from every confirmed image and every image suggested before it. That distance is how far a typical confirmed image is from its nearest confirmed neighbour.`
+                : summary.novelty_cutoff_mode === "fixed" ? `An image is suggested while it is at least ${cutoff.toFixed(3)} away from every confirmed image and every image suggested before it.`
+                : `The most different ${Math.round(Number(summary.keep_fraction || 0) * 100)}% are suggested, whatever their distance.`;
+            content.append(node("p", `${suggested.length} of ${count(items.length, "Incoming image")} suggested. ${rule} Distances run from 0 (same whole-image features) upward. These images remain in Incoming.`));
+            if (!suggested.length && items.length) content.append(node("p", "None of these images is new enough to suggest: each is closer to a confirmed image than confirmed images usually are to each other."));
+            const failed = items.filter(item => item.descriptor_failed).length;
+            if (failed) content.append(node("p", `${count(failed, "image")} could not be measured and ${failed === 1 ? "is" : "are"} not suggested.`));
+            if (suggested.length) act(content, `Select the ${count(suggested.length, "suggested image")} in Incoming`, async () => { await app.selectImages(suggested.map(item => item.hosted_identity.id)); dialog.close(); });
             if (measured.distribution?.points?.length) {
                 const Plotly = await window.TatorHostedDQE.loadPlotly();
                 if (!valid(ticket) || currentJob !== jobId) return;
                 const layout = node("div"), graph = node("div"), selected = node("aside"); layout.className = "hosted-analysis-graph";
                 graph.setAttribute("aria-label", "Incoming and confirmed image features");
-                selected.append(node("p", "Click a dot to see its image. Gray dots are confirmed images; colored dots are Incoming. Nearby dots have similar whole-image features in this two-dimensional view."));
+                selected.append(node("p", "Click a dot to see its image. Gray dots are confirmed images, orange dots are suggested Incoming images and blue dots are the other Incoming images. Nearby dots have similar whole-image features in this two-dimensional view."));
                 layout.append(graph, selected); content.append(layout);
                 const points = measured.distribution.points.filter(point => point.hosted_identity && point.projection?.length === 2 && point.projection.every(Number.isFinite));
                 const css = getComputedStyle(document.documentElement);
-                const traces = [["reference", "Confirmed images", css.getPropertyValue("--muted") || "#8997a8"], ["candidate", "Incoming images", "#d47433"]].map(([kind, name, color]) => {
-                    const rows = points.filter(point => point.kind === kind);
+                const traces = [["reference", "Confirmed images", css.getPropertyValue("--muted") || "#8997a8", null], ["candidate", "Other Incoming images", "#3d7fc4", false], ["candidate", "Suggested Incoming images", "#d47433", true]].map(([kind, name, color, keep]) => {
+                    const rows = points.filter(point => point.kind === kind && (keep === null || Boolean(point.keep) === keep));
                     return {type: "scattergl", mode: "markers", name, x: rows.map(point => point.projection[0]), y: rows.map(point => point.projection[1]), customdata: rows,
                         text: rows.map(point => point.filename), hovertemplate: "%{text}<extra></extra>", marker: {size: kind === "candidate" ? 10 : 5, opacity: .75, color}};
                 });
@@ -240,7 +248,9 @@
                     selected.replaceChildren(image, node("strong", point.filename), node("p", point.kind === "candidate" ? "Incoming image · awaiting annotation and approval" : "Confirmed reference image"), link);
                 });
                 disposeGraph = () => Plotly.purge(graph);
-                content.append(node("small", "The original ingestion analysis fits these PCA axes on confirmed images and projects Incoming images onto the same axes. The selection uses the full descriptors; this plot is a view of them."));
+                content.append(node("small", measured.distribution.summary?.projection_fit_basis === "reference"
+                    ? "These two axes were fitted on confirmed images only, so an Incoming image that differs from them can still appear inside the gray cloud. The selection uses the full descriptors; this plot is a view of them."
+                    : "These two axes are fitted on confirmed and Incoming images together, each set weighted equally. The selection uses the full descriptors; two axes cannot show every difference."));
             }
             const grid = node("div"); grid.className = "hosted-caption-proposals"; content.append(grid);
             let offset = 0;
@@ -251,9 +261,13 @@
                     const card = node("article"), image = node("img"), link = node("a", "Inspect and annotate →");
                     image.src = `/api/hosted/analysis/jobs/${jobId}/images/${encodeURIComponent(item.hosted_identity.id)}/media`; image.alt = item.filename; image.loading = "lazy";
                     link.href = `/annotate?image=${encodeURIComponent(item.hosted_identity.id)}`;
-                    const scores = [`Incoming diversity: ${Number(item.diversity_score).toFixed(3)}`];
-                    if (Number.isFinite(item.reference_novelty_score)) scores.unshift(`Reference novelty: ${item.reference_novelty_score.toFixed(3)}`);
-                    card.append(image, node("strong", item.keep ? `Suggested addition · rank ${item.rank}` : "Lower priority in this selection"), node("p", scores.join(" · ")), node("small", item.filename), link); grid.append(card);
+                    // Two different distances: to the nearest confirmed image, and to the
+                    // nearest of confirmed images plus the suggestions made before this one.
+                    const novelty = Number.isFinite(item.reference_novelty_score) ? item.reference_novelty_score : Number(item.diversity_score);
+                    const scores = [`From nearest confirmed image: ${novelty.toFixed(3)}`];
+                    if (Number.isFinite(item.coverage_score)) scores.push(`From confirmed and earlier suggestions: ${item.coverage_score.toFixed(3)}`);
+                    const title = item.descriptor_failed ? "Could not be measured" : item.keep ? `Suggested addition · rank ${item.rank}` : summary.novelty_cutoff_mode === "keep_fraction" || !summary.novelty_cutoff_mode ? "Lower priority in this selection" : "Not suggested · too close to what is already covered";
+                    card.append(image, node("strong", title), node("p", item.descriptor_failed ? "The descriptor for this image was empty." : scores.join(" · ")), node("small", item.filename), link); grid.append(card);
                 }
                 offset += 24; if (offset < items.length) act(grid, "Show more incoming images", page);
             }

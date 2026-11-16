@@ -456,6 +456,32 @@ def test_trained_detector_installs_published_weights_and_survives_restart(system
         restarted.close()
 
 
+def test_detector_label_follows_class_retirement(system):
+    install(system, "detector")
+    store, admin, dataset_id = system["store"], system["admin"], system["dataset"]["id"]
+    current = store.get_dataset(admin, dataset_id)
+    url = f"/api/hosted/tools/datasets/{dataset_id}/detector"
+    selected = system["admin_client"].post(url, json={"model_id": "detector", "expected_revision": current["revision"], "operation_id": op()})
+    assert selected.status_code == 200, selected.text
+    vehicle = current["classes"][0]["id"]
+    truck = store.add_class(admin, dataset_id, "truck", op(), current["class_version"])
+    bus = store.add_class(admin, dataset_id, "bus", op(), truck["class_version"])
+    # Merge: the model label now produces the class the boxes were merged into.
+    merged = store.retire_class(admin, dataset_id, vehicle, "merge", op(), bus["class_version"], target_class_id=truck["class"]["id"])
+    assert merged["model_settings"] == [{"kind": "detector", "model_id": "detector", "labels": ["vehicle"]}]
+    spec, _ = system["controller"]._spec(system["alice"], dataset_id, "detect_full")
+    assert spec.config["detector"]["class_bindings"]["vehicle"]["id"] == truck["class"]["id"]
+    # Delete: the label is ignored, and the selection still counts as checked.
+    store.retire_class(admin, dataset_id, truck["class"]["id"], "delete", op(), merged["class_version"], background_empty=True)
+    spec, _ = system["controller"]._spec(system["alice"], dataset_id, "detect_full")
+    assert spec.config["detector"]["class_bindings"] == {"vehicle": None}
+    # An administrator may ignore a label on purpose, but not every label.
+    current = store.get_dataset(admin, dataset_id)
+    body = {"model_id": "detector", "expected_revision": current["revision"], "class_mapping": {"vehicle": None}, "operation_id": op()}
+    refused = system["admin_client"].post(url, json=body)
+    assert refused.status_code == 422 and refused.json()["error"] == "tool_class_mapping_invalid", refused.text
+
+
 def test_classifier_artifacts_class_binding_and_private_runtime_state(system):
     install(system)
     install(system, "classifier")

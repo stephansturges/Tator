@@ -699,22 +699,36 @@
         state.classDataset = dataset;
         const isAdmin = state.session.user.role === "admin";
         $("classesTitle").textContent = `Classes · ${dataset.name}`;
-        $("classesExplanation").textContent = isAdmin ? "Class names are shared by this dataset. Renaming preserves each class's identity and existing annotations. Describe what each class means in Dataset guidance; annotators see it here." : "Use the dataset's existing classes. Request a new class here when you need one; an administrator reviews it.";
+        $("classesExplanation").textContent = isAdmin ? "Class names are shared by this dataset. Renaming preserves each class's identity and existing annotations. Retiring a class takes it out of the list and merges or deletes its boxes. Describe what each class means in Dataset guidance; annotators see it here." : "Use the dataset's existing classes. Request a new class here when you need one; an administrator reviews it.";
         $("addClassForm").hidden = !isAdmin; $("requestClassForm").hidden = isAdmin;
         $("classList").replaceChildren(); $("classRequestList").replaceChildren();
         drawGuidance(dataset, isAdmin);
-        for (const item of dataset.classes) {
+        const activeClasses = dataset.classes.filter(item => !item.retired), retiredClasses = dataset.classes.filter(item => item.retired);
+        $("retiredClasses").hidden = !isAdmin || !retiredClasses.length; $("retiredClassList").replaceChildren();
+        if (isAdmin) for (const item of retiredClasses) {
+            const row = node("div", undefined, "hosted-class hosted-class-retired"), text = node("span", item.name), target = dataset.classes.find(other => other.id === item.merged_into);
+            text.append(node("small", target ? `Its boxes were merged into “${target.name}”.` : "Its boxes were deleted."));
+            const restore = node("button", "Restore class"); restore.type = "button";
+            restore.onclick = () => {
+                if (!window.confirm(`Restore “${item.name}”? It returns to the class list and to new exports. Boxes that were merged or deleted when it was retired stay as they are: the earlier versions are in each image's history. Model settings are not changed back.`)) return;
+                action(restore, () => classCommand(`/datasets/${encodeURIComponent(dataset.id)}/classes/${encodeURIComponent(item.id)}/restore`, { expected_class_version: dataset.class_version }, `“${item.name}” restored to the class list.`));
+            };
+            row.append(text, restore); $("retiredClassList").append(row);
+        }
+        for (const item of activeClasses) {
             const row = node(isAdmin ? "form" : "div", undefined, "hosted-class");
             if (isAdmin) {
                 const label = node("label", "Class name"), input = node("input"); input.value = item.name; input.required = true; input.maxLength = 200; label.append(input);
                 const rename = node("button", "Rename"); rename.type = "submit"; rename.disabled = true;
                 input.oninput = () => { rename.disabled = !input.value.trim() || input.value.trim() === item.name; };
-                row.append(label, rename);
+                const retire = node("button", "Retire…"); retire.type = "button"; retire.setAttribute("aria-label", `Retire ${item.name}`);
+                retire.onclick = () => action(retire, () => openRetirement(dataset, item));
+                row.append(label, rename, retire);
                 row.onsubmit = (event) => { event.preventDefault(); const name = input.value.trim(); action(rename, () => classCommand(`/datasets/${encodeURIComponent(dataset.id)}/classes/${encodeURIComponent(item.id)}`, { name, expected_class_version: dataset.class_version }, "Class renamed.", "PATCH")); };
             } else row.append(node("span", item.name));
             $("classList").append(row);
         }
-        if (!dataset.classes.length) $("classList").append(node("p", "No classes have been added yet."));
+        if (!activeClasses.length) $("classList").append(node("p", "No classes have been added yet."));
         for (const request of requests.requests) {
             const row = node("article", undefined, "hosted-class-request"), author = state.users.find((user) => user.id === request.actor_id);
             row.append(node("strong", request.name), node("small", `${request.state === "pending" ? "Waiting for review" : request.state === "approved" ? "Approved" : "Declined"}${isAdmin && author ? ` · ${author.username}` : ""}`), node("p", request.reason));
@@ -730,6 +744,58 @@
             $("classRequestList").append(row);
         }
         if (!requests.requests.length) $("classRequestList").append(node("p", "No class requests for this dataset."));
+    }
+    // ---- Retire a class: a read-only preview of what changes, one choice, one explicit confirmation.
+    async function openRetirement(dataset, item) {
+        const preview = await api(`/datasets/${encodeURIComponent(dataset.id)}/classes/${encodeURIComponent(item.id)}/retirement`);
+        if (!$("classesDialog").open || state.classDataset?.id !== dataset.id) return;
+        const body = $("retireClassBody"), confirm = $("retireClassConfirm"), name = `“${preview.class.name}”`;
+        const line = group => `${count(group.images, "image")}, ${count(group.boxes, "box", "boxes")}`;
+        $("retireClassTitle").textContent = `Retire class · ${preview.class.name}`; body.replaceChildren(); confirm.disabled = true;
+        body.append(node("p", preview.boxes ? `${name} is used by ${count(preview.boxes, "box", "boxes")} on ${count(preview.images, "image")}.` : `No boxes use ${name}.`));
+        if (preview.boxes) {
+            const list = node("ul");
+            list.append(node("li", `Confirmed: ${line(preview.confirmed)}`), node("li", `In progress (Incoming, Assigned, Returned for changes): ${line(preview.in_progress)}`), node("li", `Waiting for review: ${line(preview.waiting_for_review)}`));
+            if (preview.open_now) list.append(node("li", `Open on a canvas right now: ${count(preview.open_now, "image")}. ${preview.open_now === 1 ? "It is" : "They are"} changed too, and the person editing is told.`));
+            body.append(list);
+        }
+        if (preview.archived.images) body.append(node("p", `${count(preview.archived.images, "archived image")} also ${preview.archived.images === 1 ? "uses" : "use"} this class. Archived images change the same way when they are restored.`));
+        for (const setting of preview.model_settings) body.append(node("p", `Model settings: the ${setting.kind} ${setting.model_id || ""} links its label${setting.labels.length === 1 ? "" : "s"} ${setting.labels.map(label => `“${label}”`).join(", ")} to this class. After a merge ${setting.labels.length === 1 ? "it links" : "they link"} to the other class; after a delete ${setting.labels.length === 1 ? "it is" : "they are"} ignored.`));
+        if (preview.last_active) {
+            body.append(node("p", "This is the dataset's only class. Add another class before retiring this one."));
+            $("retireClassDialog").showModal(); notice(""); return;
+        }
+        const choices = node("fieldset"), legend = node("legend", "What happens to its boxes?"); choices.append(legend);
+        const option = (value, text) => { const label = node("label"), input = node("input"); input.type = "radio"; input.name = "retireMode"; input.value = value; label.append(input, ` ${text}`); choices.append(label); return input; };
+        const merge = option("merge", "Merge into another class"), mergeBox = node("div"), targetLabel = node("label", "Class to merge into "), target = node("select");
+        for (const row of preview.targets) { const entry = node("option", row.name); entry.value = row.id; target.append(entry); }
+        targetLabel.append(target); mergeBox.append(targetLabel, node("p", "Every box takes the other class and keeps its position, its identity and its history.")); choices.append(mergeBox);
+        const remove = option("delete", "Delete the boxes"), removeBox = node("div"), empty = preview.empty_after_delete, background = node("input"); background.type = "checkbox";
+        removeBox.append(node("p", "The boxes are removed from the current annotations. Earlier versions keep them."));
+        if (empty.confirmed) {
+            const files = empty.confirmed_images.slice(0, 10).map(image => image.filename).join(", "), more = empty.confirmed - Math.min(10, empty.confirmed_images.length);
+            removeBox.append(node("p", `${count(empty.confirmed, "confirmed image")} would be left with no boxes: ${files}${more > 0 ? `, and ${more.toLocaleString()} more` : ""}.`));
+            const tick = node("label"); tick.append(background, ` Save ${empty.confirmed === 1 ? "it as a background image" : "them as background images"} (no objects to label)`); removeBox.append(tick);
+        }
+        if (empty.in_progress) removeBox.append(node("p", `${count(empty.in_progress, "image")} in progress or waiting for review would be left with no boxes. ${empty.in_progress === 1 ? "It stays where it is" : "They stay where they are"}, for the annotator or reviewer to decide.`));
+        choices.append(removeBox); body.append(choices);
+        body.append(node("p", "Earlier versions stay in each image's history, which says what was changed. New exports leave this class out; exports made earlier are not changed. You can restore the class later, but that does not undo this change."));
+        const sync = () => {
+            mergeBox.hidden = !merge.checked; removeBox.hidden = !remove.checked;
+            confirm.disabled = !(merge.checked || (remove.checked && (!empty.confirmed || background.checked)));
+            confirm.textContent = merge.checked ? "Merge boxes and retire class" : remove.checked ? "Delete boxes and retire class" : "Retire class";
+        };
+        merge.onchange = remove.onchange = background.onchange = sync; sync();
+        confirm.onclick = () => action(confirm, async () => {
+            const result = await api(`/datasets/${encodeURIComponent(dataset.id)}/classes/${encodeURIComponent(item.id)}/retire`, { method: "POST", body: {
+                mode: merge.checked ? "merge" : "delete", target_class_id: merge.checked ? target.value : null, background_empty: remove.checked && background.checked,
+                expected_class_version: preview.class_version, operation_id: op() } });
+            $("retireClassDialog").close();
+            const changed = result.boxes ? `${count(result.boxes, "box", "boxes")} on ${count(result.images, "image")} ${result.target ? `merged into “${result.target.name}”` : "deleted"}` : "no boxes used it";
+            const message = `${name} retired: ${changed}.${result.background_images ? ` ${count(result.background_images, "image")} saved as background.` : ""}`;
+            await afterCommit(message, async () => { if ($("classesDialog").open && state.classDataset?.id === dataset.id) await loadClasses(); });
+        });
+        $("retireClassDialog").showModal(); notice("");
     }
     async function classCommand(path, body, message, method = "POST") {
         const id = state.classDataset?.id;

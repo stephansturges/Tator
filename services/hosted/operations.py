@@ -211,6 +211,9 @@ class HostedOperations:
                 self.store._event(con, actor, archive["dataset_id"], image["id"], "image_restored", {"archive_id": archive_id})
             con.execute("DELETE FROM hosted_archived_images WHERE archive_id=?", (archive_id,))
             con.execute("DELETE FROM hosted_archived_datasets WHERE archive_id=?", (archive_id,))
+            # Classes retired while these images were archived: their boxes
+            # follow that choice now, so no restored image uses a retired class.
+            self.store._retire_restored_images(con, actor, archive["dataset_id"], [member["image_id"] for member in members])
             con.execute("UPDATE hosted_archives SET state='restored',restored_at=?,restored_by=? WHERE id=?", (self.store.clock(), actor.user_id, archive_id))
             con.execute("UPDATE hosted_datasets SET revision=revision+1 WHERE id=?", (archive["dataset_id"],))
             return {"archive_id": archive_id, "state": "restored", "image_count": len(members), "files_deleted": 0}

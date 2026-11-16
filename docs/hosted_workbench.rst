@@ -131,9 +131,9 @@ An image is not applied, and the review says why, when any of these is true:
 
 * it was edited, returned or removed in the hosted dataset after the copy.
   Make a new copy to continue with it;
-* its labels use a retired class. Hosted versions keep such objects, so new
-  copies contain them too: relabel or delete those objects in the workbench,
-  save, and review again;
+* its labels use a class that was retired after the copy was made. Relabel or
+  delete those objects in the workbench, save, and review again, or make a
+  new copy: new copies leave retired classes out;
 * another person holds the image open for editing. Apply again once it is
   closed;
 * a polygon object was moved or resized, because the workbench edits boxes

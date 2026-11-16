@@ -364,7 +364,9 @@ The API exposes:
 Dataset attachments freeze model-label to stable dataset-class IDs. Initial
 attachment matches class names, or accepts an explicit admin ``class_mapping``.
 Unknown or retired classes are rejected rather than using a model's numeric
-class index as a dataset label. At execution, IDs resolve to the dataset's
+class index as a dataset label. A label mapped to ``null`` is ignored: results
+for it are dropped. Retiring a class moves its labels to the merge target, or
+sets them to ``null`` when its boxes are deleted. At execution, IDs resolve to the dataset's
 current names and positions; rename/retirement makes old captured results stale.
 Results include ``stable_class_id`` alongside the legacy numeric/name fields.
 

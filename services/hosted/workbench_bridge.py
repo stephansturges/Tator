@@ -602,8 +602,8 @@ class WorkbenchBridge:
                     plan["conflict"] = "This image was edited in the hosted workspace after the workbench copy. Make a new copy to edit it."
                 elif retired := sorted({bridge["class_names"].get(obj["class_id"], obj["class_id"]) for obj in result["objects"]
                                         if obj["class_id"] not in active}):
-                    # New copies keep these objects too (hosted versions keep them), so a
-                    # new copy does not help: the objects themselves have to change.
+                    # The class was retired after this copy was made. A new copy
+                    # leaves it out; in this copy the objects themselves have to change.
                     plan["conflict"] = (f"Objects use the retired class{'es' if len(retired) > 1 else ''} {', '.join(f'“{n}”' for n in retired)}. "
                                         "Relabel or delete those objects here, save, then review again.")
                 else:

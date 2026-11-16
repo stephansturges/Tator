@@ -110,7 +110,8 @@ class ModelSelection(BaseModel):
 
 
 class DatasetModelSelection(ModelSelection):
-    class_mapping: dict[str, str] | None = None
+    # A label linked to null is ignored: the model's results for it are dropped.
+    class_mapping: dict[str, str | None] | None = None
 
 
 class DatasetRecipeSelection(BaseModel):
@@ -554,9 +555,11 @@ class ToolController:
             raise DomainError("tool_model_selection_changed", 409, f"The {kind} changed. An administrator must confirm its new version.")
         classes = {row["id"]: row for row in dataset["classes"] if not row["retired"]}
         mapping = selected.get("class_mapping", {})
-        if set(mapping) != set(definition["labels"]) or any(value not in classes for value in mapping.values()):
+        # A label linked to null is ignored (its class was retired and its
+        # boxes deleted, or the administrator chose to ignore it).
+        if set(mapping) != set(definition["labels"]) or any(value is not None and value not in classes for value in mapping.values()):
             raise DomainError("tool_class_mapping_changed", 409, "An administrator must check this model's dataset classes.")
-        return selected, {label: classes[class_id] for label, class_id in mapping.items()}
+        return selected, {label: classes[class_id] if class_id is not None else None for label, class_id in mapping.items()}
 
     def _qwen_config(self, actor, *, required):
         policy = self.configuration.get("user_qwen", {})
@@ -582,7 +585,8 @@ class ToolController:
         from services.hosted.config import _native_device
         dataset = self.store.get_dataset(actor, dataset_id)
         device = _native_device(self.configuration.get("detector_device"))
-        labelmap = [row["name"] for row in sorted(dataset["classes"], key=lambda row: row["position"])]
+        # Active classes are numbered 0..n-1, so a class's position indexes this list.
+        labelmap = [row["name"] for row in sorted(dataset["classes"], key=lambda row: row["position"]) if not row["retired"]]
         config = {"dataset_id": dataset_id}
         selection, bindings = self._dataset_model(dataset, "detector", required=operation in DETECTOR_OPERATIONS)
         if selection:
@@ -1062,8 +1066,12 @@ class ToolController:
             mapping = body.class_mapping
             if mapping is None:
                 mapping = {label: names.get(label.casefold()) for label in definition["labels"]}
-            if set(mapping) != set(definition["labels"]) or any(class_id not in active for class_id in mapping.values()):
-                raise DomainError("tool_class_mapping_invalid", 422, "Map each model label to an existing dataset class before selecting this model.")
+            # Only an explicit mapping may ignore a label (null); a label the
+            # automatic name match cannot place still has to be linked.
+            explicit = body.class_mapping is not None
+            if (set(mapping) != set(definition["labels"]) or all(class_id is None for class_id in mapping.values())
+                    or any(class_id not in active if class_id is not None else not explicit for class_id in mapping.values())):
+                raise DomainError("tool_class_mapping_invalid", 422, "Link each model label to a dataset class, or choose to ignore it, before selecting this model.")
             settings = {kind: {"model_id": body.model_id, "checkpoint_sha256": definition["checkpoint_sha256"], "model_identity": self.registry.model_identity(body.model_id), "class_mapping": mapping, "selection_request": request}}
             result = self.store.patch_dataset_settings(actor, dataset_id, settings, body.expected_revision, body.operation_id)
             if self._runtime and kind == "detector":
@@ -1190,7 +1198,8 @@ class ToolController:
                 "active": model["model_id"] == catalog["sam"]["model_id"]}
                 for model in catalog["models"] if model["kind"] in {"sam1", "sam3"} and model.get("available", True)],
             "labelmaps": [{"path": dataset_id, "rel_path": dataset_id, "filename": dataset["name"],
-                "classes": [row["name"] for row in dataset["classes"]], "n_classes": len(dataset["classes"])}],
+                "classes": [row["name"] for row in dataset["classes"] if not row["retired"]],
+                "n_classes": sum(not row["retired"] for row in dataset["classes"])}],
             "prepass_recipes": [{"id": model["model_id"], "name": model["model_id"], "read_only": True,
                 "active": model["model_id"] == (catalog.get("edr") or {}).get("model_id")}
                 for model in catalog["models"] if model["kind"] == "edr"],

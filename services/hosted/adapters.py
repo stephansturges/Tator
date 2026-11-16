@@ -156,6 +156,9 @@ class UserToolAdapter:
             if not details.get("error"):
                 raise ValueError("hosted_classifier_label_unmapped")
             result.update(prediction="unknown", second_label=None)
+        elif bindings[label] is None:
+            # An ignored label (its dataset class was retired) predicts no class.
+            result.update(prediction="unknown", second_label=None)
         else:
             target = bindings[label]
             result.update(prediction=target["name"], class_id=str(target["position"]), stable_class_id=target["id"])
@@ -442,12 +445,17 @@ class DatasetDetectorAdapter:
                         crop.close()
             bindings = self.config.get("class_bindings")
             if bindings is not None:
+                kept = []
                 for detection in raw:
                     source = detection.get("class_name")
                     if source not in bindings:
                         raise ValueError("hosted_detector_label_unmapped")
                     target = bindings[source]
+                    if target is None:
+                        continue  # ignored label: its dataset class was retired
                     detection.update(class_id=target["position"], stable_class_id=target["id"], class_name=target["name"])
+                    kept.append(detection)
+                raw = kept
                 labels = list(self.config["dataset_labelmap"])
             detections = _merge_detections_nms(raw, merge_iou, max_det)
             return {"detections": detections, "labelmap": labels, "warnings": sorted(set(warnings)) or None}

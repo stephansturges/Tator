@@ -16,6 +16,8 @@ label.hosted-checkbox{display:flex;flex-direction:row;align-items:center;gap:.5r
 .hosted-class{display:flex;align-items:end;gap:.7rem;padding:.65rem 0;border-bottom:1px solid var(--border)}
 .hosted-class label{flex:1;min-width:0;font-size:.8rem}
 .hosted-class input{width:100%;font-size:1rem}
+.hosted-class-retired{align-items:center;justify-content:space-between}.hosted-class-retired small{display:block;color:var(--muted)}
+#retireClassBody ul{margin:.4rem 0;padding-left:1.2rem}#retireClassBody fieldset{border:1px solid var(--border);border-radius:6px;margin:12px 0;padding:10px 12px}#retireClassBody fieldset label{display:block;margin:.35rem 0}#retireClassBody fieldset div{margin:.2rem 0 .6rem 1.6rem}#retireClassBody fieldset div p{margin:.3rem 0}
 .hosted-class-request{border-top:1px solid var(--border);padding:16px 0}
 .hosted-class-request>small{display:block;color:var(--muted)}
 .hosted-class-request p,.hosted-submission p{white-space:pre-wrap;overflow-wrap:anywhere}

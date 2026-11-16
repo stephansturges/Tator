@@ -240,6 +240,10 @@ class HostedStore(TrancheMixin):
             if row and row[0] not in (1, SCHEMA_VERSION):
                 raise RuntimeError("Unsupported hosted store schema")
             con.execute("INSERT OR IGNORE INTO hosted_schema VALUES ('store',1)")
+            # A retired class records what became of its boxes: the class they
+            # were merged into, or NULL when they were deleted.
+            if "merged_into" not in {row[1] for row in con.execute("PRAGMA table_info(hosted_classes)")}:
+                con.execute("ALTER TABLE hosted_classes ADD COLUMN merged_into TEXT REFERENCES hosted_classes(id)")
             migrate_store(con, now=self.clock())
             for table in ("hosted_annotation_versions", "hosted_class_versions", "hosted_dataset_setting_versions", "hosted_submissions",
                           "hosted_reviews", "hosted_receipts", "hosted_events", "hosted_snapshots",
@@ -427,8 +431,52 @@ class HostedStore(TrancheMixin):
 
     @staticmethod
     def _classes(con: sqlite3.Connection, dataset_id: str) -> list[dict[str, Any]]:
-        return [dict(row) for row in con.execute(
-            "SELECT id,name,position,retired FROM hosted_classes WHERE dataset_id=? ORDER BY position", (dataset_id,))]
+        # ``merged_into`` appears only on a retired class whose boxes were merged.
+        return [{key: value for key, value in dict(row).items() if key != "merged_into" or value is not None}
+                for row in con.execute("SELECT id,name,position,retired,merged_into FROM hosted_classes "
+                                       "WHERE dataset_id=? ORDER BY position", (dataset_id,))]
+
+    @staticmethod
+    def _renumber_classes(con: sqlite3.Connection, dataset_id: str) -> None:
+        """Active classes take positions 0..n-1 in their current order; retired ones follow.
+
+        Every position-indexed class list (canvas, model results, exports) is
+        then free of gaps without each reader having to renumber. A restored
+        or newly added class comes last among the active classes.
+        """
+        rows = con.execute("SELECT id,position FROM hosted_classes WHERE dataset_id=? ORDER BY retired,position", (dataset_id,)).fetchall()
+        if [row["position"] for row in rows] == list(range(len(rows))):
+            return
+        # Positions are unique per dataset: move them out of the way first.
+        con.execute("UPDATE hosted_classes SET position=-position-1 WHERE dataset_id=?", (dataset_id,))
+        con.executemany("UPDATE hosted_classes SET position=? WHERE id=?", [(index, row["id"]) for index, row in enumerate(rows)])
+
+    @classmethod
+    def _active_classes(cls, con: sqlite3.Connection, dataset_id: str) -> list[dict[str, Any]]:
+        """The class list of anything made now: retired classes left out, numbered 0..n-1."""
+        return [{"id": row["id"], "name": row["name"], "position": index, "retired": 0}
+                for index, row in enumerate(row for row in cls._classes(con, dataset_id) if not row["retired"])]
+
+    @classmethod
+    def _class_dispositions(cls, con: sqlite3.Connection, dataset_id: str) -> tuple[set[str], dict[str, str | None]]:
+        """Active class ids, and for each retired class the active class its boxes take.
+
+        A merge target that was itself retired later is followed to its own
+        target. ``None`` means the boxes are deleted.
+        """
+        rows = {row["id"]: row for row in cls._classes(con, dataset_id)}
+        active = {identifier for identifier, row in rows.items() if not row["retired"]}
+        retired = {}
+        for identifier in rows.keys() - active:
+            target, seen = rows[identifier].get("merged_into"), {identifier}
+            while target is not None and target not in active:
+                if target in seen or target not in rows:
+                    target = None
+                    break
+                seen.add(target)
+                target = rows[target].get("merged_into")
+            retired[identifier] = target
+        return active, retired
 
     def _class_revision(self, con: sqlite3.Connection, actor: Actor, dataset_id: str) -> int:
         con.execute("UPDATE hosted_datasets SET class_version=class_version+1,revision=revision+1 WHERE id=?", (dataset_id,))
@@ -437,14 +485,25 @@ class HostedStore(TrancheMixin):
                     (dataset_id, version, _json(self._classes(con, dataset_id)), actor.user_id, self.clock()))
         return version
 
+    @staticmethod
+    def _class_name_free(con: sqlite3.Connection, dataset_id: str, name: str, *, except_id: str = "") -> None:
+        row = con.execute("SELECT name,retired FROM hosted_classes WHERE dataset_id=? AND name_key=? AND id!=?",
+                          (dataset_id, name.casefold(), except_id)).fetchone()
+        if row and row["retired"]:
+            raise DomainError("class_name_retired", 409, f"“{row['name']}” is a retired class of this dataset. "
+                              "Restore it under Retired classes instead of adding it again.")
+        if row:
+            raise DomainError("class_name_exists", 409)
+
     def _add_class(self, con: sqlite3.Connection, actor: Actor, dataset_id: str, name: str) -> dict[str, Any]:
         name = validate_class_name(name)
-        if con.execute("SELECT 1 FROM hosted_classes WHERE dataset_id=? AND name_key=?", (dataset_id, name.casefold())).fetchone():
-            raise DomainError("class_name_exists", 409)
+        self._class_name_free(con, dataset_id, name)
         position = con.execute("SELECT COALESCE(MAX(position),-1)+1 FROM hosted_classes WHERE dataset_id=?", (dataset_id,)).fetchone()[0]
         class_id = _id("class")
         con.execute("INSERT INTO hosted_classes(id,dataset_id,name,name_key,position) VALUES (?,?,?,?,?)",
                     (class_id, dataset_id, name, name.casefold(), position))
+        self._renumber_classes(con, dataset_id)  # ahead of any retired classes
+        position = con.execute("SELECT position FROM hosted_classes WHERE id=?", (class_id,)).fetchone()[0]
         return {"id": class_id, "name": name, "position": position, "retired": 0}
 
     def create_dataset(self, actor: Actor, name: str, classes: list[str] | tuple[str, ...] = (),
@@ -502,17 +561,21 @@ class HostedStore(TrancheMixin):
             if patch:
                 current = con.execute("SELECT settings_json FROM hosted_dataset_settings WHERE dataset_id=?", (dataset_id,)).fetchone()
                 value = {**(json.loads(current[0]) if current else {}), **settings}
-            encoded = _json(value)
-            if len(encoded.encode()) > 1024 * 1024:
-                raise DomainError("dataset_settings_too_large", 413)
-            version = dataset["revision"] + 1
-            con.execute("INSERT INTO hosted_dataset_settings VALUES (?,?,?) ON CONFLICT(dataset_id) DO UPDATE SET version=excluded.version,settings_json=excluded.settings_json", (dataset_id, version, encoded))
-            con.execute("INSERT INTO hosted_dataset_setting_versions VALUES (?,?,?,?,?)", (dataset_id, version, encoded, actor.user_id, self.clock()))
-            con.execute("UPDATE hosted_datasets SET revision=? WHERE id=?", (version, dataset_id))
-            self._event(con, actor, dataset_id, None, "dataset_settings_changed", {"settings_version": version})
+            self._write_settings(con, actor, dataset_id, value)
             return self._dataset_result(con, actor, dataset_id)
         operation = "patch_dataset_settings" if patch else "set_dataset_settings"
         return self._command(actor, operation_id, operation, dict(dataset_id=dataset_id,settings=settings,expected_revision=expected_revision), run, admin=True)
+
+    def _write_settings(self, con: sqlite3.Connection, actor: Actor, dataset_id: str, value: dict[str, Any]) -> int:
+        encoded = _json(value)
+        if len(encoded.encode()) > 1024 * 1024:
+            raise DomainError("dataset_settings_too_large", 413)
+        version = self._dataset(con, dataset_id)["revision"] + 1
+        con.execute("INSERT INTO hosted_dataset_settings VALUES (?,?,?) ON CONFLICT(dataset_id) DO UPDATE SET version=excluded.version,settings_json=excluded.settings_json", (dataset_id, version, encoded))
+        con.execute("INSERT INTO hosted_dataset_setting_versions VALUES (?,?,?,?,?)", (dataset_id, version, encoded, actor.user_id, self.clock()))
+        con.execute("UPDATE hosted_datasets SET revision=? WHERE id=?", (version, dataset_id))
+        self._event(con, actor, dataset_id, None, "dataset_settings_changed", {"settings_version": version})
+        return version
 
     def get_dataset(self, actor: Actor, dataset_id: str) -> dict[str, Any]:
         with self.read_connection() as con:
@@ -543,7 +606,11 @@ class HostedStore(TrancheMixin):
     _validate_language_annotations = staticmethod(validate_language_annotations)
 
     def _annotations(self, con: sqlite3.Connection, dataset_id: str, annotations: Any,
-                     *, width: int, height: int) -> dict[str, Any]:
+                     *, width: int, height: int, retired_changes: dict[str, int] | None = None) -> dict[str, Any]:
+        """Validate objects. Boxes of a retired class are refused, unless the
+        caller passes ``retired_changes``: then they follow what the
+        administrator chose when retiring it (merged into another class, or
+        deleted) and the mapping counts the boxes changed per retired class."""
         if not isinstance(annotations, dict):
             raise DomainError("invalid_annotations", 422)
         encoded = _json(annotations)
@@ -554,8 +621,8 @@ class HostedStore(TrancheMixin):
         objects = result.setdefault("objects", [])
         if not isinstance(objects, list):
             raise DomainError("invalid_objects", 422)
-        valid = {row["id"] for row in self._classes(con, dataset_id) if not row["retired"]}
-        seen = set()
+        valid, retired = self._class_dispositions(con, dataset_id)
+        seen, kept = set(), []
         for item in objects:
             if not isinstance(item, dict):
                 raise DomainError("invalid_object", 422)
@@ -564,8 +631,14 @@ class HostedStore(TrancheMixin):
                 raise DomainError("duplicate_object_id", 422)
             seen.add(object_id)
             item["id"] = object_id
+            if retired_changes is not None and isinstance(item.get("class_id"), str) and item["class_id"] in retired:
+                retired_changes[item["class_id"]] = retired_changes.get(item["class_id"], 0) + 1
+                if retired[item["class_id"]] is None:
+                    continue
+                item["class_id"] = retired[item["class_id"]]
             if not isinstance(item.get("class_id"), str) or item["class_id"] not in valid:
                 raise DomainError("invalid_class", 422, {"class_id": item.get("class_id")})
+            kept.append(item)
             bbox = item.get("bbox")
             if (not isinstance(bbox, list) or len(bbox) != 4
                     or any(type(v) not in (int, float) or not math.isfinite(v) for v in bbox)):
@@ -587,6 +660,8 @@ class HostedStore(TrancheMixin):
                     raise DomainError("invalid_polygon", 422, {"object_id": object_id})
                 if any(not (0 <= point[0] <= width and 0 <= point[1] <= height) for point in polygon):
                     item["polygon"] = clamp_polygon(polygon, width, height)
+        if len(kept) != len(objects):
+            result["objects"] = kept
         return result
 
     def _version(self, con: sqlite3.Connection, actor: Actor, image_id: str, dataset_id: str,
@@ -843,6 +918,11 @@ class HostedStore(TrancheMixin):
             image = self._image(con, image_id)
             self._can_view(actor, image)
             self._can_edit(actor, image)
+            # A class retired while this tab had the image open wrote a newer
+            # version. The tab keeps editing; the reply says what changed.
+            behind = self._retirement_versions(con, image, expected_version)
+            if behind:
+                expected_version = image["current_version"]
             if expected_version is not None or generation is not None:
                 self._expected(image, expected_version, generation)
             lease = con.execute("SELECT * FROM hosted_editor_leases WHERE image_id=?", (image_id,)).fetchone()
@@ -862,7 +942,10 @@ class HostedStore(TrancheMixin):
                 con.execute("INSERT INTO hosted_editor_leases VALUES (?,?,?,?,?) ON CONFLICT(image_id) DO UPDATE SET "
                             "actor_id=excluded.actor_id,editor_id=excluded.editor_id,generation=excluded.generation,expires_at=excluded.expires_at",
                             (image_id, actor.user_id, editor_id, image["generation"] + 1, self.clock() + self.lease_seconds))
-            return self._image_result(con, image_id, content=True)
+            result = self._image_result(con, image_id, content=True)
+            if behind:
+                result["class_retirement"] = self._retirement_notice(con, image, behind, {})
+            return result
 
     def _handoff(self, con: sqlite3.Connection, image_id: str, state: str, *, assignee: str | None,
                  assignment: str | None, submission: str | None = None, actor_id: str = "system:handoff") -> None:
@@ -1026,10 +1109,21 @@ class HostedStore(TrancheMixin):
     def _save(self, con: sqlite3.Connection, actor: Actor, ctx: MutationContext,
               annotations: dict[str, Any], *, complete: bool, negative: bool,
               trusted_instruction_pairs=()) -> dict[str, Any]:
-        """Shared commit mechanism for interactive and guarded analysis edits."""
+        """Shared commit mechanism for interactive and guarded analysis edits.
+
+        Boxes of a retired class follow the administrator's choice for that
+        class (merged or deleted). An editor that opened the image before the
+        retirement saves onto the version the retirement wrote; nothing of
+        either is lost, and the result says in words what changed.
+        """
+        behind = self._retirement_versions(con, self._image(con, ctx.image_id), ctx.expected_version)
+        if behind:
+            ctx = replace(ctx, expected_version=behind[0])
         image = self._guard(con, actor, ctx)
         media = con.execute("SELECT width,height FROM hosted_media WHERE sha256=?", (image["media_hash"],)).fetchone()
-        body = self._annotations(con, image["dataset_id"], annotations, width=media["width"], height=media["height"])
+        changes: dict[str, int] = {}
+        body = self._annotations(con, image["dataset_id"], annotations, width=media["width"], height=media["height"],
+                                 retired_changes=changes)
         if actor.role != 'admin':
             previous = con.execute('SELECT annotations_json FROM hosted_annotation_versions WHERE id=?',
                                    (ctx.expected_version,)).fetchone()
@@ -1039,6 +1133,9 @@ class HostedStore(TrancheMixin):
                                                trusted_instruction_pairs=trusted_instruction_pairs)
         if image["state"] == "confirmed" and not (complete or negative):
             raise DomainError("confirmed_annotation_requires_completion", 409)
+        if changes and image["state"] == "confirmed" and not body["objects"] and not negative:
+            raise DomainError("retired_class_boxes_deleted", 409, "A class was retired and its boxes were deleted, which leaves "
+                              "this image with no boxes. Reload the image to see its current state.")
         version_id = self._version(con, actor, ctx.image_id, image["dataset_id"], body,
                                    parent=ctx.expected_version, kind="canonical_edit" if image["state"] == "confirmed" else "draft",
                                    complete=complete, negative=negative)
@@ -1049,7 +1146,10 @@ class HostedStore(TrancheMixin):
         else:
             con.execute("UPDATE hosted_images SET current_version=?,updated_at=? WHERE id=?", (version_id, self.clock(), ctx.image_id))
         self._event(con, actor, image["dataset_id"], ctx.image_id, "annotation_saved", {"version_id": version_id, "previous_version": ctx.expected_version})
-        return self._image_result(con, ctx.image_id)
+        result = self._image_result(con, ctx.image_id)
+        if behind or changes:
+            result["class_retirement"] = self._retirement_notice(con, image, behind, changes)
+        return result
 
     @staticmethod
     def _preserve_instruction_reviews(previous, current):
@@ -1341,7 +1441,8 @@ class HostedStore(TrancheMixin):
             approved_version = image["current_version"]
             if not (version["complete"] and bool(version["negative"]) == negative):
                 media = con.execute("SELECT width,height FROM hosted_media WHERE sha256=?", (image["media_hash"],)).fetchone()
-                body = self._annotations(con, dataset_id, annotations, width=media["width"], height=media["height"])
+                body = self._annotations(con, dataset_id, annotations, width=media["width"], height=media["height"],
+                                         retired_changes={})
                 approved_version = self._version(con, actor, ctx.image_id, dataset_id, body, parent=image["current_version"],
                                                  kind="draft", complete=True, negative=negative)
                 con.execute("UPDATE hosted_images SET current_version=?,updated_at=? WHERE id=?", (approved_version, self.clock(), ctx.image_id))
@@ -1584,13 +1685,305 @@ class HostedStore(TrancheMixin):
             if not row:
                 raise DomainError("class_not_found", 404)
             value = validate_class_name(name)
-            if con.execute("SELECT 1 FROM hosted_classes WHERE dataset_id=? AND name_key=? AND id!=?", (dataset_id, value.casefold(), class_id)).fetchone():
-                raise DomainError("class_name_exists", 409)
+            self._class_name_free(con, dataset_id, value, except_id=class_id)
             con.execute("UPDATE hosted_classes SET name=?,name_key=? WHERE id=?", (value, value.casefold(), class_id))
             version = self._class_revision(con, actor, dataset_id)
             self._event(con, actor, dataset_id, None, "class_renamed", {"class_id": class_id, "previous_name": row["name"], "name": value})
             return {"class_id": class_id, "name": value, "class_version": version}
         return self._command(actor, operation_id, "rename_class", dict(dataset_id=dataset_id,class_id=class_id,name=name,expected_class_version=expected_class_version), run, admin=True)
+
+    # ---- Class retirement -------------------------------------------------
+    # One administrator command retires a class and changes every current
+    # annotation that uses it. Earlier versions stay in each image's history.
+
+    RETIREMENT_KIND = "class_retired"
+    RETIREMENT_LIST_LIMIT = 50
+
+    @staticmethod
+    def _retirement_sentence(name: str, boxes: int, target: str | None) -> str:
+        count = f"{boxes:,} box{'' if boxes == 1 else 'es'}"
+        return (f"Class “{name}” retired: {count} merged into “{target}”." if target
+                else f"Class “{name}” retired: {count} deleted.")
+
+    def _retirement_versions(self, con: sqlite3.Connection, image: sqlite3.Row, expected_version: Any) -> list[str]:
+        """Versions that only class retirement wrote after ``expected_version``, newest first."""
+        if not isinstance(expected_version, str) or not expected_version or image["current_version"] == expected_version:
+            return []
+        chain, version_id = [], image["current_version"]
+        while version_id and version_id != expected_version:
+            row = con.execute("SELECT parent_version,kind FROM hosted_annotation_versions WHERE id=?", (version_id,)).fetchone()
+            if not row or row["kind"] != self.RETIREMENT_KIND:
+                return []
+            chain.append(version_id)
+            version_id = row["parent_version"]
+        return chain if version_id == expected_version else []
+
+    def _retirement_notice(self, con: sqlite3.Connection, image: sqlite3.Row, versions: list[str],
+                           changes: dict[str, int]) -> dict[str, Any]:
+        """What an editor is told when boxes of a retired class changed under it."""
+        sentences = []
+        if versions:
+            for row in con.execute("SELECT data_json FROM hosted_events WHERE image_id=? AND kind='class_retired' ORDER BY id", (image["id"],)):
+                data = json.loads(row[0])
+                if data.get("version_id") in versions:
+                    sentences.append(data["summary"])
+        else:
+            names = {row["id"]: row["name"] for row in self._classes(con, image["dataset_id"])}
+            _, retired = self._class_dispositions(con, image["dataset_id"])
+            sentences = [self._retirement_sentence(names[class_id], boxes, names.get(retired[class_id]))
+                         for class_id, boxes in changes.items()]
+        return {"message": " ".join(sentences) or "A class of this dataset was retired."}
+
+    @staticmethod
+    def _class_row(con: sqlite3.Connection, dataset_id: str, class_id: str) -> sqlite3.Row:
+        row = con.execute("SELECT * FROM hosted_classes WHERE id=? AND dataset_id=?", (class_id, dataset_id)).fetchone()
+        if not row:
+            raise DomainError("class_not_found", 404, "That class is not in this dataset. Refresh classes.")
+        return row
+
+    def _class_usage(self, con: sqlite3.Connection, dataset_id: str, class_ids: set[str]) -> list[dict[str, Any]]:
+        """Images whose current version has boxes of these classes.
+
+        One query for the whole dataset; annotation JSON is parsed only for
+        the rows that mention a class id.
+        """
+        if not class_ids:
+            return []
+        ordered = sorted(class_ids)
+        rows = con.execute(
+            "SELECT i.id,i.filename,i.state,i.current_version,v.annotations_json,v.complete,v.negative,"
+            "EXISTS(SELECT 1 FROM hosted_archived_images a WHERE a.image_id=i.id) AS archived,"
+            "EXISTS(SELECT 1 FROM hosted_editor_leases l WHERE l.image_id=i.id AND l.expires_at>?) AS open_now "
+            "FROM hosted_images i JOIN hosted_annotation_versions v ON v.id=i.current_version "
+            "WHERE i.dataset_id=? AND (" + " OR ".join("instr(v.annotations_json,?)>0" for _ in ordered) + ") "
+            "ORDER BY i.created_at,i.id", (self.clock(), dataset_id, *ordered)).fetchall()
+        usage = []
+        for row in rows:
+            item = dict(row)
+            item["annotations"] = json.loads(item.pop("annotations_json"))
+            objects = item["annotations"].get("objects") or []
+            boxes: dict[str, int] = {}
+            for obj in objects:
+                if obj.get("class_id") in class_ids:
+                    boxes[obj["class_id"]] = boxes.get(obj["class_id"], 0) + 1
+            if boxes:
+                item["boxes"], item["only"] = boxes, sum(boxes.values()) == len(objects)
+                usage.append(item)
+        return usage
+
+    @staticmethod
+    def _retirement_group(item: dict[str, Any]) -> str:
+        return ("archived" if item["archived"] else "confirmed" if item["state"] == "confirmed"
+                else "waiting_for_review" if item["state"] == "submitted" else "in_progress")
+
+    @staticmethod
+    def _class_model_settings(settings: dict[str, Any], class_id: str) -> list[dict[str, Any]]:
+        """Dataset model settings (detector, classifier, recipe…) with a label linked to this class."""
+        found = []
+        for kind, selected in sorted(settings.items()):
+            mapping = selected.get("class_mapping") if isinstance(selected, dict) else None
+            labels = sorted(label for label, value in mapping.items() if value == class_id) if isinstance(mapping, dict) else []
+            if labels:
+                found.append({"kind": kind, "model_id": selected.get("model_id"), "labels": labels})
+        return found
+
+    def class_retirement_preview(self, actor: Actor, dataset_id: str, class_id: str) -> dict[str, Any]:
+        """Read-only: what retiring this class would change. Nothing is written."""
+        with self.read_connection() as con:
+            self._actor(con, actor, admin=True)
+            dataset = self._dataset(con, dataset_id)
+            row = self._class_row(con, dataset_id, class_id)
+            if row["retired"]:
+                raise DomainError("class_already_retired", 409, "This class is already retired.")
+            groups = {key: {"images": 0, "boxes": 0} for key in ("confirmed", "in_progress", "waiting_for_review", "archived")}
+            states = {state: {"images": 0, "boxes": 0} for state in STATES}
+            open_now = empty_confirmed = empty_other = 0
+            listed = []
+            for item in self._class_usage(con, dataset_id, {class_id}):
+                group, boxes = self._retirement_group(item), item["boxes"][class_id]
+                groups[group]["images"] += 1
+                groups[group]["boxes"] += boxes
+                if group == "archived":
+                    continue
+                states[item["state"]]["images"] += 1
+                states[item["state"]]["boxes"] += boxes
+                open_now += item["open_now"]
+                if item["only"] and group == "confirmed":
+                    empty_confirmed += 1
+                    if len(listed) < self.RETIREMENT_LIST_LIMIT:
+                        listed.append({"id": item["id"], "filename": item["filename"]})
+                elif item["only"]:
+                    empty_other += 1
+            settings = con.execute("SELECT settings_json FROM hosted_dataset_settings WHERE dataset_id=?", (dataset_id,)).fetchone()
+            targets = [{"id": item["id"], "name": item["name"]} for item in self._classes(con, dataset_id)
+                       if not item["retired"] and item["id"] != class_id]
+            live = [groups[key] for key in ("confirmed", "in_progress", "waiting_for_review")]
+            return {"dataset_id": dataset_id, "class": {"id": row["id"], "name": row["name"]},
+                    "class_version": dataset["class_version"],
+                    "images": sum(group["images"] for group in live), "boxes": sum(group["boxes"] for group in live),
+                    **groups, "by_state": states, "open_now": open_now,
+                    "empty_after_delete": {"confirmed": empty_confirmed, "confirmed_images": listed, "in_progress": empty_other},
+                    "model_settings": self._class_model_settings(json.loads(settings[0]) if settings else {}, class_id),
+                    "targets": targets, "last_active": not targets}
+
+    def _apply_retirements(self, con: sqlite3.Connection, actor: Actor, dataset_id: str,
+                           usage: list[dict[str, Any]]) -> dict[str, Any]:
+        """Write one new version per image so no current annotation uses a retired class.
+
+        State, assignee, generation and editor leases are left alone. A
+        confirmed image left with no boxes becomes a background image; callers
+        refuse beforehand unless the administrator agreed to that.
+        """
+        names = {row["id"]: row["name"] for row in self._classes(con, dataset_id)}
+        _, retired = self._class_dispositions(con, dataset_id)
+        class_version, now = self._dataset(con, dataset_id)["class_version"], self.clock()
+        totals = {"images": 0, "boxes": 0, "background_images": 0, "open_now": 0,
+                  **{key: {"images": 0, "boxes": 0} for key in ("confirmed", "in_progress", "waiting_for_review")}}
+        versions, events, current, confirmed = [], [], [], []
+        for item in usage:
+            annotations, changed, kept = item["annotations"], {}, []
+            for obj in annotations.get("objects") or []:
+                class_id = obj.get("class_id")
+                if class_id in retired:
+                    changed[class_id] = changed.get(class_id, 0) + 1
+                    if retired[class_id] is None:
+                        continue
+                    obj = {**obj, "class_id": retired[class_id]}
+                kept.append(obj)
+            if not changed:
+                continue
+            annotations["objects"] = kept
+            complete, negative = bool(item["complete"]), bool(item["negative"])
+            background = item["state"] == "confirmed" and not kept
+            if background:
+                complete = negative = True
+            version_id, value, boxes = _id("version"), _json(annotations), sum(changed.values())
+            versions.append((version_id, item["id"], item["current_version"], value, hashlib.sha256(value.encode()).hexdigest(),
+                             int(complete or negative), int(negative), class_version, actor.user_id, self.RETIREMENT_KIND, now))
+            summary = " ".join(self._retirement_sentence(names[class_id], count, names.get(retired[class_id]))
+                               for class_id, count in changed.items())
+            if background:
+                summary += " The image has no boxes left and was saved as a background image."
+            events.append((actor.user_id, dataset_id, item["id"], "class_retired", _json({
+                "version_id": version_id, "previous_version": item["current_version"], "background": background, "summary": summary,
+                "classes": [{"class_id": class_id, "class_name": names[class_id], "boxes": count,
+                             "merged_into": retired[class_id], "merged_into_name": names.get(retired[class_id])}
+                            for class_id, count in changed.items()]}), now))
+            current.append((version_id, now, item["id"]))
+            if item["state"] == "confirmed":
+                confirmed.append((version_id, item["id"]))
+            group = self._retirement_group({**item, "archived": 0})
+            totals["images"] += 1
+            totals["boxes"] += boxes
+            totals[group]["images"] += 1
+            totals[group]["boxes"] += boxes
+            totals["background_images"] += background
+            totals["open_now"] += item["open_now"]
+        con.executemany("INSERT INTO hosted_annotation_versions VALUES (?,?,?,?,?,?,?,?,?,?,?)", versions)
+        con.executemany("UPDATE hosted_images SET current_version=?,updated_at=? WHERE id=?", current)
+        con.executemany("UPDATE hosted_images SET confirmed_version=? WHERE id=?", confirmed)
+        con.executemany("INSERT INTO hosted_events(actor_id,dataset_id,image_id,kind,data_json,created_at) VALUES (?,?,?,?,?,?)", events)
+        return totals
+
+    def _retire_restored_images(self, con: sqlite3.Connection, actor: Actor, dataset_id: str, image_ids: list[str]) -> None:
+        """Images coming back from the archive follow the retirements they missed."""
+        _, retired = self._class_dispositions(con, dataset_id)
+        wanted = set(image_ids)
+        usage = [item for item in self._class_usage(con, dataset_id, set(retired)) if item["id"] in wanted] if retired and wanted else []
+        emptied = [item for item in usage if item["state"] == "confirmed" and item["only"]
+                   and all(retired[class_id] is None for class_id in item["boxes"])]
+        if emptied:
+            names = {row["id"]: row["name"] for row in self._classes(con, dataset_id)}
+            classes = sorted({names[class_id] for item in emptied for class_id in item["boxes"]})
+            raise DomainError("archive_uses_retired_class", 409,
+                f"{len(emptied):,} confirmed image{'' if len(emptied) == 1 else 's'} in this archive only "
+                f"{'has' if len(emptied) == 1 else 'have'} boxes of the retired class{'' if len(classes) == 1 else 'es'} "
+                f"{', '.join(f'“{name}”' for name in classes)}, whose boxes were deleted. "
+                "Restore the class under Classes first, then restore the archive.")
+        if usage:
+            self._apply_retirements(con, actor, dataset_id, usage)
+
+    def retire_class(self, actor: Actor, dataset_id: str, class_id: str, mode: str, operation_id: str,
+                     expected_class_version: int, *, target_class_id: str | None = None,
+                     background_empty: bool = False) -> dict[str, Any]:
+        """Retire a class and change every current annotation that uses it.
+
+        ``merge`` gives each box the target class (geometry, object id and
+        history kept); ``delete`` removes the boxes. Confirmed images get a new
+        confirmed version, the others a new draft in the same state with the
+        same assignee. Confirmed images that deleting would leave empty are
+        saved as background images only with ``background_empty``; otherwise
+        nothing is changed.
+        """
+        payload = dict(dataset_id=dataset_id, class_id=class_id, mode=mode, target_class_id=target_class_id,
+                       background_empty=background_empty, expected_class_version=expected_class_version)
+
+        def run(con: sqlite3.Connection) -> dict[str, Any]:
+            if self._dataset(con, dataset_id)["class_version"] != expected_class_version:
+                raise DomainError("class_version_changed", 409)
+            row = self._class_row(con, dataset_id, class_id)
+            if row["retired"]:
+                raise DomainError("class_already_retired", 409, "This class is already retired.")
+            if mode not in ("merge", "delete") or type(background_empty) is not bool or (mode == "delete" and target_class_id is not None):
+                raise DomainError("invalid_retirement", 422, "Choose whether to merge the boxes into another class or delete them.")
+            classes = {item["id"]: item for item in self._classes(con, dataset_id)}
+            if not any(not item["retired"] and item["id"] != class_id for item in classes.values()):
+                raise DomainError("class_last_active", 409, "A dataset needs at least one class. Add another class before retiring this one.")
+            target = None
+            if mode == "merge":
+                if not isinstance(target_class_id, str) or not target_class_id:
+                    raise DomainError("retire_target_required", 422, "Choose the class to merge the boxes into.")
+                if target_class_id == class_id:
+                    raise DomainError("retire_target_same", 409, "A class cannot be merged into itself. Choose another class.")
+                target = classes.get(target_class_id)
+                if target is None:
+                    raise DomainError("retire_target_missing", 409, "The class to merge into is not in this dataset. Refresh classes and choose again.")
+                if target["retired"]:
+                    raise DomainError("retire_target_retired", 409, f"“{target['name']}” is retired. Choose an active class to merge into.")
+            usage = [item for item in self._class_usage(con, dataset_id, {class_id}) if not item["archived"]]
+            emptied = sum(item["state"] == "confirmed" and item["only"] for item in usage) if mode == "delete" else 0
+            if emptied and not background_empty:
+                raise DomainError("retire_leaves_empty_images", 409,
+                    f"{emptied:,} confirmed image{'' if emptied == 1 else 's'} would be left with no boxes. "
+                    "Tick “Save them as background images” to continue, or give those images other boxes first.")
+            con.execute("UPDATE hosted_classes SET retired=1,merged_into=? WHERE id=?", (target["id"] if target else None, class_id))
+            self._renumber_classes(con, dataset_id)
+            version = self._class_revision(con, actor, dataset_id)
+            settings = con.execute("SELECT settings_json FROM hosted_dataset_settings WHERE dataset_id=?", (dataset_id,)).fetchone()
+            value = json.loads(settings[0]) if settings else {}
+            moved = self._class_model_settings(value, class_id)
+            for entry in moved:
+                # The label follows a merge; after a delete it is ignored (null).
+                selected = value[entry["kind"]]
+                value[entry["kind"]] = {**selected, "class_mapping": {
+                    label: (target["id"] if target else None) if linked == class_id else linked
+                    for label, linked in selected["class_mapping"].items()}}
+            if moved:
+                self._write_settings(con, actor, dataset_id, value)
+            totals = self._apply_retirements(con, actor, dataset_id, usage)
+            result = {"dataset_id": dataset_id, "class": {"id": class_id, "name": row["name"]}, "class_version": version,
+                      "mode": mode, "target": {"id": target["id"], "name": target["name"]} if target else None,
+                      **totals, "model_settings": moved}
+            self._event(con, actor, dataset_id, None, "class_retired", {key: value for key, value in result.items() if key != "dataset_id"})
+            return result
+        return self._command(actor, operation_id, "retire_class", payload, run, admin=True)
+
+    def restore_class(self, actor: Actor, dataset_id: str, class_id: str, operation_id: str,
+                      expected_class_version: int) -> dict[str, Any]:
+        """Put a retired class back in the active list. Boxes that were merged or deleted stay as they are."""
+        def run(con: sqlite3.Connection) -> dict[str, Any]:
+            if self._dataset(con, dataset_id)["class_version"] != expected_class_version:
+                raise DomainError("class_version_changed", 409)
+            row = self._class_row(con, dataset_id, class_id)
+            if not row["retired"]:
+                raise DomainError("class_not_retired", 409, "This class is not retired.")
+            con.execute("UPDATE hosted_classes SET retired=0,merged_into=NULL WHERE id=?", (class_id,))
+            self._renumber_classes(con, dataset_id)  # last among the active classes
+            version = self._class_revision(con, actor, dataset_id)
+            self._event(con, actor, dataset_id, None, "class_restored", {"class_id": class_id, "name": row["name"]})
+            return {"dataset_id": dataset_id, "class": {"id": class_id, "name": row["name"]}, "class_version": version}
+        return self._command(actor, operation_id, "restore_class", dict(dataset_id=dataset_id, class_id=class_id,
+                             expected_class_version=expected_class_version), run, admin=True)
 
     def request_class(self, actor: Actor, dataset_id: str, name: str, reason: str,
                       operation_id: str) -> dict[str, Any]:
@@ -1658,7 +2051,9 @@ class HostedStore(TrancheMixin):
         settings = con.execute("SELECT version,settings_json FROM hosted_dataset_settings WHERE dataset_id=?", (dataset_id,)).fetchone()
         return {"schema": "hosted-canonical-snapshot-v1", "dataset_id": dataset_id, "dataset_name": dataset["name"],
                 "revision": dataset["revision"], "class_version": dataset["class_version"],
-                "classes": self._classes(con, dataset_id), "images": images,
+                # Each snapshot stands alone: retired classes are left out and
+                # the remaining classes are numbered without gaps.
+                "classes": self._active_classes(con, dataset_id), "images": images,
                 "settings": json.loads(settings["settings_json"]) if settings else {},
                 "settings_version": settings["version"] if settings else 0}
 

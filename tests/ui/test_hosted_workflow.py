@@ -1352,3 +1352,71 @@ async def _dqe_corrections(origin):
             assert current['annotations']['objects'][0]['class_id'] == person
         assert not errors
         await browser.close()
+
+
+def test_admin_drag_selects_incoming_images_and_sees_their_boxes(hosted_origin, tmp_path):
+    asyncio.run(_drag_select(hosted_origin, tmp_path))
+
+
+async def _drag_select(origin, output):
+    from playwright.async_api import async_playwright, expect
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page(viewport={'width': 1280, 'height': 950})
+        errors = []; page.on('pageerror', lambda error: errors.append(str(error)))
+        await sign_in(page, origin, 'admin')
+        api = lambda path, body=None: page.evaluate("([path,body]) => window.TatorHostedDashboard.api(path, body === null ? {} : {method:'POST',body})", [path, body])
+        ds = await page.locator('#datasetChoice').input_value()
+        dataset = await api(f'/datasets/{ds}')
+        free = [image for image in (await api(f'/images?dataset_id={ds}'))['images'] if image['state'] == 'unassigned']
+        # A box over the middle of the first free 640 x 480 image.
+        boxed = await api(f"/images/{free[0]['id']}/editor", {'editor_id': 'grid-test', 'expected_version': free[0]['current_version'], 'generation': free[0]['generation']})
+        await api(f"/images/{boxed['id']}/save", {'expected_version': boxed['current_version'], 'generation': boxed['generation'], 'editor_id': 'grid-test', 'operation_id': str(uuid.uuid4()),
+            'annotations': {'objects': [{'id': 'middle', 'class_id': dataset['classes'][1]['id'], 'bbox': [160, 120, 320, 240]}]}})
+        await api(f"/images/{boxed['id']}/release", {'expected_version': (await api(f"/images/{boxed['id']}"))['current_version'], 'generation': boxed['generation'], 'editor_id': 'grid-test', 'operation_id': str(uuid.uuid4())})
+        await page.get_by_role('button', name='Incoming', exact=True).click()
+        cards = page.locator('#imageGrid .hosted-card')
+        await expect(cards).to_have_count(4)
+        await expect(page.locator('#imageMatchCount')).to_contain_text('Drag across images to select them')
+
+        # The overlay is the thumbnail's own geometry: the box covers its middle half.
+        card = page.locator(f"#imageGrid [data-image-id='{boxed['id']}']")
+        await expect(card.locator('.card-boxes path')).to_have_count(1)
+        await expect(card.locator('.card-boxes path')).to_have_attribute('stroke', '#dc2626')  # the canvas colour of the second class
+        frame = await card.locator('img').bounding_box()
+        drawn = await card.locator('.card-boxes path').evaluate("path => { const b = path.getBBox(), m = path.getScreenCTM(); return {x: m.e + b.x * m.a, y: m.f + b.y * m.d, width: b.width * m.a, height: b.height * m.d}; }")
+        shown_width = frame['height'] * 640 / 480
+        assert abs(drawn['x'] - (frame['x'] + frame['width'] / 2 - shown_width / 4)) < 1.5 and abs(drawn['width'] - shown_width / 2) < 1.5
+        assert abs(drawn['y'] - (frame['y'] + frame['height'] / 4)) < 1.5 and abs(drawn['height'] - frame['height'] / 2) < 1.5
+
+        # Drag from the first card's picture across all four: the three Not assigned ones are selected, nothing opens.
+        first, last = await cards.nth(0).bounding_box(), await cards.nth(3).bounding_box()
+        await page.mouse.move(first['x'] + 60, first['y'] + 80); await page.mouse.down()
+        await page.mouse.move(last['x'] + last['width'] - 20, last['y'] + 120, steps=10)
+        await expect(page.locator('.hosted-band')).to_contain_text('3 images selected')
+        await page.screenshot(path=str(output / 'drag-select.png'))
+        await page.mouse.up()
+        await expect(page.locator('#selectionCount')).to_have_text('3 images selected')
+        await expect(page.locator('#assign')).to_be_visible()
+        await expect(page.locator('#imageGrid input:checked')).to_have_count(3)
+        assert '/annotate' not in page.url
+
+        # Alt-drag takes images out again; Escape leaves the selection as it was.
+        first = await cards.nth(1).bounding_box()
+        await page.keyboard.down('Alt')
+        await page.mouse.move(first['x'] + 60, first['y'] + 80); await page.mouse.down()
+        await page.mouse.move(first['x'] + 90, first['y'] + 120, steps=4); await page.mouse.up()
+        await page.keyboard.up('Alt')
+        await expect(page.locator('#selectionCount')).to_have_text('2 images selected')
+        await page.mouse.move(first['x'] + 60, first['y'] + 80); await page.mouse.down()
+        await page.mouse.move(last['x'] + 60, last['y'] + 120, steps=6)
+        await page.keyboard.press('Escape'); await page.mouse.up()
+        await expect(page.locator('#selectionCount')).to_have_text('2 images selected')
+        assert '/annotate' not in page.url
+
+        # A plain click still opens the image.
+        await page.locator('#clearSelection').click()
+        await cards.nth(1).locator('a').click()
+        await page.wait_for_url('**/annotate?**')
+        assert not errors, errors
+        await browser.close()

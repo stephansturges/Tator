@@ -11,7 +11,7 @@
     // requests go to the server in chunks, one receipt per image.
     const SELECTION_LIMIT = 5000, BULK_CHUNK = 250;
     // The image grid's own state: box overlays, the next page loading as the end nears, and the drag selection.
-    const grid = {loading: 0, autoPaused: false, scrollQueued: false, refreshing: false, band: null, suppressClick: false, rows: new WeakMap(), overlays: null};
+    const grid = {loading: 0, autoPaused: false, scrollQueued: false, refreshing: false, band: null, suppressClick: false, filled: new Map(), pinned: new Set(), measured: false};
     const showBoxes = () => { try { return localStorage.getItem("tator.hosted.gridBoxes") !== "0"; } catch (_) { return true; } };
     function notice(message, error = false) {
         for (const element of [$("notice"), ...document.querySelectorAll("dialog[open] [data-dialog-notice]")]) { element.textContent = message; element.dataset.error = String(error); element.hidden = !message; }
@@ -351,10 +351,13 @@
         if (state.view === "submitted" && state.filters.annotator) route.set("annotator", state.filters.annotator);
         return `/annotate?${route}`;
     }
-    function drawCard(image) {
-        const card = node("article", undefined, "hosted-card"); card.dataset.imageId = image.id;
+    // Every loaded image has a card in the grid, but only the cards near the viewport have
+    // their picture, text and controls (see showNearbyCards). The rest are empty frames of
+    // the same size, which is what keeps a grid of many thousands of images quick.
+    function drawCard(image) { const card = node("article", undefined, "hosted-card"); card.dataset.imageId = image.id; return card; }
+    function fillCard(card, image) {
         const link = node("a"); link.href = cardLink(image);
-        const photo = node("img"); photo.decoding = "async"; photo.onerror = () => { photo.onerror = null; photo.src = `/api/hosted/images/${encodeURIComponent(image.id)}/media`; }; photo.src = `/api/hosted/images/${encodeURIComponent(image.id)}/thumbnail`; photo.alt = image.filename; photo.loading = "lazy";
+        const photo = node("img"); photo.decoding = "async"; photo.onerror = () => { photo.onerror = null; photo.src = `/api/hosted/images/${encodeURIComponent(image.id)}/media`; }; photo.src = `/api/hosted/images/${encodeURIComponent(image.id)}/thumbnail`; photo.alt = image.filename; photo.draggable = false;
         const info = node("div", undefined, "card-info"); info.append(node("strong", image.filename));
         const status = node("small", `${stateLabel(image)}${image.negative ? " · No target objects" : ""}`);
         status.dataset.state = image.state; if (image.state === "returned") status.dataset.tone = "warning";
@@ -366,7 +369,7 @@
         }
         if (image.tranche_name) info.append(node("small", `Tranche: ${image.tranche_name}`));
         link.append(photo, info); card.append(link);
-        if (image.boxes?.length) { grid.rows.set(card, image); grid.overlays.observe(card); }
+        if (image.boxes?.length) drawBoxes(link, image);
         if (image.boxes_truncated) info.append(node("small", `The first ${(image.boxes.length / 5).toLocaleString()} boxes are drawn`));
         if (state.session.user.role === "admin") {
             const history = node("button", "History", "card-history"); history.type = "button"; history.setAttribute("aria-label", `History of ${image.filename}`);
@@ -377,11 +380,51 @@
             check.dataset.image = image.id; check.checked = state.selected.has(image.id);
             check.onclick = event => { const at = state.images.findIndex(row => row.id === image.id), previous = state.images.findIndex(row => row.id === state.selectionAnchor); const rows = event.shiftKey && previous >= 0 ? state.images.slice(Math.min(at, previous), Math.max(at, previous) + 1) : [image]; for (const row of rows.filter(selectable)) { if (check.checked) state.selected.set(row.id, row); else state.selected.delete(row.id); } state.selectionAnchor = image.id; syncChecks(); }; card.append(check);
         }
-        return card;
     }
-    // ---- Boxes over the thumbnails. One SVG per card, made when the card nears the viewport.
+    // Columns and rows of the grid as it is laid out now. A row is read from its first card,
+    // and the rows meeting a stretch of the viewport are found by bisection, so this costs a
+    // few dozen readings however long the grid is.
+    function gridLayout() {
+        const cards = $("imageGrid").children, n = cards.length;
+        if (!n || !cards[0].offsetParent) return null;
+        const columns = [cards[0].getBoundingClientRect()];
+        for (let at = 1; at < n; at++) { const rect = cards[at].getBoundingClientRect(); if (rect.top > columns[0].top + 1) break; columns.push(rect); }
+        const cols = columns.length, rows = Math.ceil(n / cols), row = index => cards[index * cols].getBoundingClientRect();
+        const span = (top, bottom) => {
+            let low = 0, high = rows;
+            while (low < high) { const middle = (low + high) >> 1; if (row(middle).bottom < top) low = middle + 1; else high = middle; }
+            const first = low; high = rows;
+            while (low < high) { const middle = (low + high) >> 1; if (row(middle).top <= bottom) low = middle + 1; else high = middle; }
+            return [first, low - 1];
+        };
+        return {cards, n, columns, cols, rows, span};
+    }
+    function showNearbyCards() {
+        const filled = grid.filled, fill = index => { const card = $("imageGrid").children[index], image = state.images[index]; if (!filled.has(card) && image && card.dataset.imageId === image.id) { fillCard(card, image); filled.set(card, index); } };
+        for (const card of filled.keys()) if (card.parentNode !== $("imageGrid")) filled.delete(card);
+        if ($("imageGrid").hidden || !$("imageGrid").firstElementChild?.offsetParent) return;
+        if (!grid.measured) {
+            // Empty frames take the height of an ordinary filled card, so filling them later moves nothing.
+            const sample = Math.min(8, $("imageGrid").children.length); let height = Infinity;
+            for (let index = 0; index < sample; index++) fill(index);
+            for (let index = 0; index < sample; index++) height = Math.min(height, $("imageGrid").children[index].getBoundingClientRect().height);
+            $("imageGrid").style.setProperty("--card-height", `${height}px`); grid.measured = true;
+        }
+        const layout = gridLayout();
+        if (!layout) return;
+        const {cards, cols, n} = layout, [first, last] = layout.span(-innerHeight, 2 * innerHeight), [keepFirst, keepLast] = layout.span(-4 * innerHeight, 5 * innerHeight);
+        // Read first, then change: cards far from the viewport keep their size and lose their content.
+        const drop = [];
+        for (const [card, index] of filled) if ((index < keepFirst * cols || index >= (keepLast + 1) * cols) && !card.contains(document.activeElement)) drop.push([card, card.getBoundingClientRect().height]);
+        for (const [card, size] of drop) { card.style.minHeight = `${size}px`; grid.pinned.add(card); card.replaceChildren(); filled.delete(card); }
+        for (let index = Math.max(0, first * cols); index < Math.min(n, (last + 1) * cols); index++) fill(index);
+    }
+    window.addEventListener("resize", () => requestAnimationFrame(showNearbyCards));
+    // Narrow screens use a shorter thumbnail, so the frames are measured again.
+    matchMedia("(max-width:700px)").addEventListener("change", () => { grid.measured = false; for (const card of grid.pinned) card.style.minHeight = ""; grid.pinned.clear(); $("imageGrid").style.removeProperty("--card-height"); showNearbyCards(); });
+    // ---- Boxes over the thumbnails: one SVG per card.
     // Colours follow the annotation canvas (ybat.js: curatedClassColors and generatedClassColor),
-    // by the class's place in the dataset's class list.
+    // by the position of the active class; a retired class is drawn grey.
     const CLASS_COLORS = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c", "#0891b2", "#ca8a04", "#db2777", "#4f46e5", "#65a30d", "#be123c", "#0d9488", "#7c3aed", "#d97706", "#0284c7", "#c026d3",
         "#1d4ed8", "#b91c1c", "#15803d", "#6d28d9", "#f97316", "#0f766e", "#a16207", "#be185d", "#4338ca", "#4d7c0f", "#e11d48", "#0369a1", "#a21caf", "#92400e", "#059669", "#7e22ce",
         "#3b82f6", "#ef4444", "#22c55e", "#a855f7", "#f59e0b", "#06b6d4", "#84cc16", "#ec4899", "#6366f1", "#14b8a6", "#f43f5e", "#8b5cf6", "#fb7185", "#10b981", "#eab308", "#38bdf8"];
@@ -391,18 +434,15 @@
         const extra = index - CLASS_COLORS.length, band = extra % 4;
         return `hsl(${((23 + extra * 137.508) % 360).toFixed(1)} ${[82, 68, 90, 74][band]}% ${[46, 58, 38, 66][band]}%)`;
     }
-    function drawBoxes(card, image) {
+    function drawBoxes(card, image) { // card: the card's link, which holds the thumbnail
         const NS = "http://www.w3.org/2000/svg", svg = document.createElementNS(NS, "svg"), group = document.createElementNS(NS, "g"), flat = image.boxes, paths = new Map();
         // The same fit as the thumbnail (object-fit: contain); boxes are thousandths of the image's width and height.
         svg.setAttribute("viewBox", `0 0 ${image.media_width} ${image.media_height}`); svg.setAttribute("class", "card-boxes"); svg.setAttribute("aria-hidden", "true");
         group.setAttribute("transform", `scale(${image.media_width / 1000} ${image.media_height / 1000})`);
         for (let at = 0; at + 4 < flat.length; at += 5) paths.set(flat[at], `${paths.get(flat[at]) || ""}M${flat[at + 1]} ${flat[at + 2]}h${flat[at + 3]}v${flat[at + 4]}h-${flat[at + 3]}z`);
         for (const [index, d] of paths) { const path = document.createElementNS(NS, "path"), colour = classColor(index); path.setAttribute("d", d); path.setAttribute("stroke", colour); path.setAttribute("fill", colour); group.append(path); }
-        svg.append(group); card.firstElementChild.append(svg);
+        svg.append(group); card.append(svg);
     }
-    grid.overlays = new IntersectionObserver(entries => {
-        for (const entry of entries) if (entry.isIntersecting) { grid.overlays.unobserve(entry.target); const image = grid.rows.get(entry.target); if (image) drawBoxes(entry.target, image); }
-    }, {rootMargin: "600px 0px"});
     function drawMatchCount() {
         if (state.total === null) { $("imageMatchCount").textContent = ""; return; }
         const shown = state.images.length < state.total ? ` · ${state.images.length.toLocaleString()} shown` : "";
@@ -425,7 +465,7 @@
         }
         if (grouped) { clearSelection(); state.images = []; await window.TatorHostedTranches?.show(); return; }
         window.TatorHostedTranches?.hide();
-        if (!append) { state.cursor = null; state.total = null; clearSelection(); state.images = []; $("imageGrid").replaceChildren(); }
+        if (!append) { state.cursor = null; state.total = null; clearSelection(); state.images = []; $("imageGrid").replaceChildren(); grid.measured = false; grid.pinned.clear(); $("imageGrid").style.removeProperty("--card-height"); }
         if (!id) { $("empty").hidden = false; $("empty").textContent = state.session.user.role === "admin" ? "Start with New dataset: name it and list its classes. Then add images to Incoming." : "No editable work is currently assigned to you."; $("more").hidden = $("moreAll").hidden = true; return; }
         const query = queueQuery(limit);
         if (showBoxes()) query.set("boxes", "true");
@@ -437,6 +477,7 @@
         const fragment = document.createDocumentFragment();
         for (const image of result.images) fragment.append(drawCard(image));
         $("imageGrid").append(fragment);
+        showNearbyCards();
         $("empty").hidden = state.images.length !== 0;
         const filtered = state.filters.q || (state.view === "incoming" && state.filters.incoming !== "incoming") || (state.view === "submitted" && (state.filters.tranche || state.filters.annotator));
         $("empty").textContent = filtered ? "No images match these filters." : state.view === "submitted" ? "No images are waiting for review." : state.view === "confirmed" ? "No confirmed images yet. Add images in Incoming and approve them to build this dataset." : "No images in Incoming. Use Add images to upload new ones.";
@@ -451,7 +492,7 @@
         if ($("moreRow").getBoundingClientRect().top > innerHeight + 1500) return;
         loadImages(true, 200).catch(error => { grid.autoPaused = true; if (!error.stale) notice(error.message, true); });
     }
-    window.addEventListener("scroll", () => { if (grid.scrollQueued) return; grid.scrollQueued = true; requestAnimationFrame(() => { grid.scrollQueued = false; nearEnd(); }); }, {passive: true});
+    window.addEventListener("scroll", () => { if (grid.scrollQueued) return; grid.scrollQueued = true; requestAnimationFrame(() => { grid.scrollQueued = false; showNearbyCards(); nearEnd(); }); }, {passive: true});
     async function loadAll() {
         const remaining = state.total - state.images.length;
         if (remaining > 2000 && !window.confirm(`Load all ${remaining.toLocaleString()} remaining images? Very long lists can make this page slow; a search or filter keeps it quick.`)) return;
@@ -949,22 +990,16 @@
     };
 
     // ---- Drag selection: press in the grid and drag a rectangle over the images. Alt-drag deselects.
-    // The rows a rectangle covers are found by bisection, so a frame reads a few dozen card
-    // positions however long the grid is; only cards entering or leaving the rectangle are touched.
+    // Only cards entering or leaving the rectangle are touched in a frame.
     function bandRange(band) {
-        const cards = $("imageGrid").children, n = cards.length;
-        if (!n) return null;
+        const layout = gridLayout();
+        if (!layout) return null;
+        const {columns, cols, n} = layout;
         const startY = band.pageY - scrollY, left = Math.min(band.x0, band.x), right = Math.max(band.x0, band.x), top = Math.min(startY, band.y), bottom = Math.max(startY, band.y);
-        const columns = [cards[0].getBoundingClientRect()];
-        for (let at = 1; at < n; at++) { const rect = cards[at].getBoundingClientRect(); if (rect.top > columns[0].top + 1) break; columns.push(rect); }
-        const cols = columns.length, rows = Math.ceil(n / cols), row = index => cards[index * cols].getBoundingClientRect();
-        let low = 0, high = rows;
-        while (low < high) { const middle = (low + high) >> 1; if (row(middle).bottom < top) low = middle + 1; else high = middle; }
-        const r0 = low; high = rows;
-        while (low < high) { const middle = (low + high) >> 1; if (row(middle).top <= bottom) low = middle + 1; else high = middle; }
+        const [r0, r1] = layout.span(top, bottom);
         let c0 = cols, c1 = -1;
         columns.forEach((rect, column) => { if (rect.right >= left && rect.left <= right) { c0 = Math.min(c0, column); c1 = column; } });
-        return {r0, r1: low - 1, c0, c1, cols, n};
+        return {r0, r1, c0, c1, cols, n};
     }
     function bandApply(band) {
         const next = bandRange(band), previous = band.range, cards = $("imageGrid").children;
@@ -994,10 +1029,11 @@
         const edge = 70, speed = band.y > innerHeight - edge ? Math.min(70, 6 + (band.y - innerHeight + edge) * 0.7) : band.y < edge ? -Math.min(70, 6 + (edge - band.y) * 0.7) : 0;
         if (speed) scrollBy(0, speed);
         bandApply(band);
-        const startY = band.pageY - scrollY, style = band.box.style;
-        style.left = `${Math.min(band.x0, band.x)}px`; style.top = `${Math.min(startY, band.y)}px`; style.width = `${Math.abs(band.x - band.x0)}px`; style.height = `${Math.abs(band.y - startY)}px`;
+        // The rectangle is drawn only as far as the window's edges; the count stays beside the pointer.
+        const startY = band.pageY - scrollY, style = band.box.style, top = Math.max(-2, Math.min(startY, band.y)), bottom = Math.min(innerHeight + 2, Math.max(startY, band.y));
+        style.left = `${Math.min(band.x0, band.x)}px`; style.top = `${top}px`; style.width = `${Math.abs(band.x - band.x0)}px`; style.height = `${Math.max(0, bottom - top)}px`;
         const text = `${count(state.selected.size, "image")} selected${band.full ? ` · at most ${SELECTION_LIMIT.toLocaleString()}` : ""}`;
-        if (band.label.textContent !== text) band.label.textContent = text;
+        if (band.label.textContent !== text) { band.label.textContent = text; if (!$("selectionBar").hidden) selection(); }
         band.frame = requestAnimationFrame(bandTick);
     }
     function bandStart(band) {

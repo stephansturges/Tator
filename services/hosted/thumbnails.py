@@ -7,6 +7,7 @@ and deleting the cache directory only costs regeneration time.
 """
 from __future__ import annotations
 
+import collections
 import os
 import tempfile
 import threading
@@ -30,6 +31,8 @@ class Thumbnails:
         self._slots = threading.BoundedSemaphore(concurrency)
         self._guard = threading.Lock()
         self._keys: dict[tuple[str, int], threading.Lock] = {}
+        self._pending: collections.deque[tuple[str, int]] = collections.deque(maxlen=20000)
+        self._warmer: threading.Thread | None = None
 
     @staticmethod
     def etag(digest: str, size: int) -> str:
@@ -53,6 +56,34 @@ class Thumbnails:
         with self._guard:
             self._keys.pop((digest, size), None)
         return target
+
+    def warm(self, digest: str, size: int = DEFAULT_THUMBNAIL_SIZE) -> None:
+        """Make one thumbnail in the background, after an upload.
+
+        One worker at a time, through the same slots as viewers, so a long
+        upload leaves the other slots to people looking at the grid. A failure
+        only means the thumbnail is made on its first view instead.
+        """
+        self._pending.append((digest, size))
+        with self._guard:
+            if self._warmer is None or not self._warmer.is_alive():
+                self._warmer = threading.Thread(target=self._warm, name="hosted-thumbnail-warmer", daemon=True)
+                self._warmer.start()
+
+    def _warm(self) -> None:
+        while True:
+            try:
+                digest, size = self._pending.popleft()
+            except IndexError:
+                with self._guard:
+                    if not self._pending:
+                        self._warmer = None
+                        return
+                continue
+            try:
+                self.get(digest, size)
+            except Exception:  # noqa: BLE001 - a cache; the first view retries and reports
+                pass
 
     def _render(self, digest: str, size: int, target: Path) -> None:
         view = self.media.resolve(digest)

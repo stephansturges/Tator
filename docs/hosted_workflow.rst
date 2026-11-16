@@ -44,10 +44,46 @@ importer v5), check and correct the boxes on the canvas and approve the image;
 approving ends the decision.
 
 **Select all matching** selects up to 5,000 eligible images, including those not
-yet displayed; only Not assigned images can be selected in Incoming. **Load more
+yet displayed; only Not assigned images can be selected in Incoming. The next
+200 images load by themselves as the end of the grid nears. **Load more
 images** adds 100 at a time and **Load all remaining** loads the rest, with a
-warning above 2,000. Administrators can then act on the selection from the
-Incoming grid, after one confirmation that states the count:
+warning above 2,000.
+
+Administrators can also select by dragging. Press the mouse anywhere in the
+grid, on a card or between cards, and drag: once the pointer has moved a few
+pixels a rectangle appears, and every selectable image it touches is selected
+in addition to what was selected before. Hold **Alt** (**Option** on a Mac)
+while dragging to deselect instead. Near the top or bottom edge of the window
+the page scrolls and the rectangle keeps growing, across everything loaded and
+the pages that load on the way. **Esc** during the drag puts the selection back
+as it was. A click without dragging still opens the image, and the checkboxes
+and Shift-click work as before; Ctrl-, Cmd- and Shift-clicks on a card keep
+their browser meaning. Dragging selects with the mouse only, so touch screens
+scroll as usual. One selection holds at most 5,000 images. The selection bar
+stays at the top of the window while scrolling.
+
+What a selection can do depends on the view. In Incoming, **Create tranche from
+selection** reserves the images in a new tranche and, with **Assign now**, gives
+them to an annotator; one selection can put at most 500 images into a tranche,
+and the bar says so when more are selected. In Confirmed, **Set training split**
+works on the selection; confirmed images cannot be handed to an annotator. In
+Review the selection can be approved.
+
+**Show boxes** draws each image's boxes over its thumbnail, in the class
+colours of the canvas. The boxes are those of the version the card describes:
+the confirmed version in Confirmed, the current draft or submission elsewhere.
+A polygon is drawn as its box, a box of a retired class is grey, and at most
+300 boxes are drawn per image (the card says when there are more). The choice
+is remembered in the browser and is on by default.
+
+Only the cards near the visible part of the grid hold their picture and text;
+the others are empty frames of the same size, filled as they come near. A long
+grid therefore stays quick, and the browser's own find-in-page reaches only the
+cards near the window; use **Find images** to search all filenames. When the
+tab is opened again, the grid is redrawn only if its first page has changed.
+
+Administrators can act on the selection from the Incoming grid, after one
+confirmation that states the count:
 
 * **Approve selected** approves the selected images that have labels, as they are.
 * **Confirm as background** records the selected images without labels as having

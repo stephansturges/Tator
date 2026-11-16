@@ -60,7 +60,7 @@ def _string(value, field, maximum, *, empty=False):
 def _grid_boxes(objects_json, width, height, class_index):
     """Flat ``[class, x, y, w, h, ...]`` for the grid overlay, and whether it was cut short.
 
-    ``class`` is the class's place in the dataset's class list (-1 when unknown).
+    ``class`` is the position of an active class; -1 for a retired or unknown one.
     A polygon is represented by its box.
     """
     try:
@@ -662,7 +662,9 @@ class TrancheMixin:
             if boxes:
                 # The grid draws the version it shows a status for: a confirmed image's
                 # current version is its confirmed one; elsewhere it is the draft.
-                class_index = {row['id']: index for index, row in enumerate(self._classes(con, dataset_id))}
+                # Colours follow the canvas, which numbers the active classes by position.
+                # A box of a retired class (an older version) gets -1 and is drawn grey.
+                class_index = {row['id']: row['position'] for row in self._classes(con, dataset_id) if not row['retired']}
                 for image in images:
                     image['boxes'], truncated = _grid_boxes(image.pop('objects_json'), image['media_width'], image['media_height'], class_index)
                     if truncated:

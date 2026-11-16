@@ -43,11 +43,38 @@ It follows ``b19464d``.
   end of the class list. It does not undo the merge or delete. Adding or approving a class whose name
   belongs to a retired class says to restore it instead.
 
+The image grid, also untested on a server (one browser walk and timings on a
+development Mac, against a synthetic dataset of 20,500 small images):
+
+* Administrators can drag a rectangle over the grid to select images; Alt-drag
+  (Option on a Mac) deselects, **Esc** cancels, and the page scrolls when the
+  pointer nears the top or bottom edge. A click still opens the image and the
+  checkboxes and Shift-click are unchanged. The selection bar stays at the top
+  of the window.
+* **Show boxes** draws each image's current boxes over its thumbnail in the
+  canvas's class colours (on by default, remembered in the browser). The grid
+  asks the server for them with the image list: about 1.5 times the bytes of
+  the list without boxes on the test data, and at most 300 boxes per image.
+* The next page of images loads as the end of the grid nears; **Load more
+  images** and **Load all remaining** stay.
+* Only the cards near the window hold their picture and text. With 18,000
+  images loaded, a fast scroll went from a median 42 ms per frame with 35
+  long tasks to 16 ms with none, and the page from 199,000 to 21,000 elements.
+* Thumbnails are made in the background when an image is uploaded, and browsers
+  no longer ask again for a thumbnail they hold. Returning to the tab redraws
+  the grid only when its first page changed.
+
 Automated checks run: the hosted test suite and the hosted browser tests.
 
 Known limits
 ~~~~~~~~~~~~
 
+* One selection can put at most 500 images into a tranche, and confirmed
+  images cannot be handed to an annotator; the grid does not change either.
+* The browser's find-in-page reaches only the cards near the window. **Find
+  images** searches every filename.
+* Drag selection is for the mouse. On a touch screen use the checkboxes.
+* Images added by a migration import get their thumbnail on first view.
 * Saved SAM3 recipes and cascade presets name their output class. One that
   names a retired class stops with a message until it is detached or the
   class is restored; it does not follow a merge. The remaining classes are

@@ -416,3 +416,32 @@ def test_intake_search_review_filters_and_cursor_binding(store):
     error('invalid_cursor', lambda: store.image_queue(ADMIN, ds['id'], queue='incoming', q='changed', cursor=first['next_cursor']))
     error('admin_required', lambda: store.image_queue(ALICE, ds['id'], queue='incoming'))
     error('admin_required', lambda: store.image_queue(ALICE, ds['id'], tranche_id=tranche['id'], queue='work', annotator_id=BOB.user_id))
+
+
+def test_grid_queue_boxes_follow_the_shown_version_role_scope_and_cap(store):
+    from test_hosted_store import assigned
+    from services.hosted.errors import DomainError
+    ds = dataset(store); car = ds['classes'][0]['id']
+    confirmed = imported(store, ds, 'confirmed', objects(ds))
+    store.confirm_incoming_image(ADMIN, ctx(confirmed, 'confirm-grid'), dataset_id=ds['id'], mode='labelled')
+    crowded = imported(store, ds, 'crowded', {'objects': [{'id': f'o{n}', 'class_id': car, 'bbox': [n % 90, 0, 5, 5]} for n in range(301)]})
+    mine = assigned(store, ds, imported(store, ds, 'mine'), ALICE)
+    other = assigned(store, ds, imported(store, ds, 'other', objects(ds)), BOB)
+    mine = store.acquire_editor(ALICE, mine['id'], 'editor')
+    store.save(ALICE, ctx(mine, 'draft-grid', 'editor'), {'objects': [{'id': 'new', 'class_id': car, 'bbox': [50, 40, 25, 20]}]})
+
+    # Thousandths of the 100 x 80 image: [class position, x, y, w, h].
+    shown = store.image_queue(ADMIN, ds['id'], queue='confirmed', boxes=True)['images']
+    assert [(i['id'], i['boxes'], i['media_width'], i['media_height']) for i in shown] == [(confirmed['id'], [0, 10, 25, 100, 188], 100, 80)]
+    incoming = {i['id']: i for i in store.image_queue(ADMIN, ds['id'], queue='incoming', boxes=True)['images']}
+    assert incoming[mine['id']]['boxes'] == [0, 500, 500, 250, 250]  # the current draft, not the imported version
+    assert len(incoming[crowded['id']]['boxes']) == 300 * 5 and incoming[crowded['id']]['boxes_truncated'] is True
+    assert 'boxes_truncated' not in incoming[mine['id']] and 'objects_json' not in incoming[mine['id']]
+    assert 'boxes' not in store.image_queue(ADMIN, ds['id'], queue='incoming')['images'][0]
+
+    # An annotator gets boxes only through their own work queue.
+    work = store.image_queue(ALICE, ds['id'], tranche_id=incoming[mine['id']]['tranche_id'], queue='work', boxes=True)['images']
+    assert [(i['id'], i['boxes']) for i in work] == [(mine['id'], [0, 500, 500, 250, 250])]
+    error('admin_required', lambda: store.image_queue(ALICE, ds['id'], queue='incoming', boxes=True))
+    with pytest.raises(DomainError):
+        store.image_queue(ALICE, ds['id'], tranche_id=incoming[other['id']]['tranche_id'], queue='work', boxes=True)

@@ -511,11 +511,15 @@ def create_app(state_dir: str | Path | None = None, *, testing=False, origin: st
         with artifacts.exclusive():
             media_store.stage(file.file)
             if yolo_labels is not None:
-                return store.import_yolo_image(identity, dataset_id, info.source_sha256, filename, yolo_labels, names,
-                                              expected_class_version, operation_id, width=info.width, height=info.height, size_bytes=info.size_bytes,
-                                              media_info=info, label_coordinate_space=label_coordinate_space)
-            return store.import_image(identity, dataset_id, info.source_sha256, filename, labels, operation_id, width=info.width, height=info.height, size_bytes=info.size_bytes, split='unsplit',
-                                      media_info=info, label_coordinate_space=label_coordinate_space)
+                result = store.import_yolo_image(identity, dataset_id, info.source_sha256, filename, yolo_labels, names,
+                                                expected_class_version, operation_id, width=info.width, height=info.height, size_bytes=info.size_bytes,
+                                                media_info=info, label_coordinate_space=label_coordinate_space)
+            else:
+                result = store.import_image(identity, dataset_id, info.source_sha256, filename, labels, operation_id, width=info.width, height=info.height, size_bytes=info.size_bytes, split='unsplit',
+                                            media_info=info, label_coordinate_space=label_coordinate_space)
+        # The grid's thumbnail is made now, in the background, rather than on the first view.
+        thumbnails.warm(info.source_sha256)
+        return result
 
     @app.post("/api/hosted/datasets/{dataset_id}/assignments")
     def assign(dataset_id: str, body: Assignment, identity: Actor = Depends(admin)):

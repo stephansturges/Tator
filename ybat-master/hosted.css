@@ -122,8 +122,8 @@ input:not([type=checkbox]):not([type=radio]),select,textarea{border-color:var(--
 .hosted-card>a:focus-visible{outline-offset:-3px;border-radius:10px}
 /* Phones: tabs and dataset actions wrap onto a second line instead of running off the screen. */
 @media(max-width:700px){#views,.hosted-actions{flex-wrap:wrap;overflow-x:visible}}
-/* Image grid: off-screen cards are not rendered, boxes sit exactly over the thumbnail, the selection bar stays in view. */
-#imageGrid>.hosted-card{content-visibility:auto;contain-intrinsic-block-size:auto 262px}
+/* Image grid: cards away from the viewport are empty frames, boxes sit exactly over the thumbnail, the selection bar stays in view. */
+#imageGrid>.hosted-card{min-height:var(--card-height,0px)}
 .hosted-card .card-boxes{position:absolute;top:0;left:0;width:100%;height:170px;pointer-events:none}
 .hosted-card .card-boxes path{fill-opacity:.1;stroke-width:1.5;vector-effect:non-scaling-stroke}
 .hosted-grid.boxes-off .card-boxes{display:none}

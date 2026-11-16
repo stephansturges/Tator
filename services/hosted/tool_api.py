@@ -54,6 +54,19 @@ RUNTIME_MESSAGES = {
     "runtime_payload_budget_exceeded": "The server is busy with large tool requests. Try again in a moment.",
     "runtime_configuration_changed": "The server's model settings changed while this request waited. Run the tool again.",
 }
+# Request fields every Incoming diversity task accepts, whatever its server
+# configuration lists: its inputs and the object-aware comparison settings.
+INGESTION_PARAMETERS = ("candidate_image_ids", "salad_head_id", "object_aware", "object_weight", "detector_confidence")
+OBJECT_ENCODER_ROOTS = {"DINOV3_TORCH_MODEL_ROOT", "MLX_DINOV3_MODEL_ROOT"}
+
+
+def heavy_allowed_parameters(definition):
+    allowed = list(definition.get("allowed_parameters", []))
+    if definition.get("operation") == "ingestion":
+        allowed.extend(key for key in INGESTION_PARAMETERS if key not in allowed)
+    return allowed
+
+
 PARAMETERS = {"point_x", "point_y", "positive_points", "negative_points", "bbox_left", "bbox_top", "bbox_width", "bbox_height",
               "local_refine", "uuid", "slot", "conf", "iou", "max_det", "slice_size", "overlap", "merge_iou",
               "text_prompt", "prompt", "threshold", "mask_threshold", "min_size", "max_results", "windowed", "window_size", "window_overlap", "simplify_epsilon", "bboxes", "bbox_labels"}
@@ -560,6 +573,34 @@ class ToolController:
         if set(mapping) != set(definition["labels"]) or any(value is not None and value not in classes for value in mapping.values()):
             raise DomainError("tool_class_mapping_changed", 409, "An administrator must check this model's dataset classes.")
         return selected, {label: classes[class_id] if class_id is not None else None for label, class_id in mapping.items()}
+
+    def _ingestion_object_mode(self, actor, dataset_id, definition):
+        """Whether an Incoming diversity task can also compare detected objects.
+
+        It needs the dataset's detector, the DINOv3 files this task describes
+        boxes with, and confirmed images to compare against. The reason it
+        cannot run is returned in plain words; nothing falls back silently.
+        """
+        from services.hosted.ingestion_objects import DETECTOR_CONFIDENCE_DEFAULT, MAX_BOXES_PER_IMAGE
+        from services.data_ingestion import OBJECT_WEIGHT_DEFAULT
+        dataset = self.store.get_dataset(actor, dataset_id)
+        mode = {"available": False, "reason": None, "detector": None,
+                "defaults": {"object_weight": OBJECT_WEIGHT_DEFAULT, "detector_confidence": DETECTOR_CONFIDENCE_DEFAULT},
+                "max_boxes_per_image": MAX_BOXES_PER_IMAGE}
+        try:
+            selection, bindings = self._dataset_model(dataset, "detector", required=False)
+        except DomainError as exc:
+            return {**mode, "reason": exc.detail if isinstance(exc.detail, str) else "This dataset's detector needs to be confirmed again in Tools & models."}
+        if not selection:
+            return {**mode, "reason": "This dataset has no detector. Choose one in Tools & models first."}
+        model = self._definition(selection["model_id"])
+        mode["detector"] = {"model_id": selection["model_id"], "kind": model["kind"]}
+        config = definition.get("config", {})
+        if not OBJECT_ENCODER_ROOTS & set(config.get("model_environment", {})):
+            return {**mode, "reason": "This task's server configuration has no DINOv3 model files to describe objects with. Ask the operator to add them to the task."}
+        if int((dataset.get("counts") or {}).get("confirmed") or 0) < 2:
+            return {**mode, "reason": "Comparing objects needs at least two confirmed images with boxes."}
+        return {**mode, "available": True, "selection": selection, "bindings": bindings, "model": model, "dataset": dataset}
 
     def _qwen_config(self, actor, *, required):
         policy = self.configuration.get("user_qwen", {})
@@ -1128,9 +1169,16 @@ class ToolController:
             result["unavailable_models"] = dict(self.unavailable_models)
             result["heavy_jobs"] = sorted(self.configuration.get("heavy_jobs", {}))
             result["heavy_job_options"] = {name: {"operation": value["operation"],
-                "label": value.get("label", name), "allowed_parameters": list(value.get("allowed_parameters", [])),
+                "label": value.get("label", name), "allowed_parameters": heavy_allowed_parameters(value),
                 "defaults": {key: item for key, item in value.get("defaults", {}).items() if key in value.get("allowed_parameters", [])}}
                 for name, value in self.configuration.get("heavy_jobs", {}).items()}
+            if dataset:
+                # Whether each Incoming diversity task can also compare detected
+                # objects for this dataset, and why not when it cannot.
+                for name, value in self.configuration.get("heavy_jobs", {}).items():
+                    if value.get("operation") == "ingestion":
+                        mode = self._ingestion_object_mode(actor, dataset_id, value)
+                        result["heavy_job_options"][name]["object_mode"] = {key: mode[key] for key in ("available", "reason", "detector", "defaults", "max_boxes_per_image")}
         if dataset_id:
             result["detector"] = dataset["settings"].get("detector")
             result["classifier"] = dataset["settings"].get("classifier")
@@ -1298,11 +1346,19 @@ class ToolController:
             definition = self.configuration.get("heavy_jobs", {}).get(body.job)
             if not isinstance(definition, dict):
                 raise DomainError("heavy_tool_not_configured", 503)
-            if set(body.parameters) - set(definition.get("allowed_parameters", [])):
+            if set(body.parameters) - set(heavy_allowed_parameters(definition)):
                 raise DomainError("tool_parameter_not_allowed", 422)
             native = definition["factory"] == NATIVE_ANALYSIS_FACTORY
+            if native and definition["operation"] == "ingestion":
+                # Refuse before anything is captured when objects were asked
+                # for and cannot be compared.
+                from services.hosted.ingestion_objects import validate_parameters
+                if validate_parameters(body.parameters):
+                    mode = self._ingestion_object_mode(actor, body.dataset_id, definition)
+                    if not mode["available"]:
+                        raise DomainError("ingestion_object_mode_unavailable", 409, mode["reason"])
             spec = AdapterSpec(definition["factory"], {**definition.get("config", {}),
-                **({"allowed_parameters": definition.get("allowed_parameters", [])} if native else {}),
+                **({"allowed_parameters": heavy_allowed_parameters(definition)} if native else {}),
                 "canonical_root": str(self.media_root)}, definition["device"])
         new_command = False
         planned_id = uuid.uuid4().hex
@@ -1428,6 +1484,32 @@ class ToolController:
                     injected_cache.extend(profiles["cache_inputs"])
                     if definition["operation"] == "ingestion":
                         native_config["hosted_salad_heads"] = {head["id"]: head["head_sha256"] for head in profiles["heads"] if head["representation_scope"] == "whole_image"}
+                        from services.hosted.ingestion_objects import RECIPE_KEYS, validate_parameters
+                        if validate_parameters(parameters):
+                            # Pin the dataset's detector weights for this job and
+                            # record which detector it was. The dataset's own
+                            # detector setting is only read.
+                            mode = self._ingestion_object_mode(actor, body.dataset_id, definition)
+                            if not mode["available"]:
+                                raise DomainError("ingestion_object_mode_unavailable", 409, mode["reason"])
+                            model, selection = mode["model"], mode["selection"]
+                            ref = self.artifacts.pin(model["checkpoint_sha256"], directory)
+                            relative = "object-detector/weights" + Path(model["checkpoint"]).suffix
+                            injected_cache.append({"namespace": "models", "relative_path": relative, "path": str(directory / ref.sha256), **ref.as_dict()})
+                            labelmap = [row["name"] for row in sorted(mode["dataset"]["classes"], key=lambda row: row["position"]) if not row["retired"]]
+                            native_config["object_detector"] = {"model_id": selection["model_id"], "model_identity": selection["model_identity"],
+                                "relative_path": "models/" + relative, "class_bindings": mode["bindings"], "dataset_labelmap": labelmap,
+                                "model": {key: model[key] for key in ("model_id", "kind", "variant", "labels", "class_ids", "checkpoint_sha256") if key in model}}
+                            # The object descriptor follows the dataset's pruning
+                            # object recipe, so both tools describe a box alike.
+                            pruning = next((value.get("config", {}).get("parameters", {}) for value in self.configuration.get("heavy_jobs", {}).values()
+                                            if isinstance(value, dict) and value.get("operation") == "pruning"), {})
+                            recipe = {"object_recipe": "thorough_quality_v1", **pruning, **profiles["pruning_defaults"]}
+                            native_config["object_recipe"] = {key: recipe[key] for key in RECIPE_KEYS if key in recipe}
+                            previous_cache = self.analysis.object_descriptor_cache(actor, body.dataset_id, directory)
+                            if previous_cache:
+                                injected_cache.append(previous_cache)
+                            capture_provenance.update(object_detector_model_id=selection["model_id"], object_detector_identity=selection["model_identity"])
                     if definition["operation"] == "pruning":
                         native_config["parameters"] = {**native_config.get("parameters", {}), **profiles["pruning_defaults"]}
                     elif definition["operation"] == "dqe":

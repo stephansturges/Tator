@@ -674,6 +674,34 @@ def test_ingestion_admission_pins_separate_unassigned_candidates(system, monkeyp
     assert system["admin_client"].post("/api/hosted/tools/heavy", json=body).json()["error"] == "ingestion_candidate_not_unassigned_incoming"
 
 
+def test_object_aware_ingestion_is_refused_up_front_when_it_cannot_run(system):
+    """Asking for objects never quietly becomes a whole-image run."""
+    from services.hosted.tool_api import NATIVE_ANALYSIS_FACTORY
+    controller, dataset_id = system["controller"], system["dataset"]["id"]
+    task = {"factory": NATIVE_ANALYSIS_FACTORY, "config": {"native_root": str(system["root"] / "native")},
+            "device": "cpu", "operation": "ingestion", "allowed_parameters": [], "timeout": 30}
+    controller.configuration["heavy_jobs"]["ingestion"] = task
+    def start():
+        return system["admin_client"].post("/api/hosted/tools/heavy", json={"dataset_id": dataset_id, "job": "ingestion", "operation_id": op(),
+            "parameters": {"candidate_image_ids": [system["images"][0]["id"]], "object_aware": True, "object_weight": 0.5, "detector_confidence": 0.5}})
+    def mode():
+        return system["admin_client"].get(f"/api/hosted/tools/catalog?dataset_id={dataset_id}").json()["heavy_job_options"]["ingestion"]["object_mode"]
+    refused = start()
+    assert refused.status_code == 409 and refused.json()["error"] == "ingestion_object_mode_unavailable"
+    assert "no detector" in refused.json()["detail"] and mode() == {**mode(), "available": False, "detector": None, "reason": refused.json()["detail"]}
+    # With a detector chosen, the task still needs the DINOv3 files that describe boxes.
+    install(system, "detector")
+    current = system["store"].get_dataset(system["admin"], dataset_id)
+    assert system["admin_client"].post(f"/api/hosted/tools/datasets/{dataset_id}/detector",
+        json={"model_id": "detector", "expected_revision": current["revision"], "operation_id": op()}).status_code == 200
+    refused = start()
+    assert refused.status_code == 409 and "DINOv3" in refused.json()["detail"]
+    assert mode()["detector"] == {"model_id": "detector", "kind": "yolo"} and not mode()["available"]
+    bad = system["admin_client"].post("/api/hosted/tools/heavy", json={"dataset_id": dataset_id, "job": "ingestion", "operation_id": op(),
+        "parameters": {"candidate_image_ids": [system["images"][0]["id"]], "object_aware": True, "object_weight": 3}})
+    assert bad.status_code == 422 and bad.json()["error"] == "ingestion_object_weight_invalid"
+
+
 def test_caption_jobs_retry_quality_preserve_evidence_and_never_save_annotations(system):
     install(system)
     install(system, "qwen")

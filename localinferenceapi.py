@@ -352,6 +352,9 @@ from services.data_ingestion import (
     local_vendi_metrics_from_patch_tokens as _data_ingestion_local_vendi_metrics_from_patch_tokens,
     normalize_keep_fraction as _data_ingestion_keep_fraction,
     normalize_rows as _data_ingestion_normalize_rows,
+    object_aware_enabled as _data_ingestion_object_aware_enabled,
+    object_aware_ranking as _data_ingestion_object_aware_ranking,
+    object_weight_value as _data_ingestion_object_weight_value,
     reference_spacing as _data_ingestion_reference_spacing,
     usable_embedding_rows as _data_ingestion_usable_rows,
     safe_media_name as _data_ingestion_safe_media_name,
@@ -98994,6 +98997,12 @@ def _data_ingestion_encode_prepared_images(
     return encoded
 
 
+# Object-aware scoring needs detections on the candidates and object
+# descriptors on both sides. The hosted analysis child installs the provider;
+# without one the mode is refused, never replaced by whole-image scoring.
+_data_ingestion_object_evidence: Optional[Callable[..., Dict[str, Any]]] = None
+
+
 @_storage_library_guard
 def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
     try:
@@ -99061,7 +99070,15 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
         if not references:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_no_reference_images")
         batch_size = _coerce_int(request.get("batch_size"), 16, minimum=1)
-        local_vendi_enabled = _data_ingestion_local_vendi_enabled(request.get("local_vendi_enabled"))
+        try:
+            object_aware = _data_ingestion_object_aware_enabled(request.get("object_aware"))
+            object_weight = _data_ingestion_object_weight_value(request.get("object_weight"))
+        except ValueError as exc:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"data_ingestion_{exc}") from exc
+        object_provider = _data_ingestion_object_evidence
+        if object_aware and object_provider is None:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_object_evidence_unavailable")
+        local_vendi_enabled = _data_ingestion_local_vendi_enabled(request.get("local_vendi_enabled")) and not object_aware
         local_vendi_weight = _data_ingestion_local_vendi_weight(request.get("local_vendi_weight")) if local_vendi_enabled else 0.0
         # Bind pruning publication to pixels and head/runtime before encoding.
         from services.dataset_pruning_cache import file_state as _pruning_file_state
@@ -99163,7 +99180,10 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
             if not math.isfinite(parsed_cutoff) or not 0.0 <= parsed_cutoff <= 2.0:
                 raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_novelty_cutoff_invalid")
             novelty_cutoff, novelty_cutoff_mode = parsed_cutoff, "fixed"
+        scene_spacing = novelty_cutoff if novelty_cutoff_mode == "reference_spacing" else _data_ingestion_reference_spacing(reference_embeddings)
         all_candidate_embeddings = candidate_embeddings
+        object_result: Optional[Dict[str, Any]] = None
+        object_evidence: Dict[str, Any] = {}
 
         def _all_rows(values: Any) -> np.ndarray:
             full = np.zeros(len(candidates), dtype=np.float32)
@@ -99171,7 +99191,41 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
             return full
 
         candidate_embeddings = np.asarray(all_candidate_embeddings, dtype=np.float32)[usable_indices]
-        if not len(usable_indices):
+        if object_aware:
+            # Detections and object descriptors come from the provider; an
+            # image whose scene descriptor failed is left out with its boxes.
+            _data_ingestion_update(job, progress=0.88, message="Detecting and describing objects ...")
+            object_evidence = object_provider(job, request, candidates, references)
+            position = {int(index): row for row, index in enumerate(usable_indices)}
+            evidence_owner = np.asarray(object_evidence["candidate_box_owner"], dtype=np.int64).reshape(-1)
+            box_rows = np.asarray([row for row, index in enumerate(evidence_owner) if int(index) in position], dtype=np.int64)
+            try:
+                object_result = _data_ingestion_object_aware_ranking(
+                    candidate_embeddings,
+                    reference_embeddings,
+                    object_evidence["reference_box_embeddings"],
+                    object_evidence["reference_box_image"],
+                    np.asarray(object_evidence["candidate_box_embeddings"], dtype=np.float32)[box_rows],
+                    [position[int(evidence_owner[row])] for row in box_rows],
+                    object_weight=object_weight,
+                    novelty_cutoff=cutoff_request,
+                    keep_fraction=keep_fraction,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"data_ingestion_{exc}") from exc
+            object_result["box_rows"] = box_rows
+            selected = list(object_result["selected"])
+            novelty_scores = np.asarray(object_result["scene_distance"], dtype=np.float32)
+            # Legacy fields keep whole-image distances; the combined score is
+            # in typical-spacing units.
+            coverage_scores = np.asarray([row[0] for row in object_result["final"]], dtype=np.float32) * np.float32(object_result["scene_spacing"])
+            selection_scores = np.asarray([row[2] for row in object_result["final"]], dtype=np.float32)
+            novelty_cutoff, novelty_cutoff_mode = object_result["novelty_cutoff"], object_result["novelty_cutoff_mode"]
+            scene_spacing = object_result["scene_spacing"]
+            selection_method, selection_score_kind = "farthest_first_scene_and_objects", "combined_typical_spacing"
+            selection_score_description = "whole-image and object distance, each in its typical reference spacing"
+            local_vendi_weight = 0.0
+        elif not len(usable_indices):
             selected, novelty_scores, coverage_scores = [], np.zeros(len(candidates), dtype=np.float32), np.zeros(len(candidates), dtype=np.float32)
             selection_scores = coverage_scores.copy()
             selection_method, selection_score_kind = "farthest_first_coverage", "coverage_distance"
@@ -99209,6 +99263,40 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
         ranked_items: List[Dict[str, Any]] = []
         rank_by_idx = {idx: rank + 1 for rank, idx in enumerate(selected)}
         novelty_metadata = _data_ingestion_novelty_score_metadata(novelty_scores)
+        object_fields: Dict[int, Dict[str, Any]] = {}
+        if object_result is not None:
+            # Boxes are evidence for this result only; they are never written
+            # to an image's annotations.
+            evidence_boxes = list(object_evidence.get("candidate_boxes") or [])
+            evidence_totals = list(object_evidence.get("candidate_detection_totals") or [])
+            detections_by_idx: Dict[int, List[Dict[str, Any]]] = {}
+            for local_row, evidence_row in enumerate(object_result["box_rows"]):
+                owner_idx = int(evidence_owner[int(evidence_row)])
+                box = dict(evidence_boxes[int(evidence_row)]) if int(evidence_row) < len(evidence_boxes) else {}
+                box.update(
+                    novelty=round(float(object_result["box_score"][local_row]), 4),
+                    novelty_distance=round(float(object_result["box_distance"][local_row]), 5),
+                    coverage_novelty=round(float(object_result["box_coverage_score"][local_row]), 4),
+                    top=bool(object_result["box_top"][local_row]),
+                )
+                detections_by_idx.setdefault(owner_idx, []).append(box)
+            for local_idx, idx in enumerate(usable_indices):
+                idx = int(idx)
+                initial_scores, final_scores = object_result["initial"][local_idx], object_result["final"][local_idx]
+                boxes = sorted(detections_by_idx.get(idx, []), key=lambda item: -float(item.get("novelty") or 0.0))
+                object_fields[idx] = {
+                    "scene_score": float(initial_scores[0]),
+                    "object_score": None if initial_scores[1] is None else float(initial_scores[1]),
+                    "combined_score": float(initial_scores[2]),
+                    "coverage_scene_score": float(final_scores[0]),
+                    "coverage_object_score": None if final_scores[1] is None else float(final_scores[1]),
+                    "coverage_combined_score": float(final_scores[2]),
+                    "object_weight_used": float(object_result["object_weight"]) if initial_scores[1] is not None else 0.0,
+                    "suggestion_reason": object_result["reasons"][local_idx],
+                    "detection_count": len(boxes),
+                    "confident_detection_total": int(evidence_totals[idx]) if idx < len(evidence_totals) else len(boxes),
+                    "detections": boxes,
+                }
         for idx, row in enumerate(candidates):
             novelty_meta = novelty_metadata[idx] if idx < len(novelty_metadata) else {}
             local_vendi_meta = local_vendi_metadata[idx] if idx < len(local_vendi_metadata) else {}
@@ -99226,6 +99314,7 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
                     "coverage_score": coverage_score,
                     "selection_score": selection_score,
                     "selection_score_kind": selection_score_kind,
+                    **object_fields.get(idx, {}),
                     **novelty_meta,
                     **local_vendi_meta,
                     "filename": row.get("filename") or Path(str(row.get("image_path") or "")).name,
@@ -99257,6 +99346,8 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
             "keep_fraction": keep_fraction,
             "novelty_cutoff": novelty_cutoff,
             "novelty_cutoff_mode": novelty_cutoff_mode,
+            "scene_spacing": scene_spacing,
+            "object_aware": object_result is not None,
             "descriptor_failed_count": len(failed_indices),
             "encoder": encoder,
             "encoder_type": salad_base_encoder,
@@ -99294,6 +99385,18 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
                 "key": str((reference_cache_entry or {}).get("key") or ""),
             },
         }
+        if object_result is not None:
+            summary.update(
+                {
+                    "score_unit": "typical_reference_spacing",
+                    "object_spacing": object_result["object_spacing"],
+                    "object_weight": object_result["object_weight"],
+                    "object_top_count": object_result["top_count"],
+                    "candidates_without_detections": sum(1 for fields in object_fields.values() if not fields["detection_count"]),
+                    "candidate_box_count": int(len(object_result["box_rows"])),
+                    "object_evidence": dict(object_evidence.get("summary") or {}),
+                }
+            )
         if len(novelty_scores):
             summary.update(
                 {

@@ -185,6 +185,336 @@ def reference_spacing(reference_embeddings: np.ndarray, *, max_queries: int = 20
     return float(np.median(nearest))
 
 
+def _distance_chunk(reference_rows: int, budget_bytes: int = 256 * 1024 * 1024) -> int:
+    """Query rows per block so one distance block stays within the budget."""
+
+    return max(1, min(4096, budget_bytes // max(1, 4 * reference_rows)))
+
+
+def nearest_distances(queries: np.ndarray, references: np.ndarray) -> np.ndarray:
+    """Cosine distance from each query row to its nearest reference row.
+
+    Both sides are compared in blocks, so no queries-by-references matrix is
+    held. With no reference rows every distance is 1.
+    """
+
+    left = normalize_rows(np.asarray(queries, dtype=np.float32).reshape(len(queries), -1)) if len(queries) else np.empty((0, 0), np.float32)
+    out = np.ones(left.shape[0], dtype=np.float32)
+    right = np.asarray(references, dtype=np.float32)
+    if not left.shape[0] or right.ndim != 2 or not right.shape[0]:
+        return out
+    right = normalize_rows(right)
+    step = _distance_chunk(right.shape[0])
+    for start in range(0, left.shape[0], step):
+        similarity = left[start : start + step] @ right.T
+        out[start : start + step] = np.maximum(0.0, 1.0 - np.clip(similarity.max(axis=1), -1.0, 1.0))
+    return out
+
+
+def object_reference_spacing(
+    object_embeddings: np.ndarray,
+    image_index: Sequence[int],
+    *,
+    max_queries: int = 2000,
+) -> Optional[float]:
+    """Median distance from a reference box to its nearest box in another image.
+
+    The object counterpart of ``reference_spacing``. Boxes of the same image
+    are skipped: two boxes on one object, or repeated objects in one picture,
+    would otherwise make every new object look far away. Large sets are
+    measured from evenly spaced boxes against every box.
+    """
+
+    ref = np.asarray(object_embeddings, dtype=np.float32)
+    owner = np.asarray(image_index, dtype=np.int64).reshape(-1)
+    if ref.ndim != 2 or not ref.size or owner.shape[0] != ref.shape[0]:
+        return None
+    usable = usable_embedding_rows(ref)
+    ref, owner = normalize_rows(ref[usable]), owner[usable]
+    total = int(ref.shape[0])
+    if total < 2 or np.unique(owner).size < 2:
+        return None
+    queries = np.arange(total) if total <= max_queries else np.unique(np.linspace(0, total - 1, max_queries).astype(np.int64))
+    nearest = np.empty(queries.shape[0], dtype=np.float32)
+    step = _distance_chunk(total)
+    for start in range(0, queries.shape[0], step):
+        rows = queries[start : start + step]
+        distances = np.maximum(0.0, 1.0 - np.clip(ref[rows] @ ref.T, -1.0, 1.0))
+        distances[owner[rows][:, None] == owner[None, :]] = np.inf
+        nearest[start : start + rows.shape[0]] = distances.min(axis=1)
+    nearest = nearest[np.isfinite(nearest)]
+    return float(np.median(nearest)) if nearest.size else None
+
+
+def top_mean(values: np.ndarray, count: int = 3) -> Optional[float]:
+    """Mean of the largest ``count`` values, or None without values."""
+
+    arr = np.asarray(values, dtype=np.float32).reshape(-1)
+    if not arr.size:
+        return None
+    count = max(1, min(int(count), arr.size))
+    return float(np.sort(arr)[-count:].mean())
+
+
+def object_aware_selection(
+    scene_embeddings: np.ndarray,
+    scene_scores: Sequence[float],
+    box_embeddings: np.ndarray,
+    box_scores: Sequence[float],
+    box_owner: Sequence[int],
+    *,
+    scene_spacing: float,
+    object_spacing: float,
+    object_weight: float = 0.5,
+    top_count: int = 3,
+    min_score: Optional[float] = None,
+    target_count: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Farthest-first selection on a whole-image and an object score together.
+
+    ``scene_scores`` and ``box_scores`` are distances to the nearest reference
+    image and reference box, already divided by ``scene_spacing`` and
+    ``object_spacing``, so 1.0 means "as far as a typical reference item is
+    from its nearest neighbour". An image's object score is the mean of its
+    ``top_count`` most novel boxes. Its combined score is
+    ``(1 - object_weight) * scene + object_weight * object``; an image without
+    boxes is scored on its scene alone.
+
+    When an image is selected, its scene descriptor and its box descriptors
+    join the covered set, and the scores of the remaining images shrink to the
+    nearer of what they had and their distance to the new image. Selection
+    stops when the best remaining combined score is below ``min_score``, or at
+    ``target_count`` images when given.
+
+    Scores only ever shrink, so an image's last computed score is an upper
+    bound: only the image at the top of the queue is brought up to date before
+    it is selected or passed over.
+    """
+
+    import heapq
+
+    scene = normalize_rows(np.asarray(scene_embeddings, dtype=np.float32))
+    total = int(scene.shape[0])
+    weight = float(max(0.0, min(1.0, object_weight)))
+    scene_cover = np.asarray(scene_scores, dtype=np.float32).reshape(-1).copy()
+    owner = np.asarray(box_owner, dtype=np.int64).reshape(-1)
+    box_cover = np.asarray(box_scores, dtype=np.float32).reshape(-1).copy()
+    boxes = np.asarray(box_embeddings, dtype=np.float32)
+    if scene_cover.shape[0] != total or box_cover.shape[0] != owner.shape[0] or (owner.size and boxes.shape[0] != owner.shape[0]):
+        raise ValueError("object_selection_rows_mismatch")
+    if not (scene_spacing > 0 and object_spacing > 0):
+        raise ValueError("object_selection_spacing_invalid")
+    if owner.size and (owner.min() < 0 or owner.max() >= total):
+        raise ValueError("object_selection_owner_out_of_range")
+    order = np.argsort(owner, kind="stable")
+    boxes = normalize_rows(boxes[order]) if owner.size else np.empty((0, 0), np.float32)
+    sorted_owner = owner[order]
+    starts = np.searchsorted(sorted_owner, np.arange(total), side="left")
+    ends = np.searchsorted(sorted_owner, np.arange(total), side="right")
+    box_cover = box_cover[order]
+
+    def scores(index: int) -> Tuple[float, Optional[float], float]:
+        scene_score = float(scene_cover[index])
+        object_score = top_mean(box_cover[starts[index] : ends[index]], top_count)
+        if object_score is None:
+            return scene_score, None, scene_score
+        return scene_score, object_score, (1.0 - weight) * scene_score + weight * object_score
+
+    initial = [scores(index) for index in range(total)]
+    selected: List[int] = []
+    fresh_at = np.zeros(total, dtype=np.int64)
+
+    def refresh(index: int) -> None:
+        """Apply the images selected since this one was last brought up to date."""
+        added = selected[int(fresh_at[index]) :]
+        fresh_at[index] = len(selected)
+        if not added:
+            return
+        nearest = float(np.maximum(0.0, 1.0 - np.clip(scene[added] @ scene[index], -1.0, 1.0)).min()) / scene_spacing
+        scene_cover[index] = min(float(scene_cover[index]), nearest)
+        lo, hi = int(starts[index]), int(ends[index])
+        covered = [boxes[starts[other] : ends[other]] for other in added if ends[other] > starts[other]]
+        if hi > lo and covered:
+            similarity = boxes[lo:hi] @ np.concatenate(covered).T
+            nearest_box = np.maximum(0.0, 1.0 - np.clip(similarity.max(axis=1), -1.0, 1.0)) / object_spacing
+            box_cover[lo:hi] = np.minimum(box_cover[lo:hi], nearest_box)
+
+    limit = total if target_count is None else max(0, min(total, int(target_count)))
+    queue = [(-initial[index][2], index) for index in range(total)]
+    heapq.heapify(queue)
+    at_selection: Dict[int, Tuple[float, Optional[float], float]] = {}
+    while queue and len(selected) < limit:
+        _stale, index = heapq.heappop(queue)
+        if fresh_at[index] != len(selected):
+            refresh(index)
+            heapq.heappush(queue, (-scores(index)[2], index))
+            continue
+        current = scores(index)
+        if min_score is not None and current[2] < min_score:
+            break
+        at_selection[index] = current
+        selected.append(index)
+    chosen = set(selected)
+    final = []
+    for index in range(total):
+        if index in chosen:
+            final.append(at_selection[index])
+        else:
+            refresh(index)
+            final.append(scores(index))
+    restore = np.empty_like(order)
+    restore[order] = np.arange(order.shape[0])
+    return {
+        "selected": selected,
+        "initial": initial,
+        "final": final,
+        "box_final": box_cover[restore] if order.size else box_cover,
+        "object_weight": weight,
+    }
+
+
+OBJECT_TOP_COUNT = 3
+OBJECT_WEIGHT_DEFAULT = 0.5
+
+
+def object_aware_enabled(value: Any) -> bool:
+    """Whether a request asks for object-aware scoring; anything unclear is an error."""
+
+    if value is None or value is False or value == "":
+        return False
+    if value is True:
+        return True
+    if isinstance(value, str) and value.strip().lower() in {"true", "1", "yes", "on", "objects", "scene_and_objects"}:
+        return True
+    if isinstance(value, str) and value.strip().lower() in {"false", "0", "no", "off", "scene", "scene_only"}:
+        return False
+    raise ValueError("object_aware_invalid")
+
+
+def object_weight_value(value: Any, default: float = OBJECT_WEIGHT_DEFAULT) -> float:
+    """The share of the combined score given to objects, 0..1."""
+
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        raise ValueError("object_weight_invalid")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        raise ValueError("object_weight_invalid") from None
+    if not math.isfinite(parsed) or not 0.0 <= parsed <= 1.0:
+        raise ValueError("object_weight_invalid")
+    return parsed
+
+
+def object_aware_ranking(
+    candidate_scene: np.ndarray,
+    reference_scene: np.ndarray,
+    reference_boxes: np.ndarray,
+    reference_box_image: Sequence[int],
+    candidate_boxes: np.ndarray,
+    candidate_box_owner: Sequence[int],
+    *,
+    object_weight: float = OBJECT_WEIGHT_DEFAULT,
+    novelty_cutoff: Any = "auto",
+    keep_fraction: float = 0.2,
+    top_count: int = OBJECT_TOP_COUNT,
+) -> Dict[str, Any]:
+    """Score and select candidates on whole-image and object novelty together.
+
+    Each side is measured in its own typical spacing: the median distance from
+    a reference image to its nearest reference image, and from a reference box
+    to its nearest box in another reference image. A box is compared with
+    every reference box whatever its class. ``novelty_cutoff`` is in those
+    units here: "auto" is 1.0, a number is used as given, and off/None selects
+    the ``keep_fraction`` most novel candidates instead.
+    """
+
+    scene = np.asarray(candidate_scene, dtype=np.float32)
+    total = int(scene.shape[0])
+    owner = np.asarray(candidate_box_owner, dtype=np.int64).reshape(-1)
+    scene_spacing = reference_spacing(reference_scene)
+    object_spacing = object_reference_spacing(reference_boxes, reference_box_image)
+    if scene_spacing is None or scene_spacing <= 1e-9:
+        raise ValueError("object_scene_spacing_unavailable")
+    if object_spacing is None or object_spacing <= 1e-9:
+        raise ValueError("object_spacing_unavailable")
+    usable_reference = np.asarray(reference_scene, dtype=np.float32)
+    usable_reference = usable_reference[usable_embedding_rows(usable_reference)]
+    scene_distance = nearest_distances(scene, usable_reference)
+    usable_boxes = np.asarray(reference_boxes, dtype=np.float32)
+    usable_boxes = usable_boxes[usable_embedding_rows(usable_boxes)]
+    box_distance = nearest_distances(candidate_boxes, usable_boxes) if owner.size else np.empty((0,), np.float32)
+    cutoff: Optional[float] = None
+    mode = "keep_fraction"
+    target: Optional[int] = None
+    if isinstance(novelty_cutoff, str) and novelty_cutoff.strip().lower() == "auto":
+        cutoff, mode = 1.0, "combined_spacing"
+    elif novelty_cutoff is not None and novelty_cutoff is not False and novelty_cutoff != "" and not (
+        isinstance(novelty_cutoff, str) and novelty_cutoff.strip().lower() in {"off", "none"}
+    ):
+        try:
+            cutoff = float(novelty_cutoff)
+        except (TypeError, ValueError):
+            raise ValueError("novelty_cutoff_invalid") from None
+        if isinstance(novelty_cutoff, bool) or not math.isfinite(cutoff) or not 0.0 <= cutoff <= 100.0:
+            raise ValueError("novelty_cutoff_invalid")
+        mode = "combined_fixed"
+    else:
+        target = max(1, min(total, int(math.ceil(total * normalize_keep_fraction(keep_fraction))))) if total else 0
+    weight = object_weight_value(object_weight)
+    chosen = object_aware_selection(
+        scene,
+        scene_distance / scene_spacing,
+        candidate_boxes,
+        box_distance / object_spacing,
+        owner,
+        scene_spacing=scene_spacing,
+        object_spacing=object_spacing,
+        object_weight=weight,
+        top_count=top_count,
+        min_score=cutoff,
+        target_count=target,
+    )
+    box_score = box_distance / object_spacing
+    # The boxes that make up each image's object score.
+    box_top = np.zeros(owner.shape[0], dtype=bool)
+    for index in np.unique(owner):
+        rows = np.flatnonzero(owner == index)
+        box_top[rows[np.argsort(-box_score[rows], kind="stable")[: max(1, int(top_count))]]] = True
+    selected_set = set(chosen["selected"])
+    reasons: List[Optional[str]] = []
+    for index in range(total):
+        scene_part, object_part, _combined = chosen["final"][index]
+        if index not in selected_set:
+            reasons.append(None)
+        elif object_part is None:
+            reasons.append("scene")
+        elif scene_part >= 1.0 and object_part >= 1.0:
+            reasons.append("both")
+        elif object_part > scene_part:
+            reasons.append("objects")
+        else:
+            reasons.append("scene")
+    return {
+        "selected": chosen["selected"],
+        "scene_spacing": float(scene_spacing),
+        "object_spacing": float(object_spacing),
+        "object_weight": weight,
+        "top_count": int(top_count),
+        "novelty_cutoff": cutoff,
+        "novelty_cutoff_mode": mode,
+        "scene_distance": scene_distance,
+        "box_distance": box_distance,
+        "box_score": box_score,
+        "box_top": box_top,
+        "box_coverage_score": np.asarray(chosen["box_final"], dtype=np.float32),
+        "initial": chosen["initial"],
+        "final": chosen["final"],
+        "reasons": reasons,
+    }
+
+
 def greedy_diverse_indices(
     embeddings: np.ndarray,
     *,

@@ -40,7 +40,9 @@ detector. See `Hosted inference runtime <hosted_runtime.rst>`_ for the files
 used and the refusals.
 
 For Incoming diversity analysis, first select unassigned images in **Incoming**
-and attach a whole-image SALAD descriptor in **Analysis presets**. For pruning,
+and attach a whole-image SALAD descriptor in **Analysis presets**. To compare
+the objects in those images as well, the dataset also needs a detector (see
+`Comparing detected objects as well`_). For pruning,
 start a configured pruning task here, then open its completed review page.
 Changing that hosted review's producer recipe requires a new analysis.
 
@@ -331,7 +333,85 @@ never suggested. The result names the rule and cutoff it used.
 suggestions that are still not assigned selected, ready for **Create tranche
 from selection**. The graph draws suggested and other Incoming images in
 different colours; its two axes are fitted on confirmed and Incoming images
-together, each set weighted equally.
+together, each set weighted equally. Result cards also give each whole-image
+distance as a count of typical spacings between confirmed images.
+
+Comparing detected objects as well
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A whole-image descriptor describes the scene. It cannot tell a familiar scene
+that contains a new kind of object from one that does not. In the start form,
+**Compare** offers **Whole image and detected objects**. The choice is disabled,
+with the reason shown, when the dataset has no detector, when the task's server
+configuration lacks the DINOv3 files that describe boxes, or when fewer than two
+images are confirmed. A request for objects that cannot run is refused before
+anything starts; it never becomes a whole-image run.
+
+What the run does:
+
+1. The dataset's detector (the one chosen in **Tools & models**) runs once over
+   each selected Incoming image, at full image size. Boxes at or above
+   **Detection confidence** (default 0.5) are kept, the 50 most confident per
+   image, with boxes under 2 pixels on a side dropped. Labels the dataset
+   ignores are dropped as in annotation. A wrong detection still counts: using
+   it or correcting it both add to the dataset.
+2. Every kept box, and every confirmed human box, is described with the DINOv3
+   crop part of the dataset's pruning object recipe (by default the tight and
+   context views of ``thorough_quality_v1``, 1,536 numbers, no size correction).
+   The SAM3 mask, crop SALAD and C-RADIO parts of that recipe are left out of
+   this first version, on both sides alike. The result lists what was used.
+3. Each detected box is compared with the confirmed boxes of every class. The
+   predicted class is shown on the result but never narrows the search, so a
+   familiar object under a wrong label does not look new.
+4. Both distances are counted in their own typical spacing. The scene spacing
+   is the median distance from a confirmed image to its nearest confirmed
+   image. The object spacing is the median distance from a confirmed box to
+   its nearest confirmed box in a different image (from at most 2,000 evenly
+   spaced boxes). 1.0 therefore means "as far as a typical confirmed item is
+   from its nearest neighbour" for scenes and objects alike.
+5. An image's object score is the mean of its three most novel boxes, so one
+   new object among many familiar ones still counts. Its mixed score is
+   ``(1 - w) x scene + w x object``, with ``w`` the **Whole image ↔ Objects**
+   balance (default 0.5). An image with no confident detection is scored on its
+   scene alone and the result says so: no detection is not proof of no objects.
+6. Images are suggested highest mixed score first. A suggested image's scene
+   and boxes then count as covered, and the scores of the remaining images
+   shrink accordingly, so ten pictures of the same new object are not all
+   suggested. Suggesting stops when the best remaining mixed score is below
+   1.0. In this mode a numeric ``novelty_cutoff`` is a mixed score in typical
+   spacings (0 to 100), and ``"off"`` suggests the ``keep_fraction`` share with
+   the highest mixed scores. Local Vendi is not mixed in.
+
+The request fields are ``object_aware`` (true), ``object_weight`` (0 to 1) and
+``detector_confidence`` (0.05 to 0.99). Every Incoming diversity task accepts
+them, and ``candidate_image_ids`` and ``salad_head_id``, without listing them in
+``allowed_parameters``.
+
+Result cards show the whole-image, object and mixed scores, why an image was
+suggested (new scene, new objects or both), and the detected boxes over the
+thumbnail, with the boxes that set the object score in orange. The detections,
+their classes, confidences and per-box distances are stored in the job result
+only. They are not written to annotations or drafts, and the dataset's detector
+setting is only read. The summary records the detector's model ID, identity
+and weights hash, the confidence threshold, the object recipe and how many
+descriptors were reused or encoded.
+
+Object descriptors are cached by image content, producer recipe and box
+geometry. Each completed object-aware run retains that cache, and the next run
+for the same dataset starts from the newest one, so only new images and changed
+boxes are encoded again. Descriptors cached by a pruning or Data Quality
+Explorer job are not reused by this version.
+
+One measured run, on an Apple M-series machine with MLX DINOv3 and a YOLOv8n
+detector on the CPU (400 confirmed images with 6,491 boxes, 120 Incoming
+images, 1,293 kept detections): detection took 28 s (0.24 s per image) and
+describing 7,778 boxes took 46 s (about 170 boxes per second). A second run
+reused every descriptor and spent 0.3 s on that step. These figures do not
+predict a CUDA server, a larger detector or a larger dataset. Per
+box the comparison holds one 1,536-number descriptor in memory, and briefly a
+second copy while the table is assembled: about 1.2 GB at the peak per 100,000
+boxes, confirmed and detected together. 5,000 candidates carrying 50 boxes each
+are 250,000 boxes. Distances are computed in blocks of at most 256 MB.
 
 Result views and pruning review
 -------------------------------

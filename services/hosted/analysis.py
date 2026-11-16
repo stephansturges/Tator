@@ -476,6 +476,28 @@ class CanonicalAnalysis:
                 'parent_analysis': {'job_id': job_id, 'native_job_id': native_id, 'snapshot_id': job['snapshot_id']},
                 'cache_inputs': inputs}
 
+    def object_descriptor_cache(self, actor: Actor, dataset_id: str, pin_directory: str | Path) -> dict | None:
+        """Pin the object descriptors the newest Incoming diversity run retained.
+
+        A later object-aware run for the same dataset then encodes only boxes
+        it has not seen. Rows are keyed by pixels, producer recipe and box
+        geometry, so a changed recipe or image simply misses.
+        """
+        with self.store.read_connection() as con:
+            self.store._actor(con, actor, admin=True)
+            row = con.execute("""SELECT a.sha256,a.size_bytes FROM hosted_analysis_artifacts a
+                JOIN hosted_analysis_jobs j ON j.id=a.job_id JOIN hosted_snapshots s ON s.id=j.snapshot_id
+                WHERE s.dataset_id=? AND j.consumer='ingestion' AND j.state='complete'
+                AND a.relative_path='class_analysis/pruning/cache/descriptors.sqlite3'
+                ORDER BY j.created_at DESC LIMIT 1""", (dataset_id,)).fetchone()
+        if row is None:
+            return None
+        directory = Path(pin_directory)
+        with self.artifacts.exclusive():
+            self.artifacts.pin(ArtifactRef(row[0], row[1]), directory)
+        return {'namespace': 'pruning_cache', 'relative_path': 'descriptors.sqlite3', 'path': str((directory / row[0]).resolve()),
+                'sha256': row[0], 'size_bytes': row[1]}
+
     def dqe_request(self, actor: Actor, job_id: str) -> dict:
         """Native DQE active-workspace contract, bound to this capture only.
 

@@ -49,6 +49,12 @@ ENGINE_FAILURES = {
     "gpu_unavailable": "native_gpu_unavailable",
     "class_name_required": "native_dqe_scope_required",
     "model_unavailable": "native_model_unavailable",
+    "object_detector_failed": "ingestion_object_detector_failed",
+    "object_encoder_failed": "ingestion_object_encoder_failed",
+    "object_recipe_component_missing": "ingestion_object_recipe_unsupported",
+    "data_ingestion_object_spacing_unavailable": "ingestion_object_reference_too_small",
+    "data_ingestion_object_scene_spacing_unavailable": "ingestion_object_reference_too_small",
+    "data_ingestion_object_evidence_unavailable": "ingestion_object_mode_unavailable",
 }
 FAILURE_LIMIT = 4096
 
@@ -287,6 +293,16 @@ class NativeAnalysisAdapter:
                                      and item['sha256'] == digest for item in copied):
                 raise DomainError('ingestion_salad_head_not_attached', 409)
             request.update(candidate_reference=payload['candidate_set'], hosted_salad_heads={head_id: digest})
+            from .ingestion_objects import validate_parameters
+            if validate_parameters(parameters):
+                # Object-aware scoring runs only with the detector weights the
+                # server pinned for this job; it never falls back to scene only.
+                detector = self.config.get('object_detector')
+                relative = _safe_relative(detector['relative_path']) if isinstance(detector, dict) and detector.get('relative_path') else None
+                if relative is None or not any(NAMESPACES[item['namespace']] + '/' + item['relative_path'] == relative
+                                           and item['sha256'] == detector['model']['checkpoint_sha256'] for item in copied):
+                    raise DomainError('ingestion_object_detector_not_attached', 409)
+                request.update(object_detector=detector, object_recipe=self.config.get('object_recipe', {}))
         if operation == 'dqe_review':
             parent = self.config.get('parent_analysis', {})
             if parent.get('snapshot_id') != manifest['snapshot_id'] or not isinstance(parameters.get('point_id'), str):
@@ -547,10 +563,14 @@ def _run_ingestion(api, request, manifest, source, directory):
                 if suffix is None or decoded.size != (image['width'], image['height']):
                     raise DomainError('ingestion_candidate_encoding_invalid', 409)
             uploads.append(_LocalUpload(image['media_path'], image['id'] + suffix))
+    restore_objects = None
     try:
         if candidates is None:
             created = asyncio.run(api.create_local_salad_training_job(_json(parameters), references))
         else:
+            from .ingestion_objects import install_object_evidence, validate_parameters
+            if validate_parameters(parameters):
+                restore_objects = install_object_evidence(api, request, manifest, source, candidates, directory)
             api._local_salad_head_reference_matches_request = matches
             created = asyncio.run(api.create_data_ingestion_analysis_job(_json(parameters), uploads, references))
         status = _wait(api.get_data_ingestion_job, created['job_id'], request['timeout'])
@@ -585,6 +605,8 @@ def _run_ingestion(api, request, manifest, source, directory):
                 upload.stream.close()
         if candidates is not None:
             api._local_salad_head_reference_matches_request = original_match
+        if restore_objects is not None:
+            restore_objects()
 
 
 def _run_native(request, manifest, dataset, source, directory):

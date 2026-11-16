@@ -107,3 +107,9 @@ html.theme-pipboy .hosted-decision-note{background:var(--pip-panel-3);border-col
 .hosted-canvas .modal:not(.visible){visibility:hidden}
 /* Light theme helper text: #64748b on the page background is just under 4.5:1. */
 body.hosted-canvas:not(.theme-dark) .training-help{color:#556274}
+/* Incoming diversity results: detected boxes over each thumbnail; the newest objects in orange. */
+.hosted-diversity-thumb{position:relative;height:160px}.hosted-diversity-thumb svg{position:absolute;inset:0;width:100%;height:100%}
+.hosted-diversity-thumb rect{fill:#3d7fc4;fill-opacity:.06;stroke:#3d7fc4;stroke-width:1.2;vector-effect:non-scaling-stroke}
+.hosted-diversity-thumb rect.newest{fill:#d47433;fill-opacity:.12;stroke:#d47433;stroke-width:2.4}
+.hosted-diversity-card>p{margin:.25rem 0;font-size:.9rem}.hosted-diversity-card>small{display:block;overflow-wrap:anywhere}
+.hosted-diversity-compare,.hosted-diversity-objects{grid-column:1/-1;margin:0}.hosted-diversity-compare select{max-width:100%}.hosted-diversity-objects input[type=range]{width:100%}.hosted-diversity-objects small{display:block;color:var(--muted)}

@@ -791,6 +791,41 @@ Its selected whole-image SALAD head must belong to the frozen dataset settings,
 with matching retained bytes. Native SALAD training uses the confirmed snapshot
 and does not consume Incoming candidates.
 
+An Incoming diversity task is one ``heavy_jobs`` entry with ``operation``
+``ingestion``. Its inputs (``candidate_image_ids``, ``salad_head_id``) and the
+object comparison settings (``object_aware``, ``object_weight``,
+``detector_confidence``) are accepted without being listed in
+``allowed_parameters``. The task needs the base model of the attached SALAD
+head among its verified ``cache_inputs``. To compare detected objects it also
+needs DINOv3 ViT-B/16 there, named by ``model_environment``
+(``DINOV3_TORCH_MODEL_ROOT`` on a CUDA server, ``MLX_DINOV3_MODEL_ROOT`` on
+Apple Silicon); without that entry the launcher shows the object choice as
+unavailable. A CUDA example, reusing the files a pruning task already lists::
+
+    "ingestion": {
+      "label": "Incoming diversity",
+      "factory": "services.hosted.native_analysis:NativeAnalysisAdapter",
+      "operation": "ingestion", "device": "cuda:0", "timeout": 90000,
+      "allowed_parameters": [],
+      "config": {
+        "native_root": "<state>/native-heavy", "timeout": 90000,
+        "cache_input_roots": ["<model-cache>"],
+        "cache_inputs": [<the native-dinov3 entries of the pruning task>],
+        "model_environment": {"DINOV3_TORCH_MODEL_ROOT": "models/native-dinov3"}
+      }
+    }
+
+The detector is not configured here. At admission the server pins the weights
+of the dataset's current detector from its artifact store, copies them into the
+job's private directory under ``models/object-detector/`` and records the model
+ID, identity and weights hash with the job. The child refuses to run object
+comparison without those exact weights. Detection runs inside the job on the
+task's ``device``, in the heavy window, not through the per-dataset detection
+queue. The newest completed Incoming diversity result of the dataset supplies
+its retained object-descriptor cache as a further verified input, when one
+exists. A dataset whose detector is an RF-DETR model needs the ``rfdetr``
+package in the server environment, as interactive detection does.
+
 Human review of saved captions and QA
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

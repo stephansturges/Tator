@@ -32,7 +32,9 @@
         analysis_snapshot_stale: "The confirmed images changed since this run was prepared. Start a new run.", analysis_snapshot_identity_changed: "The confirmed images changed while the task was preparing. Start it again.", analysis_media_changed: "An image file changed while the task was preparing. Start it again.", analysis_manifest_changed: "The confirmed images changed while the task was preparing. Start it again.", analysis_materialization_changed: "The task's prepared images changed. Start it again.", native_annotation_identity_changed: "Annotations changed while the task was running. Start it again.", native_cache_input_changed: "A cached input changed while the task was running. Start it again.",
         native_yolo_terms_required: "YOLO training needs the Ultralytics licence accepted: tick the licence box when you start the task.", native_rfdetr_terms_required: "RF-DETR training needs the RF-DETR licence accepted: tick the licence box when you start the task.",
         native_gpu_unavailable: "The task needs a GPU, but none is available to it on the server. Ask the operator to check the GPU or the task's device setting.", native_classifier_classes_missing: "The class predictor needs confirmed objects of at least two classes in its training images.", native_dqe_scope_required: "This Data Quality Explorer task needs a class, or all classes, in its server configuration.", native_model_unavailable: "A model this task needs is not installed for server jobs. Ask the operator to add it to the task's verified model files.",
-        analysis_result_unavailable: "This result is no longer available on the server.", dqe_result_unavailable: "This result is no longer available on the server.", analysis_manifest_too_large: "This dataset is too large for this task's limits.", ingestion_salad_head_not_attached: "Attach a whole-image SALAD descriptor in Analysis presets first.", ingestion_candidate_not_unassigned_incoming: "Some selected images are no longer Not assigned in Incoming. Select them again."};
+        analysis_result_unavailable: "This result is no longer available on the server.", dqe_result_unavailable: "This result is no longer available on the server.", analysis_manifest_too_large: "This dataset is too large for this task's limits.", ingestion_salad_head_not_attached: "Attach a whole-image SALAD descriptor in Analysis presets first.", ingestion_candidate_not_unassigned_incoming: "Some selected images are no longer Not assigned in Incoming. Select them again.",
+        ingestion_object_mode_unavailable: "Comparing detected objects is not available for this dataset and task.", ingestion_object_detector_not_attached: "The dataset's detector was not available to this run. Start it again.", ingestion_object_detector_failed: "The dataset's detector could not run on the selected images; its log is kept on the server.", ingestion_object_encoder_failed: "The detected objects could not be described; the model files may be missing from this task. Its log is kept on the server.",
+        ingestion_object_recipe_unsupported: "This dataset's object recipe has no DINOv3 crop part, so objects cannot be compared yet.", ingestion_object_reference_too_small: "Comparing objects needs confirmed boxes in at least two confirmed images that differ from each other."};
     const computeError = code => !code ? "" : computeErrors[code] || app.errorText?.(code) || String(code).replaceAll("_", " ");
     const error = (problem) => { notice.textContent = problem.message; notice.dataset.error = "true"; };
     function act(parent, title, callback) {
@@ -100,6 +102,35 @@
         } else field(parent, text, input);
         return () => input.type === "checkbox" ? input.checked : typeof value === "number" ? Number(input.value) : value && typeof value === "object" ? JSON.parse(input.value) : input.value;
     }
+    // Incoming diversity: compare whole images only, or whole images and the objects the dataset's detector finds.
+    function objectControls(parent, readers, mode) {
+        if (!mode) return;
+        const compare = field(parent, "Compare", select([["scene", "Whole image only"], ["objects", `Whole image and detected objects${mode.detector ? ` (uses ${mode.detector.model_id})` : ""}`]]));
+        compare.options[1].disabled = !mode.available; compare.parentElement.className = "hosted-diversity-compare";
+        const note = node("p"), settings = node("div"); settings.className = "hosted-analysis-parameters hosted-diversity-objects";
+        const balance = node("input"); balance.type = "range"; balance.min = "0"; balance.max = "100"; balance.step = "5"; balance.value = String(Math.round((mode.defaults?.object_weight ?? 0.5) * 100));
+        const balanceText = node("small");
+        const balanceWrap = node("label"); balance.id = `analysis-field-${crypto.randomUUID()}`; balanceWrap.htmlFor = balance.id; balance.setAttribute("aria-label", "Balance between whole image and objects");
+        balanceWrap.append(node("span", "Whole image ↔ Objects"), balance, balanceText); settings.append(balanceWrap);
+        const confidence = field(settings, "Detection confidence", node("input")); confidence.type = "number"; confidence.min = "0.05"; confidence.max = "0.99"; confidence.step = "0.05"; confidence.value = String(mode.defaults?.detector_confidence ?? 0.5);
+        settings.append(node("p", `Only boxes the detector is at least this sure of are compared, at most ${mode.max_boxes_per_image || 50} per image. The boxes are kept with the result as evidence; they are not saved as annotations, and an image with no such box is scored on the whole image alone.`));
+        const draw = () => {
+            const objects = Number(balance.value);
+            balanceText.textContent = `${100 - objects}% whole image · ${objects}% objects`;
+            settings.hidden = compare.value !== "objects";
+            note.textContent = mode.available ? (compare.value === "objects" ? "" : "The whole-image comparison cannot tell a familiar scene with a new object from one without.") : `Comparing detected objects is not available: ${mode.reason}`;
+            note.hidden = !note.textContent;
+        };
+        balance.oninput = draw; compare.onchange = draw; draw();
+        parent.append(note, settings);
+        readers.object_aware = () => compare.value === "objects";
+        readers.object_weight = () => Number(balance.value) / 100;
+        readers.detector_confidence = () => {
+            const value = Number(confidence.value);
+            if (compare.value === "objects" && !(value >= 0.05 && value <= 0.99)) throw new Error("Detection confidence must be between 0.05 and 0.99.");
+            return value;
+        };
+    }
     async function open(preferredOperation) {
         if (app.session?.user.role !== "admin") return;
         selectedOperation = operationNames[preferredOperation] ? preferredOperation : null;
@@ -128,7 +159,7 @@
                 parameters.replaceChildren(); readers = {};
                 const definition = catalog.heavy_job_options[recipe.value];
                 for (const key of definition.allowed_parameters || []) {
-                    if (definition.operation === "ingestion" && ["candidate_image_ids", "salad_head_id"].includes(key)) continue;
+                    if (definition.operation === "ingestion" && ["candidate_image_ids", "salad_head_id", "object_aware", "object_weight", "detector_confidence"].includes(key)) continue;
                     const value = key === "accept_tos" ? Boolean(definition.defaults?.[key]) : definition.defaults?.[key];
                     if (value !== undefined || key === "quality_recipe") readers[key] = parameterControl(parameters, key, value, definition.operation);
                 }
@@ -141,6 +172,7 @@
                     const selectedHead = field(parameters, "Trained whole-image SALAD descriptor", select(heads.map(head => [head.id, head.display_label || head.label || head.id])));
                     readers.salad_head_id = () => { if (!selectedHead.value) throw new Error("Attach a whole-image SALAD descriptor in Analysis presets, or train one first."); return selectedHead.value; };
                     readers.candidate_image_ids = () => { if (!candidates.length) throw new Error("Select Not assigned images in Incoming before starting this comparison."); return candidates.map(image => image.id); };
+                    objectControls(parameters, readers, definition.object_mode);
                 }
                 if (trainingTasks.has(definition.operation)) parameters.append(node("p", "Splits set on the dataset are used. Unsplit images are split for this run only (about 10% validation, capture groups kept together); the dataset is not changed."));
                 if (definition.operation === "salad_training") parameters.append(node("p", "Train a whole-image descriptor on confirmed images. After training, open Analysis presets to register and attach the saved descriptor."));
@@ -151,12 +183,14 @@
             act(controls, "Start task", async () => {
                 const parameters = Object.fromEntries(Object.entries(readers).map(([key, read]) => [key, read()]));
                 const definition = catalog.heavy_job_options[recipe.value];
+                // A whole-image run sends no object settings at all.
+                if (!parameters.object_aware) for (const key of ["object_aware", "object_weight", "detector_confidence"]) delete parameters[key];
                 if (licences[definition.operation] && readers.accept_tos && !parameters.accept_tos) throw new Error("Tick the licence box to start this training.");
                 const dataset = await api(`/datasets/${encodeURIComponent(datasetId)}`);
                 if (!valid(ticket)) return;
                 // Every task except the Incoming comparison works on the confirmed images.
                 if (definition.operation !== "ingestion" && !dataset.counts?.confirmed) throw new Error(`${dataset.name} has no confirmed images yet. Confirm images in the dataset workspace before starting this task.`);
-                const scope = definition.operation === "ingestion" ? `${count(candidates.length, "selected Incoming image")}, compared with ${count(dataset.counts?.confirmed || 0, "confirmed image")}`
+                const scope = definition.operation === "ingestion" ? `${count(candidates.length, "selected Incoming image")}, compared with ${count(dataset.counts?.confirmed || 0, "confirmed image")}${parameters.object_aware ? " and their boxes" : ""}`
                     : `all ${count(dataset.counts?.confirmed || 0, "confirmed image")}`;
                 if (!window.confirm(`Start "${definition.label || definition.operation}" on ${scope} of ${dataset.name}?\n\nLarge datasets can take hours. Annotation assistance pauses for everyone while it runs, and the server needs scratch disk space roughly the size of these images. You can cancel it from this dialog.`)) return;
                 const body = { dataset_id: datasetId, job: recipe.value, operation_id: crypto.randomUUID(), parameters };
@@ -215,11 +249,25 @@
         } else if (job.consumer === "ingestion") {
             const measured = result.result || result, items = measured.items || [];
             const summary = measured.summary || {}, suggested = items.filter(item => item.keep && item.hosted_identity), cutoff = Number(summary.novelty_cutoff);
-            const rule = summary.novelty_cutoff_mode === "reference_spacing" ? `An image is suggested while it is at least ${cutoff.toFixed(3)} away from every confirmed image and every image suggested before it. That distance is how far a typical confirmed image is from its nearest confirmed neighbour.`
-                : summary.novelty_cutoff_mode === "fixed" ? `An image is suggested while it is at least ${cutoff.toFixed(3)} away from every confirmed image and every image suggested before it.`
-                : `The most different ${Math.round(Number(summary.keep_fraction || 0) * 100)}% are suggested, whatever their distance.`;
-            content.append(node("p", `${suggested.length} of ${count(items.length, "Incoming image")} suggested. ${rule} Distances run from 0 (same whole-image features) upward. These images remain in Incoming.`));
-            if (!suggested.length && items.length) content.append(node("p", "None of these images is new enough to suggest: each is closer to a confirmed image than confirmed images usually are to each other."));
+            const objectAware = Boolean(summary.object_aware), spacing = Number(summary.scene_spacing), evidence = summary.object_evidence || {};
+            // "× typical spacing": 1.0 is as far as a typical confirmed image (or box) is from its nearest neighbour.
+            const times = value => `${Number(value) >= 10 ? Number(value).toFixed(0) : Number(value).toFixed(1)}×`;
+            const share = Math.round(Number(summary.object_weight || 0) * 100);
+            if (objectAware) {
+                const stop = summary.novelty_cutoff_mode === "keep_fraction" ? `The ${Math.round(Number(summary.keep_fraction || 0) * 100)}% with the highest mixed score are suggested, whatever that score is.`
+                    : `An image is suggested while its mixed score is at least ${times(cutoff)} against the confirmed images and the images suggested before it.`;
+                content.append(node("p", `${suggested.length} of ${count(items.length, "Incoming image")} suggested. Each image has a whole-image score and an object score, mixed ${100 - share}% / ${share}%. ${stop} These images remain in Incoming.`));
+                content.append(node("p", `Scores count typical spacings: 1.0× is as far from the nearest confirmed image, or confirmed box, as confirmed ones usually are from each other. ${evidence.detector ? `${evidence.detector.model_id} proposed the boxes (confidence ${Number(evidence.confidence_threshold).toFixed(2)} or more, at most ${evidence.max_boxes_per_image} per image). ` : ""}Each box is compared with the confirmed boxes of every class, and an image's object score is the mean of its ${summary.object_top_count || 3} newest boxes. Orange boxes are those newest objects; blue boxes are the other detections. The boxes are evidence for this result only and are not saved as annotations.`));
+                const without = Number(summary.candidates_without_detections || 0);
+                if (without) content.append(node("p", `${count(without, "image")} had no confident detection and ${without === 1 ? "is" : "are"} scored on the whole image only. That does not mean ${without === 1 ? "it contains" : "they contain"} no objects.`));
+                if (!suggested.length && items.length) content.append(node("p", "None of these images is new enough to suggest: their scenes and objects are closer to confirmed ones than confirmed ones usually are to each other."));
+            } else {
+                const rule = summary.novelty_cutoff_mode === "reference_spacing" ? `An image is suggested while it is at least ${cutoff.toFixed(3)} away from every confirmed image and every image suggested before it. That distance is how far a typical confirmed image is from its nearest confirmed neighbour.`
+                    : summary.novelty_cutoff_mode === "fixed" ? `An image is suggested while it is at least ${cutoff.toFixed(3)} away from every confirmed image and every image suggested before it.`
+                    : `The most different ${Math.round(Number(summary.keep_fraction || 0) * 100)}% are suggested, whatever their distance.`;
+                content.append(node("p", `${suggested.length} of ${count(items.length, "Incoming image")} suggested. ${rule} Distances run from 0 (same whole-image features) upward${spacing > 0 ? `; the number in brackets counts typical spacings between confirmed images (${spacing.toFixed(3)} each)` : ""}. Only whole images were compared, not the objects in them. These images remain in Incoming.`));
+                if (!suggested.length && items.length) content.append(node("p", "None of these images is new enough to suggest: each is closer to a confirmed image than confirmed images usually are to each other."));
+            }
             const failed = items.filter(item => item.descriptor_failed).length;
             if (failed) content.append(node("p", `${count(failed, "image")} could not be measured and ${failed === 1 ? "is" : "are"} not suggested.`));
             if (suggested.length) act(content, `Select the ${count(suggested.length, "suggested image")} in Incoming`, async () => { await app.selectImages(suggested.map(item => item.hosted_identity.id)); dialog.close(); });
@@ -258,16 +306,32 @@
                 grid.querySelector("button")?.remove();
                 for (const item of items.slice(offset, offset + 24)) {
                     if (!item.hosted_identity) continue;
-                    const card = node("article"), image = node("img"), link = node("a", "Inspect and annotate →");
+                    const card = node("article"), image = node("img"), link = node("a", "Inspect and annotate →"), thumb = node("div");
                     image.src = `/api/hosted/analysis/jobs/${jobId}/images/${encodeURIComponent(item.hosted_identity.id)}/media`; image.alt = item.filename; image.loading = "lazy";
                     link.href = `/annotate?image=${encodeURIComponent(item.hosted_identity.id)}`;
-                    // Two different distances: to the nearest confirmed image, and to the
-                    // nearest of confirmed images plus the suggestions made before this one.
-                    const novelty = Number.isFinite(item.reference_novelty_score) ? item.reference_novelty_score : Number(item.diversity_score);
-                    const scores = [`From nearest confirmed image: ${novelty.toFixed(3)}`];
-                    if (Number.isFinite(item.coverage_score)) scores.push(`From confirmed and earlier suggestions: ${item.coverage_score.toFixed(3)}`);
-                    const title = item.descriptor_failed ? "Could not be measured" : item.keep ? `Suggested addition · rank ${item.rank}` : summary.novelty_cutoff_mode === "keep_fraction" || !summary.novelty_cutoff_mode ? "Lower priority in this selection" : "Not suggested · too close to what is already covered";
-                    card.append(image, node("strong", title), node("p", item.descriptor_failed ? "The descriptor for this image was empty." : scores.join(" · ")), node("small", item.filename), link); grid.append(card);
+                    thumb.className = "hosted-diversity-thumb"; thumb.append(image); card.className = "hosted-diversity-card";
+                    if (objectAware && item.detections?.length && item.width > 0 && item.height > 0) drawDetections(thumb, item);
+                    const unranked = summary.novelty_cutoff_mode === "keep_fraction" || !summary.novelty_cutoff_mode;
+                    const lines = [];
+                    let title;
+                    if (item.descriptor_failed) { title = "Could not be measured"; lines.push("The descriptor for this image was empty."); }
+                    else if (objectAware) {
+                        const why = {scene: "new scene", objects: "new objects", both: "new scene and new objects"}[item.suggestion_reason];
+                        title = item.keep ? `Suggested addition · rank ${item.rank}${why ? ` · ${why}` : ""}` : unranked ? "Lower priority in this selection" : "Not suggested · too close to what is already covered";
+                        const detected = item.object_score !== null && item.object_score !== undefined;
+                        lines.push(detected ? `Whole image ${times(item.scene_score)} · Objects ${times(item.object_score)} · Mixed ${times(item.combined_score)}` : `Whole image ${times(item.scene_score)}`);
+                        lines.push(detected ? `${count(item.detection_count, "detected box", "detected boxes")}${item.confident_detection_total > item.detection_count ? ` of ${item.confident_detection_total} confident ones` : ""}` : "No confident detections — scored on the whole image only");
+                        if (!item.keep && Number.isFinite(item.coverage_combined_score) && item.coverage_combined_score < item.combined_score - 0.05) lines.push(`${times(item.coverage_combined_score)} once the earlier suggestions are counted`);
+                    } else {
+                        // Two different distances: to the nearest confirmed image, and to the
+                        // nearest of confirmed images plus the suggestions made before this one.
+                        const novelty = Number.isFinite(item.reference_novelty_score) ? item.reference_novelty_score : Number(item.diversity_score);
+                        const inSpacings = value => spacing > 0 ? ` (${times(value / spacing)})` : "";
+                        title = item.keep ? `Suggested addition · rank ${item.rank}` : unranked ? "Lower priority in this selection" : "Not suggested · too close to what is already covered";
+                        lines.push(`From nearest confirmed image: ${novelty.toFixed(3)}${inSpacings(novelty)}`);
+                        if (Number.isFinite(item.coverage_score)) lines.push(`From confirmed and earlier suggestions: ${item.coverage_score.toFixed(3)}${inSpacings(item.coverage_score)}`);
+                    }
+                    card.append(thumb, node("strong", title), ...lines.map(line => node("p", line)), node("small", item.filename), link); grid.append(card);
                 }
                 offset += 24; if (offset < items.length) act(grid, "Show more incoming images", page);
             }
@@ -295,6 +359,21 @@
             if (!valid(ticket) || currentJob !== jobId) return;
         }
         const download = node("a", "Download result and provenance"); download.href = `/api/hosted/analysis/jobs/${jobId}/result`; download.download = `${job.consumer}-${jobId}.json`; content.append(download);
+    }
+    // Detected boxes over a result thumbnail, fitted like the image (object-fit: contain).
+    // The newest objects, which set the image's object score, are drawn last and stronger.
+    function drawDetections(thumb, item) {
+        const NS = "http://www.w3.org/2000/svg", svg = document.createElementNS(NS, "svg");
+        svg.setAttribute("viewBox", `0 0 ${item.width} ${item.height}`); svg.setAttribute("aria-hidden", "true");
+        for (const top of [false, true]) for (const box of item.detections) {
+            if (Boolean(box.top) !== top || box.bbox?.length !== 4) continue;
+            const rect = document.createElementNS(NS, "rect"), label = document.createElementNS(NS, "title");
+            rect.setAttribute("x", box.bbox[0]); rect.setAttribute("y", box.bbox[1]); rect.setAttribute("width", box.bbox[2]); rect.setAttribute("height", box.bbox[3]);
+            if (top) rect.setAttribute("class", "newest");
+            label.textContent = `${box.class_name || "object"} · confidence ${Number(box.score).toFixed(2)} · ${Number(box.novelty) >= 10 ? Number(box.novelty).toFixed(0) : Number(box.novelty).toFixed(1)}× typical spacing from the nearest confirmed box`;
+            rect.append(label); svg.append(rect);
+        }
+        thumb.append(svg);
     }
     // The server installs the exact weights this run published; making it the
     // dataset's detector is a separate choice in Tools & models.

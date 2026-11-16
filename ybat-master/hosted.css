@@ -133,3 +133,9 @@ input:not([type=checkbox]):not([type=radio]),select,textarea{border-color:var(--
 .hosted-band span{position:absolute;right:4px;bottom:4px;padding:.1rem .5rem;border-radius:5px;background:var(--surface);color:var(--text);font-size:.8rem;white-space:nowrap;box-shadow:var(--shadow)}
 .hosted-banding,.hosted-banding *{user-select:none;-webkit-user-select:none}
 @media(max-width:700px){.hosted-card .card-boxes{height:130px}}
+/* Incoming diversity results: detected boxes over each thumbnail; the newest objects in orange. */
+.hosted-diversity-thumb{position:relative;height:160px}.hosted-diversity-thumb svg{position:absolute;inset:0;width:100%;height:100%}
+.hosted-diversity-thumb rect{fill:#3d7fc4;fill-opacity:.06;stroke:#3d7fc4;stroke-width:1.2;vector-effect:non-scaling-stroke}
+.hosted-diversity-thumb rect.newest{fill:#d47433;fill-opacity:.12;stroke:#d47433;stroke-width:2.4}
+.hosted-diversity-card>p{margin:.25rem 0;font-size:.9rem}.hosted-diversity-card>small{display:block;overflow-wrap:anywhere}
+.hosted-diversity-compare,.hosted-diversity-objects{grid-column:1/-1;margin:0}.hosted-diversity-compare select{max-width:100%}.hosted-diversity-objects input[type=range]{width:100%}.hosted-diversity-objects small{display:block;color:var(--muted)}
